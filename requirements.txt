@@ -1,0 +1,15 @@
+Django==4.2.11
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+psycopg2-binary==2.9.9
+python-decouple==3.8
+gunicorn==21.2.0
+dj-database-url==2.1.0
+
+# Celery for background tasks and scheduling
+celery==5.3.6
+redis==5.0.1
+django-celery-beat==2.5.0  # Optional: manage periodic tasks via Django admin
+
+requests==2.31.0
+

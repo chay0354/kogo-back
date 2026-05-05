@@ -1,0 +1,5 @@
+"""
+Instructors app tests package.
+"""
+
+

@@ -1,0 +1,5 @@
+"""
+Courses app tests package.
+"""
+
+
