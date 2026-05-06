@@ -407,8 +407,8 @@ class DashboardViewSet(viewsets.ViewSet):
         quit_data = []
         status_changes = ChildStatusHistory.objects.filter(
             previous_status='active',
-            changed_at__gte=date_from,
-            changed_at__lte=date_to
+            changed_at__date__gte=date_from,
+            changed_at__date__lte=date_to
         ).exclude(new_status='active')
         
         # Filter by branch/course if specified
