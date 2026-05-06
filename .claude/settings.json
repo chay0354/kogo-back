@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PGPASSWORD=kogo0386038 psql \"postgres://postgres:[password]@[2406:da18:167b:f902:4c8e:d406:9e27:ecc5]:5432/postgres?sslmode=require\" -c \"SELECT 1;\")"
+    ]
+  }
+}
