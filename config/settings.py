@@ -90,6 +90,10 @@ if DATABASE_URL:
     DATABASES = {
         'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
     }
+    # Supabase transaction pooler (port 6543) and psycopg v3: disable prepared statements
+    if ':6543' in DATABASE_URL:
+        DATABASES['default'].setdefault('OPTIONS', {})
+        DATABASES['default']['OPTIONS']['prepare_threshold'] = None
 else:
     # Development: Use SQLite
     DATABASES = {

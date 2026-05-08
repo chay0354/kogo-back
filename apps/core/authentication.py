@@ -1,4 +1,5 @@
 from rest_framework.authentication import TokenAuthentication
+from rest_framework.exceptions import AuthenticationFailed
 
 
 class CookieTokenAuthentication(TokenAuthentication):
@@ -16,11 +17,14 @@ class CookieTokenAuthentication(TokenAuthentication):
         if header_auth:
             return header_auth
 
-        # 2) Cookie token
+        # 2) Cookie token (best-effort: a stale cookie should not block AllowAny endpoints)
         token = request.COOKIES.get(self.cookie_name)
         if not token:
             return None
 
-        return self.authenticate_credentials(token)
+        try:
+            return self.authenticate_credentials(token)
+        except AuthenticationFailed:
+            return None
 
 
