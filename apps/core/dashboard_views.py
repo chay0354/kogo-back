@@ -113,26 +113,30 @@ class DashboardViewSet(viewsets.ViewSet):
         snapshots = snapshots.select_related('branch')
         
         # === LOGGING: Financial Overview KPIs ===
-        print("=" * 80)
-        print("FINANCIAL OVERVIEW - KPI CALCULATION")
-        print(f"Branch filter: {branch_id}")
-        print(f"Date range: {date_from} to {date_to}")
-        print(f"Months included: {months}")
-        print(f"Number of snapshots found: {snapshots.count()}")
-        
-        # Log each snapshot for debugging
-        for snap in snapshots:
-            print(f"  Snapshot: {snap.branch.name} | {snap.month} | Revenue: {snap.total_revenue} | Costs: {snap.instructor_costs} | Profit: {snap.profit}")
-        
+        # NOTE: use logger (not print) so non-ASCII branch names don't crash the
+        # response on Windows consoles whose default codec is cp1252.
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("FINANCIAL OVERVIEW - KPI CALCULATION")
+            logger.debug("Branch filter: %s", branch_id)
+            logger.debug("Date range: %s to %s", date_from, date_to)
+            logger.debug("Months included: %s", months)
+            logger.debug("Number of snapshots found: %s", snapshots.count())
+            for snap in snapshots:
+                logger.debug(
+                    "  Snapshot: %s | %s | Revenue: %s | Costs: %s | Profit: %s",
+                    snap.branch.name, snap.month, snap.total_revenue,
+                    snap.instructor_costs, snap.profit,
+                )
+
         # Aggregate KPIs
         total_revenue = snapshots.aggregate(Sum('total_revenue'))['total_revenue__sum'] or Decimal('0.00')
         total_expenses = snapshots.aggregate(Sum('instructor_costs'))['instructor_costs__sum'] or Decimal('0.00')
         net_profit = total_revenue - total_expenses
-        
-        print(f"Total Revenue (sum of snapshots.total_revenue): {total_revenue}")
-        print(f"Total Expenses (sum of snapshots.instructor_costs): {total_expenses}")
-        print(f"Net Profit (revenue - expenses): {net_profit}")
-        print("=" * 80)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Total Revenue: %s", total_revenue)
+            logger.debug("Total Expenses: %s", total_expenses)
+            logger.debug("Net Profit: %s", net_profit)
         
         # Expense breakdown
         total_instructor_salaries = snapshots.aggregate(Sum('instructor_salaries'))['instructor_salaries__sum'] or Decimal('0.00')
@@ -460,7 +464,56 @@ class DashboardViewSet(viewsets.ViewSet):
                 'percentage': round(percentage, 1),
                 'children': child_details  # Add child details
             })
-        
+
+        # Quit Percentage breakdown by course type (each dropout counted once
+        # per distinct course type the child was enrolled in).
+        quit_by_course_type = []
+        if total_quit > 0:
+            child_ids_in_quit = list(
+                status_changes.values_list('child_id', flat=True).distinct()
+            )
+
+            child_course_types: dict = {}
+            if child_ids_in_quit:
+                enrollment_rows = LessonEnrollment.objects.filter(
+                    child_id__in=child_ids_in_quit,
+                    lesson__course__course_type__isnull=False,
+                ).values_list(
+                    'child_id',
+                    'lesson__course__course_type_id',
+                    'lesson__course__course_type__name',
+                ).distinct()
+
+                for child_id, ct_id, ct_name in enrollment_rows:
+                    if not ct_id:
+                        continue
+                    child_course_types.setdefault(child_id, set()).add((str(ct_id), ct_name))
+
+            agg: dict = {}
+            unknown_count = 0
+            for change in status_changes.only('id', 'child_id'):
+                types = child_course_types.get(change.child_id)
+                if not types:
+                    unknown_count += 1
+                    continue
+                for ct_id, ct_name in types:
+                    entry = agg.setdefault(
+                        ct_id,
+                        {'course_type_id': ct_id, 'course_type_name': ct_name, 'count': 0},
+                    )
+                    entry['count'] += 1
+
+            quit_by_course_type = sorted(
+                agg.values(), key=lambda x: x['count'], reverse=True
+            )
+
+            if unknown_count > 0:
+                quit_by_course_type.append({
+                    'course_type_id': None,
+                    'course_type_name': 'ללא תחום',
+                    'count': unknown_count,
+                })
+
         # Student list (top 10)
         student_list = []
         active_enrollments = LessonEnrollment.objects.filter(status='active')
@@ -508,7 +561,8 @@ class DashboardViewSet(viewsets.ViewSet):
             'abnormal_attendance_by_branch': abnormal_by_branch,
             'quit_percentage': {
                 'total_quit': total_quit,
-                'by_status': quit_data
+                'by_status': quit_data,
+                'by_course_type': quit_by_course_type,
             },
             'student_list': student_list
         })
@@ -711,17 +765,21 @@ class DashboardViewSet(viewsets.ViewSet):
         snapshots = snapshots.select_related('branch', 'branch__city')
         
         # === LOGGING: Branches Data KPIs ===
-        print("=" * 80)
-        print("BRANCHES DATA - KPI CALCULATION")
-        print(f"Branch filter: {branch_id}")
-        print(f"City filter: {city_id}")
-        print(f"Date range: {date_from} to {date_to}")
-        print(f"Months included: {months}")
-        print(f"Number of snapshots found: {snapshots.count()}")
-        
-        # Log each snapshot for debugging
-        for snap in snapshots:
-            print(f"  Snapshot: {snap.branch.name} | {snap.month} | Revenue: {snap.total_revenue} | Costs: {snap.instructor_costs} | Profit: {snap.profit}")
+        # NOTE: use logger (not print) so non-ASCII branch names don't crash the
+        # response on Windows consoles whose default codec is cp1252.
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("BRANCHES DATA - KPI CALCULATION")
+            logger.debug("Branch filter: %s", branch_id)
+            logger.debug("City filter: %s", city_id)
+            logger.debug("Date range: %s to %s", date_from, date_to)
+            logger.debug("Months included: %s", months)
+            logger.debug("Number of snapshots found: %s", snapshots.count())
+            for snap in snapshots:
+                logger.debug(
+                    "  Snapshot: %s | %s | Revenue: %s | Costs: %s | Profit: %s",
+                    snap.branch.name, snap.month, snap.total_revenue,
+                    snap.instructor_costs, snap.profit,
+                )
         
         # KPIs - Only total_students and total_profit (removed active_branches and avg_room_utilization)
         # For students: Count only children whose status is NOT ghost, non_active, or sign_in
@@ -744,10 +802,10 @@ class DashboardViewSet(viewsets.ViewSet):
         total_profit_agg = snapshots.aggregate(Sum('profit'))
         total_profit = total_profit_agg['profit__sum'] or Decimal('0.00')
         
-        print(f"Total Students (from Child model): {total_students}")
-        print(f"Total Profit aggregation result: {total_profit_agg}")
-        print(f"Total Profit (sum of snapshots.profit): {total_profit}")
-        print("=" * 80)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Total Students (from Child model): %s", total_students)
+            logger.debug("Total Profit aggregation result: %s", total_profit_agg)
+            logger.debug("Total Profit (sum of snapshots.profit): %s", total_profit)
         
         # Branch data - aggregate properly across months
         # Get all unique branches
