@@ -79,6 +79,12 @@ class Lesson(models.Model):
     lesson_price_override = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="מחיר מותאם")
     instructor_salary_override = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="שכר מדריך מותאם")
     is_recurring = models.BooleanField(default=True, verbose_name="חוזר שבועית")
+    max_students = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="מקסימום תלמידים",
+        help_text="Optional cap on enrollments for this lesson. Defaults to room capacity when null.",
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled', verbose_name="סטטוס")
     cancellation_reason = models.TextField(null=True, blank=True, verbose_name="סיבת ביטול")
     cancelled_at = models.DateTimeField(null=True, blank=True, verbose_name="בוטל בתאריך")

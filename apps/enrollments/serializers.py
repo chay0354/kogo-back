@@ -48,25 +48,33 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         if self.instance:
             return data
         
-        # Get room capacity
-        if not lesson.room:
+        # Determine effective capacity: explicit lesson cap takes precedence,
+        # otherwise fall back to room capacity. A room is required only when
+        # there is no per-lesson cap to fall back on.
+        lesson_cap = lesson.max_students
+        room_capacity = lesson.room.capacity if lesson.room else None
+
+        if lesson_cap is None and room_capacity is None:
             raise serializers.ValidationError({
                 'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'
             })
-        
-        room_capacity = lesson.room.capacity
-        
+
+        if lesson_cap is not None and room_capacity is not None:
+            effective_capacity = min(lesson_cap, room_capacity)
+        else:
+            effective_capacity = lesson_cap if lesson_cap is not None else room_capacity
+
         # Count current active enrollments
         active_enrollments = LessonEnrollment.objects.filter(
             lesson=lesson,
             status='active'
         ).count()
-        
-        if active_enrollments >= room_capacity:
+
+        if active_enrollments >= effective_capacity:
             raise serializers.ValidationError({
-                'lesson': f'השיעור מלא - קיבולת מקסימלית: {room_capacity} תלמידים'
+                'lesson': f'השיעור מלא - קיבולת מקסימלית: {effective_capacity} תלמידים'
             })
-        
+
         return data
 
 

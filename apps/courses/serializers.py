@@ -105,7 +105,8 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
         model = Lesson
         fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time', 
                   'branch', 'room', 'instructor', 'enrolled_count', 'total_students_count',
-                  'price', 'lesson_price_override', 'instructor_salary_override', 'status', 
+                  'price', 'lesson_price_override', 'instructor_salary_override',
+                  'max_students', 'status',
                   'is_recurring', 'notes']
     
     def get_enrolled_count(self, obj):
@@ -200,7 +201,8 @@ class LessonSerializer(serializers.ModelSerializer):
         fields = ['id', 'course', 'course_name', 'branch', 'branch_name', 'room', 'room_name',
                   'instructor', 'instructor_name', 'day_of_week', 'day_name', 
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override', 
-                  'instructor_salary_override', 'is_recurring', 'status', 'notes', 
+                  'instructor_salary_override', 'max_students',
+                  'is_recurring', 'status', 'notes',
                   'enrolled_students_count', 'room_capacity', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
     
