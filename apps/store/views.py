@@ -303,15 +303,17 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
             invoice__payment_status='completed'
         ).select_related('product', 'child', 'branch', 'invoice')
         
-        print(f"\n📊 [ANALYTICS] Calculating KPIs for last {days} days (from {start_date})")
-        print(f"   Completed sales found: {completed_sales.count()}")
+        logger.info(
+            "[ANALYTICS] Calculating KPIs for last %s days (from %s); completed sales found: %s",
+            days, start_date, completed_sales.count()
+        )
         
         # KPI 1: Total Revenue (sum all completed sales)
         total_revenue = completed_sales.aggregate(
             total=Sum('total_price')
         )['total'] or Decimal('0.00')
         
-        print(f"   📈 Total Revenue (completed sales only): ₪{total_revenue}")
+        logger.info("[ANALYTICS] Total Revenue (completed sales only): %s", total_revenue)
         
         # KPI 2: Net Profit (revenue - cost for completed sales)
         net_profit = Decimal('0.00')
@@ -320,7 +322,7 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
             profit = sale.total_price - cost
             net_profit += profit
         
-        print(f"   💰 Net Profit (completed sales only): ₪{net_profit}")
+        logger.info("[ANALYTICS] Net Profit (completed sales only): %s", net_profit)
         
         # KPI 3: Total Sales Count
         total_sales_count = completed_sales.count()
@@ -343,7 +345,7 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
             for month, revenue in sorted(monthly_revenue.items())
         ]
         
-        print(f"   📅 Monthly revenue data: {monthly_revenue_data}")
+        logger.info("[ANALYTICS] Monthly revenue data: %s", monthly_revenue_data)
         
         # Chart 2: Sales by Product (top 6) - only completed sales
         sales_by_product = completed_sales.values('product__name').annotate(
@@ -637,53 +639,38 @@ def payment_callback(request):
     This endpoint is public (no authentication required) since it's called
     by Tranzila's servers.
     """
-    print("\n" + "=" * 100)
-    print("🔔 TRANZILA WEBHOOK RECEIVED - STORE PAYMENT")
-    print("=" * 100)
-    print(f"Request method: {request.method}")
-    print(f"Content type: {request.content_type}")
-    print(f"Request data keys: {list(request.data.keys()) if hasattr(request, 'data') else 'N/A'}")
-    print(f"Request data: {request.data if hasattr(request, 'data') else 'N/A'}")
-    print(f"GET params: {dict(request.GET)}")
-    print(f"POST params: {dict(request.POST)}")
-    print("=" * 100 + "\n")
-    
+    logger.info("[STORE WEBHOOK] received: method=%s content_type=%s", request.method, request.content_type)
+    logger.debug("[STORE WEBHOOK] data=%s GET=%s POST=%s",
+                 getattr(request, 'data', None), dict(request.GET), dict(request.POST))
+
     payment_service = PaymentService()
-    
+
     try:
-        # Get signature from headers for security verification
         signature = request.headers.get('X-Tranzila-Signature', '')
         if signature:
-            print(f"🔐 Webhook signature present: {signature[:20]}...")
+            logger.info("[STORE WEBHOOK] signature present: %s...", signature[:20])
         else:
-            print(f"⚠️  No webhook signature in headers (development mode)")
-        
-        # Parse Tranzila webhook
+            logger.warning("[STORE WEBHOOK] no signature in headers (development mode)")
+
         tranzila_service = payment_service.tranzila_service
         parsed_response = tranzila_service.parse_webhook_response(request.data)
-        
-        # Get invoice ID from transaction metadata
+
         invoice_id = request.data.get('pdesc', '')
-        
-        print(f"📋 Parsed webhook:")
-        print(f"   Invoice ID (pdesc): {invoice_id}")
-        print(f"   Response: {parsed_response}\n")
-        
-        # Complete purchase with signature verification
+
+        logger.info("[STORE WEBHOOK] parsed invoice_id=%s response=%s", invoice_id, parsed_response)
+
         result = payment_service.complete_store_purchase_from_webhook(
             invoice_id=invoice_id,
             tranzila_response=parsed_response,
             signature=signature
         )
-        
-        logger.info(f"✅ Webhook processed for invoice {invoice_id}: {result}")
-        print(f"✅ Webhook processing completed successfully\n")
-        
+
+        logger.info("[STORE WEBHOOK] processed for invoice %s: %s", invoice_id, result)
+
         return Response(result)
-    
+
     except Exception as e:
-        print(f"❌ ERROR processing webhook: {str(e)}\n")
-        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
+        logger.error("[STORE WEBHOOK] error processing webhook: %s", str(e), exc_info=True)
         return Response(
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
