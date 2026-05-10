@@ -77,6 +77,16 @@ class Lesson(models.Model):
     lesson_date = models.DateField(null=True, blank=True, verbose_name="תאריך שיעור")
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="מחיר שיעור")
     lesson_price_override = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="מחיר מותאם")
+    additional_course_prices = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="מחירים מדורגים לרישום מקביל",
+        help_text=(
+            "List of {course_index, price} entries used when a child is concurrently enrolled "
+            "in N other courses. course_index is 1-based: 2 = student's 2nd course, 3 = 3rd, ... "
+            "Used by get_lesson_price_for_course_index to pick a discounted/different price per tier."
+        ),
+    )
     instructor_salary_override = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="שכר מדריך מותאם")
     is_recurring = models.BooleanField(default=True, verbose_name="חוזר שבועית")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled', verbose_name="סטטוס")
