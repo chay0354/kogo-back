@@ -15,7 +15,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
-from apps.store.models import StoreProduct, StoreInvoice, StoreSale
+from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale
 from apps.store.serializers import (
     StoreProductSerializer, StoreInvoiceSerializer,
     StoreSaleSerializer, StoreAnalyticsSerializer,
@@ -36,7 +36,7 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     - Stock updates
     - Soft delete (set is_active=False)
     """
-    queryset = StoreProduct.objects.filter(is_active=True)
+    queryset = StoreProduct.objects.filter(is_active=True).prefetch_related('size_stocks')
     serializer_class = StoreProductSerializer
     permission_classes = [IsAuthenticated]
     
@@ -79,32 +79,69 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     def update_stock(self, request, pk=None):
         """
         Update product stock quantity.
-        
+
         Body: {
             "mode": "add" | "subtract" | "set",
-            "quantity": number
+            "quantity": number,
+            "size": string | null   # optional, target a specific size row
         }
+
+        When `size` is provided and the product has per-size stock rows, the
+        update is applied only to that size (and the product total is
+        recomputed). Otherwise we fall back to mutating `stock_quantity`
+        directly, which preserves the legacy behavior for products without
+        per-size tracking.
         """
         product = self.get_object()
         mode = request.data.get('mode')
-        quantity = int(request.data.get('quantity', 0))
-        
-        if mode == 'add':
-            product.stock_quantity += quantity
-        elif mode == 'subtract':
-            product.stock_quantity = max(0, product.stock_quantity - quantity)
-        elif mode == 'set':
-            product.stock_quantity = max(0, quantity)
-        else:
+        try:
+            quantity = int(request.data.get('quantity', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'quantity must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if mode not in {'add', 'subtract', 'set'}:
             return Response(
                 {'error': 'Invalid mode. Must be add, subtract, or set'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        product.save(update_fields=['stock_quantity'])
-        
-        logger.info(f"Updated stock for {product.name}: mode={mode}, quantity={quantity}, new_stock={product.stock_quantity}")
-        
+
+        size = (request.data.get('size') or '').strip()
+
+        with db_transaction.atomic():
+            if size and product.has_per_size_stock():
+                size_row = (
+                    StoreProductSize.objects
+                    .select_for_update()
+                    .filter(product=product, size=size)
+                    .first()
+                )
+                if size_row is None:
+                    return Response(
+                        {'error': f'Size "{size}" not found for this product'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if mode == 'add':
+                    size_row.stock_quantity += quantity
+                elif mode == 'subtract':
+                    size_row.stock_quantity = max(0, size_row.stock_quantity - quantity)
+                else:
+                    size_row.stock_quantity = max(0, quantity)
+                size_row.save(update_fields=['stock_quantity', 'updated_at'])
+                product.recalculate_total_stock()
+            else:
+                if mode == 'add':
+                    product.stock_quantity += quantity
+                elif mode == 'subtract':
+                    product.stock_quantity = max(0, product.stock_quantity - quantity)
+                else:
+                    product.stock_quantity = max(0, quantity)
+                product.save(update_fields=['stock_quantity', 'updated_at'])
+
+        logger.info(
+            "Updated stock for %s: mode=%s, quantity=%s, size=%s, new_stock=%s",
+            product.name, mode, quantity, size or '-', product.stock_quantity,
+        )
+        product.refresh_from_db()
         serializer = self.get_serializer(product)
         return Response(serializer.data)
     
@@ -453,6 +490,7 @@ def charge_card(request):
     """
     from apps.store.models import StoreProduct, StoreInvoice, StoreSale
     from apps.core.tranzila_service import TranzilaService
+    from apps.core.payment_service import _decrement_product_stock
     from apps.customers.models import Child, RecurringPayment
     from django.db import transaction as db_transaction
     
@@ -517,10 +555,7 @@ def charge_card(request):
             with db_transaction.atomic():
                 for item in product_items:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
-                    
-                    if product.stock_quantity < item['quantity']:
-                        raise ValueError(f'אין מספיק מלאי עבור {product.name}')
-                    
+
                     StoreSale.objects.create(
                         invoice=invoice,
                         product=product,
@@ -532,9 +567,8 @@ def charge_card(request):
                         payment_method='credit_card',
                         branch=product.branch
                     )
-                    
-                    product.stock_quantity -= item['quantity']
-                    product.save(update_fields=['stock_quantity'])
+
+                    _decrement_product_stock(product, item)
             
             # Save token for future use if child exists
             token_created = result.get('token')
