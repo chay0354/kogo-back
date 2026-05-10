@@ -26,8 +26,11 @@ from apps.customers.discount_service import DiscountService
 from apps.core.tranzila_service import TranzilaService
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment
+from apps.instructors.utils import get_lesson_price_for_course_index
 
 logger = logging.getLogger(__name__)
+
+BILLING_ENROLLMENT_STATUSES = ("active", "payments_problem")
 
 
 def log_payment_operation(operation: str, **kwargs):
@@ -36,6 +39,21 @@ def log_payment_operation(operation: str, **kwargs):
     for key, value in kwargs.items():
         log_parts.append(f"{key}={value}")
     logger.info(" ".join(log_parts))
+
+
+def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
+    """
+    Return the 1-based lesson number this lesson will be for the child.
+
+    Existing active/payment-problem enrollments still count as signed lessons.
+    The selected lesson is excluded so re-opening payment for the same lesson
+    does not incorrectly move the child into the next price tier.
+    """
+    signed_lessons_count = LessonEnrollment.objects.filter(
+        child=child,
+        status__in=BILLING_ENROLLMENT_STATUSES,
+    ).exclude(lesson=lesson).count()
+    return signed_lessons_count + 1
 
 
 class PaymentService:
@@ -93,19 +111,43 @@ class PaymentService:
             logger.error(f"Child or Lesson not found: {e}")
             raise ValueError("Child or Lesson not found")
         
-        # Get lesson price (use lesson price override if set, otherwise course price)
-        base_price = lesson.price or lesson.course.price
+        # Determine which lesson number this is for the child:
+        # 1 = first signed lesson, 2 = second, 3 = third, etc.
+        course_index = get_child_lesson_index_for_billing(child, lesson)
+
+        # Lesson price: prefer the matching tier in `additional_course_prices`,
+        # then fall back to lesson.price or course.price.
+        tier_price = get_lesson_price_for_course_index(lesson, course_index)
+        regular_price = lesson.price or lesson.course.price
+        base_price = tier_price if tier_price and tier_price > 0 else regular_price
         if not base_price:
             raise ValueError("Lesson/Course price not configured")
-        
-        # Calculate discounts
-        discount_calculation = self.discount_service.evaluate_discounts_for_payment(
-            family_id=str(child.family.id),
-            child_id=str(child.id),
-            payment_date=payment_date,
-            base_price=base_price,
-            lesson_id=str(lesson.id)
+
+        used_lesson_tier = (
+            course_index >= 2
+            and tier_price is not None
+            and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
         )
+
+        # Calculate discounts. If a per-lesson tier already kicked in for this
+        # course-index, skip the global "additional_lesson" discount so the
+        # price isn't reduced twice.
+        if used_lesson_tier:
+            discount_calculation = self.discount_service.evaluate_discounts_for_payment(
+                family_id=str(child.family.id),
+                child_id=str(child.id),
+                payment_date=payment_date,
+                base_price=base_price,
+                lesson_id=None,
+            )
+        else:
+            discount_calculation = self.discount_service.evaluate_discounts_for_payment(
+                family_id=str(child.family.id),
+                child_id=str(child.id),
+                payment_date=payment_date,
+                base_price=base_price,
+                lesson_id=str(lesson.id),
+            )
 
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
         payment = None
@@ -181,6 +223,7 @@ class PaymentService:
         return {
             'payment_id': str(payment.id),
             'tranzila_url': tranzila_url,
+            'course_index': course_index,
             'base_amount': float(discount_calculation.base_price),
             'discount_amount': float(discount_calculation.total_discount_amount),
             'final_amount': float(discount_calculation.final_price),

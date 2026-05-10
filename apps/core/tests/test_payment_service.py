@@ -16,6 +16,7 @@ from apps.core.tests.test_fixtures import TestDataFactory
 from apps.core.payment_service import PaymentService
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 from apps.customers.discount_service import DiscountCalculation, ApplicableDiscount
+from apps.enrollments.models import LessonEnrollment
 
 
 class PaymentServiceInitiateSubscriptionTest(TestCase):
@@ -129,6 +130,89 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         mock_discount.assert_called_once()
         call_args = mock_discount.call_args[1]
         self.assertEqual(call_args['base_price'], Decimal('400.00'))
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_first_signed_lesson_uses_regular_price(self, mock_discount, mock_tranzila):
+        """A child with no active lessons pays the regular first-lesson price."""
+        self.lesson.course.price = Decimal('350.00')
+        self.lesson.course.save()
+        self.lesson.additional_course_prices = [
+            {'course_index': 2, 'price': 250},
+            {'course_index': 3, 'price': 200},
+        ]
+        self.lesson.save()
+
+        def passthrough_discount(**kwargs):
+            return DiscountCalculation(
+                applicable_discounts=[],
+                total_discount_amount=Decimal('0.00'),
+                final_price=kwargs['base_price'],
+                base_price=kwargs['base_price'],
+            )
+
+        mock_discount.side_effect = passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+
+        self.assertEqual(result['course_index'], 1)
+        self.assertEqual(result['base_amount'], 350.00)
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_second_and_third_signed_lessons_use_matching_tiers(self, mock_discount, mock_tranzila):
+        """Existing signed lessons advance the child through the lesson price tiers."""
+        course = self.lesson.course
+        course.price = Decimal('350.00')
+        course.save()
+        self.lesson.additional_course_prices = [
+            {'course_index': 2, 'price': 250},
+            {'course_index': 3, 'price': 200},
+        ]
+        self.lesson.save()
+
+        def passthrough_discount(**kwargs):
+            return DiscountCalculation(
+                applicable_discounts=[],
+                total_discount_amount=Decimal('0.00'),
+                final_price=kwargs['base_price'],
+                base_price=kwargs['base_price'],
+            )
+
+        mock_discount.side_effect = passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        existing_lesson = TestDataFactory.create_lesson(course=course, branch=course.branch)
+        LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=existing_lesson,
+            status='active',
+        )
+
+        second_result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(second_result['course_index'], 2)
+        self.assertEqual(second_result['base_amount'], 250.00)
+
+        payment_problem_lesson = TestDataFactory.create_lesson(course=course, branch=course.branch)
+        LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=payment_problem_lesson,
+            status='payments_problem',
+        )
+
+        third_result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(third_result['course_index'], 3)
+        self.assertEqual(third_result['base_amount'], 200.00)
 
 
 class PaymentServiceWebhookTest(TestCase):

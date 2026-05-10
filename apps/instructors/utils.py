@@ -1,7 +1,7 @@
 """
 Utility functions for instructor financial calculations
 """
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, date, timedelta
 import calendar
 from typing import Optional
@@ -86,6 +86,56 @@ def get_lesson_price(lesson):
     if lesson.lesson_price_override:
         return lesson.lesson_price_override
     return lesson.course.price if lesson.course else Decimal('0.00')
+
+
+def get_lesson_price_for_course_index(lesson, course_index: int) -> Decimal:
+    """
+    Pick the lesson price for a student based on which course this is for them.
+
+    course_index is 1-based: 1 = first course (regular price), 2 = student's
+    second course, 3 = third, etc.
+
+    Resolution order:
+    1. If course_index >= 2, look in lesson.additional_course_prices for an exact
+       match. If none, fall back to the closest tier with course_index <= the
+       requested index (so a tier defined at "3" also covers index 4 unless a
+       higher tier overrides).
+    2. Otherwise, fall back to the regular lesson/course price (lesson.price or
+       lesson.course.price), which is also the value returned for course_index <= 1.
+    """
+    base_price = lesson.price if lesson.price else (lesson.course.price if lesson.course else Decimal('0.00'))
+
+    try:
+        idx = int(course_index)
+    except (TypeError, ValueError):
+        return base_price
+    if idx <= 1:
+        return base_price
+
+    tiers = list(lesson.additional_course_prices or [])
+    if not tiers:
+        # Backwards-compat: lesson_price_override historically meant "second course price"
+        if lesson.lesson_price_override and idx >= 2:
+            return Decimal(str(lesson.lesson_price_override))
+        return base_price
+
+    best = None
+    best_index = -1
+    for tier in tiers:
+        try:
+            tier_index = int(tier.get('course_index'))
+            tier_price = Decimal(str(tier.get('price')))
+        except (TypeError, ValueError, InvalidOperation):
+            continue
+        if tier_index <= idx and tier_index > best_index:
+            best = tier_price
+            best_index = tier_index
+    if best is not None:
+        return best
+
+    if lesson.lesson_price_override and idx >= 2:
+        return Decimal(str(lesson.lesson_price_override))
+    return base_price
 
 
 def _enrollment_overlaps_range(enrollment: LessonEnrollment, start_d: date, end_d: date) -> bool:

@@ -1,8 +1,63 @@
+from decimal import Decimal, InvalidOperation
+
 from rest_framework import serializers
 from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.enrollments.models import LessonEnrollment
 from apps.core.models import Branch
+
+
+def _normalize_additional_course_prices(value):
+    """
+    Coerce a list of `{course_index, price}` tier entries into a clean,
+    sorted, deduped list. Used by both LessonSerializer and
+    LessonWithEnrollmentsSerializer.
+
+    Rules:
+    - Empty / null / not-a-list inputs become [].
+    - Each entry must be a dict-like object.
+    - course_index must parse as int and be >= 2.
+    - price must parse as a non-negative decimal; entries with blank/None price
+      are dropped (treated as "tier removed").
+    - Later entries with the same course_index override earlier ones.
+    - Output is sorted ascending by course_index.
+    """
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise serializers.ValidationError(
+            'מחירים מדורגים חייבים להיות רשימה של {course_index, price}'
+        )
+
+    cleaned: dict[int, float] = {}
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise serializers.ValidationError(
+                'כל מדרגת מחיר חייבת להיות אובייקט עם course_index ו-price'
+            )
+        try:
+            idx = int(entry.get('course_index'))
+        except (TypeError, ValueError):
+            raise serializers.ValidationError('course_index חייב להיות מספר שלם >= 2')
+        if idx < 2:
+            raise serializers.ValidationError('course_index חייב להיות 2 או יותר')
+
+        price_raw = entry.get('price')
+        if price_raw in (None, ''):
+            continue
+        try:
+            price = Decimal(str(price_raw))
+        except (InvalidOperation, TypeError, ValueError):
+            raise serializers.ValidationError('price חייב להיות מספר תקין')
+        if price < 0:
+            raise serializers.ValidationError('price לא יכול להיות שלילי')
+
+        cleaned[idx] = float(price)
+
+    return [
+        {'course_index': idx, 'price': cleaned[idx]}
+        for idx in sorted(cleaned)
+    ]
 
 
 class CourseTypeSerializer(serializers.ModelSerializer):
@@ -105,9 +160,12 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
         model = Lesson
         fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time', 
                   'branch', 'room', 'instructor', 'enrolled_count', 'total_students_count',
-                  'price', 'lesson_price_override', 'instructor_salary_override', 'status', 
-                  'is_recurring', 'notes']
-    
+                  'price', 'lesson_price_override', 'additional_course_prices',
+                  'instructor_salary_override', 'status', 'is_recurring', 'notes']
+
+    def validate_additional_course_prices(self, value):
+        return _normalize_additional_course_prices(value)
+
     def get_enrolled_count(self, obj):
         """Get count of active enrollments for this lesson (for income calculation)"""
         return obj.enrollments.filter(status='active').count()
@@ -199,10 +257,14 @@ class LessonSerializer(serializers.ModelSerializer):
         model = Lesson
         fields = ['id', 'course', 'course_name', 'branch', 'branch_name', 'room', 'room_name',
                   'instructor', 'instructor_name', 'day_of_week', 'day_name', 
-                  'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override', 
-                  'instructor_salary_override', 'is_recurring', 'status', 'notes', 
-                  'enrolled_students_count', 'room_capacity', 'created_at', 'updated_at']
+                  'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
+                  'additional_course_prices', 'instructor_salary_override', 'is_recurring',
+                  'status', 'notes', 'enrolled_students_count', 'room_capacity',
+                  'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_additional_course_prices(self, value):
+        return _normalize_additional_course_prices(value)
     
     def get_day_name(self, obj):
         """Convert day number to Hebrew name"""
