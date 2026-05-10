@@ -135,6 +135,78 @@ class StoreProduct(models.Model):
             return Decimal('0.00')
         return ((self.sale_price - self.cost_price) / self.sale_price) * 100
 
+    def has_per_size_stock(self) -> bool:
+        """True when stock is tracked per size on this product."""
+        return self.size_stocks.exists()
+
+    def recalculate_total_stock(self, save: bool = True):
+        """
+        Recompute stock_quantity from per-size stock rows.
+
+        When a product has any size rows, stock_quantity becomes the sum of those
+        rows so callers (analytics, list views, store dashboard) keep working
+        without changes. If a product has no size rows, the existing
+        stock_quantity value is left untouched.
+        """
+        if not self.has_per_size_stock():
+            return self.stock_quantity
+        total = sum(int(s.stock_quantity) for s in self.size_stocks.all())
+        self.stock_quantity = max(0, total)
+        if save:
+            self.save(update_fields=['stock_quantity', 'updated_at'])
+        return self.stock_quantity
+
+
+class StoreProductSize(models.Model):
+    """
+    Per-size stock entries for a `StoreProduct`.
+
+    A product may have many sizes (e.g. S, M, L). Each row tracks the stock
+    quantity for one specific size of one specific product. When a product has
+    at least one row, the parent's `stock_quantity` is treated as the running
+    total of these rows; products without any rows continue to use the legacy
+    single `stock_quantity` field.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        StoreProduct,
+        on_delete=models.CASCADE,
+        related_name='size_stocks',
+        verbose_name="מוצר",
+    )
+    size = models.CharField(
+        max_length=20,
+        verbose_name="מידה",
+        help_text="Size label (e.g. S, M, L, 42)",
+    )
+    stock_quantity = models.IntegerField(
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name="כמות במלאי",
+        help_text="Stock available for this specific size",
+    )
+    sort_order = models.PositiveIntegerField(
+        default=0,
+        verbose_name="סדר",
+        help_text="Display order among other sizes of the same product",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'store_product_sizes'
+        verbose_name = "מלאי לפי מידה"
+        verbose_name_plural = "מלאי לפי מידה"
+        ordering = ['sort_order', 'size']
+        unique_together = [('product', 'size')]
+        indexes = [
+            models.Index(fields=['product']),
+            models.Index(fields=['product', 'size']),
+        ]
+
+    def __str__(self):
+        return f"{self.product.name} - {self.size}: {self.stock_quantity}"
+
 
 class StoreInvoice(models.Model):
     """

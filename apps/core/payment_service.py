@@ -27,6 +27,10 @@ from apps.core.tranzila_service import TranzilaService
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment
 from apps.instructors.utils import get_lesson_price_for_course_index
+from apps.store.stock_utils import (
+    decrement_product_stock as _decrement_product_stock,
+    restore_stock_for_sale as _restore_stock_for_sale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -803,10 +807,8 @@ class PaymentService:
                         notes=''
                     )
                     
-                    # Decrement stock
-                    product.stock_quantity -= item['quantity']
-                    product.save(update_fields=['stock_quantity'])
-                    
+                    _decrement_product_stock(product, item)
+
                     logger.debug(f"Sold {item['quantity']}x {product.name}, new stock: {product.stock_quantity}")
             
             log_payment_operation("STORE_CHARGE_SUCCESS", invoice=invoice.invoice_number, total=invoice.total_amount)
@@ -889,10 +891,9 @@ class PaymentService:
                         branch=product.branch,
                         notes=''
                     )
-                    
-                    product.stock_quantity -= item['quantity']
-                    product.save(update_fields=['stock_quantity'])
-            
+
+                    _decrement_product_stock(product, item)
+
             logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
             return {'success': True, 'invoice_id': str(invoice.id)}
         else:
@@ -964,10 +965,9 @@ class PaymentService:
                     branch=product.branch,
                     notes=''  # Empty notes for cash/monthly purchases
                 )
-                
-                product.stock_quantity -= item['quantity']
-                product.save(update_fields=['stock_quantity'])
-        
+
+                _decrement_product_stock(product, item)
+
         logger.info(f"Created {payment_method} invoice {invoice.invoice_number}")
         
         return StoreInvoiceSerializer(invoice).data
@@ -1272,16 +1272,17 @@ class PaymentService:
             
             # Update invoice status to refunded and restore stock
             with transaction.atomic():
-                # Restore stock for refunded products
-                from apps.store.models import StoreSale, StoreProduct
+                # Restore stock for refunded products (per-size aware)
+                from apps.store.models import StoreSale
                 sales = StoreSale.objects.filter(invoice=invoice).select_related('product')
-                
+
                 for sale in sales:
-                    product = StoreProduct.objects.select_for_update().get(id=sale.product.id)
-                    product.stock_quantity += sale.quantity  # Restore stock
-                    product.save(update_fields=['stock_quantity'])
-                    logger.info(f"Restored {sale.quantity} units to product {product.name} (new stock: {product.stock_quantity})")
-                
+                    _restore_stock_for_sale(sale)
+                    logger.info(
+                        f"Restored {sale.quantity} units to product {sale.product.name}"
+                        f"{f' (size {sale.size})' if sale.size else ''}"
+                    )
+
                 # Update invoice
                 invoice.payment_status = 'refunded'
                 invoice.refunded_amount = refund_amount
