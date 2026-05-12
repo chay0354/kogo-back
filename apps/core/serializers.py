@@ -19,10 +19,10 @@ class RoomSerializer(serializers.ModelSerializer):
 class BranchListSerializer(serializers.ModelSerializer):
     """Simple branch list for dropdowns"""
     city_name = serializers.CharField(source='city.name', read_only=True, allow_null=True)
-    
+
     class Meta:
         model = Branch
-        fields = ['id', 'name', 'city_name']
+        fields = ['id', 'name', 'city', 'city_name']
 
 
 class BranchSerializer(serializers.ModelSerializer):
