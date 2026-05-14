@@ -146,10 +146,25 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS Settings
-CORS_ALLOWED_ORIGINS = config(
-    'CORS_ALLOWED_ORIGINS',
-    default='http://localhost:3000,http://localhost:3001'
-).split(',')
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in config(
+        'CORS_ALLOWED_ORIGINS',
+        default='http://localhost:3000,http://localhost:3001',
+    ).split(',')
+    if o.strip()
+]
+
+# Vercel preview URLs are unique per deploy (e.g. https://kogo-front-abc123.vercel.app).
+# Listing every preview in CORS_ALLOWED_ORIGINS is impractical; allow *.vercel.app when
+# running on Vercel. Set CORS_DISABLE_VERCEL_REGEX=true to skip (then list every origin explicitly).
+CORS_ALLOWED_ORIGIN_REGEXES = []
+if os.environ.get('VERCEL') and not config(
+    'CORS_DISABLE_VERCEL_REGEX', default=False, cast=bool
+):
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r'^https://[\w.-]+\.vercel\.app$',
+    ]
 
 CORS_ALLOW_CREDENTIALS = True
 
