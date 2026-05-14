@@ -36,6 +36,8 @@ class LoginView(APIView):
         response = Response(
             {
                 'user': CurrentUserSerializer(user).data,
+                # Lets SPA on another origin authenticate (SameSite=Lax cookies are not sent on cross-site XHR).
+                'token': token.key,
             },
             status=status.HTTP_200_OK,
         )
