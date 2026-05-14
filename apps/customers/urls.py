@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
+from .widget_views import WidgetLookupView, WidgetRegisterView
 
 router = DefaultRouter()
 router.register(r'families', views.FamilyViewSet, basename='family')
@@ -13,5 +14,7 @@ router.register(r'recurring-payments', views.RecurringPaymentViewSet, basename='
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('widget/lookup/', WidgetLookupView.as_view(), name='widget-lookup'),
+    path('widget/register/', WidgetRegisterView.as_view(), name='widget-register'),
 ]
 
