@@ -150,13 +150,11 @@ CORS_ALLOWED_ORIGINS = [
     if o.strip()
 ]
 
-# Vercel preview URLs are unique per deploy (e.g. https://kogo-front-abc123.vercel.app).
-# Listing every preview in CORS_ALLOWED_ORIGINS is impractical; allow *.vercel.app when
-# running on Vercel. Set CORS_DISABLE_VERCEL_REGEX=true to skip (then list every origin explicitly).
+# Vercel preview + production hosts (*.vercel.app). Not gated on os.environ["VERCEL"] — that is not
+# always visible to the app process; without the regex, preflight fails for split front/back deploys.
+# Set CORS_DISABLE_VERCEL_REGEX=true to turn off (then list every origin in CORS_ALLOWED_ORIGINS).
 CORS_ALLOWED_ORIGIN_REGEXES = []
-if os.environ.get('VERCEL') and not config(
-    'CORS_DISABLE_VERCEL_REGEX', default=False, cast=bool
-):
+if not config('CORS_DISABLE_VERCEL_REGEX', default=False, cast=bool):
     CORS_ALLOWED_ORIGIN_REGEXES = [
         r'^https://[\w.-]+\.vercel\.app$',
     ]
