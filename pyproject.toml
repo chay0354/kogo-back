@@ -1,0 +1,8 @@
+# Vercel reads this to wire Django into the Python runtime.
+# See: https://vercel.com/docs/frameworks/full-stack/django
+[tool.vercel]
+entrypoint = "config.wsgi:application"
+
+[tool.vercel.scripts]
+# collectstatic is run by Vercel automatically when STATIC_ROOT is set.
+build = "python vercel_build.py"

@@ -12,9 +12,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-development-key-change-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=True, cast=bool)
+# On Vercel, default DEBUG to False unless explicitly enabled.
+_DEBUG_DEFAULT = 'false' if os.environ.get('VERCEL') else 'true'
+DEBUG = config('DEBUG', default=_DEBUG_DEFAULT, cast=bool)
 
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = [h.strip() for h in config('ALLOWED_HOSTS', default='localhost,127.0.0.1').split(',') if h.strip()]
 # Add Cloudflare Tunnel domain for webhook testing
 ALLOWED_HOSTS.append('just-doors-versus-presence.trycloudflare.com')
 # Allow all Cloudflare Tunnel domains (they change randomly)
@@ -22,6 +24,9 @@ ALLOWED_HOSTS.append('.trycloudflare.com')
 # Add fly.io domains
 ALLOWED_HOSTS.append('.fly.dev')
 ALLOWED_HOSTS.append('.fly.io')
+# Vercel preview + production hostnames (*.vercel.app)
+if os.environ.get('VERCEL') and '.vercel.app' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('.vercel.app')
 
 # Application definition
 INSTALLED_APPS = [
@@ -153,13 +158,18 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True
 USE_X_FORWARDED_PORT = True
 
-# CSRF settings
+# CSRF settings (must be full origins; add your Vercel frontend via CSRF_TRUSTED_ORIGINS_EXTRA)
 CSRF_TRUSTED_ORIGINS = [
     'https://kogomalo.fly.dev',
     'https://*.fly.dev',
     'http://localhost:3000',
     'http://localhost:3001',
 ]
+_csrf_extra = config('CSRF_TRUSTED_ORIGINS_EXTRA', default='')
+if _csrf_extra:
+    CSRF_TRUSTED_ORIGINS.extend(
+        [o.strip() for o in _csrf_extra.split(',') if o.strip()]
+    )
 
 # Django REST Framework
 REST_FRAMEWORK = {
@@ -240,7 +250,16 @@ CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes soft time limit
 CELERY_WORKER_LOG_FORMAT = '[%(asctime)s: %(levelname)s/%(processName)s] %(message)s'
 CELERY_WORKER_TASK_LOG_FORMAT = '[%(asctime)s: %(levelname)s/%(processName)s][%(task_name)s(%(task_id)s)] %(message)s'
 
-# Logging configuration for Celery
+# Logging configuration for Celery (Vercel: filesystem is read-only; use console only)
+_celery_log_handlers = ['console']
+if not os.environ.get('VERCEL'):
+    _logs_dir = BASE_DIR / 'logs'
+    try:
+        _logs_dir.mkdir(parents=True, exist_ok=True)
+        _celery_log_handlers = ['console', 'file']
+    except OSError:
+        pass
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -263,11 +282,11 @@ LOGGING = {
     },
     'loggers': {
         'celery': {
-            'handlers': ['console', 'file'],
+            'handlers': _celery_log_handlers,
             'level': 'INFO',
         },
         'apps.core.tasks': {
-            'handlers': ['console', 'file'],
+            'handlers': _celery_log_handlers,
             'level': 'INFO',
         },
     },
