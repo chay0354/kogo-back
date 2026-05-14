@@ -3,6 +3,8 @@ Django settings for Kogomalo project.
 """
 import os
 from pathlib import Path
+import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from decouple import config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -85,28 +87,21 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-# Database
-# Auto-detect database from environment (PostgreSQL in production, SQLite in development)
-DATABASE_URL = config('DATABASE_URL', default='')
+# Database — PostgreSQL only (Supabase). SQLite is not supported.
+DATABASE_URL = (config('DATABASE_URL', default='') or '').strip()
+if not DATABASE_URL:
+    raise ImproperlyConfigured(
+        'DATABASE_URL is required. Use your Supabase Postgres URI '
+        '(Dashboard → Project Settings → Database → Connection string / URI).'
+    )
 
-if DATABASE_URL:
-    # Production: Use PostgreSQL from DATABASE_URL
-    import dj_database_url
-    DATABASES = {
-        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)
-    }
-else:
-    # Development: Use SQLite
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-            # Avoid "database is locked" under concurrent dev requests by waiting for the lock.
-            'OPTIONS': {
-                'timeout': 30,  # seconds
-            },
-        }
-    }
+_default_db = dj_database_url.parse(DATABASE_URL, conn_max_age=600)
+if _default_db['ENGINE'] == 'django.db.backends.sqlite3':
+    raise ImproperlyConfigured(
+        'SQLite is not supported. Set DATABASE_URL to a PostgreSQL (Supabase) connection string.'
+    )
+
+DATABASES = {'default': _default_db}
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

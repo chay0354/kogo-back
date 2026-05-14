@@ -26,15 +26,8 @@ Create a `.env` file in the backend directory with the following:
 DEBUG=True
 SECRET_KEY=your-secret-key-here
 
-# Database
-DATABASE_URL=sqlite:///db.sqlite3
-# Or for PostgreSQL:
-# DB_NAME=kogomalo
-# DB_USER=postgres
-# DB_PASSWORD=postgres
-# DB_HOST=localhost
-# DB_PORT=5432
-
+# Database (required): Supabase Postgres URI from Dashboard → Settings → Database.
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
 # CORS
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 
@@ -57,11 +50,11 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
 ### 4. Database Setup
 
-Ensure PostgreSQL is running, then:
+Supabase hosts PostgreSQL. Set `DATABASE_URL` in `.env`, then:
 
 ```bash
 python manage.py migrate
-python manage.py createsuperuser
+python manage.py create_manager --email you@example.com --password your-password --superuser
 ```
 
 ### 5. Run Development Server
