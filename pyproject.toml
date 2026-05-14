@@ -20,9 +20,9 @@ dependencies = [
   "requests==2.31.0",
 ]
 
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+[tool.uv]
+# Application repo: only third-party deps are installed; do not build/install this tree as a wheel.
+package = false
 
 [tool.vercel]
 entrypoint = "config.wsgi:application"
