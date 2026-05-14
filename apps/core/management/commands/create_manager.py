@@ -16,6 +16,11 @@ class Command(BaseCommand):
         parser.add_argument('--first-name', default='', help='First name')
         parser.add_argument('--last-name', default='', help='Last name')
         parser.add_argument('--no-staff', action='store_true', help='Do not set is_staff')
+        parser.add_argument(
+            '--superuser',
+            action='store_true',
+            help='Grant Django admin (is_superuser); implies is_staff unless --no-staff is set',
+        )
 
     def handle(self, *args, **options):
         email = (options['email'] or '').strip().lower()
@@ -23,13 +28,24 @@ class Command(BaseCommand):
         first_name = options.get('first_name', '')
         last_name = options.get('last_name', '')
         is_staff = not bool(options.get('no_staff', False))
+        is_superuser = bool(options.get('superuser', False))
+        if is_superuser:
+            is_staff = True
 
         if not email:
             raise CommandError('Email is required')
         if User.objects.filter(email__iexact=email).exists() or User.objects.filter(username=email).exists():
             raise CommandError('User already exists')
 
-        user = User(username=email, email=email, first_name=first_name, last_name=last_name, is_active=True, is_staff=is_staff)
+        user = User(
+            username=email,
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            is_active=True,
+            is_staff=is_staff,
+            is_superuser=is_superuser,
+        )
         user.set_password(password)
         user.save()
 
@@ -37,6 +53,11 @@ class Command(BaseCommand):
         profile.role = UserProfile.ROLE_MANAGER
         profile.save()
 
-        self.stdout.write(self.style.SUCCESS(f'Created manager: {email}'))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f'Created manager: {email}'
+                + (' (Django superuser)' if is_superuser else '')
+            )
+        )
 
 
