@@ -258,12 +258,25 @@ CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes soft time limit
 CELERY_WORKER_LOG_FORMAT = '[%(asctime)s: %(levelname)s/%(processName)s] %(message)s'
 CELERY_WORKER_TASK_LOG_FORMAT = '[%(asctime)s: %(levelname)s/%(processName)s][%(task_name)s(%(task_id)s)] %(message)s'
 
-# Logging configuration for Celery (Vercel: filesystem is read-only; use console only)
+# Logging configuration for Celery.
+# Vercel: /var/task is read-only — dictConfig instantiates every handler in 'handlers', so the file
+# handler must be omitted entirely when VERCEL is set, not only removed from logger handler lists.
 _celery_log_handlers = ['console']
+_logging_handlers = {
+    'console': {
+        'class': 'logging.StreamHandler',
+        'formatter': 'verbose',
+    },
+}
 if not os.environ.get('VERCEL'):
     _logs_dir = BASE_DIR / 'logs'
     try:
         _logs_dir.mkdir(parents=True, exist_ok=True)
+        _logging_handlers['file'] = {
+            'class': 'logging.FileHandler',
+            'filename': str(BASE_DIR / 'logs' / 'celery.log'),
+            'formatter': 'verbose',
+        }
         _celery_log_handlers = ['console', 'file']
     except OSError:
         pass
@@ -277,17 +290,7 @@ LOGGING = {
             'style': '{',
         },
     },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
-        },
-        'file': {
-            'class': 'logging.FileHandler',
-            'filename': BASE_DIR / 'logs' / 'celery.log',
-            'formatter': 'verbose',
-        },
-    },
+    'handlers': _logging_handlers,
     'loggers': {
         'celery': {
             'handlers': _celery_log_handlers,
