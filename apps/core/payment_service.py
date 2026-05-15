@@ -30,6 +30,7 @@ from apps.instructors.utils import get_lesson_price_for_course_index
 from apps.store.stock_utils import (
     decrement_product_stock as _decrement_product_stock,
     restore_stock_for_sale as _restore_stock_for_sale,
+    store_line_item_branch_id as _store_line_item_branch_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -803,7 +804,7 @@ class PaymentService:
                         total_price=product.sale_price * item['quantity'],
                         size=item.get('size', ''),
                         payment_method='credit_card',
-                        branch=product.branch,
+                        branch_id=_store_line_item_branch_id(item, product),
                         notes=''
                     )
                     
@@ -888,7 +889,7 @@ class PaymentService:
                         total_price=product.sale_price * item['quantity'],
                         size=item.get('size', ''),
                         payment_method='credit_card',
-                        branch=product.branch,
+                        branch_id=_store_line_item_branch_id(item, product),
                         notes=''
                     )
 
@@ -962,7 +963,7 @@ class PaymentService:
                     total_price=product.sale_price * item['quantity'],
                     size=item.get('size', ''),
                     payment_method=payment_method,
-                    branch=product.branch,
+                    branch_id=_store_line_item_branch_id(item, product),
                     notes=''  # Empty notes for cash/monthly purchases
                 )
 

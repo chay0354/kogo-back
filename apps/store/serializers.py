@@ -1,7 +1,9 @@
 """
 Store Serializers - API Serialization for Store Models
 """
-from django.db import transaction
+import uuid
+
+from django.db import transaction, IntegrityError
 from rest_framework import serializers
 from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale
 from apps.core.models import Branch
@@ -11,10 +13,57 @@ from apps.customers.models import Child
 class StoreProductSizeSerializer(serializers.ModelSerializer):
     """Serializer for per-size stock rows."""
 
+    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+
     class Meta:
         model = StoreProductSize
-        fields = ['id', 'size', 'stock_quantity', 'sort_order']
-        read_only_fields = ['id']
+        fields = ['id', 'size', 'stock_quantity', 'sort_order', 'branch', 'branch_name']
+        read_only_fields = ['id', 'branch_name']
+
+    def to_internal_value(self, data):
+        # Nested list validation runs before StoreProductSerializer.validate_size_stocks.
+        # Empty select sends ""; FK/UUID fields reject that — coerce before field validation.
+        # Only touch `branch` when the client sent the key (omit = leave default handling).
+        # HTML/JSON sometimes sends "" for integers (e.g. sort_order) → DRF 400 otherwise.
+        if isinstance(data, dict):
+            data = {**data}
+            if 'branch' in data and data.get('branch') in ('', 'delivery', None):
+                data['branch'] = None
+            if 'sort_order' in data:
+                so = data.get('sort_order')
+                if so in ('', None):
+                    data['sort_order'] = 0
+                elif isinstance(so, str):
+                    try:
+                        data['sort_order'] = max(0, int(so.strip() or '0'))
+                    except (TypeError, ValueError):
+                        data['sort_order'] = 0
+            if 'stock_quantity' in data:
+                sq = data.get('stock_quantity')
+                if sq in ('', None):
+                    data['stock_quantity'] = 0
+                elif isinstance(sq, str):
+                    try:
+                        data['stock_quantity'] = max(0, int(sq.strip() or '0'))
+                    except (TypeError, ValueError):
+                        data['stock_quantity'] = 0
+        return super().to_internal_value(data)
+
+
+def _coerce_branch_pk_string(branch_raw):
+    """
+    Nested `StoreProductSizeSerializer` turns `branch` into a `Branch` model instance.
+    `str(Branch)` is the display name, not the UUID — never use bare str() for FK ids.
+    """
+    if branch_raw in (None, '', serializers.empty, 'delivery'):
+        return None
+    if isinstance(branch_raw, Branch):
+        pk = branch_raw.pk
+        return str(pk) if pk is not None else None
+    if isinstance(branch_raw, uuid.UUID):
+        return str(branch_raw)
+    sid = str(branch_raw).strip()
+    return sid if sid else None
 
 
 def _normalize_size_stocks(value):
@@ -22,17 +71,18 @@ def _normalize_size_stocks(value):
     Coerce incoming size_stocks into a clean, deduplicated list.
 
     Rules:
-    - Each entry must be {size: str, stock_quantity: int >= 0}.
+    - Each entry must be {size: str, stock_quantity: int >= 0, branch?: uuid|null}.
     - Sizes are stripped; empty sizes are dropped.
-    - Same size repeated → last one wins.
+    - Same (size, branch) repeated → last one wins (branch None = משלוח).
     - sort_order is filled in from the input order if not provided.
+    - branch: omit, null, '', or 'delivery' → None; otherwise must be a valid Branch id.
     """
     if value in (None, ''):
         return []
     if not isinstance(value, list):
         raise serializers.ValidationError("size_stocks חייב להיות רשימה")
 
-    cleaned: dict[str, dict] = {}
+    cleaned: dict[tuple, dict] = {}
     for index, entry in enumerate(value):
         if not isinstance(entry, dict):
             raise serializers.ValidationError(
@@ -53,13 +103,25 @@ def _normalize_size_stocks(value):
         except (TypeError, ValueError):
             sort_order = index
 
-        cleaned[size_label] = {
+        branch_raw = entry.get('branch', serializers.empty)
+        branch_id = None
+        sid = _coerce_branch_pk_string(branch_raw)
+        if sid:
+            if not Branch.objects.filter(id=sid).exists():
+                raise serializers.ValidationError(
+                    f'סניף לא תקף למידה "{size_label}"'
+                )
+            branch_id = sid
+
+        row_key = (size_label, branch_id)
+        cleaned[row_key] = {
             'size': size_label,
             'stock_quantity': qty,
             'sort_order': sort_order,
+            'branch': branch_id,
         }
 
-    return [cleaned[size] for size in sorted(cleaned, key=lambda s: cleaned[s]['sort_order'])]
+    return sorted(cleaned.values(), key=lambda e: (e['sort_order'], e['size'], e['branch'] or ''))
 
 
 class StoreProductSerializer(serializers.ModelSerializer):
@@ -104,15 +166,39 @@ class StoreProductSerializer(serializers.ModelSerializer):
         """
         Replace the product's size rows with the provided list and keep the
         derived `size` (CSV) and `stock_quantity` (total) fields in sync.
+        Sets `product.branch` to the first row's branch when any row has a branch.
         """
-        product.size_stocks.all().delete()
-        for entry in size_stocks:
-            StoreProductSize.objects.create(product=product, **entry)
+        try:
+            product.size_stocks.all().delete()
+            for entry in size_stocks:
+                StoreProductSize.objects.create(
+                    product=product,
+                    size=entry['size'],
+                    stock_quantity=entry['stock_quantity'],
+                    sort_order=entry['sort_order'],
+                    branch_id=entry.get('branch'),
+                )
 
-        if size_stocks:
-            product.size = ','.join(entry['size'] for entry in size_stocks)
-            product.stock_quantity = sum(entry['stock_quantity'] for entry in size_stocks)
-            product.save(update_fields=['size', 'stock_quantity', 'updated_at'])
+            if size_stocks:
+                product.size = ','.join(dict.fromkeys(entry['size'] for entry in size_stocks))
+                product.stock_quantity = sum(entry['stock_quantity'] for entry in size_stocks)
+                first_branch = None
+                for entry in size_stocks:
+                    if entry.get('branch'):
+                        first_branch = entry['branch']
+                        break
+                product.branch_id = first_branch
+                product.save(update_fields=['size', 'stock_quantity', 'branch', 'updated_at'])
+        except IntegrityError as exc:
+            raise serializers.ValidationError(
+                {
+                    'size_stocks': [
+                        'שמירת שורות המלאי נכשלה (בדרך כלל בגלל אילוץ במסד הנתונים). '
+                        'אם הוספתם אותה מידה במספר מיקומים, הריצו: python manage.py migrate store '
+                        'ובדקו שאין שתי שורות זהות (אותה מידה ואותו מיקום).'
+                    ]
+                }
+            ) from exc
 
     def create(self, validated_data):
         size_stocks = validated_data.pop('size_stocks', None)

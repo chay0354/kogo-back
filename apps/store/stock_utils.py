@@ -21,28 +21,65 @@ from apps.store.models import StoreProduct, StoreProductSize, StoreSale
 logger = logging.getLogger(__name__)
 
 
-def _resolve_size_row(product: StoreProduct, size: str) -> StoreProductSize | None:
+def _resolve_size_row(product: StoreProduct, item: Mapping) -> StoreProductSize | None:
+    """
+    Pick the `StoreProductSize` row to mutate for a cart / sale item.
+
+    Prefer `size_stock_id` when present. Otherwise match `size` and optional
+    `branch` (UUID or null for משלוח). Fall back to the first row for that size
+    (legacy clients that only send size).
+    """
+    size_stock_id = (item.get('size_stock_id') or '').strip()
+    if size_stock_id:
+        return (
+            StoreProductSize.objects
+            .select_for_update()
+            .filter(product=product, pk=size_stock_id)
+            .first()
+        )
+
+    size = (item.get('size') or '').strip()
     if not size:
         return None
-    return (
+
+    qs = (
         StoreProductSize.objects
         .select_for_update()
         .filter(product=product, size=size)
-        .first()
     )
+
+    if 'branch' in item:
+        br = item.get('branch')
+        if br in (None, '', 'delivery'):
+            row = qs.filter(branch__isnull=True).order_by('sort_order').first()
+            if row is not None:
+                return row
+        else:
+            bid = str(br).strip()
+            row = qs.filter(branch_id=bid).order_by('sort_order').first()
+            if row is not None:
+                return row
+
+    return qs.order_by('sort_order').first()
+
+
+def store_line_item_branch_id(item: Mapping, product: StoreProduct):
+    """Branch FK for `StoreSale` / reporting: prefer explicit line item branch, else product default."""
+    br = item.get('branch')
+    if br not in (None, '', 'delivery'):
+        s = str(br).strip()
+        if s:
+            return s
+    return product.branch_id
 
 
 def decrement_product_stock(product: StoreProduct, item: Mapping) -> None:
     """
-    Decrement stock for a sale `item` (`{product_id, quantity, size?}`).
+    Decrement stock for a sale `item` (`{product_id, quantity, size?, branch?, size_stock_id?}`).
 
-    When the product tracks stock per size and `item['size']` matches an
-    existing size row, that row is decremented and the product total is
-    recomputed from all size rows. Otherwise we fall back to decrementing the
-    product's flat `stock_quantity`, preserving the legacy behaviour.
-
-    Caller is expected to be inside an atomic block; the caller has also
-    already validated stock availability.
+    When the product tracks stock per size and a matching size row is found,
+    that row is decremented and the product total is recomputed. Otherwise we
+    fall back to decrementing the product's flat `stock_quantity`.
     """
     quantity = int(item.get('quantity', 0))
     if quantity <= 0:
@@ -51,13 +88,14 @@ def decrement_product_stock(product: StoreProduct, item: Mapping) -> None:
     size = (item.get('size') or '').strip()
 
     with transaction.atomic():
-        if size and product.has_per_size_stock():
-            size_row = _resolve_size_row(product, size)
+        if (size or item.get('size_stock_id')) and product.has_per_size_stock():
+            size_row = _resolve_size_row(product, item)
             if size_row is None:
                 logger.warning(
-                    "decrement_product_stock: size %s not found for product %s; "
+                    "decrement_product_stock: no size row for product %s item=%s; "
                     "falling back to total stock decrement",
-                    size, product.id,
+                    product.id,
+                    {k: item.get(k) for k in ('size', 'branch', 'size_stock_id')},
                 )
             else:
                 size_row.stock_quantity = max(0, size_row.stock_quantity - quantity)
@@ -75,8 +113,8 @@ def restore_stock_for_sale(sale: StoreSale) -> None:
     """
     Add the units from a refunded `StoreSale` back into stock.
 
-    If the sale recorded a `size` and the product still has that size row,
-    the row is incremented and the product total is recomputed; otherwise the
+    If the sale recorded a `size` and the product still has a matching size row
+    (using sale branch when available), that row is incremented; otherwise the
     flat `stock_quantity` is incremented.
     """
     quantity = int(sale.quantity or 0)
@@ -86,9 +124,13 @@ def restore_stock_for_sale(sale: StoreSale) -> None:
     size = (sale.size or '').strip()
     product = StoreProduct.objects.select_for_update().get(pk=sale.product_id)
 
+    item: dict = {'size': size}
+    if sale.branch_id:
+        item['branch'] = str(sale.branch_id)
+
     with transaction.atomic():
         if size and product.has_per_size_stock():
-            size_row = _resolve_size_row(product, size)
+            size_row = _resolve_size_row(product, item)
             if size_row is not None:
                 size_row.stock_quantity = max(0, size_row.stock_quantity + quantity)
                 size_row.save(update_fields=['stock_quantity', 'updated_at'])

@@ -325,6 +325,8 @@ class DashboardViewSet(viewsets.ViewSet):
         - student_status: Filter by status
         - date_from: Start date (YYYY-MM-DD)
         - date_to: End date (YYYY-MM-DD)
+        - quit_date_from / quit_date_to: optional; when both set, limits churn (אחוז נשירה)
+          and נושרים לפי תחום to this window instead of date_from/date_to.
         """
         from apps.customers.status_history_models import ChildStatusHistory
         
@@ -333,6 +335,20 @@ class DashboardViewSet(viewsets.ViewSet):
         branch_id = request.query_params.get('branch_id', 'all')
         student_status = request.query_params.get('student_status', 'all')
         date_from, date_to = parse_date_filters(request)
+        
+        # Optional narrower window for quit / churn only (defaults to main date range)
+        quit_df_str = request.query_params.get('quit_date_from')
+        quit_dt_str = request.query_params.get('quit_date_to')
+        if quit_df_str and quit_dt_str:
+            try:
+                quit_date_from = datetime.strptime(quit_df_str, '%Y-%m-%d').date()
+                quit_date_to = datetime.strptime(quit_dt_str, '%Y-%m-%d').date()
+                if quit_date_from > quit_date_to:
+                    quit_date_from, quit_date_to = quit_date_to, quit_date_from
+            except ValueError:
+                quit_date_from, quit_date_to = date_from, date_to
+        else:
+            quit_date_from, quit_date_to = date_from, date_to
         
         # Get all children
         children = Child.objects.all()
@@ -411,8 +427,8 @@ class DashboardViewSet(viewsets.ViewSet):
         quit_data = []
         status_changes = ChildStatusHistory.objects.filter(
             previous_status='active',
-            changed_at__date__gte=date_from,
-            changed_at__date__lte=date_to
+            changed_at__date__gte=quit_date_from,
+            changed_at__date__lte=quit_date_to
         ).exclude(new_status='active')
         
         # Filter by branch/course if specified
