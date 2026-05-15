@@ -17,6 +17,12 @@ User = get_user_model()
 
 
 class LoginView(APIView):
+    """
+    Do not run Token/cookie auth here: a stale token in Authorization or auth_token
+    cookie would raise 'Invalid token.' before email/password is checked.
+    """
+
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):

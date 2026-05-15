@@ -36,7 +36,7 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     - Stock updates
     - Soft delete (set is_active=False)
     """
-    queryset = StoreProduct.objects.filter(is_active=True).prefetch_related('size_stocks')
+    queryset = StoreProduct.objects.filter(is_active=True).prefetch_related('size_stocks__branch')
     serializer_class = StoreProductSerializer
     permission_classes = [IsAuthenticated]
     
@@ -83,14 +83,14 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         Body: {
             "mode": "add" | "subtract" | "set",
             "quantity": number,
-            "size": string | null   # optional, target a specific size row
+            "size": string | null,           # legacy: target row by size label
+            "size_stock_id": uuid | null,    # preferred: exact StoreProductSize row (size + location)
         }
 
-        When `size` is provided and the product has per-size stock rows, the
-        update is applied only to that size (and the product total is
-        recomputed). Otherwise we fall back to mutating `stock_quantity`
-        directly, which preserves the legacy behavior for products without
-        per-size tracking.
+        When `size_stock_id` is provided and the product has per-size stock rows,
+        that exact row is updated (disambiguates when UI shows size + branch).
+        Else when `size` is provided, the first matching row for that size is used.
+        Otherwise we fall back to mutating `stock_quantity` on the product.
         """
         product = self.get_object()
         mode = request.data.get('mode')
@@ -106,9 +106,29 @@ class StoreProductViewSet(viewsets.ModelViewSet):
             )
 
         size = (request.data.get('size') or '').strip()
+        size_stock_id = (request.data.get('size_stock_id') or '').strip()
+
+        if size_stock_id and not product.has_per_size_stock():
+            return Response(
+                {'error': 'size_stock_id is only valid for products with per-size stock rows'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         with db_transaction.atomic():
-            if size and product.has_per_size_stock():
+            size_row = None
+            if size_stock_id and product.has_per_size_stock():
+                size_row = (
+                    StoreProductSize.objects
+                    .select_for_update()
+                    .filter(product=product, pk=size_stock_id)
+                    .first()
+                )
+                if size_row is None:
+                    return Response(
+                        {'error': 'Size stock row not found for this product'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif size and product.has_per_size_stock():
                 size_row = (
                     StoreProductSize.objects
                     .select_for_update()
@@ -120,6 +140,8 @@ class StoreProductViewSet(viewsets.ModelViewSet):
                         {'error': f'Size "{size}" not found for this product'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+
+            if size_row is not None:
                 if mode == 'add':
                     size_row.stock_quantity += quantity
                 elif mode == 'subtract':
@@ -138,8 +160,8 @@ class StoreProductViewSet(viewsets.ModelViewSet):
                 product.save(update_fields=['stock_quantity', 'updated_at'])
 
         logger.info(
-            "Updated stock for %s: mode=%s, quantity=%s, size=%s, new_stock=%s",
-            product.name, mode, quantity, size or '-', product.stock_quantity,
+            "Updated stock for %s: mode=%s, quantity=%s, size=%s, size_stock_id=%s, new_stock=%s",
+            product.name, mode, quantity, size or '-', size_stock_id or '-', product.stock_quantity,
         )
         product.refresh_from_db()
         serializer = self.get_serializer(product)
@@ -492,7 +514,8 @@ def charge_card(request):
     """
     from apps.store.models import StoreProduct, StoreInvoice, StoreSale
     from apps.core.tranzila_service import TranzilaService
-    from apps.core.payment_service import _decrement_product_stock
+    from apps.store.stock_utils import decrement_product_stock as _decrement_product_stock
+    from apps.store.stock_utils import store_line_item_branch_id as _store_line_item_branch_id
     from apps.customers.models import Child, RecurringPayment
     from django.db import transaction as db_transaction
     
@@ -567,7 +590,7 @@ def charge_card(request):
                         total_price=product.sale_price * item['quantity'],
                         size=item.get('size', ''),
                         payment_method='credit_card',
-                        branch=product.branch
+                        branch_id=_store_line_item_branch_id(item, product),
                     )
 
                     _decrement_product_stock(product, item)

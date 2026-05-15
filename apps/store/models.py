@@ -190,6 +190,15 @@ class StoreProductSize(models.Model):
         verbose_name="סדר",
         help_text="Display order among other sizes of the same product",
     )
+    branch = models.ForeignKey(
+        'core.Branch',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='store_product_sizes',
+        verbose_name="סניף",
+        help_text="מיקום מלאי למידה זו (ריק = משלוח)",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
@@ -198,7 +207,12 @@ class StoreProductSize(models.Model):
         verbose_name = "מלאי לפי מידה"
         verbose_name_plural = "מלאי לפי מידה"
         ordering = ['sort_order', 'size']
-        unique_together = [('product', 'size')]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product', 'size', 'branch'],
+                name='store_product_sizes_uniq_product_size_branch',
+            ),
+        ]
         indexes = [
             models.Index(fields=['product']),
             models.Index(fields=['product', 'size']),

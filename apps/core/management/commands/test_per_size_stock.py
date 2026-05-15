@@ -66,8 +66,8 @@ class Command(BaseCommand):
         product.refresh_from_db()
         self._print_state("After selling 2x size S", product)
 
-        s_row = product.size_stocks.get(size="S")
-        m_row = product.size_stocks.get(size="M")
+        s_row = product.size_stocks.filter(size="S").order_by("sort_order").first()
+        m_row = product.size_stocks.filter(size="M").order_by("sort_order").first()
         if s_row.stock_quantity != 3 or m_row.stock_quantity != 3:
             raise AssertionError(
                 f"Expected S=3 / M=3 after sale, got S={s_row.stock_quantity} M={m_row.stock_quantity}"
@@ -80,6 +80,7 @@ class Command(BaseCommand):
             "product": product,
             "quantity": 2,
             "size": "S",
+            "branch_id": None,
         })()
         restore_stock_for_sale(sale_like)
         product.refresh_from_db()
