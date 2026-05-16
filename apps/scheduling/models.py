@@ -9,13 +9,10 @@ from apps.courses.models import Lesson
 class ScheduleEvent(models.Model):
     """
     אירועים בלוח שנה
-    
-    Events are NOT included in:
-    - Profit calculations
-    - Branch KPIs
-    - Instructor salary calculations
-    
-    Use is_event property to distinguish from Lesson objects.
+
+    Regular events are NOT included in snapshot profit/revenue.
+    Studio rentals (is_studio_rental) contribute price_per_session per occurrence
+    in dashboard financial aggregates for the selected date range.
     """
     EVENT_TYPE_CHOICES = [
         ('one_time', 'חד פעמי'),
@@ -36,8 +33,27 @@ class ScheduleEvent(models.Model):
     color = models.CharField(max_length=7, blank=True, default='#9333ea', verbose_name="צבע")  # hex color, default purple
     notes = models.TextField(blank=True, verbose_name="הערות")
     files = models.JSONField(default=list, blank=True, verbose_name="קבצים מצורפים")  # Array of file URLs
+    # 0=Sunday .. 6=Saturday (same as Lesson.day_of_week). Empty => single weekday from event_date anchor.
+    weekly_repeat_days = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="ימי חזרה שבועית",
+    )
     assigned_instructors = models.ManyToManyField('instructors.Instructor', blank=True, related_name='assigned_events', verbose_name="מדריכים משויכים")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    is_studio_rental = models.BooleanField(
+        default=False,
+        verbose_name="שכירות סטודיו",
+        help_text="When true, price_per_session is counted as revenue per occurrence in dashboards.",
+    )
+    renter_name = models.CharField(max_length=200, blank=True, verbose_name="שם השוכר")
+    price_per_session = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name="מחיר למופע",
+        help_text="Revenue per rental occurrence (one_time = once; weekly = each week in range).",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
