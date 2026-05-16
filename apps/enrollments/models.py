@@ -57,6 +57,10 @@ class LessonEnrollment(models.Model):
         verbose_name_plural = "רישומים לשיעורים"
         unique_together = ['lesson', 'child']
         ordering = ['-enrolled_at']
+        indexes = [
+            models.Index(fields=['lesson', 'status']),
+            models.Index(fields=['status']),
+        ]
 
     def __str__(self):
         return f"{self.child.full_name} - {self.lesson}"

@@ -88,13 +88,12 @@ class BranchViewSet(viewsets.ModelViewSet):
         # Count lessons
         lessons_count = branch.lessons.filter(status='scheduled').count()
         
-        # Count active instructors (deduplicated: primary + assigned)
-        # Use set union to avoid counting same instructor twice if they're both primary AND assigned
-        primary_ids = set(branch.primary_instructors.filter(is_active=True).values_list('id', flat=True))
-        assigned_ids = set(branch.instructor_assignments.filter(
-            instructor__is_active=True
-        ).values_list('instructor_id', flat=True))
-        instructors_count = len(primary_ids | assigned_ids)
+        # Count active instructors (deduplicated: primary + assigned) in a single query
+        from apps.instructors.models import Instructor
+        instructors_count = Instructor.objects.filter(
+            Q(primary_branch=branch, is_active=True) |
+            Q(branch_assignments__branch=branch, is_active=True)
+        ).distinct().count()
         
         # Count active rooms
         rooms_count = branch.rooms.filter(is_active=True).count()
