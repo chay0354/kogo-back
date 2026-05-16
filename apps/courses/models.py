@@ -102,6 +102,10 @@ class Lesson(models.Model):
         verbose_name = "שיעור"
         verbose_name_plural = "שיעורים"
         ordering = ['day_of_week', 'start_time']
+        indexes = [
+            models.Index(fields=['branch', 'status']),
+            models.Index(fields=['branch', 'course']),
+        ]
 
     def __str__(self):
         day_name = dict(self.DAY_OF_WEEK_CHOICES)[self.day_of_week]
