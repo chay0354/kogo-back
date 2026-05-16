@@ -12,6 +12,7 @@ from apps.core.models import UserProfile
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
+from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range
 from .serializers import (
     LessonListSerializer,
     LessonDetailSerializer,  # kept for other uses
@@ -506,14 +507,17 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         try:
             user_role = user.profile.role
             if user_role == UserProfile.ROLE_WORKER:
-                # Filter events where user's email matches an assigned instructor's email
+                # Filter events where user's email matches an assigned instructor's email,
+                # or studio rentals (visible to all workers for scheduling).
                 from apps.instructors.models import Instructor
                 instructor = Instructor.objects.filter(email__iexact=user.email).first()
                 if instructor:
-                    queryset = queryset.filter(assigned_instructors=instructor)
+                    queryset = queryset.filter(
+                        Q(assigned_instructors=instructor) | Q(is_studio_rental=True)
+                    ).distinct()
                 else:
-                    # No instructor match, show no events
-                    queryset = queryset.none()
+                    # No instructor match: still show rentals for schedule visibility
+                    queryset = queryset.filter(is_studio_rental=True)
         except (UserProfile.DoesNotExist, AttributeError):
             pass
         
@@ -556,7 +560,10 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         
         if city_id:
             queryset = queryset.filter(Q(city_id=city_id) | Q(city__isnull=True))
-        
+
+        if self.request.query_params.get('studio_rental') == '1':
+            queryset = queryset.filter(is_studio_rental=True)
+
         return queryset.filter(is_active=True)
     
     def list(self, request, *args, **kwargs):
@@ -585,20 +592,10 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
                         data = ScheduleEventListSerializer(event).data
                         expanded.append(data)
                 elif event.event_type == 'weekly':
-                    # Weekly events: generate occurrences
-                    start_from = max(start, event.event_date)
-                    
-                    # Get day of week from event_date
-                    event_weekday = event.event_date.weekday()
-                    days_ahead = (event_weekday - start_from.weekday()) % 7
-                    first_occ = start_from + timedelta(days=days_ahead)
-                    
-                    occ = first_occ
-                    while occ <= end:
+                    for occ in iter_occurrence_dates_in_range(event, start, end):
                         data = ScheduleEventListSerializer(event).data
                         data['event_date'] = occ.isoformat()
                         expanded.append(data)
-                        occ = occ + timedelta(days=7)
             
             # Sort by date and time
             expanded.sort(key=lambda x: (

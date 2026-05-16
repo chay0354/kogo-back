@@ -5,6 +5,7 @@ from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.enrollments.models import LessonEnrollment
 from apps.core.models import Branch
+from apps.scheduling.studio_conflict import timed_event_conflicts_lesson
 
 
 def _normalize_additional_course_prices(value):
@@ -288,6 +289,8 @@ class LessonSerializer(serializers.ModelSerializer):
         day_of_week = data.get('day_of_week', self.instance.day_of_week if self.instance else None)
         start_time = data.get('start_time', self.instance.start_time if self.instance else None)
         end_time = data.get('end_time', self.instance.end_time if self.instance else None)
+        lesson_is_recurring = data.get('is_recurring', self.instance.is_recurring if self.instance else True)
+        lesson_date = data.get('lesson_date', self.instance.lesson_date if self.instance else None)
         
         if not all([day_of_week is not None, start_time, end_time]):
             return data
@@ -313,6 +316,19 @@ class LessonSerializer(serializers.ModelSerializer):
                 conflict = room_conflicts.first()
                 raise serializers.ValidationError({
                     'room': f'החדר תפוס ביום זה בין השעות {conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
+                })
+
+            if timed_event_conflicts_lesson(
+                branch,
+                room,
+                day_of_week,
+                start_time,
+                end_time,
+                lesson_is_recurring=lesson_is_recurring,
+                lesson_date=lesson_date,
+            ):
+                raise serializers.ValidationError({
+                    'room': 'החדר תפוס באותה שעה (אירוע או שכירות בלוח)'
                 })
         
         # Check for instructor conflicts (if instructor is specified)

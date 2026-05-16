@@ -133,6 +133,18 @@ class DashboardViewSet(viewsets.ViewSet):
         total_expenses = snapshots.aggregate(Sum('instructor_costs'))['instructor_costs__sum'] or Decimal('0.00')
         net_profit = total_revenue - total_expenses
 
+        from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
+
+        rental_agg = aggregate_studio_rental_revenue(
+            date_from,
+            date_to,
+            branch_id if branch_id and branch_id != 'all' else None,
+            None,
+        )
+        rental_total = rental_agg['total'] or Decimal('0.00')
+        total_revenue += rental_total
+        net_profit += rental_total
+
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Total Revenue: %s", total_revenue)
             logger.debug("Total Expenses: %s", total_expenses)
@@ -152,12 +164,31 @@ class DashboardViewSet(viewsets.ViewSet):
         ).order_by('-revenue')
         
         for item in branch_data:
+            bid = str(item['branch_id'])
+            extra = float(rental_agg['by_branch_id'].get(bid, 0) or 0)
             revenue_by_branch.append({
                 'branch_name': item['branch__name'],
-                'branch_id': str(item['branch_id']),
-                'revenue': float(item['revenue'] or 0),
+                'branch_id': bid,
+                'revenue': float(item['revenue'] or 0) + extra,
                 'expenses': float(item['expenses'] or 0),
-                'profit': float(item['profit'] or 0)
+                'profit': float(item['profit'] or 0) + extra
+            })
+
+        # Branches with rental revenue but no snapshot row in range
+        known_ids = {r['branch_id'] for r in revenue_by_branch}
+        for bid, amt in rental_agg['by_branch_id'].items():
+            if bid in known_ids:
+                continue
+            b = Branch.objects.filter(pk=bid).first()
+            if not b:
+                continue
+            extra = float(amt or 0)
+            revenue_by_branch.append({
+                'branch_name': b.name,
+                'branch_id': bid,
+                'revenue': extra,
+                'expenses': 0.0,
+                'profit': extra,
             })
         
         # Monthly trends (aggregate by month)
@@ -167,9 +198,10 @@ class DashboardViewSet(viewsets.ViewSet):
             month_revenue = month_snaps.aggregate(Sum('total_revenue'))['total_revenue__sum'] or Decimal('0.00')
             month_expenses = month_snaps.aggregate(Sum('instructor_costs'))['instructor_costs__sum'] or Decimal('0.00')
             
+            extra_month = float(rental_agg['by_month'].get(month, 0) or 0)
             monthly_trends.append({
                 'month': month,
-                'revenue': float(month_revenue),
+                'revenue': float(month_revenue) + extra_month,
                 'expenses': float(month_expenses)
             })
         
@@ -817,6 +849,17 @@ class DashboardViewSet(viewsets.ViewSet):
         # Total profit is sum across all months in the period
         total_profit_agg = snapshots.aggregate(Sum('profit'))
         total_profit = total_profit_agg['profit__sum'] or Decimal('0.00')
+
+        from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
+
+        rental_agg = aggregate_studio_rental_revenue(
+            date_from,
+            date_to,
+            branch_id if branch_id and branch_id != 'all' else None,
+            city_id if city_id and city_id != 'all' else None,
+        )
+        rental_dec = rental_agg['total'] or Decimal('0.00')
+        total_profit = total_profit + rental_dec
         
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Total Students (from Child model): %s", total_students)
@@ -847,6 +890,9 @@ class DashboardViewSet(viewsets.ViewSet):
             # Revenue, profit, and spending: Sum across all months
             revenue = float(branch_snapshots.aggregate(Sum('total_revenue'))['total_revenue__sum'] or 0)
             profit = float(branch_snapshots.aggregate(Sum('profit'))['profit__sum'] or 0)
+            rental_extra = float(rental_agg['by_branch_id'].get(str(bid), 0) or 0)
+            revenue += rental_extra
+            profit += rental_extra
             spending = float(branch_snapshots.aggregate(Sum('instructor_costs'))['instructor_costs__sum'] or 0)
             lessons_count = branch_snapshots.count()  # Number of month records
             
@@ -862,6 +908,30 @@ class DashboardViewSet(viewsets.ViewSet):
             }
             
             branch_list.append(branch_info)
+
+        # Branches that only appear via studio rental revenue (no snapshot rows)
+        seen_branch_ids = {str(x['branch_id']) for x in branch_list}
+        for bid_str, amt in rental_agg['by_branch_id'].items():
+            if bid_str in seen_branch_ids:
+                continue
+            b = Branch.objects.filter(pk=bid_str).select_related('city').first()
+            if not b:
+                continue
+            if city_id and city_id != 'all' and str(b.city_id) != str(city_id):
+                continue
+            rental_extra = float(amt or 0)
+            students_count = Child.objects.filter(family__branch_id=bid_str).exclude(
+                status__in=['ghost', 'non_active', 'sign_in']
+            ).count()
+            branch_list.append({
+                'branch_id': bid_str,
+                'name': b.name,
+                'students': students_count,
+                'lessons': 0,
+                'revenue': rental_extra,
+                'profit': rental_extra,
+                'spending': 0.0,
+            })
         
         # Sort by revenue
         branch_list.sort(key=lambda x: x['revenue'], reverse=True)
