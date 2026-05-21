@@ -12,7 +12,7 @@ from rest_framework import status
 from django.db import transaction
 
 from apps.customers.models import Family, Parent, Child
-from apps.courses.models import Lesson
+from apps.courses.models import Lesson, Course
 from apps.core.payment_service import PaymentService
 
 
@@ -86,7 +86,7 @@ class WidgetRegisterView(APIView):
     Required fields:
       parent_id_number, parent_first_name, parent_last_name, parent_phone
       child_first_name, child_last_name, child_birth_date, child_gender
-      lesson_id
+      course_id
 
     Optional:
       child_id_number, child_phone
@@ -102,7 +102,7 @@ class WidgetRegisterView(APIView):
         required = [
             'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
             'child_first_name', 'child_last_name', 'child_birth_date', 'child_gender',
-            'lesson_id',
+            'course_id',
         ]
         missing = [f for f in required if not data.get(f)]
         if missing:
@@ -111,11 +111,16 @@ class WidgetRegisterView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        lesson_id = data['lesson_id']
+        course_id = data['course_id']
         try:
-            lesson = Lesson.objects.select_related('course', 'branch').get(id=lesson_id)
-        except Lesson.DoesNotExist:
-            return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+            course = Course.objects.prefetch_related('lessons').get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        lessons = list(course.lessons.select_related('branch').all())
+        if not lessons:
+            return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
+        lesson = lessons[0]
 
         parent_id_number  = data['parent_id_number'].strip()
         child_first       = data['child_first_name'].strip()
