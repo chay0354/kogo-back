@@ -312,7 +312,9 @@ class PaymentService:
         payment_id = webhook_payload.get('pdesc', '')  # We sent payment.id as pdesc
         
         try:
-            payment = Payment.objects.select_related('child', 'family').get(id=payment_id)
+            payment = Payment.objects.select_related(
+                'child', 'family', 'lesson', 'lesson__course', 'lesson__branch',
+            ).get(id=payment_id)
         except Payment.DoesNotExist:
             logger.error(f"Payment not found for webhook: {payment_id}")
             return {'success': False, 'error': 'Payment not found'}
@@ -393,6 +395,12 @@ class PaymentService:
                         enrollment.start_date = date.today()
                     enrollment.save()
                     logger.info(f"Updated existing LessonEnrollment: {enrollment.id}")
+
+                # Notify parent on WhatsApp (non-fatal — never block payment processing).
+                try:
+                    self._send_registration_whatsapp(payment)
+                except Exception:
+                    logger.exception("ManyChat registration notification failed (non-fatal)")
             else:
                 logger.warning(f"Payment {payment.id} has no associated lesson - skipping enrollment creation")
             
@@ -417,14 +425,85 @@ class PaymentService:
             child.status = 'payment_problem'
             child.save()
             
-            logger.warning(f"Payment failed: {payment.id}, reason: {payment.failure_reason}. Child {child.id} status updated to 'payment_problem'")
-            
+            logger.warning(
+                "Payment failed: %s, code=%s, reason=%s. Child %s → payment_problem",
+                payment.id,
+                payment.failure_code,
+                payment.failure_reason,
+                child.id,
+            )
+
+            # WhatsApp when Tranzila notify reports failure (Response != 000) on subscription enrollment.
+            if payment.payment_type == 'recurring_subscription' and payment.lesson_id:
+                try:
+                    self._send_payment_failed_whatsapp(payment)
+                except Exception:
+                    logger.exception("ManyChat payment-failed notification failed (non-fatal)")
+
             return {
                 'success': False,
                 'payment_id': str(payment.id),
                 'error': payment.failure_reason
             }
-    
+
+    @staticmethod
+    def _enrollment_whatsapp_context(payment: 'Payment') -> Optional[dict]:
+        """Build parent/lesson fields for enrollment-related WhatsApp messages."""
+        from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context_from_payment
+
+        return build_enrollment_whatsapp_context_from_payment(payment)
+
+    def _send_registration_whatsapp(self, payment: 'Payment') -> None:
+        """WhatsApp confirmation after successful subscription payment (Tranzila Response 000)."""
+        from apps.core.manychat_service import ManyChatService
+
+        ctx = self._enrollment_whatsapp_context(payment)
+        if not ctx:
+            logger.info("Skipping registration WhatsApp: no phone/lesson for payment %s", payment.id)
+            return
+
+        lookup_names = ctx.pop('lookup_names', None)
+        result = ManyChatService().notify_registration(
+            kind=ManyChatService.REGISTRATION_KIND_SUBSCRIPTION,
+            lookup_names=lookup_names,
+            **ctx,
+        )
+        self._log_whatsapp_result('registration', ctx['phone'], result)
+
+    def _send_payment_failed_whatsapp(self, payment: 'Payment') -> None:
+        """WhatsApp notice after failed subscription payment (Tranzila Response != 000)."""
+        from apps.core.manychat_service import ManyChatService
+
+        ctx = self._enrollment_whatsapp_context(payment)
+        if not ctx:
+            logger.info("Skipping payment-failed WhatsApp: no phone/lesson for payment %s", payment.id)
+            return
+
+        lookup_names = ctx.pop('lookup_names', None)
+        result = ManyChatService().notify_registration(
+            kind=ManyChatService.REGISTRATION_KIND_PAYMENT_FAILED,
+            lookup_names=lookup_names,
+            **ctx,
+        )
+        self._log_whatsapp_result(
+            f"payment_failed (Tranzila {payment.failure_code or '?'})",
+            ctx['phone'],
+            result,
+        )
+
+    @staticmethod
+    def _log_whatsapp_result(label: str, phone: str, result: dict) -> None:
+        if result.get('sent'):
+            logger.info(
+                "WhatsApp %s sent to %s via %s (sub %s)",
+                label,
+                phone,
+                result.get('method'),
+                result.get('subscriber_id'),
+            )
+        else:
+            logger.warning("WhatsApp %s NOT sent to %s: %s", label, phone, result.get('reason'))
+
     def _create_invoice_from_payment(
         self,
         payment: Payment,

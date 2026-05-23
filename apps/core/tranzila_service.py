@@ -23,6 +23,23 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+# Tranzila notify/callback: success only when Response == "000".
+# https://docs.tranzila.com — webhook POST includes Response, sum, pdesc, TranzilaTK, etc.
+TRANZILA_RESPONSE_MESSAGES: dict[str, str] = {
+    '000': 'אושר',
+    '033': 'הכרטיס נדחה',
+    '036': 'פג תוקף',
+    '039': 'מספר כרטיס שגוי',
+    '800': 'העסקה בוטלה',
+    '900': 'אימות 3D Secure נכשל',
+    '903': 'חשד להונאה',
+    '951': 'שגיאת פרוטוקול',
+    '952': 'התשלום לא הושלם',
+    '954': 'התשלום נכשל',
+    '955': 'שגיאת סטטוס תשלום',
+    '959': 'התשלום לא הושלם בהצלחה',
+}
+
 
 class TranzilaService:
     """
@@ -465,10 +482,22 @@ class TranzilaService:
         return is_valid
     
     def parse_webhook_response(self, payload: Dict) -> Dict:
-        """Parse and normalize a Tranzila webhook response."""
+        """
+        Parse and normalize a Tranzila notify/callback POST body.
+
+        Success: ``Response == '000'`` (documented across Tranzila iframe + notify callbacks).
+        Failure: any other ``Response`` code (e.g. 033 declined, 952 not completed, 954 failed).
+        """
+        response_code = str(payload.get('Response', '') or '').strip()
+        raw_error = (payload.get('error') or payload.get('errormessage') or '').strip()
+        mapped_error = TRANZILA_RESPONSE_MESSAGES.get(response_code, '')
+        error_message = raw_error or mapped_error or (
+            f'קוד שגיאה {response_code}' if response_code and response_code != '000' else ''
+        )
+
         return {
             'transaction_id': payload.get('index', payload.get('TranzilaTK', '')),
-            'response_code': payload.get('Response', ''),
+            'response_code': response_code,
             'confirmation_code': payload.get('ConfirmationCode', ''),
             'amount': self._parse_amount(payload.get('sum', '0')),
             'currency': payload.get('currency', 'ILS'),
@@ -477,8 +506,8 @@ class TranzilaService:
             'token': payload.get('TranzilaTK', ''),
             'card_expire_month': int(payload.get('expmonth', 0)) if payload.get('expmonth') else None,
             'card_expire_year': int(payload.get('expyear', 0)) if payload.get('expyear') else None,
-            'is_successful': payload.get('Response', '') == '000',
-            'error_message': payload.get('error', ''),
+            'is_successful': response_code == '000',
+            'error_message': error_message,
             'timestamp': timezone.now(),
             'raw_payload': payload,
         }

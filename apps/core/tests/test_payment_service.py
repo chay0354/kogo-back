@@ -292,6 +292,38 @@ class PaymentServiceWebhookTest(TestCase):
         self.assertIsNotNone(transaction)
         self.assertTrue(transaction.is_successful)
     
+    @patch('apps.core.manychat_service.ManyChatService')
+    @patch('apps.core.payment_service.TranzilaService.parse_webhook_response')
+    @patch('apps.core.payment_service.TranzilaService.verify_webhook_signature')
+    def test_failed_webhook_sends_payment_failed_whatsapp(self, mock_verify, mock_parse, mock_manychat_cls):
+        """Failed Tranzila webhook (Response != 000) triggers payment-failed WhatsApp."""
+        mock_verify.return_value = True
+        mock_parse.return_value = {
+            'transaction_id': 'TRX456',
+            'confirmation_code': '',
+            'response_code': '033',
+            'is_successful': False,
+            'error_message': 'הכרטיס נדחה',
+            'timestamp': timezone.now(),
+            'raw_payload': {},
+        }
+        from apps.core.manychat_service import ManyChatService
+        mock_manychat_cls.return_value.notify_registration.return_value = {
+            'sent': True,
+            'method': 'flow',
+            'kind': 'payment_failed',
+        }
+
+        result = self.service.process_webhook_callback(
+            webhook_payload={'pdesc': str(self.payment.id), 'Response': '033'},
+            signature='test_signature',
+        )
+
+        self.assertFalse(result['success'])
+        mock_manychat_cls.return_value.notify_registration.assert_called_once()
+        call_kwargs = mock_manychat_cls.return_value.notify_registration.call_args.kwargs
+        self.assertEqual(call_kwargs['kind'], ManyChatService.REGISTRATION_KIND_PAYMENT_FAILED)
+
     @patch('apps.core.payment_service.TranzilaService.parse_webhook_response')
     @patch('apps.core.payment_service.TranzilaService.verify_webhook_signature')
     def test_failed_webhook_processing(self, mock_verify, mock_parse):

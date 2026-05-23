@@ -536,7 +536,8 @@ class WebhookCallbackSerializer(serializers.Serializer):
     ccno = serializers.CharField(required=False)
     cardtype = serializers.CharField(required=False)
     error = serializers.CharField(required=False, allow_blank=True)
-    pdesc = serializers.CharField(required=False)  # Our transaction_id
+    errormessage = serializers.CharField(required=False, allow_blank=True)
+    pdesc = serializers.CharField(required=False)  # Our payment.id (sent as pdesc to Tranzila)
     
     # Allow additional fields
     def to_internal_value(self, data):
