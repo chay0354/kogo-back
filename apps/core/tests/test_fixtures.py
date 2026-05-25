@@ -191,16 +191,16 @@ class TestDataFactory:
     
     @staticmethod
     def create_lesson(course=None, branch=None, room=None, instructor=None, **kwargs):
-        """Create a test lesson"""
+        """Create a test lesson. branch is ignored (branch is now on Course)."""
         if course is None:
             course = TestDataFactory.create_course()
-        if branch is None:
-            branch = course.branch
+        # Derive branch from course for room/instructor creation
+        effective_branch = branch or course.branch
         if room is None:
-            room = TestDataFactory.create_room(branch=branch)
+            room = TestDataFactory.create_room(branch=effective_branch)
         if instructor is None:
-            instructor = TestDataFactory.create_instructor(branch=branch)
-        
+            instructor = TestDataFactory.create_instructor(branch=effective_branch)
+
         defaults = {
             'day_of_week': 0,  # Monday
             'start_time': time(16, 0),
@@ -208,10 +208,9 @@ class TestDataFactory:
             'status': 'scheduled',
         }
         defaults.update(kwargs)
-        
+
         return Lesson.objects.create(
             course=course,
-            branch=branch,
             room=room,
             instructor=instructor,
             **defaults

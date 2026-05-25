@@ -399,7 +399,7 @@ class DashboardViewSet(viewsets.ViewSet):
             if course_id != 'all':
                 filtered_enrollments = filtered_enrollments.filter(lesson__course_id=course_id)
             if branch_id != 'all':
-                filtered_enrollments = filtered_enrollments.filter(lesson__branch_id=branch_id)
+                filtered_enrollments = filtered_enrollments.filter(lesson__course__branch_id=branch_id)
             filtered_child_ids = filtered_enrollments.values_list('child_id', flat=True).distinct()
             children = children.filter(id__in=filtered_child_ids)
         
@@ -568,17 +568,17 @@ class DashboardViewSet(viewsets.ViewSet):
         if course_id != 'all':
             active_enrollments = active_enrollments.filter(lesson__course_id=course_id)
         if branch_id != 'all':
-            active_enrollments = active_enrollments.filter(lesson__branch_id=branch_id)
-        
+            active_enrollments = active_enrollments.filter(lesson__course__branch_id=branch_id)
+
         active_student_ids = active_enrollments.values_list('child_id', flat=True).distinct()
         top_students = children.filter(id__in=active_student_ids)[:10]
-        
+
         for child in top_students:
             # Get child's enrollment info
             enrollment = active_enrollments.filter(child=child).select_related(
-                'lesson__branch', 'lesson__course'
+                'lesson__course__branch', 'lesson__course'
             ).first()
-            
+
             # Calculate attendance for this child
             child_attendance = LessonAttendance.objects.filter(
                 child=child,
@@ -588,11 +588,11 @@ class DashboardViewSet(viewsets.ViewSet):
             child_total = child_attendance.count()
             child_present = child_attendance.filter(status='present').count()
             child_attendance_rate = (child_present / child_total * 100) if child_total > 0 else 0
-            
+
             student_list.append({
                 'id': str(child.id),
                 'name': child.full_name,
-                'branch': enrollment.lesson.branch.name if enrollment else '',
+                'branch': enrollment.lesson.course.branch.name if enrollment else '',
                 'course': enrollment.lesson.course.name if enrollment else '',
                 'attendance': round(child_attendance_rate, 1),
                 'is_trial': child.status in ['trial_signed', 'trial_completed']
@@ -688,9 +688,9 @@ class DashboardViewSet(viewsets.ViewSet):
             if course_id and course_id != 'all':
                 lessons_query = lessons_query.filter(course_id=course_id)
             if branch_id and branch_id != 'all':
-                lessons_query = lessons_query.filter(branch_id=branch_id)
+                lessons_query = lessons_query.filter(course__branch_id=branch_id)
             if city_id and city_id != 'all':
-                lessons_query = lessons_query.filter(branch__city_id=city_id)
+                lessons_query = lessons_query.filter(course__branch__city_id=city_id)
             
             active_courses = lessons_query.values('course_id').distinct().count()
         

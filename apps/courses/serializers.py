@@ -109,9 +109,9 @@ class CourseTypeWithStatsSerializer(serializers.ModelSerializer):
         ).count()
     
     def get_branches(self, obj):
-        """Get distinct branches where lessons for this course type occur"""
+        """Get distinct branches that host courses of this course type"""
         branches = Branch.objects.filter(
-            lessons__course__course_type=obj
+            courses__course_type=obj
         ).distinct()
         return BranchMinimalSerializer(branches, many=True).data
 
@@ -150,17 +150,16 @@ class RoomMinimalSerializer(serializers.Serializer):
 
 class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
     """Lesson with enrollment count and related info"""
-    branch = BranchMinimalSerializer(read_only=True)
     room = RoomMinimalSerializer(read_only=True)
     instructor = InstructorMinimalSerializer(read_only=True)
     enrolled_count = serializers.SerializerMethodField()
     total_students_count = serializers.SerializerMethodField()
     day_name = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Lesson
-        fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time', 
-                  'branch', 'room', 'instructor', 'enrolled_count', 'total_students_count',
+        fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time',
+                  'room', 'instructor', 'enrolled_count', 'total_students_count',
                   'price', 'lesson_price_override', 'additional_course_prices',
                   'instructor_salary_override', 'status', 'is_recurring', 'notes']
 
@@ -203,7 +202,7 @@ class CourseTypeDetailsSerializer(serializers.ModelSerializer):
 class CourseSerializer(serializers.ModelSerializer):
     """Basic Course serializer for CRUD operations"""
     course_type_name = serializers.CharField(source='course_type.name', read_only=True, allow_null=True)
-    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
     lessons_count = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
     lessons = serializers.SerializerMethodField()
@@ -247,17 +246,16 @@ class CourseSerializer(serializers.ModelSerializer):
 class LessonSerializer(serializers.ModelSerializer):
     """Basic Lesson serializer for CRUD operations"""
     course_name = serializers.CharField(source='course.name', read_only=True)
-    branch_name = serializers.CharField(source='branch.name', read_only=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True, allow_null=True)
     day_name = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
     room_capacity = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Lesson
-        fields = ['id', 'course', 'course_name', 'branch', 'branch_name', 'room', 'room_name',
-                  'instructor', 'instructor_name', 'day_of_week', 'day_name', 
+        fields = ['id', 'course', 'course_name', 'room', 'room_name',
+                  'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
                   'status', 'notes', 'enrolled_students_count', 'room_capacity',
@@ -282,8 +280,9 @@ class LessonSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         """Validate that room and instructor are available during the requested time"""
-        # Extract fields from data or instance (for updates)
-        branch = data.get('branch') or (self.instance.branch if self.instance else None)
+        # Branch now lives on the course, not the lesson
+        course = data.get('course') or (self.instance.course if self.instance else None)
+        branch = course.branch if course else None
         room = data.get('room') or (self.instance.room if self.instance else None)
         instructor = data.get('instructor') or (self.instance.instructor if self.instance else None)
         day_of_week = data.get('day_of_week', self.instance.day_of_week if self.instance else None)
@@ -291,27 +290,27 @@ class LessonSerializer(serializers.ModelSerializer):
         end_time = data.get('end_time', self.instance.end_time if self.instance else None)
         lesson_is_recurring = data.get('is_recurring', self.instance.is_recurring if self.instance else True)
         lesson_date = data.get('lesson_date', self.instance.lesson_date if self.instance else None)
-        
+
         if not all([day_of_week is not None, start_time, end_time]):
             return data
-        
+
         # Base query for conflicting lessons (same day and overlapping time)
         base_conflict_query = Q(
             day_of_week=day_of_week,
             status='scheduled',
         ) & ~(Q(end_time__lte=start_time) | Q(start_time__gte=end_time))
-        
+
         # Exclude current instance if updating
         exclude_query = Q(pk=self.instance.pk) if self.instance else Q(pk=None)
-        
+
         # Check for room conflicts (if room is specified)
         if branch and room:
             room_conflicts = Lesson.objects.filter(
                 base_conflict_query,
-                branch=branch,
+                course__branch=branch,
                 room=room,
             ).exclude(exclude_query)
-            
+
             if room_conflicts.exists():
                 conflict = room_conflicts.first()
                 raise serializers.ValidationError({
@@ -330,27 +329,27 @@ class LessonSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'room': 'החדר תפוס באותה שעה (אירוע או שכירות בלוח)'
                 })
-        
+
         # Check for instructor conflicts (if instructor is specified)
         if instructor:
             instructor_conflicts = Lesson.objects.filter(
                 base_conflict_query,
                 instructor=instructor,
             ).exclude(exclude_query)
-            
+
             if instructor_conflicts.exists():
                 conflict = instructor_conflicts.first()
                 raise serializers.ValidationError({
                     'instructor': f'המדריך תפוס ביום זה בין השעות {conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
                 })
-        
+
         return data
 
 
 # Legacy serializers for backward compatibility
 class CourseListSerializer(serializers.ModelSerializer):
     """Simple course list for dropdowns"""
-    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
     course_type_name = serializers.CharField(source='course_type.name', read_only=True, allow_null=True)
     
     class Meta:

@@ -105,7 +105,7 @@ class CourseCatalogAPITests(TestCase):
             description="Beginners",
             price=400,
             capacity=20,
-            branch=None,
+            branch=self.branch_a,
             min_age=6,
             max_age=8,
             is_active=True,
@@ -116,7 +116,7 @@ class CourseCatalogAPITests(TestCase):
             description="Advanced",
             price=450,
             capacity=20,
-            branch=None,
+            branch=self.branch_b,
             min_age=9,
             max_age=11,
             is_active=True,
@@ -125,7 +125,6 @@ class CourseCatalogAPITests(TestCase):
         # Lessons: one recurring, one non-recurring (still counts towards branches list)
         self.lesson_recurring = Lesson.objects.create(
             course=self.course_1,
-            branch=self.branch_a,
             room=self.room_a1,
             instructor=self.instructor_fixed,
             day_of_week=1,
@@ -136,7 +135,6 @@ class CourseCatalogAPITests(TestCase):
         )
         self.lesson_non_recurring = Lesson.objects.create(
             course=self.course_2,
-            branch=self.branch_b,
             room=None,
             instructor=self.instructor_tiered,
             day_of_week=2,
@@ -212,7 +210,7 @@ class CourseCatalogAPITests(TestCase):
         # Ensure lesson includes instructor and enrolled_count
         recurring = next(l for l in lessons if l["id"] == str(self.lesson_recurring.id))
         self.assertEqual(recurring["enrolled_count"], 1)
-        self.assertEqual(recurring["branch"]["name"], "Branch A")
+        self.assertNotIn("branch", recurring)  # branch is now on Course, not Lesson
         self.assertEqual(recurring["instructor"]["full_name"], self.instructor_fixed.full_name)
         self.assertEqual(recurring["instructor"]["salary_model_type"], "fixed_per_lesson")
         # instructor salary override should be present (null by default)

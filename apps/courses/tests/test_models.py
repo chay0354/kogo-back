@@ -192,7 +192,6 @@ class LessonModelTest(TestCase):
         """Test creating a lesson"""
         lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             room=self.room,
             instructor=self.instructor,
             day_of_week=0,  # Sunday
@@ -212,8 +211,7 @@ class LessonModelTest(TestCase):
         for day in range(7):
             lesson = Lesson.objects.create(
                 course=self.course,
-                branch=self.branch,
-                day_of_week=day,
+                    day_of_week=day,
                 start_time=time(16, 0),
                 end_time=time(17, 0)
             )
@@ -226,8 +224,7 @@ class LessonModelTest(TestCase):
         for status in statuses:
             lesson = Lesson.objects.create(
                 course=self.course,
-                branch=self.branch,
-                day_of_week=0,
+                    day_of_week=0,
                 start_time=time(16, 0),
                 end_time=time(17, 0),
                 status=status
@@ -238,7 +235,6 @@ class LessonModelTest(TestCase):
         """Test lesson with price override (different from course price)"""
         lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=1,
             start_time=time(17, 0),
             end_time=time(18, 0),
@@ -253,7 +249,6 @@ class LessonModelTest(TestCase):
         """Test lesson with instructor salary override"""
         lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             instructor=self.instructor,
             day_of_week=2,
             start_time=time(18, 0),
@@ -269,7 +264,6 @@ class LessonModelTest(TestCase):
         
         lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=4,
             start_time=time(15, 0),
             end_time=time(16, 0),
@@ -284,7 +278,6 @@ class LessonModelTest(TestCase):
         """Test lesson cancellation with reason and timestamp"""
         lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=3,
             start_time=time(16, 0),
             end_time=time(17, 0),
@@ -301,7 +294,6 @@ class LessonModelTest(TestCase):
         """Test lesson string representation includes course, day, and time"""
         lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=0,  # Sunday
             start_time=time(16, 30),
             end_time=time(17, 30)
@@ -316,7 +308,6 @@ class LessonModelTest(TestCase):
         # Lesson in the past
         past_lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=0,
             start_time=time(16, 0),
             end_time=time(17, 0),
@@ -329,7 +320,6 @@ class LessonModelTest(TestCase):
         # Lesson in the future
         future_lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=1,
             start_time=time(16, 0),
             end_time=time(17, 0),
@@ -342,7 +332,6 @@ class LessonModelTest(TestCase):
         # Cancelled lesson should not count
         cancelled_lesson = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=2,
             start_time=time(16, 0),
             end_time=time(17, 0),
@@ -356,7 +345,6 @@ class LessonModelTest(TestCase):
         """Test lessons are ordered by day_of_week and start_time"""
         lesson1 = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=0,
             start_time=time(17, 0),
             end_time=time(18, 0)
@@ -364,7 +352,6 @@ class LessonModelTest(TestCase):
         
         lesson2 = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=0,
             start_time=time(16, 0),
             end_time=time(17, 0)
@@ -372,7 +359,6 @@ class LessonModelTest(TestCase):
         
         lesson3 = Lesson.objects.create(
             course=self.course,
-            branch=self.branch,
             day_of_week=1,
             start_time=time(16, 0),
             end_time=time(17, 0)

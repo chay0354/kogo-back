@@ -31,7 +31,7 @@ class Course(models.Model):
     description = models.TextField(blank=True, verbose_name="תיאור")
     price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="מחיר")
     capacity = models.PositiveIntegerField(verbose_name="קיבולת")
-    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name='courses', null=True, blank=True, verbose_name="סניף")  # Made optional - lessons have specific branches
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name='courses', verbose_name="סניף")
     min_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מינימום")
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
@@ -68,7 +68,6 @@ class Lesson(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='lessons', verbose_name="חוג")
-    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name='lessons', verbose_name="סניף")
     room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='lessons', verbose_name="חדר")
     instructor = models.ForeignKey(Instructor, on_delete=models.SET_NULL, null=True, related_name='lessons', verbose_name="מדריך")
     day_of_week = models.IntegerField(choices=DAY_OF_WEEK_CHOICES, verbose_name="יום בשבוע")
@@ -102,10 +101,7 @@ class Lesson(models.Model):
         verbose_name = "שיעור"
         verbose_name_plural = "שיעורים"
         ordering = ['day_of_week', 'start_time']
-        indexes = [
-            models.Index(fields=['branch', 'status']),
-            models.Index(fields=['branch', 'course']),
-        ]
+        indexes = []
 
     def __str__(self):
         day_name = dict(self.DAY_OF_WEEK_CHOICES)[self.day_of_week]

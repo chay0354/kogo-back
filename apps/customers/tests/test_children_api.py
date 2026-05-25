@@ -150,7 +150,7 @@ class ChildrenListAPITests(TestCase):
         Expected:
         - Returns only children from specified branch (through lesson enrollments)
         """
-        # The API filters by lesson_enrollments__lesson__branch_id
+        # The API filters by lesson_enrollments__lesson__course__branch_id
         # So we need to create lessons and enrollments for the test to work
         from apps.courses.models import Lesson
         from apps.enrollments.models import LessonEnrollment
@@ -159,7 +159,6 @@ class ChildrenListAPITests(TestCase):
         course = create_test_course(branch=self.branch1)
         lesson_branch1 = Lesson.objects.create(
             course=course,
-            branch=self.branch1,
             day_of_week=0,
             start_time=time(16, 0),
             end_time=time(17, 0),

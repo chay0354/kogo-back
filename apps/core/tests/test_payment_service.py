@@ -230,7 +230,7 @@ class PaymentServiceWebhookTest(TestCase):
             family=self.child.family,
             parent=self.parent,
             lesson=self.lesson,
-            branch=self.lesson.branch,
+            branch=self.lesson.course.branch,
             payment_type='recurring_subscription',
             status='pending',
             base_amount=Decimal('350.00'),

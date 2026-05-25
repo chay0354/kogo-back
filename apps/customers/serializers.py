@@ -188,7 +188,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         lesson_enrollments = LessonEnrollment.objects.filter(
             child=obj,
             status='active'
-        ).select_related('lesson', 'lesson__course', 'lesson__branch', 'lesson__instructor')
+        ).select_related('lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor')
         
         for enrollment in lesson_enrollments:
             lesson = enrollment.lesson
@@ -203,7 +203,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                     'day_of_week': lesson.day_of_week,
                     'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else None,
                     'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
-                    'branch_name': lesson.branch.name if lesson.branch else None,
+                    'branch_name': lesson.course.branch.name if lesson.course and lesson.course.branch_id else None,
                     'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
                     'status': enrollment.status
                 })
