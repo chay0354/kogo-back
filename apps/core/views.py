@@ -79,14 +79,12 @@ class BranchViewSet(viewsets.ModelViewSet):
         # Count families
         families_count = branch.families.count()
         
-        # Count active courses (via lessons, not course.branch, since course.branch is optional)
-        courses_count = branch.lessons.filter(
-            status='scheduled',
-            course__is_active=True
-        ).values('course').distinct().count()
-        
+        # Count active courses in this branch
+        courses_count = branch.courses.filter(is_active=True).count()
+
         # Count lessons
-        lessons_count = branch.lessons.filter(status='scheduled').count()
+        from apps.courses.models import Lesson
+        lessons_count = Lesson.objects.filter(course__branch=branch, status='scheduled').count()
         
         # Count active instructors (deduplicated: primary + assigned) in a single query
         from apps.instructors.models import Instructor
@@ -110,7 +108,7 @@ class BranchViewSet(viewsets.ModelViewSet):
         # Count active students (children with active lesson enrollments in this branch)
         from apps.enrollments.models import LessonEnrollment
         active_students = LessonEnrollment.objects.filter(
-            lesson__branch=branch,
+            lesson__course__branch=branch,
             status='active'
         ).values('child').distinct().count()
         
@@ -169,22 +167,18 @@ class BranchViewSet(viewsets.ModelViewSet):
         from apps.courses.models import Course, Lesson
         from apps.customers.models import Child, Family
         
-        # Check for active courses (via lessons since course.branch is optional)
-        active_courses = Lesson.objects.filter(
-            branch=instance,
-            status='scheduled',
-            course__is_active=True
-        ).values('course').distinct().exists()
-        
+        # Check for active courses in this branch
+        active_courses = instance.courses.filter(is_active=True).exists()
+
         if active_courses:
             return Response(
                 {'error': 'לא ניתן למחוק סניף עם חוגים פעילים'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # Check for active lessons
         active_lessons = Lesson.objects.filter(
-            branch=instance,
+            course__branch=instance,
             status='scheduled'
         ).exists()
         

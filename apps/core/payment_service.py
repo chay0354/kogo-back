@@ -111,7 +111,7 @@ class PaymentService:
         
         try:
             child = Child.objects.select_related('family').get(id=child_id)
-            lesson = Lesson.objects.select_related('course', 'branch').get(id=lesson_id)
+            lesson = Lesson.objects.select_related('course__branch').get(id=lesson_id)
         except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
             logger.error(f"Child or Lesson not found: {e}")
             raise ValueError("Child or Lesson not found")
@@ -164,7 +164,7 @@ class PaymentService:
                         child=child,
                         family=child.family,
                         parent=child.family.parents.filter(is_primary=True).first(),
-                        branch=lesson.branch,
+                        branch=lesson.course.branch,
                         lesson=lesson,
                         payment_type='recurring_subscription',
                         status='pending',

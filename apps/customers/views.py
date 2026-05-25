@@ -80,7 +80,7 @@ class ChildViewSet(viewsets.ModelViewSet):
     ).prefetch_related(
         'family__parents',
         Prefetch('lesson_enrollments', queryset=LessonEnrollment.objects.select_related(
-            'lesson', 'lesson__course', 'lesson__branch', 'lesson__instructor'
+            'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
         ))
     )
     permission_classes = [IsAuthenticated, IsManager]
@@ -128,7 +128,7 @@ class ChildViewSet(viewsets.ModelViewSet):
         branch_id = self.request.query_params.get('branch')
         if branch_id and branch_id != 'all':
             queryset = queryset.filter(
-                lesson_enrollments__lesson__branch_id=branch_id,
+                lesson_enrollments__lesson__course__branch_id=branch_id,
                 lesson_enrollments__status__in=['active', 'payments_problem']
             ).distinct()
         
@@ -433,7 +433,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            lesson = Lesson.objects.get(id=lesson_id)
+            lesson = Lesson.objects.select_related('course__branch').get(id=lesson_id)
         except Lesson.DoesNotExist:
             return Response(
                 {'error': 'שיעור לא נמצא'},
@@ -448,7 +448,7 @@ class ChildViewSet(viewsets.ModelViewSet):
                 phone=phone_number or '0000000000',
                 email='',
                 address='',
-                branch=lesson.branch,
+                branch=lesson.course.branch,
                 notes='משפחת רפאים'
             )
         else:
@@ -459,7 +459,7 @@ class ChildViewSet(viewsets.ModelViewSet):
                     'phone': '0000000000',
                     'email': '',
                     'address': '',
-                    'branch': lesson.branch,
+                    'branch': lesson.course.branch,
                     'notes': 'משפחה מערכתית לתלמידי רפאים'
                 }
             )

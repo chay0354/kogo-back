@@ -18,7 +18,7 @@ class CourseAdmin(admin.ModelAdmin):
 
 @admin.register(Lesson)
 class LessonAdmin(admin.ModelAdmin):
-    list_display = ['course', 'day_of_week', 'start_time', 'end_time', 'branch', 'instructor', 'status', 'is_recurring']
-    list_filter = ['day_of_week', 'status', 'is_recurring', 'branch']
+    list_display = ['course', 'day_of_week', 'start_time', 'end_time', 'instructor', 'status', 'is_recurring']
+    list_filter = ['day_of_week', 'status', 'is_recurring', 'course__branch']
     search_fields = ['course__name', 'instructor__first_name', 'instructor__last_name']
 

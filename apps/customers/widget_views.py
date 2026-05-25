@@ -117,7 +117,7 @@ class WidgetRegisterView(APIView):
         except Course.DoesNotExist:
             return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        lessons = list(course.lessons.select_related('branch').all())
+        lessons = list(course.lessons.select_related('course__branch').all())
         if not lessons:
             return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
         lesson = lessons[0]
@@ -137,7 +137,7 @@ class WidgetRegisterView(APIView):
                         name=data['parent_last_name'].strip(),
                         phone=data['parent_phone'].strip(),
                         parent_id_number=parent_id_number,
-                        branch=lesson.branch,
+                        branch=lesson.course.branch,
                     )
                     Parent.objects.create(
                         family=family,

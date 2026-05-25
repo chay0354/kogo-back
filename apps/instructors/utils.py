@@ -403,10 +403,10 @@ def calculate_branch_instructor_costs_for_month(branch, month: str, effective_en
     year, m = _parse_month_str(month)
     month_start, month_end = _month_start_end(year, m)
 
-    lessons = Lesson.objects.filter(branch=branch).exclude(status='cancelled').filter(
+    lessons = Lesson.objects.filter(course__branch=branch).exclude(status='cancelled').filter(
         Q(lesson_date__gte=month_start, lesson_date__lte=month_end) |
         Q(lesson_date__isnull=True, is_recurring=True)
-    ).select_related('instructor', 'course').prefetch_related('enrollments', 'instructor__salary_tiers')
+    ).select_related('instructor', 'course', 'course__branch').prefetch_related('enrollments', 'instructor__salary_tiers')
 
     # Batch-load cancellations for all lessons (avoids N+1 queries)
     cancellations_dict = _batch_load_cancellations(lessons, month_start, month_end, effective_end=effective_end)
@@ -843,8 +843,8 @@ def calculate_lesson_profitability(lesson, instructor, month: Optional[str] = No
         'day_of_week': lesson.day_of_week,
         'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
         'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else '',
-        'branch_name': lesson.branch.name if lesson.branch else '',
-        'branch_id': str(lesson.branch.id) if lesson.branch else None,
+        'branch_name': lesson.course.branch.name if lesson.course and lesson.course.branch_id else '',
+        'branch_id': str(lesson.course.branch.id) if lesson.course and lesson.course.branch_id else None,
         'room_name': lesson.room.name if lesson.room else '',
         'student_count': salary_student_count,
         'lesson_price': str(monthly_price),
@@ -928,7 +928,7 @@ def generate_monthly_snapshots(month, finalize=False):
     # Generate snapshots for active lessons
     lessons = Lesson.objects.exclude(
         status='cancelled'
-    ).select_related('instructor', 'course', 'branch')
+    ).select_related('instructor', 'course', 'course__branch')
 
     # Batch-load cancellations for all lessons in this month (optimizes snapshot generation)
     month_start, month_end = _month_start_end(year, m)
@@ -947,7 +947,7 @@ def generate_monthly_snapshots(month, finalize=False):
                 defaults={
                     'instructor': lesson.instructor,
                     'course': lesson.course,
-                    'branch': lesson.branch,
+                    'branch': lesson.course.branch,
                     'enrolled_students': profitability['student_count'],
                     'base_revenue': Decimal(profitability['base_revenue']),
                     'total_discounts': Decimal(profitability['total_discounts']),

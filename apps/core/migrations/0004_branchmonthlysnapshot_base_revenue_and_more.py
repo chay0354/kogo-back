@@ -9,75 +9,84 @@ class Migration(migrations.Migration):
         ('core', '0003_merge_20260505_core'),
     ]
 
+    # These columns are already present in 0001_initial (which was regenerated after the
+    # fields were added to the models). SeparateDatabaseAndState keeps Django's migration
+    # state correct while skipping DDL on fresh databases to avoid DuplicateColumn errors.
+    # Existing databases already have these columns from when this migration ran originally.
     operations = [
-        migrations.AddField(
-            model_name='branchmonthlysnapshot',
-            name='base_revenue',
-            field=models.DecimalField(decimal_places=2, default=0, help_text='Revenue before discounts', max_digits=10, verbose_name='הכנסות תיאורטיות'),
-        ),
-        migrations.AddField(
-            model_name='branchmonthlysnapshot',
-            name='instructor_bonuses',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='בונוסים למדריכים'),
-        ),
-        migrations.AddField(
-            model_name='branchmonthlysnapshot',
-            name='instructor_salaries',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='שכר מדריכים'),
-        ),
-        migrations.AddField(
-            model_name='branchmonthlysnapshot',
-            name='operational_costs',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='הוצאות תפעוליות'),
-        ),
-        migrations.AddField(
-            model_name='branchmonthlysnapshot',
-            name='total_discounts',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הנחות'),
-        ),
-        migrations.AddField(
-            model_name='instructormonthlysnapshot',
-            name='base_revenue',
-            field=models.DecimalField(decimal_places=2, default=0, help_text='Revenue before discounts (lesson price × students)', max_digits=10, verbose_name='הכנסות תיאורטיות'),
-        ),
-        migrations.AddField(
-            model_name='instructormonthlysnapshot',
-            name='total_bonuses',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ בונוסים'),
-        ),
-        migrations.AddField(
-            model_name='instructormonthlysnapshot',
-            name='total_discounts',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הנחות'),
-        ),
-        migrations.AddField(
-            model_name='lessonmonthlysnapshot',
-            name='base_revenue',
-            field=models.DecimalField(decimal_places=2, default=0, help_text='Revenue before discounts', max_digits=10, verbose_name='הכנסות תיאורטיות'),
-        ),
-        migrations.AddField(
-            model_name='lessonmonthlysnapshot',
-            name='total_discounts',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הנחות'),
-        ),
-        migrations.AlterField(
-            model_name='branchmonthlysnapshot',
-            name='instructor_costs',
-            field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הוצאות'),
-        ),
-        migrations.AlterField(
-            model_name='branchmonthlysnapshot',
-            name='total_revenue',
-            field=models.DecimalField(decimal_places=2, default=0, help_text='Actual collected revenue (from completed payments)', max_digits=10, verbose_name='סה״כ הכנסות'),
-        ),
-        migrations.AlterField(
-            model_name='instructormonthlysnapshot',
-            name='total_revenue',
-            field=models.DecimalField(decimal_places=2, default=0, help_text='Actual collected revenue (from completed payments)', max_digits=10, verbose_name='סה״כ הכנסות'),
-        ),
-        migrations.AlterField(
-            model_name='lessonmonthlysnapshot',
-            name='revenue',
-            field=models.DecimalField(decimal_places=2, default=0, help_text='Actual collected revenue (from completed payments)', max_digits=10, verbose_name='הכנסות'),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.AddField(
+                    model_name='branchmonthlysnapshot',
+                    name='base_revenue',
+                    field=models.DecimalField(decimal_places=2, default=0, help_text='Revenue before discounts', max_digits=10, verbose_name='הכנסות תיאורטיות'),
+                ),
+                migrations.AddField(
+                    model_name='branchmonthlysnapshot',
+                    name='instructor_bonuses',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='בונוסים למדריכים'),
+                ),
+                migrations.AddField(
+                    model_name='branchmonthlysnapshot',
+                    name='instructor_salaries',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='שכר מדריכים'),
+                ),
+                migrations.AddField(
+                    model_name='branchmonthlysnapshot',
+                    name='operational_costs',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='הוצאות תפעוליות'),
+                ),
+                migrations.AddField(
+                    model_name='branchmonthlysnapshot',
+                    name='total_discounts',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הנחות'),
+                ),
+                migrations.AddField(
+                    model_name='instructormonthlysnapshot',
+                    name='base_revenue',
+                    field=models.DecimalField(decimal_places=2, default=0, help_text='Revenue before discounts (lesson price × students)', max_digits=10, verbose_name='הכנסות תיאורטיות'),
+                ),
+                migrations.AddField(
+                    model_name='instructormonthlysnapshot',
+                    name='total_bonuses',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ בונוסים'),
+                ),
+                migrations.AddField(
+                    model_name='instructormonthlysnapshot',
+                    name='total_discounts',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הנחות'),
+                ),
+                migrations.AddField(
+                    model_name='lessonmonthlysnapshot',
+                    name='base_revenue',
+                    field=models.DecimalField(decimal_places=2, default=0, help_text='Revenue before discounts', max_digits=10, verbose_name='הכנסות תיאורטיות'),
+                ),
+                migrations.AddField(
+                    model_name='lessonmonthlysnapshot',
+                    name='total_discounts',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הנחות'),
+                ),
+                migrations.AlterField(
+                    model_name='branchmonthlysnapshot',
+                    name='instructor_costs',
+                    field=models.DecimalField(decimal_places=2, default=0, max_digits=10, verbose_name='סה״כ הוצאות'),
+                ),
+                migrations.AlterField(
+                    model_name='branchmonthlysnapshot',
+                    name='total_revenue',
+                    field=models.DecimalField(decimal_places=2, default=0, help_text='Actual collected revenue (from completed payments)', max_digits=10, verbose_name='סה״כ הכנסות'),
+                ),
+                migrations.AlterField(
+                    model_name='instructormonthlysnapshot',
+                    name='total_revenue',
+                    field=models.DecimalField(decimal_places=2, default=0, help_text='Actual collected revenue (from completed payments)', max_digits=10, verbose_name='סה״כ הכנסות'),
+                ),
+                migrations.AlterField(
+                    model_name='lessonmonthlysnapshot',
+                    name='revenue',
+                    field=models.DecimalField(decimal_places=2, default=0, help_text='Actual collected revenue (from completed payments)', max_digits=10, verbose_name='הכנסות'),
+                ),
+            ],
         ),
     ]

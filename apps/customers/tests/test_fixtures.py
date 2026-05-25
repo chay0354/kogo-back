@@ -54,10 +54,9 @@ def create_test_course(
     """Create a test course"""
     if not course_type:
         course_type = create_test_course_type()
-    # branch is optional on Course (lessons are branch-specific)
     if branch is None:
-        branch = None
-    
+        branch = create_test_branch()
+
     return Course.objects.create(
         course_type=course_type,
         name=name,

@@ -367,7 +367,7 @@ class PaymentModelTest(TestCase):
             child=self.child,
             family=self.family,
             parent=self.parent,
-            branch=self.lesson.branch,
+            branch=self.lesson.course.branch,
             lesson=self.lesson,
             payment_type='recurring_subscription',
             status='pending',

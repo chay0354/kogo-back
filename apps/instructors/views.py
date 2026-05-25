@@ -64,7 +64,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(primary_branch_id=branch_id) | 
                 Q(branch_assignments__branch_id=branch_id) |
-                Q(lessons__branch_id=branch_id)
+                Q(lessons__course__branch_id=branch_id)
             ).distinct()
         
         # Note: min_students and max_students filters are applied after metrics calculation in list()
@@ -234,7 +234,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
         lessons = Lesson.objects.filter(
             instructor=instructor,
             is_recurring=True
-        ).select_related('course', 'branch', 'room').prefetch_related('enrollments')
+        ).select_related('course', 'course__branch', 'room').prefetch_related('enrollments')
         
         lessons_data = []
         unique_courses = {}

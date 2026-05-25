@@ -59,7 +59,7 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
                         Prefetch(
                             'lessons',
                             queryset=Lesson.objects.select_related(
-                                'branch', 'room', 'instructor'
+                                'room', 'instructor'
                             ).prefetch_related(
                                 'instructor__salary_tiers',
                                 Prefetch(
@@ -115,9 +115,7 @@ class CourseViewSet(viewsets.ModelViewSet):
         
         branch_id = self.request.query_params.get('branch_id', None)
         if branch_id:
-            # Filter courses that have lessons in this branch (not course.branch)
-            # This is the authoritative link since course.branch is optional
-            queryset = queryset.filter(lessons__branch_id=branch_id).distinct()
+            queryset = queryset.filter(branch_id=branch_id)
         
         return queryset.order_by('course_type', 'name')
     
@@ -150,19 +148,15 @@ class LessonViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsManager]
     
     def get_queryset(self):
-        """Filter lessons, optionally by course, branch, instructor, room"""
+        """Filter lessons, optionally by course, instructor, room"""
         queryset = Lesson.objects.select_related(
-            'course', 'branch', 'room', 'instructor'
+            'course', 'course__branch', 'room', 'instructor'
         )
-        
+
         course_id = self.request.query_params.get('course', None)
         if course_id:
             queryset = queryset.filter(course_id=course_id)
-        
-        branch_id = self.request.query_params.get('branch_id', None)
-        if branch_id:
-            queryset = queryset.filter(branch_id=branch_id)
-        
+
         instructor_id = self.request.query_params.get('instructor_id', None)
         if instructor_id:
             queryset = queryset.filter(instructor_id=instructor_id)
