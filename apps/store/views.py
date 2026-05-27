@@ -531,12 +531,13 @@ def charge_card(request):
         
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
-            total_amount += product.sale_price * item['quantity']
-            
+            unit_price = Decimal(str(item['price_override'])) if item.get('price_override') else product.sale_price
+            total_amount += unit_price * item['quantity']
+
             tranzila_items.append({
                 'name': f"{product.name} {item.get('size', '')}".strip(),
                 'type': 'I',
-                'unit_price': float(product.sale_price),
+                'unit_price': float(unit_price),
                 'units_number': item['quantity'],
                 'unit_type': 1,
                 'price_type': 'G',
@@ -564,7 +565,6 @@ def charge_card(request):
             card_holder_id=card_details['card_holder_id'],
             amount=total_amount,
             description=f"Store purchase - Invoice {invoice.invoice_number}",
-            transaction_id=str(invoice.id),
             items=tranzila_items,
             installments=installments
         )

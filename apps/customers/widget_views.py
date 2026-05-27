@@ -184,7 +184,7 @@ class WidgetRegisterView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # ── 3. Initiate payment ───────────────────────────────────────────
+        # ── 3. Initiate payment (pricing + pending Payment record) ───────
         try:
             result = PaymentService().initiate_subscription_payment(
                 child_id=str(child.id),
@@ -200,4 +200,189 @@ class WidgetRegisterView(APIView):
             return Response(
                 {'error': f'שגיאה בתהליך התשלום: {exc}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class WidgetChargeView(APIView):
+    """
+    Charge an existing pending Payment directly with card details (no iframe/webhook).
+
+    POST /api/v1/customers/widget/charge/
+    Body: {
+        "payment_id": "uuid",
+        "card_details": {
+            "card_number": "...",
+            "expiry_month": 12,
+            "expiry_year": 2026,
+            "cvv": "123",
+            "card_holder_id": "012345678"
+        }
+    }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from apps.customers.models import Payment
+        from apps.core.tranzila_service import TranzilaService
+        from apps.customers.models import TranzilaTransaction, RecurringPayment
+        from apps.customers.financial_models import Invoice, InvoiceChild
+        from apps.enrollments.models import LessonEnrollment
+        from django.utils import timezone
+        from datetime import date, timedelta
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        payment_id = (request.data.get('payment_id') or '').strip()
+        card_details = request.data.get('card_details') or {}
+
+        if not payment_id:
+            return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+        if not card_details.get('card_number'):
+            return Response({'error': 'פרטי כרטיס נדרשים'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            payment = Payment.objects.select_related('child', 'family', 'lesson__course__branch').get(
+                id=payment_id, status='pending'
+            )
+        except Payment.DoesNotExist:
+            return Response({'error': 'תשלום לא נמצא או כבר עובד'}, status=status.HTTP_404_NOT_FOUND)
+
+        child = payment.child
+        lesson = payment.lesson
+
+        try:
+            card_number = str(card_details['card_number']).replace(' ', '')
+            expiry_month = int(card_details['expiry_month'])
+            expiry_year = int(card_details['expiry_year'])
+            cvv = str(card_details['cvv'])
+            card_holder_id = str(card_details.get('card_holder_id', ''))
+        except (KeyError, ValueError, TypeError) as e:
+            return Response({'error': f'פרטי כרטיס שגויים: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        tranzila = TranzilaService()
+        items = [{
+            'name': f"{lesson.course.name} - {child.full_name}" if lesson else child.full_name,
+            'type': 'I',
+            'unit_price': float(payment.final_amount),
+            'units_number': 1,
+            'unit_type': 1,
+            'price_type': 'G',
+            'currency_code': 'ILS',
+        }]
+
+        result = tranzila.charge_with_card(
+            card_number=card_number,
+            expiry_month=expiry_month,
+            expiry_year=expiry_year,
+            cvv=cvv,
+            card_holder_id=card_holder_id,
+            amount=payment.final_amount,
+            description=payment.description or f"מנוי - {child.full_name}",
+            items=items,
+        )
+
+        if result['success']:
+            with transaction.atomic():
+                payment.status = 'completed'
+                payment.payment_date = timezone.now()
+                payment.save()
+
+                tranzila_txn = TranzilaTransaction.objects.create(
+                    transaction_id=result.get('transaction_id', ''),
+                    confirmation_code=result.get('confirmation_code', ''),
+                    transaction_type='recurring_setup',
+                    response_code=result.get('response_code', '000'),
+                    response_message='',
+                    request_data={},
+                    response_data=result.get('raw_response', {}),
+                    idempotency_key=f"widget_{result.get('transaction_id', payment_id)}",
+                    is_successful=True,
+                    response_timestamp=timezone.now(),
+                )
+                payment.tranzila_transaction = tranzila_txn
+                payment.save(update_fields=['tranzila_transaction'])
+
+                token = result.get('token', '')
+                if token:
+                    discount_details = [
+                        {
+                            'name': s.discount_name,
+                            'type': s.discount_type,
+                            'value': str(s.discount_value),
+                            'amount_deducted': str(s.amount_deducted),
+                            'reason': s.reason,
+                        }
+                        for s in payment.discount_snapshots.all()
+                    ]
+                    RecurringPayment.objects.create(
+                        child=child,
+                        initial_payment=payment,
+                        tranzila_token=token,
+                        card_expire_month=expiry_month,
+                        card_expire_year=expiry_year,
+                        status='active',
+                        base_amount=payment.base_amount,
+                        discount_amount=payment.discount_amount,
+                        amount=payment.final_amount,
+                        discount_details=discount_details,
+                        billing_day=date.today().day,
+                        start_date=date.today(),
+                        next_billing_date=date.today() + timedelta(days=30),
+                    )
+
+                # Invoice
+                invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
+                invoice = Invoice.objects.create(
+                    invoice_number=invoice_number,
+                    family=payment.family,
+                    parent=payment.parent,
+                    branch=payment.branch,
+                    payment=payment,
+                    amount=payment.final_amount,
+                    status='paid',
+                    payment_method='credit_card',
+                    payment_type='recurring',
+                    payer_name=payment.family.name,
+                    payer_email=payment.family.email if payment.family.email else '',
+                    payer_phone=payment.family.phone,
+                    tranzila_transaction_id=tranzila_txn.transaction_id,
+                    invoice_date=timezone.now(),
+                )
+                if child and lesson:
+                    InvoiceChild.objects.create(
+                        invoice=invoice,
+                        child=child,
+                        course=lesson.course,
+                        lesson=lesson,
+                    )
+
+                child.status = 'active'
+                child.subscription_start_date = date.today()
+                child.paid_until_date = date.today() + timedelta(days=30)
+                child.save()
+
+                if lesson:
+                    enrollment, created = LessonEnrollment.objects.get_or_create(
+                        child=child,
+                        lesson=lesson,
+                        defaults={'start_date': date.today(), 'status': 'active'},
+                    )
+                    if not created:
+                        enrollment.status = 'active'
+                        if not enrollment.start_date:
+                            enrollment.start_date = date.today()
+                        enrollment.save()
+
+            return Response({'success': True, 'payment_id': str(payment.id)})
+
+        else:
+            payment.status = 'failed'
+            payment.failure_reason = result.get('error', 'Unknown')
+            payment.save()
+            child.status = 'payment_problem'
+            child.save()
+            return Response(
+                {'success': False, 'error': result.get('error', 'התשלום נכשל')},
+                status=status.HTTP_400_BAD_REQUEST,
             )
