@@ -961,6 +961,53 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 'error': f'שגיאה בעיבוד webhook: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    @action(detail=False, methods=['post'])
+    def charge_subscription(self, request):
+        """
+        Charge a subscription payment directly with card details (no iframe).
+
+        POST /api/v1/customers/payments/charge_subscription/
+        Body: {
+            "child_id": "uuid",
+            "lesson_id": "uuid",
+            "card_details": {
+                "card_number": "...",
+                "expiry_month": 12,
+                "expiry_year": 2025,
+                "cvv": "111",
+                "card_holder_id": "123456789"
+            }
+        }
+        """
+        child_id = request.data.get('child_id')
+        lesson_id = request.data.get('lesson_id')
+        card_details = request.data.get('card_details', {})
+
+        if not child_id or not lesson_id:
+            return Response({'error': 'child_id and lesson_id are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not card_details.get('card_number'):
+            return Response({'error': 'card_details are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            payment_service = PaymentService()
+            result = payment_service.charge_subscription_with_card(
+                child_id=str(child_id),
+                lesson_id=str(lesson_id),
+                card_number=str(card_details['card_number']).replace(' ', ''),
+                expiry_month=int(card_details['expiry_month']),
+                expiry_year=int(card_details['expiry_year']),
+                cvv=str(card_details['cvv']),
+                card_holder_id=str(card_details.get('card_holder_id', '')),
+            )
+            if result['success']:
+                return Response(result, status=status.HTTP_200_OK)
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception("Failed to charge subscription with card")
+            return Response({'error': f'שגיאה בסליקה: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=True, methods=['post'])
     def refund(self, request, pk=None):
         """

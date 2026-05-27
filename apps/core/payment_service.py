@@ -425,6 +425,207 @@ class PaymentService:
                 'error': payment.failure_reason
             }
     
+    @transaction.atomic
+    def charge_subscription_with_card(
+        self,
+        child_id: str,
+        lesson_id: str,
+        card_number: str,
+        expiry_month: int,
+        expiry_year: int,
+        cvv: str,
+        card_holder_id: str = '',
+        payment_date: Optional[date] = None,
+    ) -> Dict:
+        """
+        Charge a subscription payment directly with card details (synchronous, no iframe/webhook).
+        Reuses the same pricing/discount logic as initiate_subscription_payment and the same
+        post-success logic as process_webhook_callback.
+        """
+        if payment_date is None:
+            payment_date = date.today()
+
+        try:
+            child = Child.objects.select_related('family').get(id=child_id)
+            lesson = Lesson.objects.select_related('course__branch').get(id=lesson_id)
+        except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
+            raise ValueError("Child or Lesson not found")
+
+        # Pricing (identical to initiate_subscription_payment)
+        course_index = get_child_lesson_index_for_billing(child, lesson)
+        tier_price = get_lesson_price_for_course_index(lesson, course_index)
+        regular_price = lesson.price or lesson.course.price
+        base_price = tier_price if tier_price and tier_price > 0 else regular_price
+        if not base_price:
+            raise ValueError("Lesson/Course price not configured")
+
+        used_lesson_tier = (
+            course_index >= 2
+            and tier_price is not None
+            and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
+        )
+
+        if used_lesson_tier:
+            discount_calculation = self.discount_service.evaluate_discounts_for_payment(
+                family_id=str(child.family.id),
+                child_id=str(child.id),
+                payment_date=payment_date,
+                base_price=base_price,
+                lesson_id=None,
+            )
+        else:
+            discount_calculation = self.discount_service.evaluate_discounts_for_payment(
+                family_id=str(child.family.id),
+                child_id=str(child.id),
+                payment_date=payment_date,
+                base_price=base_price,
+                lesson_id=str(lesson.id),
+            )
+
+        # Create Payment (pending)
+        payment = Payment.objects.create(
+            child=child,
+            family=child.family,
+            parent=child.family.parents.filter(is_primary=True).first(),
+            branch=lesson.course.branch,
+            lesson=lesson,
+            payment_type='recurring_subscription',
+            status='pending',
+            base_amount=discount_calculation.base_price,
+            discount_amount=discount_calculation.total_discount_amount,
+            final_amount=discount_calculation.final_price,
+            description=f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
+        )
+
+        for applied_discount in discount_calculation.applicable_discounts:
+            discount_kwargs = {
+                'payment': payment,
+                'discount_name': applied_discount.name,
+                'discount_type': applied_discount.discount_type,
+                'discount_value': applied_discount.value,
+                'amount_deducted': applied_discount.value,
+                'reason': applied_discount.reason
+            }
+            if applied_discount.discount_id:
+                discount_kwargs['discount_id'] = applied_discount.discount_id
+            PaymentDiscountSnapshot.objects.create(**discount_kwargs)
+
+        # Charge card via Tranzila REST API
+        items = [{
+            'name': f"{lesson.course.name} - {child.full_name}",
+            'type': 'I',
+            'unit_price': float(discount_calculation.final_price),
+            'units_number': 1,
+            'unit_type': 1,
+            'price_type': 'G',
+            'currency_code': 'ILS',
+        }]
+
+        result = self.tranzila_service.charge_with_card(
+            card_number=card_number,
+            expiry_month=expiry_month,
+            expiry_year=expiry_year,
+            cvv=cvv,
+            card_holder_id=card_holder_id,
+            amount=discount_calculation.final_price,
+            description=payment.description,
+            items=items,
+        )
+
+        if result['success']:
+            payment.status = 'completed'
+            payment.payment_date = timezone.now()
+            payment.save()
+
+            # TranzilaTransaction audit record
+            tranzila_transaction = TranzilaTransaction.objects.create(
+                transaction_id=result.get('transaction_id', ''),
+                confirmation_code=result.get('confirmation_code', ''),
+                transaction_type='recurring_setup',
+                response_code=result.get('response_code', '000'),
+                response_message='',
+                request_data={},
+                response_data=result.get('raw_response', {}),
+                idempotency_key=f"card_{result.get('transaction_id', payment.id)}",
+                is_successful=True,
+                response_timestamp=timezone.now(),
+            )
+            payment.tranzila_transaction = tranzila_transaction
+            payment.save(update_fields=['tranzila_transaction'])
+
+            # RecurringPayment (store token for future charges)
+            token = result.get('token', '')
+            if token:
+                discount_details = [
+                    {
+                        'name': s.discount_name,
+                        'type': s.discount_type,
+                        'value': str(s.discount_value),
+                        'amount_deducted': str(s.amount_deducted),
+                        'reason': s.reason
+                    }
+                    for s in payment.discount_snapshots.all()
+                ]
+                RecurringPayment.objects.create(
+                    child=child,
+                    initial_payment=payment,
+                    tranzila_token=token,
+                    card_expire_month=expiry_month,
+                    card_expire_year=expiry_year,
+                    status='active',
+                    base_amount=payment.base_amount,
+                    discount_amount=payment.discount_amount,
+                    amount=payment.final_amount,
+                    discount_details=discount_details,
+                    billing_day=date.today().day,
+                    start_date=date.today(),
+                    next_billing_date=date.today() + timedelta(days=30),
+                )
+
+            # Invoice
+            invoice = self._create_invoice_from_payment(payment, tranzila_transaction)
+
+            # Child status
+            child.status = 'active'
+            child.subscription_start_date = date.today()
+            child.paid_until_date = date.today() + timedelta(days=30)
+            child.save()
+
+            # LessonEnrollment
+            enrollment, created = LessonEnrollment.objects.get_or_create(
+                child=child,
+                lesson=lesson,
+                defaults={'start_date': date.today(), 'status': 'active'}
+            )
+            if not created:
+                enrollment.status = 'active'
+                if not enrollment.start_date:
+                    enrollment.start_date = date.today()
+                enrollment.save()
+
+            log_payment_operation("SUBSCRIPTION_CHARGED", child=child.full_name, payment_id=payment.id, amount=payment.final_amount)
+
+            return {
+                'success': True,
+                'payment_id': str(payment.id),
+                'invoice_number': invoice.invoice_number,
+                'token_saved': bool(token),
+                'base_amount': float(payment.base_amount),
+                'discount_amount': float(payment.discount_amount),
+                'final_amount': float(payment.final_amount),
+                'discounts_applied': [
+                    {'name': d.name, 'type': d.discount_type, 'value': float(d.value), 'reason': d.reason}
+                    for d in discount_calculation.applicable_discounts
+                ],
+            }
+        else:
+            payment.status = 'failed'
+            payment.failure_reason = result.get('error', 'Unknown error')
+            payment.save()
+            child.status = 'payment_problem'
+            child.save()
+            return {'success': False, 'error': result.get('error', 'התשלום נכשל')}
+
     def _create_invoice_from_payment(
         self,
         payment: Payment,

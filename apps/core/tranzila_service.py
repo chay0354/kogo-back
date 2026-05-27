@@ -224,8 +224,10 @@ class TranzilaService:
         params.update(recurring_params)
         params.update(extra_params)
         
+        params['supplier'] = self.token_terminal
+
         query_string = urlencode(params)
-        full_url = f"{self.iframe_base_url.rstrip('/')}/{self.terminal}/iframenew.php?{query_string}"
+        full_url = f"{self.iframe_base_url.rstrip('/')}/{self.token_terminal}/iframenew.php?{query_string}"
         
         self._log_api_call(
             "CREATE_RECURRING",
@@ -309,6 +311,82 @@ class TranzilaService:
             logger.error(f"Exception during token charge: {str(e)}", exc_info=True)
             return self._build_error_response(str(e), message='Charge failed - exception')
     
+    def charge_with_card(
+        self,
+        card_number: str,
+        expiry_month: int,
+        expiry_year: int,
+        cvv: str,
+        card_holder_id: str,
+        amount: Decimal,
+        description: str = '',
+        items: list = None,
+        installments: int = 1
+    ) -> Dict:
+        """Charge a credit card directly using card details."""
+        if not self.public_key or not self.secret_key:
+            return self._build_error_response('REST API credentials not configured')
+
+        if not items:
+            items = [{
+                'name': description or 'Store Purchase',
+                'type': 'I',
+                'unit_price': float(amount),
+                'units_number': 1
+            }]
+
+        payload = {
+            'terminal_name': self.terminal,
+            'txn_type': 'debit',
+            'card_number': card_number,
+            'expire_month': expiry_month,
+            'expire_year': expiry_year,
+            'cvv': cvv,
+            'card_holder_id': card_holder_id,
+            'items': items,
+        }
+
+        if installments and installments > 1:
+            payload['payment_plan'] = 8
+            payload['installments_number'] = installments
+
+        if description:
+            payload['remarks'] = description
+
+        self._log_api_call("CHARGE_CARD", amount=amount)
+
+        try:
+            response = self._make_api_request(
+                params=payload,
+                endpoint='/v1/transaction/credit_card/create'
+            )
+
+            error_code = response.get('error_code')
+
+            if error_code == 0:
+                transaction_result = response.get('transaction_result', {})
+                return self._build_success_response(
+                    transaction_id=str(transaction_result.get('transaction_id', '')),
+                    confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
+                    token=transaction_result.get('token', ''),
+                    amount=float(amount),
+                    response_code=transaction_result.get('processor_response_code', '000'),
+                    message=response.get('message', 'Charge successful'),
+                    raw_response=response
+                )
+            else:
+                error_msg = response.get('message', 'Unknown error')
+                logger.error(f"Card charge failed: {error_code} - {error_msg}")
+                return self._build_error_response(
+                    error_msg,
+                    str(error_code) if error_code is not None else 'N/A',
+                    f'Charge failed: {error_msg}'
+                )
+
+        except Exception as e:
+            logger.error(f"Exception during card charge: {str(e)}", exc_info=True)
+            return self._build_error_response(str(e), message='Charge failed - exception')
+
     def refund_transaction(
         self,
         transaction_id: str,

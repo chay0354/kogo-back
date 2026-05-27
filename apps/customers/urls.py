@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
-from .widget_views import WidgetLookupView, WidgetRegisterView
+from .widget_views import WidgetLookupView, WidgetRegisterView, WidgetChargeView
 
 router = DefaultRouter()
 router.register(r'families', views.FamilyViewSet, basename='family')
@@ -16,5 +16,6 @@ urlpatterns = [
     path('', include(router.urls)),
     path('widget/lookup/', WidgetLookupView.as_view(), name='widget-lookup'),
     path('widget/register/', WidgetRegisterView.as_view(), name='widget-register'),
+    path('widget/charge/', WidgetChargeView.as_view(), name='widget-charge'),
 ]
 
