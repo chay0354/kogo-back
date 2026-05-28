@@ -389,6 +389,51 @@ class WidgetChargeView(APIView):
             )
 
 
+class WidgetCoursesView(APIView):
+    """Public endpoint — returns active courses with lessons for a given branch."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        branch_id = request.query_params.get('branch_id')
+        if not branch_id:
+            return Response({'error': 'branch_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+
+        courses = (
+            Course.objects
+            .filter(branch_id=branch_id, is_active=True)
+            .select_related('course_type', 'branch')
+            .prefetch_related('lessons__instructor')
+            .order_by('course_type__name', 'name')
+        )
+
+        result = []
+        for course in courses:
+            lessons = []
+            for lesson in course.lessons.all():
+                lessons.append({
+                    'id': str(lesson.id),
+                    'day_of_week': lesson.day_of_week,
+                    'start_time': str(lesson.start_time)[:5],
+                    'end_time': str(lesson.end_time)[:5],
+                    'price': str(lesson.lesson_price_override or course.price),
+                    'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
+                })
+            result.append({
+                'id': str(course.id),
+                'name': course.name,
+                'course_type': str(course.course_type_id) if course.course_type_id else None,
+                'course_type_name': course.course_type.name if course.course_type else None,
+                'branch_name': course.branch.name,
+                'price': str(course.price),
+                'min_age': course.min_age,
+                'max_age': course.max_age,
+                'lessons_count': len(lessons),
+                'lessons': lessons,
+            })
+
+        return Response(result)
+
+
 class WidgetCitiesView(APIView):
     """Public endpoint — returns all cities for the widget city selector."""
     permission_classes = [AllowAny]
