@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
-from .widget_views import WidgetLookupView, WidgetRegisterView, WidgetChargeView, WidgetCitiesView, WidgetBranchesView
+from .widget_views import WidgetLookupView, WidgetRegisterView, WidgetChargeView, WidgetCitiesView, WidgetBranchesView, WidgetCoursesView
 
 router = DefaultRouter()
 router.register(r'families', views.FamilyViewSet, basename='family')
@@ -17,6 +17,7 @@ urlpatterns = [
     path('widget/lookup/', WidgetLookupView.as_view(), name='widget-lookup'),
     path('widget/register/', WidgetRegisterView.as_view(), name='widget-register'),
     path('widget/charge/', WidgetChargeView.as_view(), name='widget-charge'),
+    path('widget/courses/', WidgetCoursesView.as_view(), name='widget-courses'),
     path('widget/cities/', WidgetCitiesView.as_view(), name='widget-cities'),
     path('widget/branches/', WidgetBranchesView.as_view(), name='widget-branches'),
 ]
