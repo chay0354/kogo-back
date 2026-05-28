@@ -13,6 +13,7 @@ from django.db import transaction
 
 from apps.customers.models import Family, Parent, Child
 from apps.courses.models import Lesson, Course
+from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
 
@@ -386,3 +387,25 @@ class WidgetChargeView(APIView):
                 {'success': False, 'error': result.get('error', 'התשלום נכשל')},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+
+class WidgetCitiesView(APIView):
+    """Public endpoint — returns all cities for the widget city selector."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        cities = City.objects.all().values('id', 'name').order_by('name')
+        return Response(list(cities))
+
+
+class WidgetBranchesView(APIView):
+    """Public endpoint — returns active branches (id, name, city) for the widget branch selector."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        branches = (
+            Branch.objects.filter(is_active=True)
+            .values('id', 'name', 'city')
+            .order_by('name')
+        )
+        return Response(list(branches))
