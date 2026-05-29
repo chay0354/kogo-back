@@ -6,8 +6,8 @@ from apps.enrollments.trial_reminders import send_due_trial_reminders
 
 class Command(BaseCommand):
     help = (
-        "Send WhatsApp 'reminder' automations for trial enrollments: "
-        "same registration evening (7pm Israel) and 72h after the trial lesson."
+        "Send WhatsApp trial reminders: test-lesson-10am on trial day at 10:00 Israel, "
+        "and after-test 2h after the trial lesson ends."
     )
 
     def add_arguments(self, parser):

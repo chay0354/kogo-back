@@ -1,11 +1,12 @@
 """
-Trial-reminder scheduling — finds LessonEnrollment rows that are still in
-trial state (child.status == 'trial_signed') and fires WhatsApp reminders:
-  • same evening as trial registration (default 19:00 / 7pm Israel time)
-  • 72 hours after the trial lesson ends
+Trial-reminder scheduling for children in trial_signed status.
 
-Idempotent: each reminder type is gated by a `*_sent_at` timestamp on the
-enrollment. Invoke via cron every 30–60 minutes:
+  • test-lesson-10am — 10:00 Israel time on the trial lesson date (cron)
+  • after-test — 2 hours after the trial lesson ends (cron, configurable)
+
+Instant signup uses test-lesson-register (see LessonEnrollmentViewSet.create).
+
+Invoke cron every 30–60 minutes:
   POST /api/v1/enrollments/cron/trial-reminders/?token=CRON_TOKEN
   python manage.py send_trial_reminders
 """
@@ -24,13 +25,7 @@ from apps.enrollments.models import LessonEnrollment
 logger = logging.getLogger(__name__)
 
 
-# ── Date helpers ────────────────────────────────────────────────────────────
-
 def lesson_weekday_to_python(day_of_week: int) -> int:
-    """
-    Lesson.day_of_week uses 0=Sunday … 6=Saturday (Israeli convention).
-    Python's date.weekday() uses 0=Monday … 6=Sunday.
-    """
     return (day_of_week - 1) % 7
 
 
@@ -40,11 +35,6 @@ def next_lesson_occurrence(
     *,
     now: Optional[datetime] = None,
 ) -> date:
-    """
-    Return the date of the next (or today's) occurrence of a weekly lesson.
-    If today matches the lesson day AND the lesson hasn't ended yet, today wins;
-    otherwise the next matching weekday.
-    """
     now = now or timezone.localtime()
     today = now.date()
     target_py_weekday = lesson_weekday_to_python(lesson_day_of_week)
@@ -61,30 +51,20 @@ def next_lesson_occurrence(
 
 
 def compute_trial_lesson_date(lesson: Lesson, *, now: Optional[datetime] = None) -> date:
-    """Public convenience wrapper used when creating a trial enrollment."""
     return next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=now)
 
 
-# ── Reminder scheduling ─────────────────────────────────────────────────────
-
-def _evening_send_at(enrollment: LessonEnrollment) -> datetime:
-    """
-    7pm (configurable) on the same calendar day the parent registered for trial.
-    If they registered after that hour, send on the next cron run (same night).
-    """
-    hour = int(getattr(settings, 'TRIAL_EVENING_REMINDER_HOUR', 19) or 19)
-    reg_local = timezone.localtime(enrollment.enrolled_at or enrollment.created_at)
-    reg_date = reg_local.date()
-    tz = timezone.get_current_timezone()
-    due = timezone.make_aware(datetime.combine(reg_date, time(hour=hour, minute=0)), tz)
-    if reg_local >= due:
-        return reg_local
-    return due
+def _trial_day_10am_send_at(trial_date: date) -> datetime:
+    """10:00 (configurable) on the calendar day of the trial lesson."""
+    hour = int(getattr(settings, 'TRIAL_10AM_REMINDER_HOUR', 10) or 10)
+    naive = datetime.combine(trial_date, time(hour=hour, minute=0))
+    return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
-def _followup_send_at(trial_date: date, lesson_end_time: time) -> datetime:
-    """72 hours after the trial lesson ended."""
-    naive = datetime.combine(trial_date, lesson_end_time) + timedelta(hours=72)
+def _after_test_send_at(trial_date: date, lesson_end_time: time) -> datetime:
+    """Configurable hours after trial lesson end (after-test automation)."""
+    hours = int(getattr(settings, 'TRIAL_AFTER_TEST_HOURS', 2) or 2)
+    naive = datetime.combine(trial_date, lesson_end_time) + timedelta(hours=hours)
     return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
@@ -100,14 +80,29 @@ def _build_send_kwargs(enrollment: LessonEnrollment) -> Optional[dict]:
     if not ctx:
         return None
 
+    if enrollment.trial_lesson_date:
+        ctx['trial_date'] = enrollment.trial_lesson_date.strftime('%d/%m/%Y')
+
     return ctx
 
 
+def _send_trial_whatsapp(svc, kind: str, ctx: dict, *, dry_run: bool, enrollment_id) -> tuple[bool, dict]:
+    if dry_run:
+        logger.info("DRY-RUN %s reminder for enrollment %s", kind, enrollment_id)
+        return True, {'sent': True, 'dry_run': True}
+
+    lookup_names = ctx.pop('lookup_names', None)
+    trial_date = ctx.pop('trial_date', '')
+    result = svc.notify_registration(
+        kind=kind,
+        lookup_names=lookup_names,
+        trial_date=trial_date,
+        **ctx,
+    )
+    return bool(result.get('sent')), result
+
+
 def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
-    """
-    Scan trial enrollments and fire any reminders whose scheduled time has passed.
-    Skips enrollments where the child has already become 'active' (subscribed).
-    """
     from apps.core.manychat_service import ManyChatService
 
     now = timezone.localtime()
@@ -123,60 +118,59 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
     )
 
     svc = ManyChatService()
-    summary = {'evening_sent': 0, 'followup_sent': 0, 'skipped': 0, 'errors': 0}
+    summary = {'ten_am_sent': 0, 'after_test_sent': 0, 'skipped': 0, 'errors': 0}
 
     for enr in qs:
         lesson = enr.lesson
-        if not lesson:
+        if not lesson or not enr.trial_lesson_date:
             summary['skipped'] += 1
             continue
 
-        evening_due = _evening_send_at(enr)
-        followup_due = _followup_send_at(enr.trial_lesson_date, lesson.end_time)
+        ten_am_due = _trial_day_10am_send_at(enr.trial_lesson_date)
+        after_test_due = _after_test_send_at(enr.trial_lesson_date, lesson.end_time)
 
-        # Same evening after trial registration (7pm Israel by default)
-        if not enr.trial_evening_reminder_sent_at and now >= evening_due:
+        if not enr.trial_10am_reminder_sent_at and now >= ten_am_due:
             ctx = _build_send_kwargs(enr)
             if not ctx:
                 summary['skipped'] += 1
-            elif dry_run:
-                logger.info("DRY-RUN evening reminder for enrollment %s", enr.id)
             else:
-                lookup_names = ctx.pop('lookup_names', None)
-                result = svc.notify_registration(
-                    kind=ManyChatService.REGISTRATION_KIND_TRIAL_REMINDER,
-                    lookup_names=lookup_names,
-                    **ctx,
+                sent, result = _send_trial_whatsapp(
+                    svc,
+                    ManyChatService.REGISTRATION_KIND_TRIAL_10AM,
+                    ctx,
+                    dry_run=dry_run,
+                    enrollment_id=enr.id,
                 )
-                if result.get('sent'):
-                    enr.trial_evening_reminder_sent_at = timezone.now()
-                    enr.save(update_fields=['trial_evening_reminder_sent_at', 'updated_at'])
-                    summary['evening_sent'] += 1
+                if sent and not dry_run:
+                    enr.trial_10am_reminder_sent_at = timezone.now()
+                    enr.save(update_fields=['trial_10am_reminder_sent_at', 'updated_at'])
+                    summary['ten_am_sent'] += 1
+                elif sent:
+                    summary['ten_am_sent'] += 1
                 else:
-                    logger.warning("Evening reminder NOT sent for %s: %s", enr.id, result)
+                    logger.warning("10am trial reminder NOT sent for %s: %s", enr.id, result)
                     summary['errors'] += 1
 
-        # 72h after the trial lesson (same reminder template)
-        if not enr.trial_followup_reminder_sent_at and now >= followup_due:
+        if not enr.trial_followup_reminder_sent_at and now >= after_test_due:
             ctx = _build_send_kwargs(enr)
             if not ctx:
                 summary['skipped'] += 1
                 continue
-            if dry_run:
-                logger.info("DRY-RUN followup reminder for enrollment %s", enr.id)
-                continue
-            lookup_names = ctx.pop('lookup_names', None)
-            result = svc.notify_registration(
-                kind=ManyChatService.REGISTRATION_KIND_TRIAL_REMINDER,
-                lookup_names=lookup_names,
-                **ctx,
+            sent, result = _send_trial_whatsapp(
+                svc,
+                ManyChatService.REGISTRATION_KIND_TRIAL_AFTER_TEST,
+                ctx,
+                dry_run=dry_run,
+                enrollment_id=enr.id,
             )
-            if result.get('sent'):
+            if sent and not dry_run:
                 enr.trial_followup_reminder_sent_at = timezone.now()
                 enr.save(update_fields=['trial_followup_reminder_sent_at', 'updated_at'])
-                summary['followup_sent'] += 1
+                summary['after_test_sent'] += 1
+            elif sent:
+                summary['after_test_sent'] += 1
             else:
-                logger.warning("Follow-up reminder NOT sent for %s: %s", enr.id, result)
+                logger.warning("after-test WhatsApp NOT sent for %s: %s", enr.id, result)
                 summary['errors'] += 1
 
     return summary

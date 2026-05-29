@@ -240,9 +240,14 @@ class ManyChatService:
     # Fallback names when flow ns is not set in Django settings.
     _FLOW_NAME_ALIASES: dict[str, tuple[str, ...]] = {
         'MANYCHAT_REGISTRATION_FLOW_NS': ('lesson-register',),
-        'MANYCHAT_TRIAL_FLOW_NS': ('test-lesson-register', 'test-lesson-registser'),
+        'MANYCHAT_TRIAL_FLOW_NS': (
+            'test-lesson-register',
+            'test lesson register',
+            'test-lesson-registser',
+        ),
         'MANYCHAT_PAYMENT_FAILED_FLOW_NS': ('payment-failed',),
-        'MANYCHAT_TRIAL_REMINDER_FLOW_NS': ('reminder',),
+        'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
+        'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS': ('after-test', 'after test'),
     }
 
     def resolve_flow_ns(self, setting_name: str) -> str:
@@ -274,7 +279,8 @@ class ManyChatService:
 
     REGISTRATION_KIND_SUBSCRIPTION = 'subscription'
     REGISTRATION_KIND_TRIAL = 'trial'
-    REGISTRATION_KIND_TRIAL_REMINDER = 'trial_reminder'
+    REGISTRATION_KIND_TRIAL_10AM = 'trial_10am'
+    REGISTRATION_KIND_TRIAL_AFTER_TEST = 'trial_after_test'
     REGISTRATION_KIND_PAYMENT_FAILED = 'payment_failed'
 
     _REGISTRATION_KINDS = {
@@ -296,9 +302,19 @@ class ManyChatService:
                 'מצפים לראותכם!'
             ),
         },
-        # Single template used both for the same-evening AND the 72h-after reminder.
-        REGISTRATION_KIND_TRIAL_REMINDER: {
-            'flow_setting': 'MANYCHAT_TRIAL_REMINDER_FLOW_NS',
+        # 10:00 Israel time on the trial lesson date (test-lesson-10am).
+        REGISTRATION_KIND_TRIAL_10AM: {
+            'flow_setting': 'MANYCHAT_TRIAL_10AM_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'תזכורת לשיעור הניסיון של {child_name} בחוג {course_name}.\n'
+                'יום {day_name} בשעה {time_range} בסניף {branch_name}.\n'
+                'האם אתם מגיעים?'
+            ),
+        },
+        # 2 hours after the trial lesson ends (after-test automation).
+        REGISTRATION_KIND_TRIAL_AFTER_TEST: {
+            'flow_setting': 'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS',
             'fallback_template': (
                 'שלום {parent_name}!\n'
                 'מקווים שהשיעור של {child_name} בחוג {course_name} היה מוצלח.\n'
@@ -331,6 +347,7 @@ class ManyChatService:
         branch_name: str,
         kind: str = REGISTRATION_KIND_SUBSCRIPTION,
         lookup_names: list[str] | None = None,
+        trial_date: str = '',
     ) -> dict:
         """
         Send a course-registration / trial confirmation to the parent on WhatsApp.
@@ -371,6 +388,8 @@ class ManyChatService:
             'kogo_lesson_day': day_name,
             'kogo_lesson_time': time_range,
         }
+        if trial_date:
+            custom_fields['kogo_trial_date'] = trial_date
         try:
             self.set_custom_fields(sid, custom_fields)
         except ManyChatError as exc:

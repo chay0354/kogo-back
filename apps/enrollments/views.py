@@ -13,8 +13,13 @@ from apps.enrollments.trial_reminders import (
 )
 from apps.core.permissions import IsManager
 from apps.courses.models import Lesson
+from apps.customers.models import Child
 
 logger = logging.getLogger(__name__)
+
+
+def _is_trial_registration_request(data) -> bool:
+    return str((data or {}).get('trial_registration', '')).lower() in ('1', 'true', 'yes')
 
 
 class EnrollmentViewSet(viewsets.ModelViewSet):
@@ -71,22 +76,37 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsManager]
 
     def create(self, request, *args, **kwargs):
+        trial_registration = _is_trial_registration_request(request.data)
         response = super().create(request, *args, **kwargs)
-        if response.status_code == status.HTTP_201_CREATED:
-            try:
-                enrollment_id = response.data.get('id') if isinstance(response.data, dict) else None
-                if enrollment_id:
-                    self._stamp_and_notify_trial_enrollment(enrollment_id)
-            except Exception:
-                logger.exception("Trial WhatsApp notification failed (non-fatal)")
+
+        if response.status_code == status.HTTP_201_CREATED and trial_registration:
+            enrollment_id = response.data.get('id') if isinstance(response.data, dict) else None
+            child_id = response.data.get('child') if isinstance(response.data, dict) else None
+            whatsapp_result = None
+
+            if enrollment_id:
+                try:
+                    whatsapp_result = self._stamp_and_notify_trial_enrollment(enrollment_id)
+                except Exception:
+                    logger.exception("Trial WhatsApp notification failed (non-fatal)")
+                    whatsapp_result = {'sent': False, 'reason': 'exception'}
+
+            if child_id:
+                Child.objects.filter(id=child_id).update(status='trial_signed')
+
+            if isinstance(response.data, dict):
+                payload = dict(response.data)
+                payload['whatsapp'] = whatsapp_result or {'sent': False, 'reason': 'skipped'}
+                response.data = payload
+
         return response
 
     @staticmethod
-    def _stamp_and_notify_trial_enrollment(enrollment_id: str) -> None:
+    def _stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
         """
-        After a manager creates a trial enrollment:
-          • compute & store the upcoming trial lesson date (used by reminder scheduler)
-          • fire the ManyChat 'trial' template
+        Immediately after trial signup (הרשם לניסיון):
+          • store trial_lesson_date for later reminder cron
+          • send ManyChat test-lesson-register flow to parent WhatsApp
         """
         from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
         from apps.core.manychat_service import ManyChatService
@@ -94,15 +114,15 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         enrollment = (
             LessonEnrollment.objects
             .select_related('lesson', 'lesson__course', 'lesson__branch', 'child', 'child__family')
+            .prefetch_related('child__family__parents')
             .filter(id=enrollment_id)
             .first()
         )
         if not enrollment or not enrollment.lesson_id:
-            return
+            return {'sent': False, 'reason': 'enrollment_not_found'}
 
         lesson = enrollment.lesson
 
-        # Stamp the trial lesson date for reminder scheduling.
         try:
             trial_date = compute_trial_lesson_date(lesson)
             if enrollment.trial_lesson_date != trial_date:
@@ -114,15 +134,21 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         child = enrollment.child
         ctx = build_enrollment_whatsapp_context(child=child, lesson=lesson)
         if not ctx:
-            return
+            return {'sent': False, 'reason': 'no_parent_phone'}
+
+        if enrollment.trial_lesson_date:
+            ctx['trial_date'] = enrollment.trial_lesson_date.strftime('%d/%m/%Y')
 
         lookup_names = ctx.pop('lookup_names', None)
+        trial_date = ctx.pop('trial_date', '')
         result = ManyChatService().notify_registration(
             kind=ManyChatService.REGISTRATION_KIND_TRIAL,
             lookup_names=lookup_names,
+            trial_date=trial_date,
             **ctx,
         )
-        logger.info("Trial WhatsApp notification result: %s", result)
+        logger.info("Trial registration WhatsApp (instant): %s", result)
+        return result
 
 
 @api_view(['GET', 'POST'])
