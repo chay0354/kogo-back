@@ -15,11 +15,11 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
-from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale
+from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale, InventoryAdjustment
 from apps.store.serializers import (
     StoreProductSerializer, StoreInvoiceSerializer,
     StoreSaleSerializer, StoreAnalyticsSerializer,
-    PaymentInitiationResponseSerializer
+    PaymentInitiationResponseSerializer, InventoryAdjustmentSerializer
 )
 from apps.core.payment_service import PaymentService
 
@@ -167,14 +167,158 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(product)
         return Response(serializer.data)
     
+    @action(detail=True, methods=['post'])
+    def adjust_stock(self, request, pk=None):
+        """
+        Adjust stock with a documented reason (add or subtract).
+
+        Body: {
+            "quantity_delta": int,           # positive = add, negative = subtract
+            "reason": "receipt"|"theft"|"damage"|"recount"|"other",
+            "note": string,                  # optional
+            "size_stock_id": uuid | null,    # preferred for per-size products
+        }
+
+        Creates an InventoryAdjustment audit record and updates the stock atomically.
+        """
+        product = self.get_object()
+        try:
+            quantity_delta = int(request.data.get('quantity_delta', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'quantity_delta must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = request.data.get('reason', '')
+        valid_reasons = {r[0] for r in InventoryAdjustment.REASON_CHOICES}
+        if reason not in valid_reasons:
+            return Response(
+                {'error': f'Invalid reason. Must be one of: {", ".join(valid_reasons)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        note = request.data.get('note', '')
+        size_stock_id = (request.data.get('size_stock_id') or '').strip()
+
+        with db_transaction.atomic():
+            size_row = None
+            if size_stock_id and product.has_per_size_stock():
+                size_row = (
+                    StoreProductSize.objects
+                    .select_for_update()
+                    .filter(product=product, pk=size_stock_id)
+                    .first()
+                )
+                if size_row is None:
+                    return Response(
+                        {'error': 'Size stock row not found for this product'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            if size_row is not None:
+                new_qty = max(0, size_row.stock_quantity + quantity_delta)
+                actual_delta = new_qty - size_row.stock_quantity
+                size_row.stock_quantity = new_qty
+                size_row.save(update_fields=['stock_quantity', 'updated_at'])
+                product.recalculate_total_stock()
+            else:
+                new_qty = max(0, product.stock_quantity + quantity_delta)
+                actual_delta = new_qty - product.stock_quantity
+                product.stock_quantity = new_qty
+                product.save(update_fields=['stock_quantity', 'updated_at'])
+
+            InventoryAdjustment.objects.create(
+                product=product,
+                size_stock=size_row,
+                quantity_delta=actual_delta,
+                reason=reason,
+                note=note,
+                adjusted_by=request.user if request.user.is_authenticated else None,
+            )
+
+        logger.info(
+            "Inventory adjustment for %s: delta=%s, reason=%s, size_stock=%s",
+            product.name, actual_delta, reason, size_stock_id or '-',
+        )
+        product.refresh_from_db()
+        serializer = self.get_serializer(product)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def transfer_stock(self, request, pk=None):
+        """
+        Transfer stock between two StoreProductSize rows (different locations).
+
+        Body: {
+            "quantity": int,                 # units to transfer (positive)
+            "from_size_stock_id": uuid,      # source row
+            "to_size_stock_id": uuid,        # destination row
+        }
+
+        Atomically decrements the source and increments the destination.
+        """
+        product = self.get_object()
+        try:
+            quantity = int(request.data.get('quantity', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'quantity must be a positive integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if quantity <= 0:
+            return Response({'error': 'quantity must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from_id = (request.data.get('from_size_stock_id') or '').strip()
+        to_id = (request.data.get('to_size_stock_id') or '').strip()
+
+        if not from_id or not to_id:
+            return Response(
+                {'error': 'from_size_stock_id and to_size_stock_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if from_id == to_id:
+            return Response({'error': 'Source and destination cannot be the same row'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with db_transaction.atomic():
+            rows = (
+                StoreProductSize.objects
+                .select_for_update()
+                .filter(product=product, pk__in=[from_id, to_id])
+            )
+            row_map = {str(r.pk): r for r in rows}
+
+            if from_id not in row_map:
+                return Response({'error': 'Source size stock row not found'}, status=status.HTTP_400_BAD_REQUEST)
+            if to_id not in row_map:
+                return Response({'error': 'Destination size stock row not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+            from_row = row_map[from_id]
+            to_row = row_map[to_id]
+
+            if from_row.stock_quantity < quantity:
+                return Response(
+                    {'error': f'מלאי לא מספיק במקור (נוכחי: {from_row.stock_quantity}, מבוקש: {quantity})'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            from_row.stock_quantity -= quantity
+            to_row.stock_quantity += quantity
+            from_row.save(update_fields=['stock_quantity', 'updated_at'])
+            to_row.save(update_fields=['stock_quantity', 'updated_at'])
+            product.recalculate_total_stock()
+
+        logger.info(
+            "Stock transfer for %s: quantity=%s, from=%s, to=%s",
+            product.name, quantity, from_id, to_id,
+        )
+        product.refresh_from_db()
+        serializer = self.get_serializer(product)
+        return Response(serializer.data)
+
     def destroy(self, request, *args, **kwargs):
         """Soft delete: set is_active=False instead of deleting."""
         instance = self.get_object()
         instance.is_active = False
         instance.save(update_fields=['is_active'])
-        
+
         logger.info(f"Soft deleted product: {instance.name}")
-        
+
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -308,143 +452,154 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
     def analytics(self, request):
         """
         Get store analytics dashboard data.
-        
-        Returns:
-        - KPIs (revenue, profit, sales count, low stock)
-        - Charts data (monthly revenue, by product, by category, etc.)
-        - Low stock products list
-        - Recent sales list
+
+        Query params:
+        - days: int (default 30) — lookback window for sales
+        - branch: uuid | 'delivery' — filter all data to one branch
+
+        Returns KPIs, chart data, low-stock list, recent sales, inventory value,
+        shrinkage by reason, and top product.
         """
-        # Date range (default: last 30 days)
         days = int(request.query_params.get('days', 30))
         start_date = date.today() - timedelta(days=days)
-        
-        # Get ONLY completed sales - refunded invoices are excluded automatically
+        branch_param = request.query_params.get('branch', '')
+
+        # Base sales queryset — completed only
         completed_sales = StoreSale.objects.filter(
             sale_date__gte=start_date,
-            invoice__payment_status='completed'
+            invoice__payment_status='completed',
         ).select_related('product', 'child', 'branch', 'invoice')
-        
+
+        # Base products queryset
+        products_qs = StoreProduct.objects.filter(is_active=True)
+
+        # Base adjustments queryset (all time for shrinkage is scoped to same date window)
+        adjustments_qs = InventoryAdjustment.objects.filter(created_at__date__gte=start_date)
+
+        if branch_param and branch_param != 'all':
+            if branch_param == 'delivery':
+                completed_sales = completed_sales.filter(branch__isnull=True)
+                products_qs = products_qs.filter(branch__isnull=True)
+                adjustments_qs = adjustments_qs.filter(size_stock__branch__isnull=True)
+            else:
+                completed_sales = completed_sales.filter(branch_id=branch_param)
+                products_qs = products_qs.filter(branch_id=branch_param)
+                adjustments_qs = adjustments_qs.filter(size_stock__branch_id=branch_param)
+
         logger.info(
-            "[ANALYTICS] Calculating KPIs for last %s days (from %s); completed sales found: %s",
-            days, start_date, completed_sales.count()
+            "[ANALYTICS] last %s days, branch=%s; completed sales: %s",
+            days, branch_param or 'all', completed_sales.count(),
         )
-        
-        # KPI 1: Total Revenue (sum all completed sales)
-        total_revenue = completed_sales.aggregate(
-            total=Sum('total_price')
-        )['total'] or Decimal('0.00')
-        
-        logger.info("[ANALYTICS] Total Revenue (completed sales only): %s", total_revenue)
-        
-        # KPI 2: Net Profit (revenue - cost for completed sales)
+
+        # KPI 1: Total Revenue
+        total_revenue = completed_sales.aggregate(total=Sum('total_price'))['total'] or Decimal('0.00')
+
+        # KPI 2: Net Profit
         net_profit = Decimal('0.00')
         for sale in completed_sales:
-            cost = sale.product.cost_price * sale.quantity
-            profit = sale.total_price - cost
-            net_profit += profit
-        
-        logger.info("[ANALYTICS] Net Profit (completed sales only): %s", net_profit)
-        
+            net_profit += sale.total_price - sale.product.cost_price * sale.quantity
+
         # KPI 3: Total Sales Count
         total_sales_count = completed_sales.count()
-        
-        # KPI 4: Low Stock Products
-        low_stock_products = StoreProduct.objects.filter(
-            is_active=True,
-            stock_quantity__lte=F('min_stock_alert')
-        )
+
+        # KPI 4: Low Stock
+        low_stock_products = products_qs.filter(stock_quantity__lte=F('min_stock_alert'))
         low_stock_count = low_stock_products.count()
-        
-        # Chart 1: Monthly Revenue (completed sales only)
+
+        # KPI 5: Inventory value (current stock × sale_price)
+        inventory_value = float(
+            sum(p.stock_quantity * p.sale_price for p in products_qs.prefetch_related('size_stocks'))
+        )
+
+        # Top product (most units sold in period)
+        top_product_row = (
+            completed_sales.values('product__name')
+            .annotate(total_qty=Sum('quantity'))
+            .order_by('-total_qty')
+            .first()
+        )
+        top_product = {
+            'name': top_product_row['product__name'],
+            'quantity': top_product_row['total_qty'],
+        } if top_product_row else None
+
+        # Shrinkage by reason (subtractions only, i.e. quantity_delta < 0)
+        shrinkage_rows = (
+            adjustments_qs.filter(quantity_delta__lt=0)
+            .values('reason')
+            .annotate(total_units=Sum('quantity_delta'))
+        )
+        reason_labels = dict(InventoryAdjustment.REASON_CHOICES)
+        shrinkage_by_reason = [
+            {
+                'reason': item['reason'],
+                'reason_label': reason_labels.get(item['reason'], item['reason']),
+                'total_units': abs(item['total_units']),
+            }
+            for item in shrinkage_rows
+        ]
+
+        # Chart 1: Monthly Revenue
         monthly_revenue = defaultdict(Decimal)
         for sale in completed_sales:
-            month_key = sale.sale_date.strftime('%Y-%m')
-            monthly_revenue[month_key] += sale.total_price
-        
+            monthly_revenue[sale.sale_date.strftime('%Y-%m')] += sale.total_price
         monthly_revenue_data = [
-            {'month': month, 'revenue': float(revenue)}
-            for month, revenue in sorted(monthly_revenue.items())
+            {'month': m, 'revenue': float(r)}
+            for m, r in sorted(monthly_revenue.items())
         ]
-        
-        logger.info("[ANALYTICS] Monthly revenue data: %s", monthly_revenue_data)
-        
-        # Chart 2: Sales by Product (top 6) - only completed sales
-        sales_by_product = completed_sales.values('product__name').annotate(
-            quantity=Sum('quantity'),
-            revenue=Sum('total_price')
-        ).order_by('-quantity')[:6]
-        
+
+        # Chart 2: Sales by Product (top 6)
         sales_by_product_data = [
-            {
-                'product': item['product__name'],
-                'quantity': item['quantity'],
-                'revenue': float(item['revenue'])
-            }
-            for item in sales_by_product
+            {'product': item['product__name'], 'quantity': item['quantity'], 'revenue': float(item['revenue'])}
+            for item in completed_sales.values('product__name')
+            .annotate(quantity=Sum('quantity'), revenue=Sum('total_price'))
+            .order_by('-quantity')[:6]
         ]
-        
-        # Chart 3: Sales by Category - only completed sales
-        sales_by_category = completed_sales.values('product__category').annotate(
-            total=Sum('total_price')
-        ).order_by('-total')
-        
+
+        # Chart 3: Sales by Category
         sales_by_category_data = [
             {'category': item['product__category'], 'total': float(item['total'])}
-            for item in sales_by_category
+            for item in completed_sales.values('product__category')
+            .annotate(total=Sum('total_price'))
+            .order_by('-total')
         ]
-        
-        # Chart 4: Sales by Branch - only completed sales
-        sales_by_branch = completed_sales.values('branch__name').annotate(
-            total=Sum('total_price')
-        ).order_by('-total')
-        
+
+        # Chart 4: Sales by Branch
         sales_by_branch_data = [
-            {
-                'branch': item['branch__name'] or 'לא משויך',
-                'total': float(item['total'])
-            }
-            for item in sales_by_branch
+            {'branch': item['branch__name'] or 'לא משויך', 'total': float(item['total'])}
+            for item in completed_sales.values('branch__name')
+            .annotate(total=Sum('total_price'))
+            .order_by('-total')
         ]
-        
-        # Chart 5: Sales by Payment Method - only completed sales
-        sales_by_payment = completed_sales.values('payment_method').annotate(
-            total=Sum('total_price')
-        ).order_by('-total')
-        
-        payment_method_names = {
-            'credit_card': 'אשראי',
-            'cash': 'מזומן',
-            'monthly_billing': 'הוראת קבע'
-        }
-        
+
+        # Chart 5: Sales by Payment Method
+        payment_method_names = {'credit_card': 'אשראי', 'cash': 'מזומן', 'monthly_billing': 'הוראת קבע'}
         sales_by_payment_data = [
-            {
-                'method': payment_method_names.get(item['payment_method'], item['payment_method']),
-                'total': float(item['total'])
-            }
-            for item in sales_by_payment
+            {'method': payment_method_names.get(item['payment_method'], item['payment_method']), 'total': float(item['total'])}
+            for item in completed_sales.values('payment_method')
+            .annotate(total=Sum('total_price'))
+            .order_by('-total')
         ]
-        
-        # Recent sales (last 10) - only completed
+
+        # Recent sales (last 10)
         recent_sales = completed_sales.order_by('-sale_date')[:10]
-        
-        # Assemble response
-        analytics_data = {
+
+        return Response({
             'total_revenue': float(total_revenue),
             'net_profit': float(net_profit),
             'total_sales_count': total_sales_count,
             'low_stock_count': low_stock_count,
+            'inventory_value': inventory_value,
+            'top_product': top_product,
+            'shrinkage_by_reason': shrinkage_by_reason,
             'monthly_revenue': monthly_revenue_data,
             'sales_by_product': sales_by_product_data,
             'sales_by_category': sales_by_category_data,
             'sales_by_branch': sales_by_branch_data,
             'sales_by_payment_method': sales_by_payment_data,
             'low_stock_products': StoreProductSerializer(low_stock_products, many=True).data,
-            'recent_sales': StoreSaleSerializer(recent_sales, many=True).data
-        }
-        
-        return Response(analytics_data)
+            'recent_sales': StoreSaleSerializer(recent_sales, many=True).data,
+        })
 
 
 @api_view(['POST'])
