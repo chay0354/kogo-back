@@ -227,6 +227,27 @@ SUPABASE_URL = config('SUPABASE_URL', default='')
 SUPABASE_PUBLISHABLE_KEY = config('SUPABASE_PUBLISHABLE_KEY', default='')
 SUPABASE_SERVICE_ROLE_KEY = config('SUPABASE_SERVICE_ROLE_KEY', default='')
 
+# ManyChat (WhatsApp) — server only; never expose in frontend
+MANYCHAT_KEY = config('MANYCHAT_KEY', default='')
+# Optional: ManyChat custom field id for phone mirror (e.g. Client_Phone) — enables findByCustomField
+MANYCHAT_PHONE_FIELD_ID = config('MANYCHAT_PHONE_FIELD_ID', default='')
+# Optional: published Automation Flow namespace that contains the approved WhatsApp Template
+# fired automatically when a subscription registration completes (any phone, no 24h window).
+MANYCHAT_REGISTRATION_FLOW_NS = config('MANYCHAT_REGISTRATION_FLOW_NS', default='')
+# Same as above, but for trial-lesson confirmations (הרשם לניסיון).
+MANYCHAT_TRIAL_FLOW_NS = config('MANYCHAT_TRIAL_FLOW_NS', default='')
+# 10:00 on trial lesson day (test-lesson-10am automation).
+MANYCHAT_TRIAL_10AM_FLOW_NS = config('MANYCHAT_TRIAL_10AM_FLOW_NS', default='')
+# after-test automation — hours after trial lesson end (default 2).
+MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS = config('MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS', default='')
+TRIAL_AFTER_TEST_HOURS = int(config('TRIAL_AFTER_TEST_HOURS', default=2))
+# When Tranzila webhook returns Response != 000 for a subscription enrollment payment.
+MANYCHAT_PAYMENT_FAILED_FLOW_NS = config('MANYCHAT_PAYMENT_FAILED_FLOW_NS', default='')
+# Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
+TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))
+# Shared secret — Vercel Cron / external scheduler must send this in the X-Cron-Token header.
+CRON_TOKEN = config('CRON_TOKEN', default='')
+
 # ==========================
 # CELERY CONFIGURATION
 # ==========================

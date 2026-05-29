@@ -17,10 +17,18 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
     """Serializer for Lesson Enrollment"""
     lesson_info = serializers.SerializerMethodField()
     child_name = serializers.CharField(source='child.full_name', read_only=True)
-    
+    trial_registration = serializers.BooleanField(
+        default=False,
+        write_only=True,
+        help_text='When true, marks child as trial_signed and sends test-lesson-register WhatsApp immediately.',
+    )
+
     class Meta:
         model = LessonEnrollment
-        fields = ['id', 'lesson', 'lesson_info', 'child', 'child_name', 'status', 'start_date', 'end_date', 'notes', 'created_at']
+        fields = [
+            'id', 'lesson', 'lesson_info', 'child', 'child_name', 'status',
+            'start_date', 'end_date', 'notes', 'trial_registration', 'created_at',
+        ]
         read_only_fields = ['id', 'created_at']
     
     def get_lesson_info(self, obj):

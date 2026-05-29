@@ -48,6 +48,11 @@ class LessonEnrollment(models.Model):
     end_date = models.DateField(null=True, blank=True, verbose_name="תאריך סיום")
     enrolled_at = models.DateTimeField(auto_now_add=True, verbose_name="מועד רישום")
     notes = models.TextField(blank=True, verbose_name="הערות")
+    # Trial-reminder tracking — populated only for trial enrollments.
+    trial_lesson_date = models.DateField(null=True, blank=True, verbose_name="תאריך שיעור ניסיון")
+    trial_evening_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת ערב נשלחה (לא בשימוש)")
+    trial_10am_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת 10:00 ביום הניסיון נשלחה")
+    trial_followup_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="after-test נשלח")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
