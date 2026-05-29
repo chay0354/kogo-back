@@ -392,6 +392,78 @@ class StoreInvoice(models.Model):
         super().save(*args, **kwargs)
 
 
+class InventoryAdjustment(models.Model):
+    """
+    Records manual stock adjustments with a stated reason (add or subtract).
+
+    Separate from sales flow — used for theft, damage, recount corrections,
+    and incoming stock (receipt of goods). Provides an audit trail for
+    shrinkage reporting.
+    """
+    REASON_CHOICES = [
+        ('receipt', 'קבלת סחורה'),
+        ('theft', 'גניבה'),
+        ('damage', 'בלאי / נזק'),
+        ('recount', 'ספירה / תיקון'),
+        ('other', 'אחר'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        StoreProduct,
+        on_delete=models.PROTECT,
+        related_name='inventory_adjustments',
+        verbose_name="מוצר",
+    )
+    size_stock = models.ForeignKey(
+        StoreProductSize,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inventory_adjustments',
+        verbose_name="שורת מידה",
+        help_text="השורה המדויקת שעודכנה (null = מלאי כולל)",
+    )
+    quantity_delta = models.IntegerField(
+        verbose_name="שינוי כמות",
+        help_text="חיובי = הוספה, שלילי = הפחתה",
+    )
+    reason = models.CharField(
+        max_length=20,
+        choices=REASON_CHOICES,
+        verbose_name="סיבה",
+    )
+    note = models.TextField(
+        blank=True,
+        default='',
+        verbose_name="הערה",
+    )
+    adjusted_by = models.ForeignKey(
+        'auth.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='inventory_adjustments',
+        verbose_name="בוצע על ידי",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך")
+
+    class Meta:
+        db_table = 'store_inventory_adjustments'
+        verbose_name = "התאמת מלאי"
+        verbose_name_plural = "התאמות מלאי"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['product']),
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['reason']),
+        ]
+
+    def __str__(self):
+        direction = '+' if self.quantity_delta >= 0 else ''
+        return f"{self.product.name}: {direction}{self.quantity_delta} ({self.get_reason_display()})"
+
+
 class StoreSale(models.Model):
     """
     Individual line items for store sales.

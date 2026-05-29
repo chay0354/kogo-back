@@ -5,7 +5,7 @@ import uuid
 
 from django.db import transaction, IntegrityError
 from rest_framework import serializers
-from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale
+from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale, InventoryAdjustment
 from apps.core.models import Branch
 from apps.customers.models import Child
 
@@ -281,6 +281,27 @@ class StoreAnalyticsSerializer(serializers.Serializer):
     # Lists
     low_stock_products = StoreProductSerializer(many=True)
     recent_sales = StoreSaleSerializer(many=True)
+
+
+class InventoryAdjustmentSerializer(serializers.ModelSerializer):
+    adjusted_by_name = serializers.CharField(source='adjusted_by.get_full_name', read_only=True, allow_null=True)
+    reason_display = serializers.CharField(source='get_reason_display', read_only=True)
+    size_stock_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InventoryAdjustment
+        fields = [
+            'id', 'product', 'size_stock', 'size_stock_label',
+            'quantity_delta', 'reason', 'reason_display', 'note',
+            'adjusted_by', 'adjusted_by_name', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'adjusted_by_name', 'reason_display', 'size_stock_label']
+
+    def get_size_stock_label(self, obj):
+        if not obj.size_stock:
+            return None
+        branch_name = obj.size_stock.branch.name if obj.size_stock.branch else 'משלוח'
+        return f"{obj.size_stock.size} · {branch_name}"
 
 
 class PaymentInitiationResponseSerializer(serializers.Serializer):
