@@ -26,6 +26,7 @@ class WidgetLookupView(APIView):
       family_status='existing', child_status='active'  → same child → additional-lesson discount
       family_status='existing', child_status='new'     → sibling    → second-child discount
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -95,6 +96,7 @@ class WidgetRegisterView(APIView):
       existing_child_id   (str)  — returned by lookup when child is already active
       success_url, error_url, callback_url
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -220,6 +222,7 @@ class WidgetChargeView(APIView):
         }
     }
     """
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
@@ -391,6 +394,7 @@ class WidgetChargeView(APIView):
 
 class WidgetCoursesView(APIView):
     """Public endpoint — returns active courses with lessons for a given branch."""
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -436,6 +440,7 @@ class WidgetCoursesView(APIView):
 
 class WidgetCitiesView(APIView):
     """Public endpoint — returns all cities for the widget city selector."""
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
@@ -445,6 +450,7 @@ class WidgetCitiesView(APIView):
 
 class WidgetBranchesView(APIView):
     """Public endpoint — returns active branches (id, name, city) for the widget branch selector."""
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
