@@ -22,6 +22,7 @@ from apps.store.serializers import (
     PaymentInitiationResponseSerializer, InventoryAdjustmentSerializer
 )
 from apps.core.payment_service import PaymentService
+from apps.core.scoping import is_scoped_manager, assigned_branch_ids
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,13 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Filter products by query parameters."""
         queryset = super().get_queryset()
+
+        # Scoped managers: only products in their assigned branches (+ global/delivery).
+        if is_scoped_manager(self.request.user):
+            branch_ids = assigned_branch_ids(self.request.user)
+            queryset = queryset.filter(
+                Q(branch_id__in=branch_ids) | Q(branch__isnull=True)
+            )
         
         # Search by name/category
         search = self.request.query_params.get('search', '')

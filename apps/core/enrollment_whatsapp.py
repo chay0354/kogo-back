@@ -57,7 +57,11 @@ def build_enrollment_whatsapp_context(
         'lookup_names': lookup_names,
         'child_name': f"{child.first_name} {child.last_name}".strip(),
         'course_name': lesson.course.name if lesson.course_id else '',
-        'branch_name': lesson.branch.name if lesson.branch_id else '',
+        'branch_name': (
+            lesson.course.branch.name
+            if lesson.course_id and lesson.course.branch_id
+            else ''
+        ),
         'day_name': dict(Lesson.DAY_OF_WEEK_CHOICES).get(lesson.day_of_week, ''),
         'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
         'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else '',

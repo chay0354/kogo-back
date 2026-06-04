@@ -20,6 +20,7 @@ from apps.courses.serializers import (
 from apps.instructors.models import Instructor
 from apps.enrollments.models import LessonEnrollment
 from apps.core.permissions import IsManager
+from apps.core.scoping import scope_courses, is_scoped_manager
 
 
 class CourseTypeViewSet(viewsets.ModelViewSet):
@@ -49,13 +50,24 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Optimize queryset based on action"""
         queryset = super().get_queryset()
-        
+
+        # Course-types are only visible if the manager has at least one assigned
+        # course of that type; nested courses are scoped too.
+        user = self.request.user
+        scoped = is_scoped_manager(user)
+        if scoped:
+            queryset = queryset.filter(courses__managers=user).distinct()
+
+        nested_courses = Course.objects.filter(is_active=True)
+        if scoped:
+            nested_courses = nested_courses.filter(managers=user)
+
         if self.action == 'details':
             # Prefetch all related data for details view
             queryset = queryset.prefetch_related(
                 Prefetch(
                     'courses',
-                    queryset=Course.objects.filter(is_active=True).prefetch_related(
+                    queryset=nested_courses.prefetch_related(
                         Prefetch(
                             'lessons',
                             queryset=Lesson.objects.select_related(
@@ -108,7 +120,8 @@ class CourseViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Filter active courses, optionally by course type or branch"""
         queryset = Course.objects.filter(is_active=True).select_related('course_type', 'branch')
-        
+        queryset = scope_courses(queryset, self.request.user)
+
         course_type_id = self.request.query_params.get('course_type', None)
         if course_type_id:
             queryset = queryset.filter(course_type_id=course_type_id)
@@ -136,6 +149,13 @@ class CourseViewSet(viewsets.ModelViewSet):
         instance.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    def perform_create(self, serializer):
+        """Auto-assign the creating manager so they can always see what they create."""
+        course = serializer.save()
+        user = self.request.user
+        if user and user.is_authenticated and not user.is_superuser:
+            course.managers.add(user)
+
 
 class LessonViewSet(viewsets.ModelViewSet):
     """
@@ -152,6 +172,7 @@ class LessonViewSet(viewsets.ModelViewSet):
         queryset = Lesson.objects.select_related(
             'course', 'course__branch', 'room', 'instructor'
         )
+        queryset = scope_courses(queryset, self.request.user, 'course')
 
         course_id = self.request.query_params.get('course', None)
         if course_id:
@@ -241,6 +262,9 @@ class CourseListViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CourseListSerializer
     permission_classes = [IsAuthenticated, IsManager]
 
+    def get_queryset(self):
+        return scope_courses(super().get_queryset(), self.request.user)
+
 
 class LessonListViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -250,3 +274,6 @@ class LessonListViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Lesson.objects.filter(status='scheduled').select_related('course')
     serializer_class = LessonListSerializer
     permission_classes = [IsAuthenticated, IsManager]
+
+    def get_queryset(self):
+        return scope_courses(super().get_queryset(), self.request.user, 'course')

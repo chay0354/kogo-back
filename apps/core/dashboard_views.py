@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, date
 from decimal import Decimal
 
 from apps.core.permissions import IsManager
+from apps.core.scoping import is_scoped_manager, assigned_course_ids, assigned_branch_ids
 
 logger = logging.getLogger(__name__)
 from apps.core.models import (
@@ -75,9 +76,28 @@ def dates_to_month_list(date_from, date_to):
 class DashboardViewSet(viewsets.ViewSet):
     """
     Dashboard data endpoints
-    All endpoints require authentication and manager role
+    All endpoints require authentication and manager role.
+
+    Scoped managers (non-superuser) only see data for their assigned courses.
+    Branch/instructor-level financial snapshots are scoped to the branches /
+    instructors derived from those courses (branch totals remain branch-level).
     """
     permission_classes = [IsAuthenticated, IsManager]
+
+    def _scope(self, request):
+        """Return (is_scoped, course_ids, branch_ids, instructor_ids) for this user."""
+        user = request.user
+        if not is_scoped_manager(user):
+            return False, None, None, None
+        course_ids = assigned_course_ids(user)
+        branch_ids = assigned_branch_ids(user)
+        instructor_ids = list(
+            Lesson.objects.filter(course_id__in=course_ids)
+            .exclude(instructor__isnull=True)
+            .values_list('instructor_id', flat=True)
+            .distinct()
+        )
+        return True, course_ids, branch_ids, instructor_ids
     
     @action(detail=False, methods=['get'], url_path='financial')
     def financial_data(self, request):
@@ -105,10 +125,14 @@ class DashboardViewSet(viewsets.ViewSet):
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
         
+        scoped, _c_ids, scoped_branch_ids, scoped_instr_ids = self._scope(request)
+
         # Query BranchMonthlySnapshot (now includes refreshed current month)
         snapshots = BranchMonthlySnapshot.objects.filter(month__in=months)
         if branch_id and branch_id != 'all':
             snapshots = snapshots.filter(branch_id=branch_id)
+        if scoped:
+            snapshots = snapshots.filter(branch_id__in=scoped_branch_ids)
         
         snapshots = snapshots.select_related('branch')
         
@@ -211,6 +235,10 @@ class DashboardViewSet(viewsets.ViewSet):
             instructor_snapshots = instructor_snapshots.filter(
                 instructor__primary_branch_id=branch_id
             )
+        if scoped:
+            instructor_snapshots = instructor_snapshots.filter(
+                instructor_id__in=scoped_instr_ids
+            )
         
         instructor_data = instructor_snapshots.values(
             'instructor__first_name',
@@ -285,6 +313,10 @@ class DashboardViewSet(viewsets.ViewSet):
         
         if branch_id and branch_id != 'all':
             snapshots = snapshots.filter(instructor__primary_branch_id=branch_id)
+
+        scoped, _c_ids, _b_ids, scoped_instr_ids = self._scope(request)
+        if scoped:
+            snapshots = snapshots.filter(instructor_id__in=scoped_instr_ids)
         
         snapshots = snapshots.select_related('instructor', 'instructor__primary_branch')
         
@@ -382,8 +414,14 @@ class DashboardViewSet(viewsets.ViewSet):
         else:
             quit_date_from, quit_date_to = date_from, date_to
         
+        scoped, scoped_course_ids, _b_ids, _i_ids = self._scope(request)
+
         # Get all children
         children = Child.objects.all()
+        if scoped:
+            children = children.filter(
+                lesson_enrollments__lesson__course_id__in=scoped_course_ids
+            ).distinct()
         
         if search_query:
             children = children.filter(
@@ -565,6 +603,10 @@ class DashboardViewSet(viewsets.ViewSet):
         # Student list (top 10)
         student_list = []
         active_enrollments = LessonEnrollment.objects.filter(status='active')
+        if scoped:
+            active_enrollments = active_enrollments.filter(
+                lesson__course_id__in=scoped_course_ids
+            )
         if course_id != 'all':
             active_enrollments = active_enrollments.filter(lesson__course_id=course_id)
         if branch_id != 'all':
@@ -645,8 +687,12 @@ class DashboardViewSet(viewsets.ViewSet):
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
         
+        scoped, scoped_course_ids, _b_ids, _i_ids = self._scope(request)
+
         # Query LessonMonthlySnapshot grouped by course (now includes refreshed current month)
         snapshots = LessonMonthlySnapshot.objects.filter(month__in=months)
+        if scoped:
+            snapshots = snapshots.filter(course_id__in=scoped_course_ids)
         
         if course_id and course_id != 'all':
             snapshots = snapshots.filter(course_id=course_id)
@@ -662,6 +708,8 @@ class DashboardViewSet(viewsets.ViewSet):
         # KPIs - Count actual courses, not snapshot records
         # Total courses: All active courses (with applied filters)
         courses_query = Course.objects.filter(is_active=True)
+        if scoped:
+            courses_query = courses_query.filter(id__in=scoped_course_ids)
         if course_id and course_id != 'all':
             courses_query = courses_query.filter(id=course_id)
         if branch_id and branch_id != 'all':
@@ -800,11 +848,15 @@ class DashboardViewSet(viewsets.ViewSet):
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
         
+        scoped, _c_ids, scoped_branch_ids, _i_ids = self._scope(request)
+
         # Query BranchMonthlySnapshot (now includes refreshed current month)
         snapshots = BranchMonthlySnapshot.objects.filter(month__in=months)
         
         if branch_id and branch_id != 'all':
             snapshots = snapshots.filter(branch_id=branch_id)
+        if scoped:
+            snapshots = snapshots.filter(branch_id__in=scoped_branch_ids)
         
         # Apply city filter
         if city_id and city_id != 'all':
@@ -835,6 +887,8 @@ class DashboardViewSet(viewsets.ViewSet):
         children_query = Child.objects.exclude(
             status__in=['ghost', 'non_active', 'sign_in']
         )
+        if scoped:
+            children_query = children_query.filter(family__branch_id__in=scoped_branch_ids)
         
         # Apply branch filter
         if branch_id and branch_id != 'all':

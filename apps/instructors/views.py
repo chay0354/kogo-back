@@ -18,6 +18,7 @@ from apps.instructors.utils import (
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment
 from apps.core.permissions import IsManager
+from apps.core.scoping import is_scoped_manager, assigned_course_ids
 from apps.scheduling.models import LessonCancellation
 from apps.instructors.utils import calculate_lesson_salary_with_override
 
@@ -53,6 +54,17 @@ class InstructorViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Apply filters to queryset"""
         queryset = super().get_queryset()
+
+        # Scoped managers: only instructors who teach one of their assigned courses.
+        if is_scoped_manager(self.request.user):
+            course_ids = assigned_course_ids(self.request.user)
+            instr_ids = (
+                Lesson.objects.filter(course_id__in=course_ids)
+                .exclude(instructor__isnull=True)
+                .values_list('instructor_id', flat=True)
+                .distinct()
+            )
+            queryset = queryset.filter(id__in=instr_ids)
         
         # Filter by branch
         branch_id = self.request.query_params.get('branch')
