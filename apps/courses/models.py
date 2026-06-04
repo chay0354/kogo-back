@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from apps.core.models import Branch, Room
 from apps.instructors.models import Instructor
@@ -35,6 +36,13 @@ class Course(models.Model):
     min_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מינימום")
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    managers = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name='assigned_courses',
+        blank=True,
+        verbose_name="מנהלים מורשים",
+        help_text="מנהלים שיכולים לראות ולנהל חוג זה. ריק = אף מנהל (מלבד מנהל-על).",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 

@@ -53,6 +53,12 @@ class LessonEnrollment(models.Model):
     trial_evening_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת ערב נשלחה (לא בשימוש)")
     trial_10am_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת 10:00 ביום הניסיון נשלחה")
     trial_followup_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="after-test נשלח")
+    didnt_arrive_whatsapp_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="didnt_arrive WhatsApp נשלח",
+        help_text="Set after 3 consecutive non-present marks; cleared when marked present again.",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 

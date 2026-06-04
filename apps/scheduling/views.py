@@ -1,5 +1,6 @@
 from datetime import date as date_cls, timedelta
 
+import logging
 from django.utils import timezone
 from django.db.models import Q
 from rest_framework import viewsets, status
@@ -9,6 +10,7 @@ from rest_framework.response import Response
 
 from apps.core.permissions import IsManager
 from apps.core.models import UserProfile
+from apps.core.scoping import scope_courses, assigned_branch_ids, is_scoped_manager
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
@@ -25,6 +27,8 @@ from .event_serializers import (
     ScheduleEventListSerializer,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class LessonViewSet(viewsets.ModelViewSet):
     """
@@ -40,7 +44,7 @@ class LessonViewSet(viewsets.ModelViewSet):
         """Filter lessons based on user role"""
         user = self.request.user
         qs = Lesson.objects.select_related(
-            'course', 'course__course_type', 'instructor', 'branch', 'room'
+            'course', 'course__course_type', 'course__branch', 'instructor', 'room'
         ).prefetch_related('enrollments')
         
         try:
@@ -49,8 +53,8 @@ class LessonViewSet(viewsets.ModelViewSet):
             return qs.none()
         
         if user_role == UserProfile.ROLE_MANAGER:
-            # Managers see all lessons
-            return qs
+            # Managers see only lessons of their assigned courses (superusers: all)
+            return scope_courses(qs, user, 'course')
         elif user_role == UserProfile.ROLE_WORKER:
             # Workers see only their own lessons (matched by email)
             return qs.filter(instructor__email__iexact=user.email)
@@ -459,6 +463,21 @@ class LessonViewSet(viewsets.ModelViewSet):
                     if child.absent_irregularly:
                         child.absent_irregularly = False
                         child.save(update_fields=['absent_irregularly'])
+
+                # WhatsApp: didnt_arrive after 3 consecutive non-present marks
+                try:
+                    from apps.enrollments.attendance_whatsapp import maybe_send_didnt_arrive_whatsapp
+                    maybe_send_didnt_arrive_whatsapp(
+                        child=child,
+                        lesson=lesson,
+                        attendance_status=attendance_status,
+                    )
+                except Exception:
+                    logger.exception(
+                        'didnt_arrive WhatsApp failed (non-fatal) for child %s lesson %s',
+                        child_id,
+                        lesson.id,
+                    )
                 
                 results.append({
                     'child_id': str(child_id),
@@ -518,6 +537,13 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
                 else:
                     # No instructor match: still show rentals for schedule visibility
                     queryset = queryset.filter(is_studio_rental=True)
+            elif user_role == UserProfile.ROLE_MANAGER and is_scoped_manager(user):
+                # Scoped managers: only events in their assigned branches
+                # (plus global/branch-less events) so the calendar stays coherent.
+                branch_ids = assigned_branch_ids(user)
+                queryset = queryset.filter(
+                    Q(branch_id__in=branch_ids) | Q(branch__isnull=True)
+                )
         except (UserProfile.DoesNotExist, AttributeError):
             pass
         

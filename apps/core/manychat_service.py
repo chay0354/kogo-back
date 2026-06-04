@@ -248,6 +248,7 @@ class ManyChatService:
         'MANYCHAT_PAYMENT_FAILED_FLOW_NS': ('payment-failed',),
         'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
         'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS': ('after-test', 'after test'),
+        'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
     }
 
     def resolve_flow_ns(self, setting_name: str) -> str:
@@ -282,6 +283,7 @@ class ManyChatService:
     REGISTRATION_KIND_TRIAL_10AM = 'trial_10am'
     REGISTRATION_KIND_TRIAL_AFTER_TEST = 'trial_after_test'
     REGISTRATION_KIND_PAYMENT_FAILED = 'payment_failed'
+    REGISTRATION_KIND_DIDNT_ARRIVE = 'didnt_arrive'
 
     _REGISTRATION_KINDS = {
         REGISTRATION_KIND_SUBSCRIPTION: {
@@ -330,6 +332,17 @@ class ManyChatService:
                 'התשלום עבור רישום {child_name} לחוג {course_name} בסניף {branch_name} לא הושלם.\n'
                 'השיעור מתוכנן בימי {day_name} בשעה {time_range}.\n'
                 'ניתן לנסות שנית דרך מערכת Kogo או לפנות אלינו.'
+            ),
+        },
+        # 3 consecutive times not marked present (didnt_arrive automation).
+        REGISTRATION_KIND_DIDNT_ARRIVE: {
+            'flow_setting': 'MANYCHAT_DIDNT_ARRIVE_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'שמנו לב ש-{child_name} לא הגיע/ה לשלושה שיעורים ברצף בחוג {course_name} בסניף {branch_name}.\n'
+                'השיעור מתקיים בימי {day_name} בשעה {time_range}.\n'
+                'נשמח לשמוע מכם אם הכל בסדר ואם אתם ממשיכים להגיע.\n'
+                'צוות Kogo'
             ),
         },
     }

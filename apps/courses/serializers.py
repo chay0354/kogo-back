@@ -1,11 +1,25 @@
 from decimal import Decimal, InvalidOperation
 
 from rest_framework import serializers
+from django.contrib.auth import get_user_model
 from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.enrollments.models import LessonEnrollment
-from apps.core.models import Branch
+from apps.core.models import Branch, UserProfile
+from apps.core.scoping import is_scoped_manager
 from apps.scheduling.studio_conflict import timed_event_conflicts_lesson
+
+
+User = get_user_model()
+
+
+def _scoped_courses_for(serializer, base_qs):
+    """Limit a Course queryset to the requesting manager's assigned courses."""
+    request = serializer.context.get('request')
+    user = getattr(request, 'user', None)
+    if user is not None and is_scoped_manager(user):
+        return base_qs.filter(managers=user)
+    return base_qs
 
 
 def _normalize_additional_course_prices(value):
@@ -91,27 +105,32 @@ class CourseTypeWithStatsSerializer(serializers.ModelSerializer):
                   'students_count', 'branches', 'is_active']
     
     def get_courses_count(self, obj):
-        """Count active courses under this course type"""
-        return obj.courses.filter(is_active=True).count()
+        """Count active courses under this course type (scoped to the manager)."""
+        return _scoped_courses_for(
+            self, obj.courses.filter(is_active=True)
+        ).count()
     
     def get_lessons_count(self, obj):
-        """Count recurring lessons under this course type"""
+        """Count recurring lessons under this course type (scoped to the manager)."""
+        courses = _scoped_courses_for(self, obj.courses.all())
         return Lesson.objects.filter(
-            course__course_type=obj,
+            course__in=courses,
             is_recurring=True
         ).count()
     
     def get_students_count(self, obj):
-        """Count active enrolled students under this course type"""
+        """Count active enrolled students under this course type (scoped)."""
+        courses = _scoped_courses_for(self, obj.courses.all())
         return LessonEnrollment.objects.filter(
-            lesson__course__course_type=obj,
+            lesson__course__in=courses,
             status='active'
         ).count()
     
     def get_branches(self, obj):
-        """Get distinct branches that host courses of this course type"""
+        """Get distinct branches that host (visible) courses of this course type."""
+        courses = _scoped_courses_for(self, obj.courses.all())
         branches = Branch.objects.filter(
-            courses__course_type=obj
+            courses__in=courses
         ).distinct()
         return BranchMinimalSerializer(branches, many=True).data
 
@@ -206,14 +225,31 @@ class CourseSerializer(serializers.ModelSerializer):
     lessons_count = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
     lessons = serializers.SerializerMethodField()
+    managers = serializers.PrimaryKeyRelatedField(
+        many=True,
+        required=False,
+        queryset=User.objects.filter(profile__role=UserProfile.ROLE_MANAGER),
+    )
+    managers_detail = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
         fields = ['id', 'course_type', 'course_type_name', 'name', 'description', 
                   'price', 'capacity', 'branch', 'branch_name',
                   'min_age', 'max_age', 'is_active', 'lessons_count', 'enrolled_students_count',
-                  'lessons', 'created_at', 'updated_at']
+                  'lessons', 'managers', 'managers_detail', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_managers_detail(self, obj):
+        """Lightweight list of assigned managers for display in the course dialog."""
+        return [
+            {
+                'id': str(u.id),
+                'name': (f"{u.first_name} {u.last_name}".strip() or u.email),
+                'email': u.email,
+            }
+            for u in obj.managers.all()
+        ]
     
     def get_lessons_count(self, obj):
         """Count lessons for this course"""
