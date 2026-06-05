@@ -313,7 +313,7 @@ class PaymentService:
         
         try:
             payment = Payment.objects.select_related(
-                'child', 'family', 'lesson', 'lesson__course', 'lesson__branch',
+                'child', 'family', 'lesson', 'lesson__course', 'lesson__course__branch',
             ).get(id=payment_id)
         except Payment.DoesNotExist:
             logger.error(f"Payment not found for webhook: {payment_id}")
@@ -769,43 +769,41 @@ class PaymentService:
         recurring_payment_id: str,
         cancellation_reason: str = ''
     ) -> Dict:
-        """
-        Cancel a recurring subscription.
-        
-        TODO: Needs to be implemented with https://api.tranzila.com/v2/sto/update
-        as mentioned in Tranzila documentation.
-        
-        The implementation should:
-        1. Use the STO (Secure Token Object) update endpoint
-        2. Update the token status to cancelled/inactive
-        3. Update the RecurringPayment status in the database
-        
-        Args:
-            recurring_payment_id: UUID of RecurringPayment
-            cancellation_reason: Reason for cancellation
-            
-        Returns:
-            Dict with cancellation result
-        """
+        """Cancel a recurring subscription locally and on Tranzila (/sto/update)."""
         try:
             recurring_payment = RecurringPayment.objects.select_related('child').get(
                 id=recurring_payment_id
             )
         except RecurringPayment.DoesNotExist:
             raise ValueError("Recurring payment not found")
-        
-        # TODO: Implement cancellation using Tranzila v2 STO API
-        # Call: https://api.tranzila.com/v2/sto/update
-        # Required parameters:
-        # - terminal_name
-        # - token (recurring_payment.tranzila_token)
-        # - status: "cancelled" or appropriate status
-        
-        logger.warning(f"Cancel subscription not yet implemented for recurring payment: {recurring_payment.id}")
-        
+
+        if recurring_payment.status == 'cancelled':
+            return {'success': True, 'message': 'Subscription already cancelled'}
+
+        tranzila_result = {'success': True}
+        if recurring_payment.tranzila_token:
+            tranzila_service = TranzilaService()
+            tranzila_result = tranzila_service.cancel_recurring_payment(
+                token=recurring_payment.tranzila_token
+            )
+            if not tranzila_result.get('success'):
+                logger.warning(
+                    f"Tranzila STO cancel failed for recurring {recurring_payment.id}: "
+                    f"{tranzila_result.get('error')}. Cancelling locally only."
+                )
+
+        recurring_payment.status = 'cancelled'
+        recurring_payment.cancelled_at = timezone.now()
+        if cancellation_reason:
+            recurring_payment.cancellation_reason = cancellation_reason
+        recurring_payment.save(update_fields=['status', 'cancelled_at', 'cancellation_reason'])
+
+        logger.info(f"Recurring payment {recurring_payment.id} cancelled")
         return {
-            'success': False,
-            'error': 'Cancel subscription feature needs to be implemented using Tranzila v2 STO API'
+            'success': True,
+            'recurring_id': str(recurring_payment.id),
+            'tranzila_cancelled': tranzila_result.get('success', False),
+            'manual_cancellation_required': tranzila_result.get('manual_cancellation_required', False),
         }
     
     def get_payment_status(self, payment_id: str) -> Dict:

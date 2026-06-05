@@ -484,34 +484,22 @@ class TranzilaService:
     
     def cancel_recurring_payment(
         self,
-        transaction_id: str,
-        authorization_number: str,
-        token: str = None,
-        recurring_index: Optional[str] = None
+        token: str,
     ) -> Dict:
         """
-        Cancel a recurring payment using Tranzila STO API.
-        
-        TODO: Needs to be implemented with https://api.tranzila.com/v2/sto/update
-        as mentioned in Tranzila documentation.
-        
-        The implementation should use the STO (Secure Token Object) update endpoint
-        to update the token status to cancelled/inactive.
-        
-        Reference: https://api.tranzila.com/v2/sto/update
-        
-        Expected implementation:
-        - Use POST request to /v2/sto/update
-        - Include terminal_name, token, and status parameters
-        - Handle authentication with API keys
-        - Parse response and return success/error
-        
+        Cancel a recurring payment (STO) on Tranzila.
+
+        Flow (two steps, per tranzila-main-api.yaml):
+        1. POST /stos/get  — look up the STO integer sto_id by the TranzilaTK token
+        2. POST /sto/update — set sto_status="inactive" on that sto_id
+
+        Note: /stos/get is a paid Tranzila module. If it returns an error, the
+        cancellation cannot proceed automatically and must be done via the
+        Tranzila dashboard.
+
         Args:
-            transaction_id: Original transaction ID (may not be needed for v2 API)
-            authorization_number: Authorization number (may not be needed for v2 API)
-            token: Tranzila token/STO identifier
-            recurring_index: Recurring payment index
-            
+            token: TranzilaTK token stored on RecurringPayment.tranzila_token
+
         Returns:
             Dict with cancellation result
         """
@@ -519,21 +507,64 @@ class TranzilaService:
             logger.error("Cannot cancel: No token provided")
             return {
                 **self._build_error_response('No Tranzila token available'),
-                'manual_cancellation_required': True
+                'manual_cancellation_required': True,
             }
-        
-        self._log_api_call("CANCEL_RECURRING_NOT_IMPLEMENTED", token=token)
-        
-        logger.warning(f"Cancel recurring payment not yet implemented. Token: {token[:10]}...")
-        
-        return {
-            **self._build_error_response(
-                'Cancel recurring payment needs to be implemented using Tranzila v2 STO API',
-                '999',
-                'Feature not yet implemented'
-            ),
-            'manual_cancellation_required': True
-        }
+
+        self._log_api_call("CANCEL_RECURRING_LOOKUP", token=token)
+
+        # Step 1: resolve the integer sto_id from the token
+        lookup_response = self._make_api_request(
+            params={'terminal_name': self.token_terminal, 'token': token},
+            endpoint='/stos/get',
+        )
+
+        if lookup_response.get('error_code') != 0:
+            msg = lookup_response.get('message', 'STO lookup failed')
+            logger.error(f"STO lookup failed for token {token[:10]}...: {msg}")
+            return {
+                **self._build_error_response(msg, str(lookup_response.get('error_code', '999'))),
+                'manual_cancellation_required': True,
+            }
+
+        stos = lookup_response.get('stos') or []
+        if not stos:
+            logger.error(f"No STO found for token {token[:10]}...")
+            return {
+                **self._build_error_response('No STO found for this token'),
+                'manual_cancellation_required': True,
+            }
+
+        # Use the first active STO (there should only be one per token)
+        active_stos = [s for s in stos if s.get('sto_status') == 'active']
+        sto = active_stos[0] if active_stos else stos[0]
+        sto_id = sto.get('sto_id')
+
+        if not sto_id:
+            logger.error(f"STO found but has no sto_id: {sto}")
+            return {
+                **self._build_error_response('STO record missing sto_id'),
+                'manual_cancellation_required': True,
+            }
+
+        self._log_api_call("CANCEL_RECURRING_UPDATE", sto_id=sto_id)
+
+        # Step 2: set the STO to inactive
+        update_response = self._make_api_request(
+            params={
+                'terminal_name': self.token_terminal,
+                'sto_id': int(sto_id),
+                'sto_status': 'inactive',
+            },
+            endpoint='/sto/update',
+        )
+
+        if update_response.get('error_code') != 0:
+            msg = update_response.get('message', 'STO update failed')
+            logger.error(f"STO update failed for sto_id={sto_id}: {msg}")
+            return self._build_error_response(msg, str(update_response.get('error_code', '999')))
+
+        logger.info(f"STO {sto_id} successfully set to inactive for token {token[:10]}...")
+        return self._build_success_response(sto_id=sto_id, sto_status='inactive')
     
     # ============================================================================
     # Webhook & Response Processing
@@ -590,27 +621,19 @@ class TranzilaService:
             'raw_payload': payload,
         }
     
-    def get_transaction_status(self, transaction_id: str) -> Dict:
-        """Query Tranzila for transaction status."""
-        params = {
-            'supplier': self.terminal,
-            'index': transaction_id,
-            'tranmode': 'Q',
-        }
-        
-        self._log_api_call("QUERY_STATUS", transaction_id=transaction_id)
-        
-        try:
-            response = self._make_api_request(params)
-            return response
-        except Exception as e:
-            logger.error(f"Error querying transaction: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e),
-                'transaction_id': transaction_id,
-                'status': 'unknown'
-            }
+    def get_sto_status(self, token: str) -> Dict:
+        """
+        Look up a standing order (STO) by its TranzilaTK token.
+
+        Uses POST /stos/get per tranzila-main-api.yaml.
+        Returns the list of matching STO records (may be empty).
+        Note: /stos/get is a paid Tranzila module.
+        """
+        self._log_api_call("GET_STO_STATUS", token=token)
+        return self._make_api_request(
+            params={'terminal_name': self.token_terminal, 'token': token},
+            endpoint='/stos/get',
+        )
     
     # ============================================================================
     # Helper Methods
