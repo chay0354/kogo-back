@@ -1,0 +1,1578 @@
+openapi: 3.0.0
+x-stoplight:
+  id: uco73pa31s3m0
+info:
+  version: 1.2.0
+  title: Invoices API
+  description: |-
+    # Tranzila Invoices API
+
+    Create, retrieve, and manage accounting documents for tax purposes in Israel.
+
+    ## Overview
+
+    The Invoices API enables businesses to generate legally compliant financial documents including:
+    - **Tax Invoices/Receipts (IR)** - חשבונית מס/קבלה
+    - **Receipts (RE)** - קבלה
+    - **Deal Invoices (DI)** - חשבונית עסקה
+    - **Tax Invoices (IN)** - חשבונית מס
+
+    ## Key Features
+
+    - **Automatic VAT calculations** based on Bank of Israel rates or custom settings
+    - **Multi-currency support** with automatic exchange rate handling
+    - **PDF generation** for all document types
+    - **Secure document retrieval** via unique retrieval keys
+    - **Integration with Tranzila payment system** via transaction indexing
+
+    ## Use Cases
+
+    - Generate invoices automatically after payment processing
+    - Create credit documents for refunds and cancellations
+    - Issue receipts for cash/check/bank transfer payments
+    - Manage multi-currency transactions with proper documentation
+    - Maintain compliant financial records for Israeli tax authorities
+servers:
+  - url: 'https://my.tranzila.com'
+    description: 'document web display '
+  - url: 'https://billing5.tranzila.com'
+    description: main API server
+paths:
+  /api/documents_db/create_document:
+    post:
+      summary: create document
+      description: |-
+        ## Payload Params
+
+        | Element Name                 | Data Type | Mandatory | Note (default value in bold)                                                           |
+        |------------------------------|-----------|-----------|---------------------------------------------------------------------------------------------|
+        | terminal_name                | String    | Yes       | Terminal for which a document is created                                                     |
+        | document_date                | Date      | No        | **Current date**. Format yyyy-mm-dd                                                              |
+        | document_type                | String    | No        | **IR**                                                                                          |
+        | document_currency_code       | String    | No        | **ILS**                                                                                         |
+        | vat_percent                  | Decimal   | No        | **Terminal setting or BOI to document date**                                                     |
+        | action                       | Integer   | No        | **1**                                                                                           |
+        | client_company               | String    | No        | my company                                                                                           |
+        | client_name                  | String    | No        | Client name or contact person                                                                |
+        | client_id                    | String    | No        | Numeric                                                                                     |
+        | client_email                 | String    | No        | Client email address                                                                        |
+        | client_address_line_1        | String    | No        | Client address line 1                                                                       |
+        | client_address_line_2        | String    | No        | Client address line 2                                                                       |
+        | client_city                  | String    | No        | jerusalem                                                                                            |
+        | client_country_code          | String    | No        | **IL**                                                                                          |
+        | client_zip                   | String    | No        | Numeric                                                                                     |
+        | items                        | Array     | See notes | Array of item documents, depending on document type                                          |
+        | payments                     | Array     | See notes | Array of payment documents, depending on document type                                       |
+        | document_language            | String    | No        | **heb**                                                                                         |
+        | response_language            | String    | No        | **eng**                                                                                         |
+        | related_document_number      | Integer   | No        |                                                                                             |
+        | relation_type                | Integer   | See notes | Mandatory if related_document_number is sent or not empty                                    |
+        | client_receipt_paid_for      | String    | No        | optional, the product or service name, use only when generating a receipt only (RE)                                                                                            |
+        | created_by_user              | String    | No        | Reference to external username, user_id or any other identifying data (will not be shown on invoice) |
+        | created_by_system            | String    | No        | Reference to external system identifying data                                      |
+
+        ### Item Params
+
+        | Element Name                 | Data Type | Mandatory | Note (default value in bold)                                                           |
+        |------------------------------|-----------|-----------|---------------------------------------------------------------------------------------------|
+        | code                         | String    | No        |                                                                                             |
+        | name                         | String    | Yes       |                                                                                             |
+        | type                         | String    | No        | **I**                                                                                           |
+        | units_number                 | Decimal   | No        | **1**                                                                                          |
+        | unit_type                    | Integer   | No        | **1**                                                                                           |
+        | unit_price                   | Decimal   | Yes       |                                                                                             |
+        | price_type                   | String    | No        | **G**                                                                                           |
+        | currency_code                | String    | No        | **ILS**                                                                                         |
+        | to_doc_currency_exchange_rate| Decimal   | See note  | Mandatory if currency code different from document currency                                  |
+
+        ### Payment Params
+
+        | Element Name                 | Data Type | Mandatory | Note (default value in bold)                                                           |
+        |------------------------------|-----------|-----------|---------------------------------------------------------------------------------------------|
+        | payment_method               | Integer   | Yes       |                                                                                             |
+        | payment_date                 | Date      | No        | **Current date.** Format yyyy-mm-dd                                                              |
+        | cc_last_4_digits             | String    | No        |                                                                                             |
+        | cc_credit_term               | Integer   | No        |                                                                                             |
+        | cc_installments_number       | Integer   | No        |                                                                                             |
+        | cc_brand                     | Integer   | No        |                                                                                             |
+        | bank                         | String    | No        |                                                                                             |
+        | bank_branch                  | String    | No        |                                                                                             |
+        | bank_account                 | String    | No        |                                                                                             |
+        | cheque_number                | String    | No        |                                                                                             |
+        | paypal_account               | String    | No        |                                                                                             |
+        | paypal_transaction_number    | String    | No        |                                                                                             |
+        | other_description            | String    | No        |                                                                                             |
+        | amount                       | Decimal   | Yes       |                                                                                             |
+        | currency_code                | String    | No        | **ILS**                                                                                         |
+        | to_doc_currency_exchange_rate| Decimal   | See notes | Mandatory if currency code different from document currency                                  |
+        | txnindex                     | Integer   | No        | Add a transaction index to the document |
+        | canceldoc                    | String    | No        | Indicates if the credit document is for a cancelled transaction | 
+
+        ### JSON Example
+
+        ```json
+        {
+          "terminal_name": "terminalname",
+          "document_date": "2021-01-01",
+          "document_type": "IR",
+          "action": 1,
+          "document_language": "heb",
+          "document_currency_code": "ILS",
+          "vat_percent": 17,
+          "client_company": "Test Ltd",
+          "client_id":"123456789",
+          "client_name": "Test",
+          "client_email": "test@test.com",
+          "client_address_line_1": "test line 1",
+          "client_address_line_2": "test line 2",
+          "client_zip": "4545451",
+          "client_city":"City",
+          "client_country_code": "IL",
+          "items": [
+            {
+              "type": "I",
+              "code": "321",
+              "name": "A",
+              "price_type": "G",
+              "unit_price": 70.25,
+              "units_number": 1,
+              "unit_type": 1,
+              "currency_code": "ILS",
+              "to_doc_currency_exchange_rate": 1
+            },
+            {
+              "type": "I",
+              "code": "111",
+              "name": "B",
+              "price_type": "G",
+              "unit_price": 30,
+              "units_number": 1,
+              "unit_type": 2,
+              "currency_code": "ILS",
+              "to_doc_currency_exchange_rate": 1
+            }
+          ],
+          "payments": [
+            {
+              "payment_method": 1,
+              "payment_date": "2024-07-06",
+              "cc_last_4_digits": 1533,
+              "cc_credit_term": 1,
+              "cc_brand": 1,
+              "amount": 100.25,
+              "currency_code": "ILS"
+            }
+          ]
+        }
+
+        ```
+      parameters:
+        - name: X-tranzila-api-app-key
+          in: header
+          schema:
+            type: string
+            example: '{{app_key}}'
+          examples:
+            default:
+              value: '{{app_key}}'
+        - name: X-tranzila-api-request-time
+          in: header
+          schema:
+            type: string
+            example: '{{new_timestamp}}'
+          examples:
+            default:
+              value: '{{new_timestamp}}'
+        - name: X-tranzila-api-nonce
+          in: header
+          schema:
+            type: string
+            example: '{{nonce}}'
+          examples:
+            default:
+              value: '{{nonce}}'
+        - name: X-tranzila-api-access-token
+          in: header
+          schema:
+            type: string
+            example: '{{access_key}}'
+          examples:
+            default:
+              value: '{{access_key}}'
+        - name: Content-Type
+          in: header
+          schema:
+            type: string
+            example: application/json
+          examples:
+            default:
+              value: application/json
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                terminal_name:
+                  type: string
+                  description: Terminal for which a document is created
+                document_date:
+                  type: string
+                  format: date
+                  pattern: yyyy-mm-dd
+                  example: '2024-01-20'
+                document_type:
+                  type: string
+                document_language:
+                  type: string
+                  description: '`eng` English, `heb` Hebrew'
+                  default: heb
+                document_currency_code:
+                  type: string
+                  description: '[Currency table detail](https://docs.tranzila.com/docs/invoices/erwyy1y8szn0h-params-table#currencies)'
+                  default: ILS
+                action:
+                  type: integer
+                  description: '`1` Debit, `3` Credit'
+                  default: 1
+                vat_percent:
+                  type: integer
+                  default: Terminal setting or BOI next to document date
+                  example: 17
+                client_company:
+                  type: string
+                client_id:
+                  type: string
+                  description: Numeric
+                client_email:
+                  type: string
+                  description: Client email address
+                client_name:
+                  type: string
+                client_address_line_1:
+                  type: string
+                client_address_line_2:
+                  type: string
+                client_zip:
+                  type: string
+                  description: "Numeric\r\n\r\n"
+                client_city:
+                  type: string
+                client_country_code:
+                  type: string
+                client_receipt_paid_for:
+                  type: string
+                response_language:
+                  type: string
+                  description: '`eng` English, `heb` Hebrew'
+                  default: eng
+                payments:
+                  type: array
+                  description: "Array of payment documents, depending on document type. </br>\r\nDifferent payment methods require different fields, [as detailed here.](https://docs.tranzila.com/docs/invoices/erwyy1y8szn0h-params-table#payment-fields-requirement-by-payment-method)"
+                  items:
+                    type: object
+                    properties:
+                      payment_method:
+                        type: integer
+                        description: "`1` Credit Card, `3` Cheque, `4` Bank Transfer, `5` Cash, `6` PayPal, `10` Other\r\n"
+                        minimum: 1
+                        maximum: 10
+                        example: 1
+                      payment_date:
+                        type: string
+                        format: date
+                        pattern: yyyy-mm-dd
+                        example: '2024-01-01'
+                      amount:
+                        type: number
+                      currency_code:
+                        type: string
+                        default: ILS
+                      to_doc_currency_exchange_rate:
+                        type: number
+                        description: Mandatory if currency code different from document currency
+                      cc_last_4_digits:
+                        type: string
+                        description: 'When using payment_method `1` '
+                        maxLength: 4
+                        example: '4568'
+                      cc_credit_term:
+                        type: integer
+                        description: "When using payment_method `1` </br> `1` Regular,\r\n `6` Credit plan (isracredit/visa adif), \r\n `8` Payments"
+                        default: 1
+                      cc_installments_number:
+                        type: integer
+                        description: 'When using payment_method `1` '
+                        minimum: 2
+                      cc_brand:
+                        type: integer
+                        description: "credit card brand When using payment_method `1` </br>\r\n[Guidelines for parameters](uhttps://docs.tranzila.com/docs/invoices/erwyy1y8szn0h-params-table#credit-card-brandsrl)"
+                      bank:
+                        type: string
+                        description: 'When using payment_method `3` OR `4` '
+                      bank_branch:
+                        type: string
+                        description: 'When using payment_method `3` OR `4` '
+                      bank_account:
+                        type: string
+                        description: 'When using payment_method `3` OR `4` '
+                      cheque_number:
+                        type: string
+                        description: "When using payment_method `3`\r\n "
+                      paypal_account:
+                        type: string
+                        description: When using payment_method `6`
+                      paypal_transaction_number:
+                        type: string
+                        description: When using payment_method `6`
+                      other_description:
+                        type: string
+                        description: 'When using payment_method `10` '
+                    required:
+                      - payment_method
+                      - payment_date
+                      - amount
+                items:
+                  type: array
+                  description: 'Array of item documents, depending on document type'
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      unit_price:
+                        type: number
+                        minimum: 0
+                      code:
+                        type: string
+                      type:
+                        type: string
+                        default: I
+                      price_type:
+                        type: string
+                        default: G
+                      units_number:
+                        type: number
+                        minimum: 1
+                        default: 1
+                      unit_type:
+                        type: integer
+                        description: Guidelines for parameters
+                        default: 1
+                      currency_code:
+                        type: string
+                        default: ILS
+                      to_doc_currency_exchange_rate:
+                        type: integer
+                        description: Mandatory if currency code different from document currency
+                    required:
+                      - name
+                      - unit_price
+                related_document_number:
+                  type: string
+                txnindex:
+                  type: integer
+                  description: This parameter allows you to add a transaction index to the document. It can be used to correlate the document with transactions in the Reports API.
+                  example: 12345
+                canceldoc:
+                  type: string
+                  description: 'This parameter indicates whether the document is a credit document for a cancelled transaction. If set to `Y`, the created document''s number will be reflected in the report response under the `txnfdnumber` parameter.'
+                  pattern: '^[YN]$'
+                  example: '"Y"'
+                created_by_system:
+                  type: string
+                  description: Reference to external system identifying data
+                relation_type:
+                  type: integer
+                  description: "Mandatory if related_document_number is sent or not empty </br> [Guidelines for parameters](https://docs.tranzila.com/docs/invoices/erwyy1y8szn0h-params-table#document-relation-types) \r\n"
+                  example: 1
+                created_by_user:
+                  type: string
+                  description: 'Reference to external username, user id or any other identifying data (will not be shown on invoice)'
+              required:
+                - terminal_name
+                - document_date
+                - document_type
+                - document_language
+                - document_currency_code
+                - payments
+                - items
+              x-examples:
+                Example 1:
+                  terminal_name: terminalname
+                  document_date: '2021-01-01'
+                  document_type: IR
+                  action: '1'
+                  document_language: heb
+                  document_currency_code: ILS
+                  vat_percent: '17'
+                  client_company: Test Ltd
+                  client_id: '123456789'
+                  client_name: Test
+                  client_email: test@test.com
+                  client_address_line_1: test line 1
+                  client_address_line_2: test line 2
+                  client_zip: '4545451'
+                  client_city: City
+                  client_country_code: IL
+                  items:
+                    - type: I
+                      code: '321'
+                      name: A
+                      price_type: G
+                      unit_price: '70.25'
+                      units_number: '1'
+                      unit_type: '1'
+                      currency_code: ILS
+                      to_doc_currency_exchange_rate: '1'
+                    - type: I
+                      code: '111'
+                      name: B
+                      price_type: G
+                      unit_price: '30'
+                      units_number: '1'
+                      unit_type: '2'
+                      currency_code: ILS
+                      to_doc_currency_exchange_rate: '1'
+                  payments:
+                    - payment_method: '5'
+                      payment_date: '2021-01-11'
+                      amount: '100.25'
+                      currency_code: ILS
+                      to_doc_currency_exchange_rate: '1'
+            examples:
+              Tax invoice/receipt - IR:
+                value:
+                  terminal_name: terminalname
+                  document_date: '2021-01-01'
+                  document_type: IR
+                  action: '1'
+                  document_language: heb
+                  document_currency_code: ILS
+                  vat_percent: '17'
+                  client_company: Test Ltd
+                  client_id: '123456789'
+                  client_name: Test
+                  client_email: test@test.com
+                  client_address_line_1: test line 1
+                  client_address_line_2: test line 2
+                  client_zip: '4545451'
+                  client_city: City
+                  client_country_code: IL
+                  items:
+                    - type: I
+                      code: '321'
+                      name: A
+                      price_type: G
+                      unit_price: '70.25'
+                      units_number: '1'
+                      unit_type: '1'
+                      currency_code: ILS
+                      to_doc_currency_exchange_rate: '1'
+                    - type: I
+                      code: '111'
+                      name: B
+                      price_type: G
+                      unit_price: '30'
+                      units_number: '1'
+                      unit_type: '2'
+                      currency_code: ILS
+                      to_doc_currency_exchange_rate: '1'
+                  payments:
+                    - payment_method: '5'
+                      payment_date: '2021-01-11'
+                      amount: '100.25'
+                      currency_code: ILS
+                      to_doc_currency_exchange_rate: '1'
+      responses:
+        '200':
+          description: |
+            Document creation response (success or error)
+
+            ## Success Response
+            When an invoice PDF is successfully created:
+            - `status_code: 0` = Success
+            - `status_msg: "Success"` or `"הצלחה"`
+            - Document details including unique `retrieval_key` for PDF access
+
+            ## Error Response  
+            When document creation fails:
+            - `status_code: <error_code>` (see error codes section)
+            - `status_msg: <error_message>`
+
+            All responses return HTTP 200 - check `status_code` field to determine success/failure.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CreateDocumentResponse'
+                  - $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                successResponse:
+                  summary: Successful document creation
+                  value:
+                    status_code: 0
+                    status_msg: הצלחה
+                    enquiry_key: 14451a5f
+                    document:
+                      id: '6995'
+                      number: '1000010'
+                      assignment_number: null
+                      total_charge_amount: 11.9
+                      currency: ILS
+                      created_at: '2025-04-06 14:12:09'
+                      retrieval_key: ODIyMWM2NGYwZWU1NjAzMzI3NzU2NDMzZDMwZTE4YzU2NTViMDAxNTFiZGE3ZGRjMDU3MzkyYmEyMWQ0MjY1Y2ZjZjM3ZmM5ZTIzNTI3YTQ0YTBkOGI5MjdjYjE4YTg5OGU5NWIyMDFjZWY4NDc1NDk0YmMwYTg3ZmYyMzk5MjgxM0EzUENxNmovUm8xUUJsMk5rK1VnVGtDK0lJZkFEZVpNOXlqbWd3NXVIZU5SZXo4MFU5aEpqV1JMY29sVFFsTVI2NGxBUHFKU0MzbnVOTldPZWhKZz09
+                errorInvalidTerminal:
+                  summary: Error 10000 - Invalid terminal name
+                  value:
+                    status_code: 10000
+                    status_msg: Invalid characters in terminal name or terminal name not found in system
+                errorInvalidDocumentType:
+                  summary: Error 10002 - Unknown document type
+                  value:
+                    status_code: 10002
+                    status_msg: Unknown document type
+      servers:
+        - url: 'https://billing5.tranzila.com'
+          description: main API server
+      x-stoplight:
+        id: e9f00t8lnhw3k
+  /api/documents_db/get_document:
+    post:
+      summary: Get financial document
+      description: |-
+        ### This endpoint will generate a PDF upon success and return JSON in case of an error.
+        | Element Name | Data type | Mandatory | Note (default value in bold) |
+        |-----------|-----|-------------| -----------------------------|
+        | terminal_name     | String  | Yes    | Terminal in which a document was created|
+        | document_id       | integer  | Yes|                              |
+        | response_language   | String  | No |  **eng**        |
+
+        ### JSON Example
+
+        ```json
+        {
+          "terminal_name": "terminalname",
+          “document_id”: “11823”
+        }
+        ```
+      operationId: post-api-documents_db-get_document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - terminal_name
+                - document_id
+              properties:
+                terminal_name:
+                  type: string
+                  description: Terminal in which the document was created
+                  example: terminalname
+                document_id:
+                  type: string
+                  description: Document ID
+                  example: '11823'
+                response_language:
+                  type: string
+                  description: 'Response language: ''eng'' for English, ''heb'' for Hebrew'
+                  enum:
+                    - eng
+                    - heb
+                  default: eng
+                  example: eng
+            examples:
+              getDocument:
+                value:
+                  terminal_name: terminalname
+                  document_id: '11823'
+      responses:
+        '200':
+          description: |
+            **Success: Returns PDF file**
+
+            When successful, this endpoint returns the PDF document file directly.
+            The response Content-Type will be `application/pdf`.
+
+            **Error: Returns JSON**
+
+            When an error occurs, returns JSON with error details:
+            - `status_code`: Error code (see error codes section)
+            - `status_msg`: Error message
+
+            Common errors:
+            - `10600`: Unknown document id
+            - `10601`: Document ID not found in database
+            - `10602`: No PDF file found for document
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+                description: PDF document file
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                errorDocumentNotFound:
+                  summary: Error 10600 - Document not found
+                  value:
+                    status_code: 10600
+                    status_msg: Unknown document id
+                errorNoFile:
+                  summary: Error 10602 - PDF not found
+                  value:
+                    status_code: 10602
+                    status_msg: NO_FILE_FOUND_FOR_DOCUMENT
+      servers:
+        - url: 'https://billing5.tranzila.com'
+          description: main API server
+      x-stoplight:
+        id: 3ow9bdyee984b
+  '/api/get_financial_document/{retrieval_key}':
+    get:
+      summary: Get financial document – for web use only (end client)
+      description: |
+        Retrieve a financial document PDF using its unique retrieval key.
+
+        This endpoint is designed for displaying documents to end customers via web browser.
+
+        ## Success Response
+        Returns the PDF document file directly with `Content-Type: application/pdf`.
+
+        ## Error Response
+        Returns an HTML error page when:
+        - Retrieval key is invalid
+        - Document not found
+        - Document expired
+
+        ## Example Usage
+        ```
+        https://my.tranzila.com/api/get_financial_document/[retrieval_key]
+        ```
+
+        **Sample PDF:** [View example document](https://my.tranzila.com/api/get_financial_document/YTM0NWFlZmI4NTk3ODgzYzFlNGJkNWYzMTY5YTFhZjM2ZTM5NWM0OGZlYWU0NzEyM2IyYTRmZmEzYjQyZGRmYmNmZGNkMWRkN2VkMjRhNWZhMTM5MmVhNTBiNmQ4ZGQ5NTUxODIzMDljZTY4N2M3MmUwZTE3ZjFjOTFlODQwYWRpRTl5MVB1dUdxZmFXWDdzWEcxVkZNWmV4SnZndmVocGZmZ1VTcUtTT1NkTjlJZXkvM2xtSmJkakh2bmhWNndpV1locnlmQTVTUHBPdHllVlVNc24wZz09)
+
+        **Error page example:** [Invalid retrieval key](https://my.tranzila.com/errors/page_missing)
+
+        ## Troubleshooting
+        - **Check the Retrieval Key**: Ensure the key is copied exactly from the API response
+        - **Contact Support**: If the key is correct but document doesn't load
+      operationId: get-api-get_financial_document-retrieval_key
+      parameters:
+        - name: retrieval_key
+          in: path
+          required: true
+          description: Unique document retrieval key (obtained from create_document or get_documents response)
+          schema:
+            type: string
+          example: NWQzNjlkMjk3YmFkM2EzYTk1MjhiMjgyOWJlZWIyY2JkM2E2MmM2ZDY1NmY3YWZjZWI2ZWFmYTYzYjhjZmY1OGYwMWYzZmVmMWUyMGQ4MDVjOWUyYTdlN2JhOTZlZTM3Njg3OWVkYjE0MDM5MzM4MDkyZmY0ODIyOGEyMzJlNzl1SUgzRThSRW95Z05qUHFXU3dpVEpSNkY1T1V5TzA2LzhMZC9ZbXZiUEdQcWc0eU1Ua09DNDJiUG8xaHJSOUpNSllDZlVJdFRLSUlocitWaDhFNVUvZz09
+      responses:
+        '200':
+          description: |
+            **Success:** PDF document file
+
+            Returns the financial document as a PDF file that can be displayed in browser or downloaded.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+                description: PDF document file
+        '404':
+          description: |
+            **Error:** Document not found or invalid retrieval key
+
+            Returns HTML error page when:
+            - Retrieval key is invalid or expired
+            - Document has been deleted
+            - Access is restricted
+          content:
+            text/html:
+              schema:
+                type: string
+                description: HTML error page
+      servers:
+        - url: 'https://my.tranzila.com'
+          description: document web display
+      x-stoplight:
+        id: hdj5h8w2jhfuj
+  /api/documents_db/get_documents:
+    post:
+      summary: Get financial documents
+      description: |-
+        This endpoint accepts json and returns json.
+
+        | Element Name | Data type | Mandatory | Note (default value in bold) |
+        |-----------|-----|-------------| -----------------------------|
+        | terminal_names     | array of strings | Yes    |  Terminals for which documents are created |
+        | transaction_ids       | array of integers  |  See note | Mandatory if all other fields empty    |
+        | start_date | Date | See note |  Format yyyy-mm-dd. Mandatory if all other fields empty        |
+        | end_date | Date | See note |  Format yyyy-mm-dd. Mandatory if all other fields empty        |
+        | client_email | String | See note |  Mandatory if all other fields empty        |
+
+        JSON example:
+        Input:
+        ```json
+        {
+          "terminal_names": ["terminalname1","terminalname2","terminalnamen"],
+          "client_email": "mymail@mydomain.com”,
+          "start_date": "2019-03-05",
+          "end_date": "2019-03-30" 
+        }
+        ```
+
+        Output:
+        ```json
+        {
+          "status_code": 0,
+          "status_msg": "Success",
+          "enquiry_key": "79b8ba07",
+          "documents": [
+            {
+              "id": "6252",
+              "number": "1001956",
+              "assignment_number": null,
+              "type": "IR",
+              "action": "1",
+              "total_charge_amount": 10,
+              "currency": "ILS",
+              "created_at": "2025-07-27 14:14:31",
+              "retrieval_key": "ZDA2ODJkNDZjNjY0NDkwZTEyMTJmODA5NWRkMDkxODAxNDgwOWY2MTdlY2IxMTY5MzcxMmRiMjYzYWExOGRkZjQyY2I5ZWRlODMxNjljNDlkNzk5NjdkMzAzOTMwODdmOTA4NjBhMjk3OGQyYmFkOThmYWU1ODNlNGI1YzNkMjE1STZMLzZYZ1Bwd2VNRXEvY2pTVm95THpsU3pZQ3d0UUpWUUhuSWNjU3FWbUgyKzlPYTh3b0JFc283YVBxakFXN0w2eXBJT1ppYUYwZEtwMHZjV3Qrdz09"
+            },
+            {
+              "id": "6253",
+              "number": "1001957",
+              "assignment_number": null,
+              "type": "IR",
+              "action": "3",
+              "total_charge_amount": 10,
+              "currency": "ILS",
+              "created_at": "2025-07-27 14:17:18",
+              "retrieval_key": "YjVmM2Y5MDgzYzNhNDAzZjAwM2JiMDUwNTQwYjgyZmE2NzcxNWY2Njc4MjFkNjM0OTA0MDJjOGIwMGEyMWI2ZmExYjlkNTc3OTVjYWRjZTg1MTg0ZTg2MjZmNWNlMmRmNThhNjE2NmZjYjZmMzJjOTZlZDIxZWY4ZDYxYjExNGQyKzRQT0hRUk9Mb2J2eFA2WSt0QlBMeHYyR3J4dnZKcEd5dnFXbE5FeFBuOXd5YklyUzdwdzVtak5tbktRWkpUajR5RWcyMlR6Q2lmVlkxZVlMVEJidz09"
+            },
+            {
+              "id": "6254",
+              "number": "1001958",
+              "assignment_number": null,
+              "type": "IR",
+              "action": "1",
+              "total_charge_amount": 9,
+              "currency": "ILS",
+              "created_at": "2025-07-27 14:20:24",
+              "retrieval_key": "N2M5ZGEyODZmYWVjNTU5M2FlMmI4M2VhODU2M2Y5YzllODE3MDQ1ZGM3YjM2YzUwZDM0ZmFiZjU5NDZlNzRmODNmZjVmM2MxNzY4NzViNmFmOWY4Y2YwYTA5ZjgxODQ3MzgwZDM4ZGE4ZTM5NWEyOTA3YjYyYzNhY2UzODgzMDdCRVZLMG9ZUHZvenpIZ0JlV3JndmU5Y3FGL3lTVXhRYlp6NFN4eVFKNTd2cjdZajVrV3FFc1BMUGlPSHRoa0kwS1hIQUk4TzF4SjhyNlZOSzBUbTcwZz09"
+            }
+          ]
+        }
+        ```
+      operationId: post-api-documents_db-get_documents
+      responses:
+        '200':
+          description: |
+            Returns a list of documents matching the search criteria.
+
+            The response includes:
+            - `status_code`: 0 for success
+            - `status_msg`: Status message
+            - `enquiry_key`: Enquiry key for this request
+            - `documents`: Array of document objects with full details including assignment_number
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetDocumentsResponse'
+      servers:
+        - url: 'https://billing5.tranzila.com'
+          description: main API server
+      x-stoplight:
+        id: h7oy1pnmr45jh
+components:
+  schemas:
+    CreateDocumentRequest:
+      type: object
+      title: Create Document Request
+      required:
+        - terminal_name
+        - items
+        - payments
+      properties:
+        terminal_name:
+          type: string
+          description: Terminal for which a document is created
+          example: myterminal
+        document_date:
+          type: string
+          format: date
+          description: 'Document date (default: current date)'
+          pattern: yyyy-mm-dd
+          example: '2024-01-20'
+        document_type:
+          type: string
+          description: |
+            Document type:
+            - `IR` = Tax invoice/receipt (חשבונית מס/קבלה)
+            - `RE` = Receipt (קבלה)
+            - `DI` = Deal Invoice (חשבונית עסקה)
+            - `IN` = Tax invoice (חשבונית מס)
+          enum:
+            - IR
+            - RE
+            - DI
+            - IN
+          default: IR
+          example: IR
+        document_currency_code:
+          type: string
+          description: 'Document currency (default: ILS)'
+          default: ILS
+          example: ILS
+        vat_percent:
+          type: number
+          format: decimal
+          description: 'VAT percentage (default: Terminal setting or Bank of Israel rate)'
+          example: 17
+        action:
+          type: integer
+          description: |
+            Document action:
+            - `1` = Debit (חיוב)
+            - `3` = Credit (זיכוי)
+          enum:
+            - 1
+            - 3
+          default: 1
+          example: 1
+        client_company:
+          type: string
+          description: Client company name
+          example: Test Ltd
+        client_name:
+          type: string
+          description: Client name or contact person
+          example: John Doe
+        client_id:
+          type: string
+          description: Client ID number (numeric)
+          example: '123456789'
+        client_email:
+          type: string
+          format: email
+          description: Client email address
+          example: test@test.com
+        client_address_line_1:
+          type: string
+          description: Client address line 1
+          example: 123 Main St
+        client_address_line_2:
+          type: string
+          description: Client address line 2
+          example: Apt 4B
+        client_city:
+          type: string
+          description: Client city
+          example: Jerusalem
+        client_country_code:
+          type: string
+          description: Country code (ISO 3166 two letter code)
+          default: IL
+          example: IL
+        client_zip:
+          type: string
+          description: Client zip code (numeric)
+          example: '4545451'
+        items:
+          type: array
+          description: Array of item documents
+          items:
+            $ref: '#/components/schemas/Item'
+        payments:
+          type: array
+          description: Array of payment documents
+          items:
+            $ref: '#/components/schemas/Payment'
+        document_language:
+          type: string
+          description: |
+            Document language:
+            - `heb` = Hebrew
+            - `eng` = English
+          enum:
+            - heb
+            - eng
+          default: heb
+          example: heb
+        response_language:
+          type: string
+          description: |
+            Response language:
+            - `eng` = English
+            - `heb` = Hebrew
+          enum:
+            - eng
+            - heb
+          default: eng
+          example: eng
+        related_document_number:
+          type: integer
+          description: Related document number (for credit documents)
+          example: 111819
+        relation_type:
+          type: integer
+          description: Relation type (mandatory if related_document_number is provided)
+          example: 1
+        client_receipt_paid_for:
+          type: string
+          description: Product or service name (use only when generating receipt only - RE)
+          example: Consulting services
+        created_by_user:
+          type: string
+          description: 'Reference to external username, user_id or any other identifying data (will not be shown on invoice)'
+          example: user123
+        created_by_system:
+          type: string
+          description: Reference to external system identifying data
+          example: MyERP v2.1
+      x-stoplight:
+        id: 2i7xkrbqy4lom
+    Item:
+      type: object
+      title: Document Item
+      required:
+        - name
+        - unit_price
+      properties:
+        code:
+          type: string
+          description: Item code
+          example: '321'
+        name:
+          type: string
+          description: Item name
+          example: Product A
+        type:
+          type: string
+          description: |
+            Item type:
+            - `I` = Item (פריט)
+            - `S` = Service (שירות)
+          enum:
+            - I
+            - S
+          default: I
+          example: I
+        units_number:
+          type: number
+          format: decimal
+          description: Number of units
+          default: 1
+          example: 2
+        unit_type:
+          type: integer
+          description: |
+            Unit type:
+            - `1` = Unit, `2` = Gram, `3` = Kilogram, `4` = Metric Ton
+            - `5` = Day, `6` = Week, `7` = Month, `8` = Year
+            - `9` = Centimeter, `10` = Meter, `11` = Kilometer
+            - `12` = MB, `13` = GB, `14` = TB
+          default: 1
+          example: 1
+        unit_price:
+          type: number
+          format: decimal
+          description: Price per unit
+          example: 70.25
+        price_type:
+          type: string
+          description: |
+            Price type:
+            - `G` = Gross (VAT extracted from amount)
+            - `N` = Net (VAT added to amount)
+          enum:
+            - G
+            - 'N'
+          default: G
+          example: G
+        currency_code:
+          type: string
+          description: Item currency code
+          default: ILS
+          example: ILS
+        to_doc_currency_exchange_rate:
+          type: number
+          format: decimal
+          description: Exchange rate (mandatory if currency code different from document currency)
+          example: 1
+      x-stoplight:
+        id: wkev8sw4x61vf
+    Payment:
+      type: object
+      title: Payment Details
+      required:
+        - payment_method
+        - amount
+      properties:
+        payment_method:
+          type: integer
+          description: |
+            Payment method:
+            - `1` = Credit Card
+            - `3` = Cheque
+            - `4` = Bank Transfer
+            - `5` = Cash
+            - `6` = PayPal
+            - `10` = Other
+          enum:
+            - 1
+            - 3
+            - 4
+            - 5
+            - 6
+            - 10
+          example: 1
+        payment_date:
+          type: string
+          format: date
+          description: 'Payment date (default: current date)'
+          pattern: yyyy-mm-dd
+          example: '2024-01-20'
+        amount:
+          type: number
+          format: decimal
+          description: Payment amount
+          example: 100.25
+        currency_code:
+          type: string
+          description: Payment currency code
+          default: ILS
+          example: ILS
+        to_doc_currency_exchange_rate:
+          type: number
+          format: decimal
+          description: Exchange rate (mandatory if currency code different from document currency)
+          example: 1
+        cc_last_4_digits:
+          type: string
+          description: Last 4 digits of credit card (for payment_method 1)
+          maxLength: 4
+          example: '4568'
+        cc_credit_term:
+          type: integer
+          description: |
+            Credit term (for payment_method 1):
+            - `1` = Regular
+            - `6` = Credit plan (Isracredit/Visa Adif)
+            - `8` = Payments
+          example: 1
+        cc_installments_number:
+          type: integer
+          description: Number of installments (for payment_method 1)
+          example: 3
+        cc_brand:
+          type: integer
+          description: Credit card brand code (for payment_method 1)
+          example: 1
+        bank:
+          type: string
+          description: 'Bank code (for payment_method 3, 4)'
+          example: '10'
+        bank_branch:
+          type: string
+          description: 'Bank branch code (for payment_method 3, 4)'
+          example: '326'
+        bank_account:
+          type: string
+          description: 'Bank account number (for payment_method 3, 4)'
+          example: '123456'
+        cheque_number:
+          type: string
+          description: Cheque number (for payment_method 3)
+          example: '987654'
+        paypal_account:
+          type: string
+          description: PayPal account (for payment_method 6)
+          example: user@paypal.com
+        paypal_transaction_number:
+          type: string
+          description: PayPal transaction number (for payment_method 6)
+          example: TXN123456
+        other_description:
+          type: string
+          description: Description for other payment types (for payment_method 10)
+          example: Gift card
+        txnindex:
+          type: integer
+          description: Transaction index to link the document with a Tranzila transaction
+          example: 12345
+        canceldoc:
+          type: string
+          description: |
+            Indicates if the credit document is for a cancelled transaction
+            - `Y` = Yes
+            - `N` = No
+          pattern: '^[YN]$'
+          example: 'Y'
+      x-stoplight:
+        id: w9leuyunomjz8
+    CreateDocumentResponse:
+      type: object
+      title: Create Document Success Response
+      properties:
+        status_code:
+          type: integer
+          description: Status code (0 = success)
+          example: 0
+        status_msg:
+          type: string
+          description: Status message
+          example: Success
+        enquiry_key:
+          type: string
+          description: Enquiry key for the document
+          example: a1a8ca97
+        document:
+          $ref: '#/components/schemas/DocumentDetails'
+      x-stoplight:
+        id: q34h1r5hxqefj
+    DocumentDetails:
+      type: object
+      title: Document Details
+      properties:
+        id:
+          type: string
+          description: Document ID
+          example: '6570'
+        number:
+          type: string
+          description: Document number
+          example: '1000008'
+        assignment_number:
+          type: string
+          nullable: true
+          description: Tax authority assignment number (מספר הקצאה של רשות המיסים)
+          example: null
+        total_charge_amount:
+          type: number
+          format: decimal
+          description: Total charge amount
+          example: 100.25
+        currency:
+          type: string
+          description: Document currency
+          example: ILS
+        created_at:
+          type: string
+          format: date-time
+          description: Document creation timestamp
+          example: '2024-07-06 12:11:29'
+        retrieval_key:
+          type: string
+          description: Unique key for retrieving the document PDF
+          example: NWQzNjlkMjk3YmFkM2EzYTk1MjhiMjgyOWJlZWIyY2JkM2E2MmM2ZDY1NmY3YWZjZWI2ZWFmYTYzYjhjZmY1OGYwMWYzZmVmMWUyMGQ4MDVjOWUyYTdlN2JhOTZlZTM3Njg3OWVkYjE0MDM5MzM4MDkyZmY0ODIyOGEyMzJlNzl1SUgzRThSRW95Z05qUHFXU3dpVEpSNkY1T1V5TzA2LzhMZC9ZbXZiUEdQcWc0eU1Ua09DNDJiUG8xaHJSOUpNSllDZlVJdFRLSUlocitWaDhFNVUvZz09
+      x-stoplight:
+        id: lcjfuz9nnp2rb
+    GetDocumentsResponse:
+      type: object
+      title: Get Documents Response
+      properties:
+        status_code:
+          type: integer
+          description: Status code (0 = success)
+          example: 0
+        status_msg:
+          type: string
+          description: Status message
+          example: Success
+        enquiry_key:
+          type: string
+          description: Enquiry key for this request
+          example: 79b8ba07
+        documents:
+          type: array
+          description: Array of documents
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Document ID
+                example: '6252'
+              number:
+                type: string
+                description: Document number
+                example: '1001956'
+              assignment_number:
+                type: string
+                nullable: true
+                description: Tax authority assignment number (מספר הקצאה של רשות המיסים)
+                example: null
+              type:
+                type: string
+                description: 'Document type (IR, RE, DI, IN)'
+                example: IR
+              action:
+                type: string
+                description: 'Document action (1 = Debit, 3 = Credit)'
+                example: '1'
+              total_charge_amount:
+                type: number
+                format: decimal
+                description: Total charge amount
+                example: 10
+              currency:
+                type: string
+                description: Document currency
+                example: ILS
+              created_at:
+                type: string
+                format: date-time
+                description: Document creation timestamp
+                example: '2025-07-27 14:14:31'
+              retrieval_key:
+                type: string
+                description: Unique key for retrieving the document PDF
+                example: ZDA2ODJkNDZjNjY0NDkwZTEyMTJmODA5NWRkMDkxODAxNDgwOWY2MTdlY2IxMTY5MzcxMmRiMjYzYWExOGRkZjQyY2I5ZWRlODMxNjljNDlkNzk5NjdkMzAzOTMwODdmOTA4NjBhMjk3OGQyYmFkOThmYWU1ODNlNGI1YzNkMjE1STZMLzZYZ1Bwd2VNRXEvY2pTVm95THpsU3pZQ3d0UUpWUUhuSWNjU3FWbUgyKzlPYTh3b0JFc283YVBxakFXN0w2eXBJT1ppYUYwZEtwMHZjV3Qrdz09
+      x-stoplight:
+        id: 46e3xve9iyp3s
+    ErrorResponse:
+      type: object
+      title: Error Response
+      properties:
+        status_code:
+          type: integer
+          description: Error status code
+          example: 10000
+        status_msg:
+          type: string
+          description: Error message
+          example: Invalid characters in terminal name or terminal name not found in system
+        details:
+          type: string
+          description: Additional error details
+          example: Terminal 'invalid_terminal' does not exist
+      x-stoplight:
+        id: hlf1bcrhkrziu
+x-error-codes:
+  description: |
+    All error codes return under HTTP 200 status.
+    Check the `status_code` field in the response to identify errors.
+
+    ## Error Code Reference
+  terminal_errors:
+    - code: 10000
+      message: Invalid characters in terminal name or terminal name not found in system
+      description: Terminal name is invalid or does not exist
+      resolution: Verify the terminal name is correct
+    - code: 10001
+      message: Unknown document action
+      description: The action parameter value is invalid
+      resolution: Use action=1 for Debit or action=3 for Credit
+    - code: 10002
+      message: Unknown document type
+      description: The document_type value is invalid
+      resolution: 'Use IR, RE, DI, or IN as document type'
+    - code: 10003
+      message: Invalid document date format or document date not allowed by regulation
+      description: Document date format is incorrect
+      resolution: Use yyyy-mm-dd format and ensure date is valid per Israeli tax regulations
+    - code: 10004
+      message: VAT percent not numeric
+      description: VAT percentage value is invalid
+      resolution: Provide a numeric value for vat_percent
+    - code: 10005
+      message: Unsupported document language
+      description: The document_language is not supported
+      resolution: Use 'heb' for Hebrew or 'eng' for English
+    - code: 10006
+      message: Unsupported response language
+      description: The response_language is not supported
+      resolution: Use 'eng' for English or 'heb' for Hebrew
+    - code: 10007
+      message: Document base number for document type was not found in terminal settings
+      description: Terminal is not configured for this document type
+      resolution: Contact support to configure document numbering for this terminal
+    - code: 10008
+      message: Items total ILS amount differs from Payments total ILS amount – unsupported partial document coverage
+      description: Item prices don't match payment amounts
+      resolution: Ensure total of items equals total of payments
+    - code: 10009
+      message: Invalid related document number
+      description: Related document number does not exist
+      resolution: Verify the related_document_number is correct
+    - code: 10010
+      message: Related document sent but missing relation type
+      description: relation_type is required when related_document_number is provided
+      resolution: Include relation_type parameter
+    - code: 10011
+      message: Invalid related document relation type
+      description: The relation_type value is invalid
+      resolution: Verify relation_type value
+  client_errors:
+    - code: 10100
+      message: Client id number not numeric
+      description: Client ID (Israeli ID/Tax ID) contains non-numeric characters
+      resolution: Provide numeric value for client_id
+    - code: 10101
+      message: Country code not ISO 2 letter code
+      description: Country code format is invalid
+      resolution: 'Use ISO 3166-1 alpha-2 format (e.g., IL, US, GB)'
+    - code: 10102
+      message: Invalid email format
+      description: Email address format is invalid
+      resolution: Provide valid email address
+  item_errors:
+    - code: 10200
+      message: Unsupported or unknown item currency code
+      description: Item currency code is not supported
+      resolution: 'Use valid currency code (ILS, USD, EUR, etc.)'
+    - code: 10201
+      message: Item name empty or contains illegal characters
+      description: Item name is missing or invalid
+      resolution: Provide valid item name
+    - code: 10202
+      message: Unknown item type
+      description: Item type value is invalid
+      resolution: Use 'I' for Item or 'S' for Service
+    - code: 10203
+      message: Item units number must be numeric and greater than 0
+      description: units_number value is invalid
+      resolution: Provide positive numeric value for units_number
+    - code: 10204
+      message: Unknown item unit type
+      description: unit_type value is not recognized
+      resolution: Use valid unit type code (1-14)
+    - code: 10206
+      message: 'Item unit price not sent, or not numeric or empty'
+      description: unit_price is missing or invalid
+      resolution: Provide numeric value for unit_price
+    - code: 10208
+      message: Unknown item price type
+      description: price_type value is invalid
+      resolution: Use 'G' for Gross or 'N' for Net
+    - code: 10210
+      message: Item currency code not ILS but no exchange rate provided
+      description: Exchange rate is required for non-ILS currencies
+      resolution: Provide to_doc_currency_exchange_rate when currency is not ILS
+  document_errors:
+    - code: 10300
+      message: FAILED_TO_CREATE_DOCUMENT
+      description: Document creation failed
+      resolution: 'Check all parameters and try again, or contact support'
+    - code: 10301
+      message: Terminal settings not found
+      description: Terminal configuration is missing
+      resolution: Contact support to configure terminal
+    - code: 10302
+      message: FAILED_TO_CREATE_PDF_FILE
+      description: PDF generation failed
+      resolution: Try again or contact support
+  payment_errors:
+    - code: 10400
+      message: Unknown payment method
+      description: payment_method value is invalid
+      resolution: 'Use valid payment method code (1, 3, 4, 5, 6, 10)'
+    - code: 10401
+      message: Unsupported or unknown payment currency code
+      description: Payment currency code is not supported
+      resolution: Use valid currency code
+    - code: 10402
+      message: Items not present although mandatory according to document type
+      description: items array is missing
+      resolution: Provide items array with at least one item
+    - code: 10403
+      message: Payments not present although mandatory according to document type
+      description: payments array is missing
+      resolution: Provide payments array with at least one payment
+    - code: 10404
+      message: Payment currency code not ILS but no exchange rate provided
+      description: Exchange rate is required for non-ILS payment currencies
+      resolution: Provide to_doc_currency_exchange_rate
+    - code: 10405
+      message: 'Payment amount not sent, or not numeric or empty'
+      description: Payment amount is missing or invalid
+      resolution: Provide numeric value for amount
+    - code: 10406
+      message: Invalid payment date format or payment date not allowed by regulation
+      description: Payment date format is incorrect
+      resolution: Use yyyy-mm-dd format
+    - code: 10407
+      message: Unknown payment CC credit term
+      description: cc_credit_term value is invalid
+      resolution: 'Use valid credit term code (1, 6, 8)'
+    - code: 10408
+      message: Unknown payment CC brand
+      description: cc_brand value is invalid
+      resolution: Use valid credit card brand code
+  retrieval_errors:
+    - code: 10500
+      message: Document financial status not found for document type
+      description: Document status is invalid
+      resolution: Contact support
+    - code: 10501
+      message: Document update failed
+      description: Failed to update document
+      resolution: Try again or contact support
+    - code: 10600
+      message: Unknown document id
+      description: Document ID does not exist
+      resolution: Verify the document_id is correct
+    - code: 10601
+      message: DOCUMENT_ID_NOT_FOUND_IN_TABLE
+      description: Document ID not found in database
+      resolution: Verify the document_id
+    - code: 10602
+      message: NO_FILE_FOUND_FOR_DOCUMENT
+      description: PDF file not found for this document
+      resolution: Contact support
+x-reference-tables:
+  document_types:
+    title: Document Types
+    description: Valid document type codes
+    values:
+      - code: IR
+        name: Tax Invoice/Receipt
+        hebrew: חשבונית מס/קבלה
+        description: Combined tax invoice and receipt
+      - code: RE
+        name: Receipt
+        hebrew: קבלה
+        description: Receipt only
+      - code: DI
+        name: Deal Invoice
+        hebrew: חשבונית עסקה
+        description: Deal invoice
+      - code: IN
+        name: Tax Invoice
+        hebrew: חשבונית מס
+        description: Tax invoice
+  document_actions:
+    title: Document Actions
+    description: Valid action codes
+    values:
+      - code: 1
+        name: Debit
+        hebrew: חיוב
+        description: Charge/Debit transaction
+      - code: 3
+        name: Credit
+        hebrew: זיכוי
+        description: Refund/Credit transaction
+  payment_methods:
+    title: Payment Methods
+    description: Valid payment method codes and required fields
+    values:
+      - code: 1
+        name: Credit Card
+        required_fields: 'cc_last_4_digits, cc_credit_term, cc_installments_number, cc_brand'
+      - code: 3
+        name: Cheque
+        required_fields: 'bank, bank_branch, bank_account, cheque_number'
+      - code: 4
+        name: Bank Transfer
+        required_fields: 'bank, bank_branch, bank_account'
+      - code: 5
+        name: Cash
+        required_fields: none
+      - code: 6
+        name: PayPal
+        required_fields: 'paypal_account, paypal_transaction_number'
+      - code: 10
+        name: Other
+        required_fields: other_description
+  currencies:
+    title: Supported Currencies
+    description: Valid currency codes
+    values:
+      - code: ILS
+        name: Israeli Shekel
+      - code: USD
+        name: US Dollar
+      - code: GBP
+        name: British Pounds
+      - code: EUR
+        name: Euro
+      - code: CAD
+        name: Canadian Dollar
+      - code: CHF
+        name: Swiss Franks
+      - code: AUD
+        name: Australian Dollar
+      - code: DKK
+        name: Danish Krone
+      - code: SEK
+        name: Swedish Krona
+      - code: NOK
+        name: Norwegian Krone
+      - code: JPY
+        name: Japanese Yen
+      - code: JOD
+        name: Jordanian Dinar
+      - code: HKD
+        name: Hong Kong Dollar
+  price_types:
+    title: Price Types
+    description: How VAT is calculated
+    values:
+      - code: G
+        name: Gross
+        description: VAT extracted from amounts (price includes VAT)
+      - code: 'N'
+        name: Net
+        description: VAT added to amounts (price excludes VAT)
+  unit_types:
+    title: Unit Types
+    description: Valid unit type codes
+    values:
+      - code: 1
+        name: Unit
+      - code: 2
+        name: Gram
+      - code: 3
+        name: Kilogram
+      - code: 4
+        name: Metric Ton
+      - code: 5
+        name: Day
+      - code: 6
+        name: Week
+      - code: 7
+        name: Month
+      - code: 8
+        name: Year
+      - code: 9
+        name: Centimeter
+      - code: 10
+        name: Meter
+      - code: 11
+        name: Kilometer
+      - code: 12
+        name: MB
+      - code: 13
+        name: GB
+      - code: 14
+        name: TB
+  item_types:
+    title: Item Types
+    description: Valid item type codes
+    values:
+      - code: I
+        name: Item
+        hebrew: פריט
+        description: Physical or digital product
+      - code: S
+        name: Service
+        hebrew: שירות
+        description: Service rendered
+  credit_terms:
+    title: Credit Card Terms
+    description: Valid credit term codes for credit cards
+    values:
+      - code: 1
+        name: Regular
+        description: Regular credit card payment
+      - code: 6
+        name: Credit Plan
+        description: Isracredit/Visa Adif credit plan
+      - code: 8
+        name: Payments
+        description: Installment payments

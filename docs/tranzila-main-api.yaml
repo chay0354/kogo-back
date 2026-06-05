@@ -1,0 +1,1789 @@
+openapi: 3.0.1
+x-stoplight:
+  id: 8kyc69pa7oiqv
+info:
+  version: '1.0'
+  title: Tranzila API
+  description: |-
+    Detailed explanation regarding the authentication header parameters can be found in [authentication](docs/Auth.md)
+
+    | Header               |  Note |
+    | :------------- | :----------- |
+    | **X-tranzila-api-app-key**      | Application key supplied by Tranzila |
+    | **X-tranzila-api-request-time**   |   Request time sent in Unix format (large integer counting milliseconds from Jan 1 st , 1970 00:00:00    |
+    | **X-tranzila-api-nonce** |   A 40 bytes NONCE – unique random string generated with any random bytes function  |
+    | **X-tranzila-api-access-token** |   hash_hmac using ‘sha256’ on application key with secret + request-time + nonce. hash_hmac is available for all programming languages with samples found here: https://www.jokecamp.com/blog/examples-of-creating-base64-hashes-using-hmac-sha256-in-different-languages/    |
+  termsOfService: 'https://tranzila.com/api/terms'
+  contact:
+    name: Tranzila
+    url: 'http://www.tranzila.com'
+    email: support@tranzila.com
+servers:
+  - url: 'https://api.tranzila.com/v1'
+    description: V1 Server
+tags:
+  - name: Standing orders
+    description: manage STOs
+  - name: Tokens
+    description: create or retrieve credit card tokens
+  - name: Apple pay
+    description: manage apple pay merchants and transactions
+  - name: Transactions
+    description: manage transactions
+externalDocs:
+  description: Public Tranzila API Documentation
+  url: 'https://developer.tranzila.com/docs'
+paths:
+  /transaction/credit_card/create:
+    post:
+      operationId: create a credit card transaction
+      summary: create a credit card transaction
+      requestBody:
+        $ref: '#/components/requestBodies/transactionCreditCardCreate'
+      responses:
+        '200':
+          description: |
+            The response can be 200 with an Application error code:
+            | Error Code |  Description  |
+            | :------------- | :----------- |
+            | **20111**      | Provided token check failure |
+            | **20112**      | Original transaction not found |
+            | **21100**      | Transaction index is not equal to original transaction index |
+            | **21101**      | Provided index was empty |
+            | **22101**      | Empty authorization number |
+            | **22100**      | Authorization number is not equal to the transaction value |
+            | **22103**      | Invalid DCdisable |
+            | **23002**      | Already Credited this transaction id |
+            | **23002**      | id 4 - sum is larger than the original debit transaction |
+            | **23001**      | Original transaction authorization number is invalid. |
+            | **23001**      | id 1 - Attempting to credit a transaction that has already been canceled 
+            | **20112**      | An origin transaction index is linked to an uncreditable origin transaction (e.g., rejected or non-existent index) or an attempt to credit a different card than the one originally charged. |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    description: '0 - success, others - failure'
+                    type: integer
+                    example: 0
+                  message:
+                    description: 'for error_code 0 - success. for others, failure reason'
+                    type: string
+                    example: success
+                  transaction_result:
+                    type: object
+                    properties:
+                      processor_response_code:
+                        description: shva transaction response code
+                        type: string
+                        example: '000'
+                      transaction_id:
+                        description: tranzila internal transaction id
+                        type: integer
+                        example: 12345
+                      Responsecvv:
+                        type: string
+                        x-stoplight:
+                          id: 81g3n6agzfr78
+                        description: "`0 – Not entered \r\n1 – Entered and valid \r\n2 – Invalid \r\n3 – Not checked\r\n`"
+                        example: '"2"'
+                      Responseid:
+                        type: string
+                        x-stoplight:
+                          id: o59x9zsav4c74
+                        description: "`0 – Not entered \r\n1 – Entered and valid \r\n2 – Invalid \r\n3 – Not checked\r\n`"
+                        example: '"1"'
+                      auth_number:
+                        description: shva authorization id
+                        type: string
+                        example: '0587923'
+                      card_type:
+                        description: shva card type
+                        type: integer
+                        example: 1
+                      card_type_name:
+                        description: shva card type name
+                        example: Mastercard
+                      currency_code:
+                        description: transaction currency ISO 3 letter code
+                        type: string
+                        example: USD
+                      expiry_month:
+                        type: integer
+                        example: 12
+                      expiry_year:
+                        description: card/token expiry date in YY format
+                        type: integer
+                        example: 22
+                      payment_plan:
+                        description: according to SHVA pamaeter
+                        type: integer
+                        example: 1
+                      token:
+                        description: tranzila internal token (representation) for credit card - applies only to tokens service subscribers
+                        type: string
+                        example: f1057849hg8495838
+                      last_4:
+                        description: credit card last 4 digits
+                        type: string
+                        example: '1234'
+                      card_mask:
+                        description: 'card bin, masked pan and last 4 digits, used for display purposes'
+                        type: string
+                        example: 458021xxxxxx4245
+                      card_locality:
+                        description: 'card locality, whether domestic (israeli) or foreign'
+                        type: string
+                        example: foreign
+                      amount:
+                        description: transaction amount in currency
+                        type: number
+                        example: 10
+                      txn_type:
+                        type: string
+                        x-stoplight:
+                          id: pn9rxroykjc9v
+                        example: debit
+                      tranmode:
+                        type: string
+                        x-stoplight:
+                          id: 4xvhev9hfrv0z
+                        pattern: '^[A-Za-z]+$'
+                        example: A
+                  original_request:
+                    x-stoplight:
+                      id: banszgs9lly94
+                    type: object
+                    description: The original JSON sent in the request to the server
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      parameters:
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-request-time
+          description: 'Request time sent in Unix format (large integer counting milliseconds from Jan 1 st , 1970  00:00:00'
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-app-key
+          description: Application public key supplied by Tranzila
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-nonce
+          description: A 40 bytes NONCE – unique random string generated with any random bytes function
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-access-token
+          description: 'hash_hmac using ‘sha256’ on application key with secret + request-time + nonce. hash_hmac is available for all programming languages with samples found here: https://www.jokecamp.com/blog/examples-of-creating-base64-hashes-using-hmac-sha256-in- different-languages/'
+          required: true
+      description: |-
+        > This endpoint can also be used with an **express terminal**
+        ## Transaction Types (txn_type)
+        ---
+        - debit - deducts funds from a user's account to make a payment or transfer money to another account
+        - credit - adds funds to a user's account, typically as a result of a refund or deposit
+        - verify -  Pairs with verify_mode attribute - 3DS supported
+          - **2** - j2 - Checks Card
+          - **5** - j5 - takes credit limit on the amount specified, The charge itself will be in txn_type - force
+          - **6** - initialization transaction for standing order (sto), The charge itself will be with txn_type - sto so make sure to keep this transaction txn_type
+        - sto - standing order - regular payment of the same amount that’s paid on a specified date need to be verifed first by txn_type - verify, pass the txn_type you recieved via verify transaction in reference_txn_id
+        - cancel - canceling a debit or a credit transaction.
+        - reversal - release credit limit - j5 Transaction(verify mode 5)
+
+        ## Prevent Duplicate Transctions - Dcdisable
+
+        The prevention solution is based on a unique value sent for a transaction under the parameter DCdisable. Below are the conditions for using the parameter:
+
+        ![dc disable image](assets/images/Transaction-DCdisable.png)
+
+        - You must log into the my.tranzila system and go to the "Additional Fields for Transaction" screen, located under the terminal settings menu, and define only field 20 as the field intended for identifying DCdisable - duplicate charge.
+
+        - If it is detected that the unique value in DCdisable has already been used once, no additional charge will be made.
+
+        - The check in our DB will be performed up to 24 hours back, at the parent terminal level.
+
+        - If a transaction fails the first time, no check will be performed for it on DCdisable. We will display the following message if a duplicate transaction is detected: "This payment has already been made, please contact the business" or "This payment has already been paid. Please contact customer service."
+
+        - The customer must pass the DCdisable parameter with a unique value for that transaction.
+
+        - If you have parent and child terminals, you must define the parameter in both the parent and the child.
+
+        - We recommend providing a long and complex unique value (the limit for the value is 254 characters).
+
+        > visit <a href="#dcdisable-enabled-example">this page</a> for a code example
+
+        ## In what why the transaction was processed? (pan_entry_mode) 
+        ---
+        - 50 - transaction through phone, the card was not present.
+        - 51 - written card.
+        - 52 - online transaction 
+
+        ## installments (payment_plan)
+        ---
+        - 1 - Default, one regular payment
+        - 6 - Credit installments - when there is an agreement of the customer with the credit card company you would get the whole sum, but the customer will pay in installments, usually with fees. Minimum 3 payments
+        - 8 - regular installments.
+
+        goes with the installments_number, first_installment_amount and other_installments_amount attributes. 
+
+        ## Code Examples
+        ---
+        ### Required Fields Only
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+        ### Transaction Types (txn_type)
+        ---
+        #### Debit (Default)
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "debit",
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+
+        #### Credit
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "credit",
+          "reference_txn_id": 12345,
+          "authorization_number":"0587923",
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+
+        #### Verify With verify_mode = 2
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "verify",
+          "verfiy_mode": 2,
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+
+
+        #### Verify With verify_mode = 5
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "verify",
+          "verfiy_mode": 5,
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+        #### reversal- release credit limit (j5 verfiy_mode=5)
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "reversal",
+          "reference_txn_id": 6769,
+          "authorization_number": "0000000",
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+        #### Charge With verify_mode = 5
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "force",
+          "reference_txn_id": 6769,
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+
+        #### Verify With verify_mode = 6
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "verify",
+          "verfiy_mode": 6,
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+
+        #### Charge With verify_mode = 6
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "sto",
+          "reference_txn_id": 6967,
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ]
+        }
+        ```
+        #### cancel transaction example
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "cancel",
+          "reference_txn_id": 123,
+          "authorization_number": "0000000"
+        }
+        ```
+        #### Dcdisable enabled example
+        ```json
+        {
+          "terminal_name": "myterminal",
+          "txn_type": "sto",
+          "reference_txn_id": 6967,
+          "expire_month": 7,
+          "expire_year": 2025,
+          "cvv": 111,
+          "card_number": 4580458045804580,
+          "items": [
+            {
+              "name": "Pen",
+              "type": "I",
+              "unit_price": 10.53,
+              "units_number": 1,
+            }
+          ],
+          "user_defined_fields": [
+            {
+              "name": "DCdisable",
+              "value": "your_generated_unique_value"
+            }
+          ]
+        }
+        ```
+      x-stoplight:
+        id: xsy729b5dsfct
+      tags:
+        - Transaction
+  /sto/create:
+    post:
+      operationId: createSTO
+      summary: create a standing order
+      requestBody:
+        $ref: '#/components/requestBodies/stoCreate'
+      responses:
+        '200':
+          description: |-
+            The response can be 200 with an Application error code:
+            | Error Code |  Description  |
+            | :------------- | :----------- |
+            | **20300**      | Too many payment methods |
+            | **20301**      | Failed to insert STO |
+            | **20302**      | Failed to retrieve STO |
+            | **20303**      | No payment method |
+            | **20304**      | Bad date |
+            | **20305**      | Failed to create token |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    description: '0 - success, others - failure'
+                    type: integer
+                  message:
+                    description: 'for error_code 0 - success. for others, failure reason'
+                    type: string
+                  sto_id:
+                    description: standing order internal my.tranzila.com my-billing id
+                    type: integer
+            application/xml:
+              schema:
+                type: object
+                properties: {}
+            multipart/form-data:
+              schema:
+                type: object
+                properties: {}
+            text/html:
+              schema:
+                type: object
+                properties: {}
+          headers: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      description: |
+        <!-- theme: danger -->
+
+        > ### Deprecated
+        >
+        > Migrate to [V2](/docs/payments-billing/4rhofms2rm6jc-create-a-standing-order)
+      deprecated: true
+      parameters:
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-request-time
+          description: 'Request time sent in Unix format (large integer counting milliseconds from Jan 1 st , 1970  00:00:00'
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-app-key
+          description: Application public key supplied by Tranzila
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-nonce
+          description: A 40 bytes NONCE – unique random string generated with any random bytes function
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-access-token
+          description: 'hash_hmac using ‘sha256’ on application key with secret + request-time + nonce. hash_hmac is available for all programming languages with samples found here: https://www.jokecamp.com/blog/examples-of-creating-base64-hashes-using-hmac-sha256-in- different-languages/'
+          required: true
+      x-stoplight:
+        id: xyajxscasy205
+      tags:
+        - '- Standing Orders -'
+  /sto/update:
+    post:
+      operationId: updateSTO
+      summary: update a standing order
+      requestBody:
+        $ref: '#/components/requestBodies/stoUpdate'
+      responses:
+        '200':
+          description: |-
+            The response can be 200 with an Application error code:
+            | Error Code |  Description  |
+            | :------------- | :----------- |
+            | **20300**      | Too many payment methods |
+            | **20301**      | Failed to insert STO |
+            | **20302**      | Failed to retrieve STO |
+            | **20303**      | No payment method |
+            | **20305**      | Failed to create token |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    description: '0 - success, others - failure'
+                    type: integer
+                  message:
+                    description: 'for error_code 0 - success. for others, failure reason'
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      parameters:
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-request-time
+          description: 'Request time sent in Unix format (large integer counting milliseconds from Jan 1 st , 1970  00:00:00'
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-app-key
+          description: Application public key supplied by Tranzila
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-nonce
+          description: A 40 bytes NONCE – unique random string generated with any random bytes function
+          required: true
+        - schema:
+            type: string
+          in: header
+          name: X-tranzila-api-access-token
+          description: 'hash_hmac using ‘sha256’ on application key with secret + request-time + nonce. hash_hmac is available for all programming languages with samples found here: https://www.jokecamp.com/blog/examples-of-creating-base64-hashes-using-hmac-sha256-in- different-languages/'
+          required: true
+      description: |-
+        <!-- theme: danger -->
+
+        > ### Deprecated
+        >
+        > Migrate to [V2](/docs/payments-billing/hodcgh24c316y-update-a-standing-order)
+
+
+        > #### This is a paid modal
+        >
+        > Please contact sales to use this modal.
+      x-stoplight:
+        id: xjo20ga9a2oc5
+      tags:
+        - '- Standing Orders -'
+      deprecated: true
+  /stos/get:
+    post:
+      operationId: getSTOs
+      summary: Retrieve a list of STOs
+      requestBody:
+        $ref: '#/components/requestBodies/stosGet'
+      responses:
+        '200':
+          description: |-
+            The response can be 200 with an Application error code:
+            | Error Code |  Description  |
+            | :------------- | :----------- |
+            | **20302**      | Failed to retrieve STO |
+            | **20304**      | Bad date |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    description: '0 - success, others - failure'
+                    type: integer
+                  message:
+                    description: 'for error_code 0 - success. for others, failure reason'
+                    type: string
+                  stos:
+                    description: an array of matching STOs according to request
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/STO'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      description: |-
+        > #### This is a paid modal
+        >
+        > Please contact sales to use this modal.
+      x-stoplight:
+        id: ieuc4iqpqdzk1
+      tags:
+        - '- Standing Orders -'
+components:
+  securitySchemes:
+    apiAppKey:
+      type: apiKey
+      in: header
+      name: X-tranzila-api-app-key
+      description: ''
+    apiRequestTime:
+      type: apiKey
+      in: header
+      name: X-tranzila-api-request-time
+    apiNonce:
+      type: apiKey
+      in: header
+      name: X-tranzila-api-nonce
+    apiAccessToken:
+      type: apiKey
+      in: header
+      name: X-tranzila-api-access-token
+  requestBodies:
+    stoCreate:
+      required: true
+      description: contains all information require to create an STO
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/STO'
+    stoUpdate:
+      required: true
+      description: update STO data
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/STOUpdate'
+    stosGet:
+      required: true
+      description: get STOs
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/getSTOs'
+    transactionApplepayPaymentCreate:
+      required: true
+      description: apple pay payment request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/transactionApplepayPaymentCreate'
+    transactionApplepayMerchantValidate:
+      required: true
+      description: apple pay merchant validate request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/transactionApplepayMerchantValidate'
+    transactionCreditCardCreate:
+      required: true
+      description: create a credit card transaction
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/transactionCreditCardCreate'
+    masavBody:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Masav'
+  schemas:
+    terminalName:
+      type: string
+      example: myterminal
+      x-stoplight:
+        id: dun4ozkd4hq3g
+    email:
+      type: string
+      example: mail@example.com
+      x-stoplight:
+        id: pd2lrxc0suhbk
+      format: email
+      pattern: mail@example.com
+    shortDisplayDate:
+      type: string
+      pattern: '^([0-2][0-9]|(3)[0-1])(\/)(((0)[0-9])|((1)[0-2]))(\/)\d{2}$'
+      x-stoplight:
+        id: 6efzfwvjrs6ib
+      title: ''
+    socialIDNumber:
+      type: string
+      pattern: '^[0-9]{9}$'
+      example: '012345632'
+      x-stoplight:
+        id: tqkkn0gcvkri1
+    zipCode:
+      type: string
+      example: '4030160'
+      x-stoplight:
+        id: 33mkl2ot9njty
+    txnCurrencyCode:
+      x-stoplight:
+        id: om5bwi1oap55y
+      x-examples:
+        Example 1:
+          txn_currency_code: ILS
+        Example 2:
+          txn_currency_code: USD
+      type: string
+      enum:
+        - USD
+        - EUR
+        - ILS
+        - JPY
+        - DKK
+        - CHF
+        - NOK
+        - SEK
+        - AUD
+        - CAD
+        - GBP
+      default: ILS
+      description: 'Allowed currency values in tranzila, based on the ISO 4217 three letter standard.'
+      title: ''
+    priceType:
+      type: string
+      default: G
+      description: |
+        if Gross, sent price/amount is processed as is, with VAT extracted from sent price/amount, if Net, VAT is added to sent amount. price type can either be
+          * `G` - Gross
+          * `N` - Net
+      enum:
+        - 'N'
+        - G
+      example: G
+      x-stoplight:
+        id: c1xx25e180rzm
+    Error:
+      type: object
+      x-stoplight:
+        id: crjg7fxsb82zc
+      required:
+        - message
+      properties:
+        error_code:
+          type: string
+        message:
+          type: string
+        'response ':
+          type: string
+          x-stoplight:
+            id: tow71yy36slvt
+          description: "Error Code\r\n"
+    tokenDetails:
+      type: object
+      properties:
+        token:
+          description: 'Credit card token to be charged. Prior to adding an STO, a merchant must tokenize used credit card'
+          type: string
+          example: f12cF45cI7898t75548
+        expire_month:
+          description: Credit card expiration month
+          type: integer
+          minimum: 1
+          maximum: 12
+          example: 4
+        expire_year:
+          description: Credit card expiration year
+          type: integer
+          minimum: 2020
+          maximum: 2030
+          example: 2024
+        card_holder_id:
+          description: 'Depending on merchant contract with credit card transactions acquirer, my be ommited or required to complete a transaction'
+          allOf:
+            - $ref: '#/components/schemas/socialIDNumber'
+        card_holder_name:
+          description: 'Depending on merchant contract with credit card transactions acquirer, my be ommited or required to complete a transaction'
+          type: string
+          minLength: 2
+          maxLength: 21
+          example: לובנגולו מלך זולו
+      required:
+        - token
+        - expire_month
+        - expire_year
+      x-stoplight:
+        id: g97w43s62enu1
+    bankDetails:
+      description: Merchant must have contract signed with MASAV in order to use this option. Please contact our sales team for further information
+      type: object
+      properties:
+        bank_code:
+          description: 'Client bank code, based on Israeli bank codes list'
+          type: integer
+          example: 12
+        branch_code:
+          description: 'Client branch code, based on Israeli bank branchs codes list'
+          type: string
+          example: '659'
+        account_number:
+          description: Client bank account to charge
+          type: string
+          example: '127963'
+      required:
+        - bank_code
+        - branch_code
+        - account_number
+      x-stoplight:
+        id: 87yakiqb8601d
+    STOItem:
+      type: object
+      properties:
+        internal_id:
+          description: my.tranzila.com internal item id
+          type: integer
+          example: 41356
+        code:
+          description: Item code. Also used by Tranzila invoicing service (if applicable).
+          type: string
+          example: AA-1246-974-B
+        name:
+          description: Item name. Also used by Tranzila invoicing service (if applicable).
+          type: string
+          example: מפצל HDMI
+        unit_price:
+          description: Item single unit price
+          type: number
+          minimum: 0.01
+          maximum: 99999
+          example: 230
+        units_number:
+          description: 'Item units number chraged. Total charge amount will be set to unit_price times units number. If ommited, is considered to be 1'
+          type: number
+          minimum: 0.01
+          maximum: 999
+          example: 2
+        price_currency:
+          description: 'currency supported currencies are ILS, USD, EUR'
+          allOf:
+            - $ref: '#/components/schemas/txnCurrencyCode'
+        price_type:
+          $ref: '#/components/schemas/priceType'
+        vat_percent:
+          description: 'if omitted, current Bank Of Israel VAT will be used'
+          type: integer
+          minimum: 0
+          maxLength: 100
+          example: 17
+      required:
+        - name
+        - unit_price
+      x-stoplight:
+        id: dmcue2uyn6qts
+    STOClient:
+      type: object
+      properties:
+        internal_id:
+          description: my.tranzila.com internal client id (currenly unsupported)
+          type: integer
+          example: 584567
+        name:
+          description: Client name
+          type: string
+          example: האקלברי פין
+        id:
+          description: Client Israeli ID number
+          allOf:
+            - $ref: '#/components/schemas/socialIDNumber'
+        email:
+          description: 'Client email address, only one can be used'
+          allOf:
+            - $ref: '#/components/schemas/email'
+        address:
+          description: Client one liner address
+          type: string
+          example: 'רציף 9 ושלושה רבעים, קינגס קרוס, לונדון'
+        phone_country_code:
+          description: 'Client country international access code, default is 972 for Israel'
+          type: string
+          default: '972'
+          example: '44'
+        phone_area_code:
+          description: Client phone number area code
+          type: string
+          example: '001'
+        phone_number:
+          description: Client phone number
+          type: string
+          example: 555-8965
+      x-stoplight:
+        id: bfeqnde253lge
+    STO:
+      type: object
+      properties:
+        sto_id:
+          type: integer
+          readOnly: true
+          example: 4192
+        terminal_name:
+          $ref: '#/components/schemas/terminalName'
+        sto_payments_number:
+          type: integer
+          minimum: 2
+          maximum: 9999
+          example: 12
+        charge_frequency:
+          type: string
+          enum:
+            - weekly
+            - monthly
+            - quarterly
+            - half-yearly
+            - yearly
+          example: monthly
+        first_charge_date:
+          $ref: '#/components/schemas/dbDate'
+        charge_dom:
+          type: integer
+          minimum: 1
+          maximum: 28
+          example: 25
+        client:
+          $ref: '#/components/schemas/STOClient'
+        item:
+          $ref: '#/components/schemas/STOItem'
+        card:
+          $ref: '#/components/schemas/tokenDetails'
+        msv:
+          $ref: '#/components/schemas/bankDetails'
+        charge_amount:
+          type: number
+          readOnly: true
+          example: 150
+        last_charge_date_time:
+          allOf:
+            - readOnly: true
+            - $ref: '#/components/schemas/dbDateTime'
+        next_charge_date_time:
+          allOf:
+            - readOnly: true
+            - $ref: '#/components/schemas/dbDateTime'
+        response_language:
+          $ref: '#/components/schemas/APILanguage'
+        created_by_user:
+          type: string
+          example: הכבשה שושנה
+      required:
+        - terminal_name
+        - sto_payments_number
+        - charge_frequency
+        - charge_dom
+        - item
+      x-stoplight:
+        id: muwbhbudya354
+      description: ''
+    STOUpdate:
+      type: object
+      properties:
+        terminal_name:
+          $ref: '#/components/schemas/terminalName'
+        sto_id:
+          description: STO id being updated
+          type: integer
+          example: 4192
+        sto_status:
+          description: New STO status
+          type: string
+          enum:
+            - active
+            - inactive
+          example: inactive
+        response_language:
+          $ref: '#/components/schemas/APILanguage'
+        updated_by_user:
+          type: string
+          example: שון כבשון
+      required:
+        - terminal_name
+        - sto_id
+      x-stoplight:
+        id: 21mht0uukpk2z
+    getSTOs:
+      type: object
+      properties:
+        terminal_name:
+          $ref: '#/components/schemas/terminalName'
+        sto_id:
+          description: Retrieve specific STO
+          type: integer
+          example: 4192
+        sto_status:
+          description: Retrieve STOs with given status
+          type: string
+          enum:
+            - active
+            - inactive
+          example: active
+        client_internal_id:
+          type: integer
+          example: 9678
+        client_name:
+          type: string
+          example: קים קרדשיאן
+        client_id:
+          $ref: '#/components/schemas/socialIDNumber'
+        client_email:
+          $ref: '#/components/schemas/email'
+        token:
+          type: string
+          example: f12cF45cI7898t70126
+        last_4_digits:
+          type: string
+          example: '0126'
+        card_holder_id:
+          $ref: '#/components/schemas/socialIDNumber'
+        bank_account_number:
+          type: string
+          example: '073875'
+        response_language:
+          $ref: '#/components/schemas/APILanguage'
+      x-stoplight:
+        id: 1vif2fj1lrg0u
+    transactionApplepayPaymentCreate:
+      type: object
+      required:
+        - terminal_name
+        - apple_pay_token
+        - items
+      properties:
+        terminal_name:
+          $ref: '#/components/schemas/terminalName'
+        apple_pay_token:
+          description: Apple pay token returned from the apple pay payment service upon authorization
+          type: object
+          properties:
+            data:
+              type: string
+              example: ZVE5eaKezYmt4lTMs1Gi0EeLNL2YMC94dMOD4qBmd6khFS2dYdEn5J0qe8M3BptBg1BC6ouiBlzNVud9Q4Sg0NDdifXHF4R1aZtxJMAXGC6olVqxgrp5La1aVLCTK5vwoD7yEzM6QWK7wFpkp6viNh9/r9XuIZsXUpwWEAS9ST4OklGfWue+QDxq9jdl6NKW9GvPhXuacP5RTAG1CVw0wGFNfPEisObcwov4J0Ie8pxdfO++4PFPJldqYpjsTxm6AFbUIFMOskSzvkNmlfTv54QAkf8Bu7TZImzNzJGYhgZOORpz0SGitVKR/D95FV9VmX70k9lYj5dPzMKKaW62P3uhSnh59z04VvS3bo3m82iqP2CdSVPUm8AwoAMadWDR530iJ0GU56hjZwS0Yw==
+            signature:
+              type: string
+              example: MIAGCSqGSIb3DQEHAqCAMIACAQExDzANBglghkgBZQMEAgEFADCABgkqhkiG9w0BBwEAAKCAMIID5jCCA4ugAwIBAgIIaGD2mdnMpw8wCgYIKoZIzj0EAwIwejEuMCwGA1UEAwwlQXBwbGUgQXBwbGljYXRpb24gSW50ZWdyYXRpb24gQ0EgLSBHMzEmMCQGA1UECwwdQXBwbGUgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkxEzARBgNVBAoMCkFwcGxlIEluYy4xCzAJBgNVBAYTAlVTMB4XDTE2MDYwMzE4MTY0MFoXDTIxMDYwMjE4MTY0MFowYjEoMCYGA1UEAwwfZWNjLXNtcC1icm9rZXItc2lnbl9VQzQtU0FOREJPWDEUMBIGA1UECwwLaU9TIFN5c3RlbXMxEzARBgNVBAoMCkFwcGxlIEluYy4xCzAJBgNVBAYTAlVTMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEgjD9q8Oc914gLFDZm0US5jfiqQHdbLPgsc1LUmeY+M9OvegaJajCHkwz3c6OKpbC9q+hkwNFxOh6RCbOlRsSlaOCAhEwggINMEUGCCsGAQUFBwEBBDkwNzA1BggrBgEFBQcwAYYpaHR0cDovL29jc3AuYXBwbGUuY29tL29jc3AwNC1hcHBsZWFpY2EzMDIwHQYDVR0OBBYEFAIkMAua7u1GMZekplopnkJxghxFMAwGA1UdEwEB/wQCMAAwHwYDVR0jBBgwFoAUI/JJxE+T5O8n5sT2KGw/orv9LkswggEdBgNVHSAEggEUMIIBEDCCAQwGCSqGSIb3Y2QFATCB/jCBwwYIKwYBBQUHAgIwgbYMgbNSZWxpYW5jZSBvbiB0aGlzIGNlcnRpZmljYXRlIGJ5IGFueSBwYXJ0eSBhc3N1bWVzIGFjY2VwdGFuY2Ugb2YgdGhlIHRoZW4gYXBwbGljYWJsZSBzdGFuZGFyZCB0ZXJtcyBhbmQgY29uZGl0aW9ucyBvZiB1c2UsIGNlcnRpZmljYXRlIHBvbGljeSBhbmQgY2VydGlmaWNhdGlvbiBwcmFjdGljZSBzdGF0ZW1lbnRzLjA2BggrBgEFBQcCARYqaHR0cDovL3d3dy5hcHBsZS5jb20vY2VydGlmaWNhdGVhdXRob3JpdHkvMDQGA1UdHwQtMCswKaAnoCWGI2h0dHA6Ly9jcmwuYXBwbGUuY29tL2FwcGxlYWljYTMuY3JsMA4GA1UdDwEB/wQEAwIHgDAPBgkqhkiG92NkBh0EAgUAMAoGCCqGSM49BAMCA0kAMEYCIQDaHGOui+X2T44R6GVpN7m2nEcr6T6sMjOhZ5NuSo1egwIhAL1a+/hp88DKJ0sv3eT3FxWcs71xmbLKD/QJ3mWagrJNMIIC7jCCAnWgAwIBAgIISW0vvzqY2pcwCgYIKoZIzj0EAwIwZzEbMBkGA1UEAwwSQXBwbGUgUm9vdCBDQSAtIEczMSYwJAYDVQQLDB1BcHBsZSBDZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwHhcNMTQwNTA2MjM0NjMwWhcNMjkwNTA2MjM0NjMwWjB6MS4wLAYDVQQDDCVBcHBsZSBBcHBsaWNhdGlvbiBJbnRlZ3JhdGlvbiBDQSAtIEczMSYwJAYDVQQLDB1BcHBsZSBDZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATwFxGEGddkhdUaXiWBB3bogKLv3nuuTeCN/EuT4TNW1WZbNa4i0Jd2DSJOe7oI/XYXzojLdrtmcL7I6CmE/1RFo4H3MIH0MEYGCCsGAQUFBwEBBDowODA2BggrBgEFBQcwAYYqaHR0cDovL29jc3AuYXBwbGUuY29tL29jc3AwNC1hcHBsZXJvb3RjYWczMB0GA1UdDgQWBBQj8knET5Pk7yfmxPYobD+iu/0uSzAPBgNVHRMBAf8EBTADAQH/MB8GA1UdIwQYMBaAFLuw3qFYM4iapIqZ3r6966/ayySrMDcGA1UdHwQwMC4wLKAqoCiGJmh0dHA6Ly9jcmwuYXBwbGUuY29tL2FwcGxlcm9vdGNhZzMuY3JsMA4GA1UdDwEB/wQEAwIBBjAQBgoqhkiG92NkBgIOBAIFADAKBggqhkjOPQQDAgNnADBkAjA6z3KDURaZsYb7NcNWymK/9Bft2Q91TaKOvvGcgV5Ct4n4mPebWZ+Y1UENj53pwv4CMDIt1UQhsKMFd2xd8zg7kGf9F3wsIW2WT8ZyaYISb1T4en0bmcubCYkhYQaZDwmSHQAAMYIBjDCCAYgCAQEwgYYwejEuMCwGA1UEAwwlQXBwbGUgQXBwbGljYXRpb24gSW50ZWdyYXRpb24gQ0EgLSBHMzEmMCQGA1UECwwdQXBwbGUgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkxEzARBgNVBAoMCkFwcGxlIEluYy4xCzAJBgNVBAYTAlVTAghoYPaZ2cynDzANBglghkgBZQMEAgEFAKCBlTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0yMDExMjMxMjQxMjZaMCoGCSqGSIb3DQEJNDEdMBswDQYJYIZIAWUDBAIBBQChCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIFgBHNSQKOkqflF4mqt53KfL4xT7k2yflzKU9h1ievbtMAoGCCqGSM49BAMCBEcwRQIgY366l4Asw2YNV1+b4femgFIQFnmcnBPz9vsL0M5Hq0ECIQDVu3YyXwX2XvWEQzn3iO6KJ+4SIPC8Mq/qBoHji4cRuQAAAAAAAA==
+            version:
+              type: string
+              example: EC_v1
+            header:
+              type: string
+              example: '{ "publicKeyHash": "GgAWSj7OEtyCsEVa+paNJ2LkgOiBgTADfHdvXfGSfaQ=", "ephemeralPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFOnNdjt7sRkG2UWnDEBD93PY/ODr3J25IB7WGDihD0AD2mK2WQnT4Kieltwgq6R7fE0Pl0DDf9Bdt53p7FmEzQ==", "transactionId": "3dc34064087b9e155c603e177a3cb3d0d05e401db19c17194bd0d1be09f82eda" }'
+        txn_type:
+          type: string
+          enum:
+            - debit
+            - verify
+          default: debit
+          example: debit
+        verfiy_mode:
+          type: integer
+          enum:
+            - 5
+          default: 5
+        payment_plan:
+          type: integer
+          enum:
+            - 1
+            - 6
+            - 8
+          default: 1
+        installments_number:
+          type: integer
+          minimum: 1
+          maximum: 36
+          default: null
+          example: 1
+        first_installment_amount:
+          type: number
+          default: null
+          example: null
+        other_installments_amount:
+          type: number
+          default: null
+          example: null
+        reference_txn_id:
+          type: integer
+          default: null
+          example: null
+        client:
+          type: object
+          properties:
+            external_id:
+              type: string
+              default: null
+              example: C4589-5940-IL
+            internal_id:
+              type: integer
+              default: null
+              example: 1234567
+            name:
+              type: string
+              default: null
+              example: הוגוורטס
+            contact_person:
+              type: string
+              default: null
+              example: הארי פוטר
+            id:
+              type: string
+              default: null
+              example: '005501291'
+            email:
+              type: string
+              default: null
+              example: user@domain.com
+            phone_country_code:
+              type: string
+              default: null
+              example: '972'
+            phone_area_code:
+              type: string
+              default: null
+              example: '050'
+            phone_number:
+              type: string
+              default: null
+              example: '2770335'
+            address_line_1:
+              type: string
+              default: null
+              example: ברודצקי 33
+            address_line_2:
+              type: string
+              default: null
+              example: כניסה ב
+            city:
+              type: string
+              default: null
+              example: נתניה
+            country_code:
+              type: string
+              enum:
+                - IL
+              default: null
+              example: IL
+            zip:
+              type: string
+              default: null
+              example: '4030160'
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required:
+              - name
+              - units_number
+              - unit_price
+            properties:
+              code:
+                type: string
+                default: null
+                example: A1234567
+              name:
+                type: string
+                default: null
+                example: שרביט קסמים
+              type:
+                type: string
+                default: I
+                enum:
+                  - I
+                  - S
+                  - C
+                example: 1
+              unit_price:
+                type: number
+                example: 10.53
+              unit_type:
+                type: number
+                enum:
+                  - 1
+                  - 2
+                  - 3
+                  - 4
+                  - 5
+                  - 6
+                  - 7
+                  - 8
+                  - 9
+                  - 10
+                  - 11
+                  - 12
+                  - 13
+                  - 14
+                  - 15
+                  - 16
+                default: 1
+                example: 1
+              price_type:
+                type: string
+                enum:
+                  - G
+                  - 'N'
+                default: G
+                example: G
+              units_number:
+                type: number
+                example: 4
+              currency_code:
+                type: string
+                enum:
+                  - ILS
+                  - USD
+                  - EUR
+                  - GBP
+                default: ILS
+                example: ILS
+              to_txn_currency_exchange_rate:
+                type: number
+                default: null
+                example: 2.5463
+              discount_type:
+                type: string
+                enum:
+                  - fixed
+                  - percent
+                default: fixed
+                example: percent
+              discount:
+                type: number
+                default: null
+                example: 15.5
+              vat_percent:
+                type: number
+                default: null
+                example: 17
+              attributes:
+                type: object
+                properties:
+                  language:
+                    type: string
+                    enum:
+                      - hebrew
+                      - english
+                    default: english
+                    example: hebrew
+                  name:
+                    type: string
+                    default: null
+                    example: אורך
+                  value:
+                    type: string
+                    default: null
+                    example: 17 ס"מ
+        user_defined_fields:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                default: null
+                example: origin_system
+              value:
+                type: string
+                default: null
+                example: mycrm
+        remarks:
+          type: string
+          default: null
+          example: any transaction level remark
+        response_language:
+          type: string
+          enum:
+            - english
+            - hebrew
+          default: english
+          example: english
+      x-stoplight:
+        id: 19ahin6b1j2kt
+      description: ''
+    transactionApplepayMerchantValidate:
+      type: object
+      required:
+        - terminal_name
+        - merchant_display_name
+      properties:
+        terminal_name:
+          $ref: '#/components/schemas/terminalName'
+        merchnat_display_name:
+          type: string
+          example: חנות השרביטים של אוליביירי
+        response_language:
+          type: string
+          enum:
+            - english
+            - hebrew
+          default: english
+          example: english
+      x-stoplight:
+        id: 32zi4pgfbkl8t
+    transactionCreditCardCreate:
+      type: object
+      x-stoplight:
+        id: 3t3iqigknqktl
+      required:
+        - terminal_name
+        - expire_month
+        - expire_year
+        - card_number
+      properties:
+        terminal_name:
+          $ref: '#/components/schemas/terminalName'
+        txn_currency_code:
+          type: string
+          enum:
+            - ILS
+            - USD
+            - EUR
+            - GPB
+            - CAD
+            - AUD
+            - SEK
+            - NOK
+            - CHF
+            - DKK
+            - JPY
+          example: ILS
+        txn_type:
+          type: string
+          enum:
+            - debit
+            - credit
+            - verify
+            - force
+            - cancel
+            - reversal
+            - sto
+          default: debit
+          example: debit
+        expire_month:
+          type: integer
+          enum:
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 7
+            - 8
+            - 9
+            - 10
+            - 11
+            - 12
+          example: 12
+        expire_year:
+          type: integer
+          minLength: 4
+          maxLength: 4
+          example: 2025
+        cvv:
+          type: string
+          minLength: 3
+          maxLength: 4
+          default: null
+          example: 111
+        card_holder_id:
+          type: string
+          minLength: 9
+          maxLength: 9
+          example: 25641832
+        card_number:
+          type: string
+          minLength: 8
+          maxLength: 19
+          example: 4580458045804580
+        payment_plan:
+          type: integer
+          enum:
+            - 1
+            - 6
+            - 8
+          default: 1
+        installments_number:
+          type: integer
+          minimum: 1
+          maximum: 36
+          example: 1
+        first_installment_amount:
+          type: number
+          default: null
+          example: 500
+        other_installments_amount:
+          type: number
+          example: 100
+        reference_txn_id:
+          type: integer
+          example: 6769
+        client:
+          type: object
+          properties:
+            external_id:
+              type: string
+              default: null
+              example: C4589-5940-IL
+            name:
+              type: string
+              default: null
+              example: הוגוורטס
+            contact_person:
+              type: string
+              default: null
+              example: הארי פוטר
+            id:
+              type: string
+              default: null
+              example: '005501291'
+            email:
+              type: string
+              default: null
+              example: user@domain.com
+            phone_country_code:
+              type: string
+              default: null
+              example: '972'
+            phone_area_code:
+              type: string
+              default: null
+              example: '050'
+            phone_number:
+              type: string
+              default: null
+              example: '2770335'
+            address_line_1:
+              type: string
+              default: null
+              example: ברודצקי 33
+            address_line_2:
+              type: string
+              default: null
+              example: כניסה ב
+            city:
+              type: string
+              default: null
+              example: נתניה
+            country_code:
+              type: string
+              enum:
+                - IL
+              default: null
+              example: IL
+            zip:
+              type: string
+              default: null
+              example: '4030160'
+        items:
+          $ref: '#/components/schemas/items-arry'
+        user_defined_fields:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                default: null
+                example: origin_system
+              value:
+                type: string
+                default: null
+                example: mycrm
+        remarks:
+          type: string
+          default: null
+          example: any transaction level remark
+        response_language:
+          type: string
+          enum:
+            - english
+            - hebrew
+          default: english
+          example: english
+        created_by_user:
+          type: string
+          default: null
+          example: Draco Malfoy
+        created_by_system:
+          type: string
+          default: null
+          example: mycrm
+    transactionSource:
+      type: integer
+      x-stoplight:
+        id: dr6llwidkp5pt
+      default: 0
+    verifyMode:
+      type: integer
+      x-stoplight:
+        id: 3uj6jf2ol1781
+      enum:
+        - 2
+        - 5
+      example: 2
+    APILanguage:
+      title: APILanguage
+      x-stoplight:
+        id: px2pf9vlm9ypg
+      enum:
+        - english
+        - hebrew
+    dbDate:
+      title: dbDate
+      x-stoplight:
+        id: 3mz9zzukfm3zl
+      type: string
+      format: date
+    dbDateTime:
+      title: dbDateTime
+      x-stoplight:
+        id: 9qr0mx67xbsg9
+      type: string
+      format: date-time
+    Masav:
+      title: Masav
+      x-stoplight:
+        id: z5999qus2wrib
+      type: object
+      properties:
+        supplier:
+          $ref: '#/components/schemas/terminalName'
+        sum:
+          type: number
+          x-stoplight:
+            id: nlfpw7dox89zu
+        currency:
+          x-stoplight:
+            id: medht5wiedyy8
+          enum:
+            - '1'
+          example: '1'
+          default: 1
+          description: 'only ILS, send 1'
+        tranmode:
+          x-stoplight:
+            id: 1dn82xpynu3vb
+          enum:
+            - T
+          example: T
+          default: T
+          description: Only T
+        bank:
+          type: integer
+          x-stoplight:
+            id: m7de8bmr8n6q5
+          exclusiveMinimum: false
+          minimum: 2
+          maximum: 2
+          exclusiveMaximum: false
+        branch:
+          type: integer
+          x-stoplight:
+            id: kkpivywo5cfaq
+          minimum: 3
+          maximum: 3
+        account:
+          type: string
+          x-stoplight:
+            id: kazyw33esjqu3
+          minLength: 5
+          maxLength: 7
+          description: bank account number
+        TranzilaPW:
+          type: string
+          x-stoplight:
+            id: iriihe50l71cb
+        response_return_format:
+          type: string
+          x-stoplight:
+            id: vba5ec0fssgjn
+          default: qstr
+          pattern: '"qstr" "json"'
+          example: json
+          description: "The responses returned to requests are returned in QSTR format by default.\r\nCertain application-level errors will return in HTML format. You can receive the responses in either QSTR or JSON format.\r\n"
+    items-arry:
+      type: array
+      x-examples:
+        Example 1:
+          - code: PROD-001
+            name: Premium Wireless Headphones
+            type: I
+            units_number: 2
+            unit_type: 1
+            unit_price: 299
+            price_type: G
+            currency_code: ILS
+            to_txn_currency_exchange_rate: 1
+            discount_type: percent
+            discount: 10
+            vat_percent: 17
+            attributes:
+              - language: hebrew
+                name: color
+                value: black
+              - language: english
+                name: warranty
+                value: 2 years
+          - code: SHIP-001
+            name: Express Shipping
+            type: S
+            units_number: 1
+            unit_type: 1
+            unit_price: 25
+            price_type: G
+            currency_code: ILS
+            to_txn_currency_exchange_rate: 1
+            discount_type: fixed
+            discount: 0
+            vat_percent: 17
+            attributes:
+              - language: hebrew
+                name: delivery_time
+                value: 1-2 business days
+          - code: COUP-001
+            name: New Customer Discount
+            type: C
+            units_number: 1
+            unit_type: 1
+            unit_price: -50
+            price_type: G
+            currency_code: ILS
+            to_txn_currency_exchange_rate: 1
+            discount_type: fixed
+            discount: 0
+            vat_percent: 0
+            attributes:
+              - language: hebrew
+                name: promo_code
+                value: WELCOME2024
+      items:
+        type: object
+        required:
+          - name
+          - units_number
+          - unit_price
+        properties:
+          code:
+            type: string
+            description: Item code/SKU (optional)
+          name:
+            type: string
+            description: Item name (required)
+          type:
+            type: string
+            description: "Item type:</br>\r\n`I` = Item/Product\r\n`S` = Shipping\r\n`C` = Coupon/Discount"
+          units_number:
+            type: integer
+            description: Quantity (required)
+          unit_type:
+            type: integer
+            description: "Unit type (1-16):\r\n\r\n`1` = Unit, `2` = Gram, `3` = Kilogram, `4` = Ton\r\n`5` = Day, `6` = Week, `7` = Month, `8` = Year\r\n`9` = Centimeter, `10` = Meter, `11` = Kilometer\r\n`12` = MB, `13` = GB, `14` = TB, `15` = Hour, `16` = Liter"
+          price_type:
+            type: string
+            description: " Price type:\r\n`N` = Net (excluding VAT)\r\n`G` = Gross (including VAT)"
+          unit_price:
+            type: integer
+            description: Price per unit (required)
+          currency_code:
+            $ref: '#/components/schemas/txnCurrencyCode'
+          discount_type:
+            type: string
+          to_txn_currency_exchange_rate:
+            type: integer
+          discount:
+            type: integer
+          vat_percent:
+            type: integer
+          attributes:
+            type: array
+            items:
+              type: object
+              properties:
+                language:
+                  type: string
+                name:
+                  type: string
+                value:
+                  type: string
+  responses:
+    UnexpectedError:
+      description: Unexpected error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: |-
+        | Error Code |  Description  |
+        | :------------- | :----------- |
+        | **20001**      | Invalid JSON Format |
+        | **20003**      | Invalid JSON Schema |
+        | **20004**      | JSON Schema mismatch |
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: The specified resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: |-
+        | Error Code |  Description  |
+        | :------------- | :----------- |
+        | **20000**      | Authentication failed |
+        | **20002**      | Authorization failed |
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

@@ -1,0 +1,406 @@
+openapi: 3.1.0
+x-stoplight:
+  id: sszgfd8q7b8l0
+info:
+  version: '1.0'
+  title: Payment request
+  summary: 'Our API now allows for easy creation of payment requests '
+  description: "Our API now enables you to create payment requests easily. To initiate a request, make a call to the following endpoint: https://api.tranzila.com/v1/pr/create.</br>\r\n Payment requests generated via TRAPI can be sent via email, SMS, or both.\r\n\r\nDetailed explanation regarding the authentication header parameters can be found in [authentication](docs/Auth.md)\r\n\r\n| Header               |  Note |\r\n| :------------- | :----------- |\r\n| **X-tranzila-api-app-key**      | Application key supplied by Tranzila |\r\n| **X-tranzila-api-request-time**   |   Request time sent in Unix format (large integer counting milliseconds from Jan 1 st , 1970 00:00:00    |\r\n| **X-tranzila-api-nonce** |   A 40 bytes NONCE – unique random string generated with any random bytes function  |\r\n| **X-tranzila-api-access-token** |   hash_hmac using ‘sha256’ on application key with secret + request-time + nonce. hash_hmac is available for all programming languages with samples found here: https://www.jokecamp.com/blog/examples-of-creating-base64-hashes-using-hmac-sha256-in-different-languages/    |"
+servers:
+  - url: 'https://api.tranzila.com'
+paths:
+  /v1/pr/create:
+    post:
+      summary: create payment requests
+      description: "Our API now enables you to create payment requests easily. To initiate a request, make a call to the following endpoint: `https://api.tranzila.com/v1/pr/create`. Payment requests generated via TRAPI can be sent via email, SMS, or both.\r\n\r\nHere’s an example of a request:\r\n\r\n```json\r\n{\r\n  \"terminal_name\": \"ternimalname\",\r\n  \"action_type\": 1,\r\n  \"response_language\": \"hebrew\",\r\n  \"request_currency\": \"ILS\",\r\n  \"request_vat\": 17,\r\n  \"payments_number\": 1,\r\n  \"created_by_user\": \"tester\",\r\n  \"created_via\": \"TRAPI\",\r\n  \"payment_plans\": [1],\r\n  \"payment_methods\": [1],\r\n  \"client\": {\r\n    \"name\": \"cats ltm\",\r\n    \"id\": \"123123123\",\r\n    \"contact_person\": \"test contact\",\r\n    \"email\": \"test@interspace.net\",\r\n    \"phone_country_code\": \"972\",\r\n    \"phone_area_code\": \"054\",\r\n    \"phone_number\": \"444444\"\r\n  },\r\n  \"items\": [\r\n    {\r\n      \"id\": 22,\r\n      \"code\": \"5555\",\r\n      \"name\": \"חולצה\",\r\n      \"unit_price\": 10,\r\n      \"type\": \"I\",\r\n      \"units_number\": 1,\r\n      \"unit_type\": 1,\r\n      \"price_type\": \"G\",\r\n      \"currency_code\": \"ILS\"\r\n    }\r\n  ],\r\n  \"send_email\": {\r\n    \"sender_name\": \"טסט טסט 123 בע''מ\",\r\n    \"sender_email\": \"donotreply@tranzila.com\"\r\n  }\r\n}\r\n```\r\n\r\n### Parameter Details:\r\n\r\n- **payment_plans**: Options include `1` for regular and `8` for installments.\r\n- **payment_methods**:\r\n  - `1`: כרטיס אשראי (Credit Card)\r\n  - `2`: העברה בנקאית מס\"ב (Bank Masav)\r\n  - `14`: Bit\r\n  - `15`: אפל פיי (Apple Pay)\r\n\r\n  > **Note:** Each payment method is a paid module. Use only the methods that are enabled for your terminal.\r\n\r\n  > **Masav – value `2`:** Using this value activates the **legacy** payment page design, which allows end-customers to enter their bank account details and pay via the Masav clearing system. Requires the Masav module.\r\n\r\n  > **New Bank Transfer model:** If you have purchased the new Bank Transfer model, no separate parameter is required. The payment method is enabled automatically once it is activated in the iFrame settings of your terminal in the **MY.TRANZILA** portal.\r\n\r\n- **action_type**: `1` for charge, `2` for J5.\r\n- **request_currency**: Supported currencies are `ILS`, `USD`, `EUR`, `GBP`, `CAD`, `AUD`, `SEK`, `NOK`, `CHF`, `DKK`, `JPY`.\r\n- **response_language**: Options are `hebrew` or `english` for the payment request language.\r\n\r\nTo send via SMS, you need the following client array parameters:\r\n- `phone_country_code`\r\n- `phone_area_code`\r\n- `phone_number`\r\n\r\nTo send via email, ensure you include the **send_email** array:\r\n- **sender_name**: Specifies the business name that will appear in the email.\r\n- **sender_email**: Defines the email address from which the payment request is sent.\r\n\r\nNote that multiple payment methods can be combined in a single request, e.g., </br>`\"payment_methods\":[1,2,14,15]`. Using unsupported methods will result in an error:\r\n```json\r\n{\r\n    \"error_code\": 20403,\r\n    \"message\": \"שגיאה בשליפת פרמטרים\"\r\n}\r\n```\r\n\r\nCustomer fields must be properly configured in the payment page settings (e.g., company name, contact person) to be displayed correctly in the payment request page.\r\n\r\nExample of a successful payment request creation response:\r\n\r\n```json\r\n{\r\n    \"error_code\": 0,\r\n    \"message\": \"דרישת תשלום נוצרה בהצלחה.\",\r\n    \"pr_id\": \"634\",\r\n    \"pr_link\": \"https://pay.tranzila.com/pr/EtujY6VXYDFtwGqunlzvekAWAbSNo2OJMur7fAspZOTVkcSPRCUxGYfNvr4EUa29Sl37p6qWgd61T3DG\"\r\n}\r\n```\r\n\r\nClients wishing to receive a NOTIFY after a payment can match the response from the notify with the payment request using the `pr_id` parameter."
+      operationId: get-v1-pr-create
+      parameters:
+        - name: Content-Type
+          in: header
+          description: application/json
+          schema:
+            type: string
+        - name: Connection
+          in: header
+          description: keep-alive
+          schema:
+            type: string
+        - name: X-tranzila-api-app-key
+          in: header
+          description: Public key
+          required: true
+          schema:
+            type: string
+        - name: X-tranzila-api-request-time
+          in: header
+          description: timestamp
+          required: true
+          schema:
+            type: string
+        - name: X-tranzila-api-nonce
+          in: header
+          description: nonce
+          required: true
+          schema:
+            type: string
+        - name: X-tranzila-api-access-token
+          in: header
+          description: hash
+          required: true
+          schema:
+            type: string
+      requestBody:
+        description: ''
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/pr_create'
+      responses:
+        '200':
+          description: "Example of a response to ensure proper creation of a payment request.\r\n\r\n```json\r\n{\r\n    \"error_code\": 0,\r\n    \"message\": \"The payment request created successfully.\",\r\n    \"pr_id\": \"634\",\r\n    \"pr_link\": \"https://pay.tranzila.com/pr/EtujY6VXYDFtwGqunlzvekAWAbSNo2OJMur7fAspZOTVkcSPRCUxGYfNvr4EUa29Sl37p6qWgd61T3DG\"\r\n}\r\n```"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    type: integer
+                  message:
+                    type: string
+                  pr_id:
+                    type: string
+                x-examples:
+                  Example 1:
+                    error_code: 0
+                    message: The payment request created successfully.
+                    pr_id: '102446'
+              examples:
+                Example 1:
+                  value:
+                    error_code: 0
+                    message: The payment request created successfully.
+                    pr_id: '102446'
+        2XX:
+          description: "Error example<BR>\r\nThe terminal name is invalid.\r\n```json\r\n{\r\n    \"error_code\": 20002,\r\n    \"message\": \"Authorization failed\"\r\n}\r\n```"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_code:
+                    type: integer
+                  message:
+                    type: string
+                  pr_id:
+                    type: string
+                x-examples:
+                  Example 1:
+                    error_code: 0
+                    message: דרישת תשלום נוצרה בהצלחה.
+                    pr_id: '634'
+      security: []
+      servers:
+        - url: 'https://api.tranzila.com'
+      x-stoplight:
+        id: 4oeojzoc0teuf
+components:
+  schemas:
+    pr_create:
+      type: object
+      x-stoplight:
+        id: 0455z2ofwucu8
+      required:
+        - terminal_name
+        - created_by_user
+        - created_by_system
+        - created_via
+        - request_date
+        - request_language
+        - response_language
+        - client
+        - items
+        - payment_plans
+        - payment_methods
+        - payments_number
+      properties:
+        terminal_name:
+          type: string
+          pattern: '^[a-z][a-z0-9]{2,15}$'
+          $id: '#/properties/terminal_name'
+        created_by_user:
+          type: string
+          $id: '#/properties/created_by_user'
+        created_by_system:
+          type: string
+          $id: '#/properties/created_by_system'
+        created_via:
+          type: string
+          $id: '#/properties/created_via'
+        action_type:
+          type: number
+          $id: '#/properties/action_type'
+        request_date:
+          type:
+            - string
+            - 'null'
+          pattern: '^(19|20)\d\d[- /.](0[1-9]|1[012])[- /.](0[1-9]|[12][0-9]|3[01])$'
+          default: null
+          $id: '#/properties/request_date'
+        request_language:
+          type: string
+          enum:
+            - english
+            - hebrew
+          default: hebrew
+          $id: '#/properties/request_language'
+        response_language:
+          type: string
+          enum:
+            - english
+            - hebrew
+          default: hebrew
+          $id: '#/properties/response_language'
+        pr_token:
+          type: string
+          pattern: '^[A-Za-z0-9]{80}$'
+          $id: '#/properties/pr_token'
+        request_vat:
+          type: number
+          minimum: 0
+          maximum: 100
+          $id: '#/properties/request_vat'
+          description: 'In case it is not sent, the PR will include the VAT as defined in the accounting documents module of the terminal.'
+          example: 18
+        currency_code:
+          type: string
+          enum:
+            - AUD
+            - CAD
+            - CHF
+            - DKK
+            - EUR
+            - GBP
+            - ILS
+            - JPY
+            - NOK
+            - SEK
+            - USD
+          default: ILS
+          $id: '#/properties/currency_code'
+        request_currency:
+          type: string
+          enum:
+            - AUD
+            - CAD
+            - CHF
+            - DKK
+            - EUR
+            - GBP
+            - ILS
+            - JPY
+            - NOK
+            - SEK
+            - USD
+          default: ILS
+          $id: '#/properties/request_currency'
+        client:
+          type: object
+          $id: '#/properties/client'
+          required:
+            - name
+            - contact_person
+            - email
+          description: The three fields for the phone number will no longer be mandatory as long as an email is provided.
+          properties:
+            external_id:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/client/properties/external_id'
+            name:
+              type: string
+              $id: '#/properties/client/properties/name'
+            contact_person:
+              type: string
+              $id: '#/properties/client/properties/contact_person'
+            id:
+              type: string
+              pattern: '^[0-9A-Za-z]{5,9}$'
+              maxLength: 9
+              $id: '#/properties/client/properties/id'
+            email:
+              type: string
+              format: email
+              $id: '#/properties/client/properties/email'
+              description: "If an email address is provided for sending the payment request, then it is not mandatory to add a phone number for sending the request via SMS.\r\n"
+            address_line_1:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/client/properties/address_line_1'
+            address_line_2:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/client/properties/address_line_2'
+            city:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/client/properties/city'
+            country_code:
+              type:
+                - string
+                - 'null'
+              pattern: '^[A-Z]{2}$'
+              default: null
+              $id: '#/properties/client/properties/country_code'
+            zip:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/client/properties/zip'
+            phone_country_code:
+              $id: '#/properties/client/properties/phone_country_code'
+              type: string
+              pattern: '^[0-9]{1,6}$'
+              example: '972'
+            phone_area_code:
+              type: string
+              pattern: '^[0-9]{1,6}$'
+              $id: '#/properties/client/properties/phone_area_code'
+              example: '054'
+            phone_number:
+              type: string
+              pattern: '^[0-9]{3,15}$'
+              $id: '#/properties/client/properties/phone_number'
+              example: '123456'
+        items:
+          type: array
+          $id: '#/properties/items'
+          items:
+            type: object
+            required:
+              - name
+              - unit_price
+              - units_number
+            properties:
+              id:
+                type: number
+                $id: '#/properties/items/item/properties/id'
+              code:
+                type:
+                  - string
+                  - 'null'
+                default: null
+                $id: '#/properties/items/item/properties/code'
+              name:
+                type:
+                  - string
+                  - 'null'
+                $id: '#/properties/items/item/properties/name'
+              type:
+                type: string
+                enum:
+                  - I
+                  - S
+                  - C
+                default: I
+                $id: '#/properties/items/item/properties/type'
+              unit_price:
+                type: number
+                $id: '#/properties/items/item/properties/unit_price'
+              unit_type:
+                type: number
+                default: 1
+                $id: '#/properties/items/item/properties/unit_type'
+              price_type:
+                type: string
+                enum:
+                  - G
+                  - 'N'
+                default: G
+                $id: '#/properties/items/item/properties/price_type'
+              units_number:
+                type: number
+                $id: '#/properties/items/item/properties/units_number'
+              currency_code:
+                type: string
+                enum:
+                  - AUD
+                  - CAD
+                  - CHF
+                  - DKK
+                  - EUR
+                  - GBP
+                  - ILS
+                  - JPY
+                  - NOK
+                  - SEK
+                  - USD
+                default: ILS
+                $id: '#/properties/items/item/properties/currency_code'
+              to_txn_currency_exchange_rate:
+                type:
+                  - number
+                  - 'null'
+                default: 1
+                $id: '#/properties/items/item/properties/to_txn_currency_exchange_rate'
+              vat_percent:
+                type:
+                  - number
+                  - 'null'
+                minimum: 0
+                maximum: 100
+                default: null
+                $id: '#/properties/items/item/properties/vat_percent'
+        payment_plans:
+          type: array
+          $id: '#/properties/items/payment_plans'
+          items:
+            - type: number
+              $id: '#/properties/items/payment_plans/items'
+        payment_methods:
+          type: array
+          description: "Supported values:\r\n- `1` – Credit Card (כרטיס אשראי)\r\n- `2` – Bank Transfer Via Masav (העברה בנקאית מס\"ב) *\r\n- `14` – Bit *\r\n- `15` – Apple Pay *\r\n\r\n\\* Paid module. Available only if enabled for your terminal."
+          $id: '#/properties/payment_methods'
+          items: {}
+        send_sms:
+          type: object
+          $id: '#/properties/send_sms'
+          required:
+            - sender_name
+          properties:
+            sender_name:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/send_sms/sender_number'
+        payments_number:
+          type: number
+          $id: '#/properties/payments_number'
+        send_email:
+          type: object
+          $id: '#/properties/send_email'
+          required:
+            - sender_name
+            - sender_email
+          properties:
+            sender_name:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/send_email/sender_name'
+            sender_email:
+              type:
+                - string
+                - 'null'
+              default: null
+              $id: '#/properties/send_email/sender_email'
