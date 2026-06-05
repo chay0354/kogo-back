@@ -684,14 +684,23 @@ def charge_card(request):
     
     try:
         product_items = request.data['items']
-        card_details = request.data['card_details']
         child_id = request.data.get('child_id')
         installments = request.data.get('installments', 1)
-        
+        use_token = request.data.get('charged_with_token', False)
+        card_details = request.data.get('card_details') if not use_token else None
+
+        if not use_token and not card_details:
+            return Response({'error': 'card_details required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not use_token:
+            missing = [f for f in ('card_number', 'expiry_month', 'expiry_year', 'cvv') if not card_details.get(f)]
+            if missing:
+                return Response({'error': f"Missing card fields: {', '.join(missing)}"}, status=status.HTTP_400_BAD_REQUEST)
+
         # Calculate total
         total_amount = Decimal('0.00')
         tranzila_items = []
-        
+
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
             unit_price = Decimal(str(item['price_override'])) if item.get('price_override') else product.sale_price
@@ -706,7 +715,7 @@ def charge_card(request):
                 'price_type': 'G',
                 'currency_code': 'ILS'
             })
-        
+
         # Create invoice
         invoice = StoreInvoice.objects.create(
             child_id=child_id,
@@ -715,22 +724,37 @@ def charge_card(request):
             total_amount=total_amount,
             payment_method='credit_card',
             payment_status='pending',
-            charged_with_token=False
+            charged_with_token=use_token,
         )
-        
-        # Charge card
+
         tranzila = TranzilaService()
-        result = tranzila.charge_with_card(
-            card_number=card_details['card_number'],
-            expiry_month=int(card_details['expiry_month']),
-            expiry_year=int(card_details['expiry_year']),
-            cvv=card_details['cvv'],
-            card_holder_id=card_details['card_holder_id'],
-            amount=total_amount,
-            description=f"Store purchase - Invoice {invoice.invoice_number}",
-            items=tranzila_items,
-            installments=installments
-        )
+
+        if use_token:
+            # Charge using stored Tranzila token
+            child = Child.objects.get(id=child_id)
+            recurring = RecurringPayment.objects.filter(child=child, status='active').first()
+            if not recurring or not recurring.tranzila_token:
+                invoice.payment_status = 'failed'
+                invoice.save()
+                return Response({'error': 'No stored token for this child'}, status=status.HTTP_400_BAD_REQUEST)
+            result = tranzila.charge_with_token(
+                token=recurring.tranzila_token,
+                amount=total_amount,
+                description=f"Store purchase - Invoice {invoice.invoice_number}",
+                items=tranzila_items,
+            )
+        else:
+            result = tranzila.charge_with_card(
+                card_number=card_details['card_number'],
+                expiry_month=int(card_details['expiry_month']),
+                expiry_year=int(card_details['expiry_year']),
+                cvv=card_details['cvv'],
+                card_holder_id=card_details['card_holder_id'],
+                amount=total_amount,
+                description=f"Store purchase - Invoice {invoice.invoice_number}",
+                items=tranzila_items,
+                installments=installments,
+            )
         
         if result['success']:
             # Update invoice
