@@ -251,7 +251,7 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'invoice_number',
             'child', 'child_name', 'customer_name', 'customer_phone',
-            'total_amount', 'refunded_amount', 'payment_method', 'payment_status',
+            'total_amount', 'refunded_amount', 'amount_paid', 'payment_method', 'payment_status',
             'tranzila_transaction_id', 'tranzila_confirmation_code',
             'charged_with_token',
             'branch', 'branch_name',
@@ -259,7 +259,7 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
             'line_items',
             'created_at'
         ]
-        read_only_fields = ['id', 'invoice_number', 'issue_date', 'created_at', 'refunded_amount']
+        read_only_fields = ['id', 'invoice_number', 'issue_date', 'created_at', 'refunded_amount', 'amount_paid']
 
 
 class StoreAnalyticsSerializer(serializers.Serializer):
