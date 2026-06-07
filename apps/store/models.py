@@ -238,6 +238,7 @@ class StoreInvoice(models.Model):
     PAYMENT_STATUS_CHOICES = [
         ('pending', 'ממתין'),
         ('completed', 'הושלם'),
+        ('partially_paid', 'שולם חלקית'),
         ('failed', 'נכשל'),
         ('refunded', 'זוכה'),
         ('refund_failed', 'זיכוי נכשל'),
@@ -289,6 +290,13 @@ class StoreInvoice(models.Model):
         default=Decimal('0.00'),
         verbose_name="סכום שזוכה",
         help_text="Amount that has been refunded"
+    )
+    amount_paid = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        verbose_name="סכום ששולם",
+        help_text="Amount paid so far against this invoice (for partial payments / collections tracking)"
     )
     payment_method = models.CharField(
         max_length=20,
