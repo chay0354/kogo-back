@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, date
 from decimal import Decimal
 
 from apps.core.permissions import IsManager
-from apps.core.scoping import is_scoped_manager, assigned_course_ids, assigned_branch_ids
 
 logger = logging.getLogger(__name__)
 from apps.core.models import (
@@ -77,27 +76,12 @@ class DashboardViewSet(viewsets.ViewSet):
     """
     Dashboard data endpoints
     All endpoints require authentication and manager role.
-
-    Scoped managers (non-superuser) only see data for their assigned courses.
-    Branch/instructor-level financial snapshots are scoped to the branches /
-    instructors derived from those courses (branch totals remain branch-level).
     """
     permission_classes = [IsAuthenticated, IsManager]
 
     def _scope(self, request):
-        """Return (is_scoped, course_ids, branch_ids, instructor_ids) for this user."""
-        user = request.user
-        if not is_scoped_manager(user):
-            return False, None, None, None
-        course_ids = assigned_course_ids(user)
-        branch_ids = assigned_branch_ids(user)
-        instructor_ids = list(
-            Lesson.objects.filter(course_id__in=course_ids)
-            .exclude(instructor__isnull=True)
-            .values_list('instructor_id', flat=True)
-            .distinct()
-        )
-        return True, course_ids, branch_ids, instructor_ids
+        """Managers see all dashboard data."""
+        return False, None, None, None
     
     @action(detail=False, methods=['get'], url_path='financial')
     def financial_data(self, request):

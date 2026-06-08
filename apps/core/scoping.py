@@ -1,13 +1,9 @@
 """
-Per-manager course scoping.
+Course visibility scoping.
 
-Managers are restricted to the courses they are assigned to (Course.managers).
-A manager sees only those courses — and everything derived from them (lessons,
-calendar, students, payments, dashboard, store, salaries). A manager with no
-assigned courses sees nothing.
-
-Django superusers bypass all scoping (safety/escape hatch so assignments can
-always be fixed, and so the system can never be permanently locked out).
+Managers see all courses and derived data.
+Instructor users (worker role, matched to Instructor by email) see only
+courses where they teach at least one lesson.
 """
 from __future__ import annotations
 
@@ -28,27 +24,48 @@ def is_unrestricted(user) -> bool:
 
 
 def is_scoped_manager(user) -> bool:
-    """True when this user's queries must be restricted to assigned courses."""
+    """Managers are never course-scoped (kept for call-site compatibility)."""
+    return False
+
+
+def is_scoped_instructor(user) -> bool:
+    """True when this worker user should only see their assigned courses."""
     if not user or not user.is_authenticated:
         return False
     if is_unrestricted(user):
         return False
-    return get_user_role(user) == UserProfile.ROLE_MANAGER
+    return get_user_role(user) == UserProfile.ROLE_WORKER
 
 
-def assigned_course_ids(user):
-    """List of course ids assigned to this manager."""
+def instructor_course_ids(user):
+    """Course ids where this instructor user is assigned to the team."""
     from apps.courses.models import Course
+
+    if not user or not user.email:
+        return []
     return list(
-        Course.objects.filter(managers=user).values_list('id', flat=True)
+        Course.objects.filter(instructor__email__iexact=user.email)
+        .values_list('id', flat=True)
+        .distinct()
     )
 
 
+def assigned_course_ids(user):
+    """Course ids visible to an instructor user; empty for managers."""
+    if is_scoped_instructor(user):
+        return instructor_course_ids(user)
+    return []
+
+
 def assigned_branch_ids(user):
-    """Distinct branch ids derived from the manager's assigned courses."""
+    """Distinct branch ids from the instructor user's assigned courses."""
     from apps.courses.models import Course
+
+    ids = instructor_course_ids(user)
+    if not ids:
+        return []
     return list(
-        Course.objects.filter(managers=user)
+        Course.objects.filter(id__in=ids)
         .values_list('branch_id', flat=True)
         .distinct()
     )
@@ -56,29 +73,34 @@ def assigned_branch_ids(user):
 
 def scope_courses(qs, user, course_lookup=''):
     """
-    Restrict a queryset to objects whose related Course is assigned to `user`.
+    Restrict a queryset to courses visible to `user`.
+
+    Managers and superusers: no filtering.
+    Instructor users (workers): only courses where they teach a lesson.
 
     course_lookup is the ORM path from the model to Course:
       - ''              for a Course queryset (filter on pk)
       - 'course'        for Lesson
       - 'lesson__course' for LessonEnrollment / attendance
       - 'initial_payment__lesson__course' for RecurringPayment, etc.
-
-    Superusers and non-managers (workers handled elsewhere) are returned as-is.
     """
-    if not is_scoped_manager(user):
+    if not is_scoped_instructor(user):
         return qs
-    ids = assigned_course_ids(user)
+    ids = instructor_course_ids(user)
+    if not ids:
+        return qs.none()
     if course_lookup in ('', None):
         return qs.filter(pk__in=ids)
     return qs.filter(**{f'{course_lookup}_id__in': ids})
 
 
 def scope_branches(qs, user, branch_lookup=''):
-    """Restrict a queryset to the manager's assigned branches."""
-    if not is_scoped_manager(user):
+    """Restrict a queryset to branches derived from the instructor's courses."""
+    if not is_scoped_instructor(user):
         return qs
     ids = assigned_branch_ids(user)
+    if not ids:
+        return qs.none()
     if branch_lookup in ('', None):
         return qs.filter(pk__in=ids)
     return qs.filter(**{f'{branch_lookup}_id__in': ids})

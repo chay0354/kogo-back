@@ -11,7 +11,7 @@ class CourseTypeAdmin(admin.ModelAdmin):
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
-    list_display = ['name', 'course_type', 'price', 'capacity', 'min_age', 'max_age', 'is_active']
+    list_display = ['name', 'course_type', 'branch', 'instructor', 'price', 'capacity', 'is_active']
     list_filter = ['is_active', 'course_type', 'branch']
     search_fields = ['name', 'description']
     filter_horizontal = ['managers']

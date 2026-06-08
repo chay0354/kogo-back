@@ -6,7 +6,8 @@ from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.enrollments.models import LessonEnrollment
 from apps.core.models import Branch, UserProfile
-from apps.core.scoping import is_scoped_manager
+from apps.core.scoping import scope_courses
+from apps.instructors.models import Instructor
 from apps.scheduling.studio_conflict import timed_event_conflicts_lesson
 
 
@@ -14,11 +15,11 @@ User = get_user_model()
 
 
 def _scoped_courses_for(serializer, base_qs):
-    """Limit a Course queryset to the requesting manager's assigned courses."""
+    """Limit a Course queryset to courses visible to the requesting user."""
     request = serializer.context.get('request')
     user = getattr(request, 'user', None)
-    if user is not None and is_scoped_manager(user):
-        return base_qs.filter(managers=user)
+    if user is not None:
+        return scope_courses(base_qs, user)
     return base_qs
 
 
@@ -201,12 +202,15 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
 
 class CourseWithLessonsSerializer(serializers.ModelSerializer):
     """Course with nested lessons for details view"""
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    instructor = InstructorMinimalSerializer(read_only=True)
     lessons = LessonWithEnrollmentsSerializer(many=True, read_only=True)
     
     class Meta:
         model = Course
         fields = ['id', 'name', 'description', 'price', 'capacity', 
-                  'min_age', 'max_age', 'lessons', 'is_active']
+                  'min_age', 'max_age', 'branch_name', 'instructor', 'instructor_salary_override',
+                  'lessons', 'is_active']
 
 
 class CourseTypeDetailsSerializer(serializers.ModelSerializer):
@@ -231,13 +235,20 @@ class CourseSerializer(serializers.ModelSerializer):
         queryset=User.objects.filter(profile__role=UserProfile.ROLE_MANAGER),
     )
     managers_detail = serializers.SerializerMethodField()
+    instructor = serializers.PrimaryKeyRelatedField(
+        queryset=Instructor.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    instructor_detail = InstructorMinimalSerializer(source='instructor', read_only=True)
     
     class Meta:
         model = Course
         fields = ['id', 'course_type', 'course_type_name', 'name', 'description', 
                   'price', 'capacity', 'branch', 'branch_name',
                   'min_age', 'max_age', 'is_active', 'lessons_count', 'enrolled_students_count',
-                  'lessons', 'managers', 'managers_detail', 'created_at', 'updated_at']
+                  'lessons', 'managers', 'managers_detail', 'instructor', 'instructor_detail',
+                  'instructor_salary_override', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_managers_detail(self, obj):
@@ -278,6 +289,16 @@ class CourseSerializer(serializers.ModelSerializer):
             } for lesson in lessons]
         return []
 
+    def create(self, validated_data):
+        course = super().create(validated_data)
+        course.sync_instructor_to_lessons()
+        return course
+
+    def update(self, instance, validated_data):
+        course = super().update(instance, validated_data)
+        course.sync_instructor_to_lessons()
+        return course
+
 
 class LessonSerializer(serializers.ModelSerializer):
     """Basic Lesson serializer for CRUD operations"""
@@ -296,7 +317,22 @@ class LessonSerializer(serializers.ModelSerializer):
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
                   'status', 'notes', 'enrolled_students_count', 'room_capacity',
                   'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'instructor', 'instructor_salary_override', 'created_at', 'updated_at']
+
+    def _apply_course_instructor(self, validated_data):
+        course = validated_data.get('course') or getattr(self.instance, 'course', None)
+        if course is not None:
+            validated_data['instructor'] = course.instructor
+            validated_data['instructor_salary_override'] = course.instructor_salary_override
+        return validated_data
+
+    def create(self, validated_data):
+        validated_data = self._apply_course_instructor(validated_data)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data = self._apply_course_instructor(validated_data)
+        return super().update(instance, validated_data)
 
     def validate_additional_course_prices(self, value):
         return _normalize_additional_course_prices(value)
@@ -324,7 +360,7 @@ class LessonSerializer(serializers.ModelSerializer):
         course = data.get('course') or (self.instance.course if self.instance else None)
         branch = course.branch if course else None
         room = data.get('room') or (self.instance.room if self.instance else None)
-        instructor = data.get('instructor') or (self.instance.instructor if self.instance else None)
+        instructor = course.instructor if course else None
         day_of_week = data.get('day_of_week', self.instance.day_of_week if self.instance else None)
         start_time = data.get('start_time', self.instance.start_time if self.instance else None)
         end_time = data.get('end_time', self.instance.end_time if self.instance else None)

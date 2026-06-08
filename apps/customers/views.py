@@ -28,7 +28,7 @@ from apps.customers.discount_service import DiscountService
 from apps.core.payment_service import PaymentService
 from apps.enrollments.models import LessonEnrollment
 from apps.core.permissions import IsManager
-from apps.core.scoping import scope_courses, is_scoped_manager, assigned_course_ids
+from apps.core.scoping import scope_courses
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +50,7 @@ class FamilyViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if is_scoped_manager(user):
-            qs = qs.filter(
-                children__lesson_enrollments__lesson__course__managers=user
-            ).distinct()
-        return qs
+        return super().get_queryset()
 
 
 class ParentViewSet(viewsets.ModelViewSet):
@@ -194,12 +188,6 @@ class ChildViewSet(viewsets.ModelViewSet):
         if absent_irregularly and absent_irregularly.lower() == 'true':
             queryset = queryset.filter(absent_irregularly=True)
 
-        # Scoped managers: only children enrolled in one of their assigned courses.
-        if is_scoped_manager(self.request.user):
-            queryset = queryset.filter(
-                lesson_enrollments__lesson__course__managers=self.request.user
-            ).distinct()
-
         return queryset
     
     @action(detail=False, methods=['get'])
@@ -243,7 +231,7 @@ class ChildViewSet(viewsets.ModelViewSet):
                 'child',
             )
         )
-        # Scoped managers only group by their assigned courses.
+        # Group by courses visible to the requesting user (instructor workers only).
         enrollments_qs = scope_courses(enrollments_qs, request.user, 'lesson__course')
 
         # 1) Aggregate counts per course (single query)
@@ -326,12 +314,6 @@ class ChildViewSet(viewsets.ModelViewSet):
         USAGE: Used by frontend when user clicks "+ עוד" to see full student list
         - GET /api/v1/customers/children/by_course/{course_id}/students/
         """
-        # Scoped managers cannot read rosters of courses they aren't assigned to.
-        if is_scoped_manager(request.user) and str(course_id) not in {
-            str(cid) for cid in assigned_course_ids(request.user)
-        }:
-            return Response({'course_id': str(course_id), 'students': []})
-
         students_qs = (
             Child.objects.filter(
                 lesson_enrollments__status='active',
@@ -866,7 +848,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         """Filter payments by child"""
         queryset = super().get_queryset()
 
-        # Scoped managers: only payments tied to their assigned courses.
+        # Scoped instructor users: only payments tied to their assigned courses.
         queryset = scope_courses(queryset, self.request.user, 'lesson__course')
 
         # Filter by child if provided
@@ -1101,7 +1083,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         """Filter recurring payments by status and child"""
         queryset = super().get_queryset()
 
-        # Scoped managers: only subscriptions tied to their assigned courses.
+        # Scoped instructor users: only subscriptions tied to their assigned courses.
         queryset = scope_courses(
             queryset, self.request.user, 'initial_payment__lesson__course'
         )

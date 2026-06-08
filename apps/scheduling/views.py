@@ -10,7 +10,6 @@ from rest_framework.response import Response
 
 from apps.core.permissions import IsManager
 from apps.core.models import UserProfile
-from apps.core.scoping import scope_courses, assigned_branch_ids, is_scoped_manager
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
@@ -53,8 +52,7 @@ class LessonViewSet(viewsets.ModelViewSet):
             return qs.none()
         
         if user_role == UserProfile.ROLE_MANAGER:
-            # Managers see only lessons of their assigned courses (superusers: all)
-            return scope_courses(qs, user, 'course')
+            return qs
         elif user_role == UserProfile.ROLE_WORKER:
             # Workers see only their own lessons (matched by email)
             return qs.filter(instructor__email__iexact=user.email)
@@ -526,24 +524,18 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         try:
             user_role = user.profile.role
             if user_role == UserProfile.ROLE_WORKER:
-                # Filter events where user's email matches an assigned instructor's email,
-                # or studio rentals (visible to all workers for scheduling).
+                # Instructors see only non-rental events assigned to them.
                 from apps.instructors.models import Instructor
                 instructor = Instructor.objects.filter(email__iexact=user.email).first()
                 if instructor:
                     queryset = queryset.filter(
-                        Q(assigned_instructors=instructor) | Q(is_studio_rental=True)
+                        assigned_instructors=instructor,
+                        is_studio_rental=False,
                     ).distinct()
                 else:
-                    # No instructor match: still show rentals for schedule visibility
-                    queryset = queryset.filter(is_studio_rental=True)
-            elif user_role == UserProfile.ROLE_MANAGER and is_scoped_manager(user):
-                # Scoped managers: only events in their assigned branches
-                # (plus global/branch-less events) so the calendar stays coherent.
-                branch_ids = assigned_branch_ids(user)
-                queryset = queryset.filter(
-                    Q(branch_id__in=branch_ids) | Q(branch__isnull=True)
-                )
+                    queryset = queryset.none()
+            elif user_role == UserProfile.ROLE_MANAGER:
+                pass
         except (UserProfile.DoesNotExist, AttributeError):
             pass
         
@@ -588,6 +580,11 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(Q(city_id=city_id) | Q(city__isnull=True))
 
         if self.request.query_params.get('studio_rental') == '1':
+            try:
+                if user.profile.role == UserProfile.ROLE_WORKER:
+                    return queryset.none()
+            except (UserProfile.DoesNotExist, AttributeError):
+                pass
             queryset = queryset.filter(is_studio_rental=True)
 
         return queryset.filter(is_active=True)

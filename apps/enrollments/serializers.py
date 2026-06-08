@@ -77,6 +77,14 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         
         return data
 
+    def create(self, validated_data):
+        validated_data.pop('trial_registration', None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('trial_registration', None)
+        return super().update(instance, validated_data)
+
 
 class AbsenceHistorySerializer(serializers.ModelSerializer):
     """Serializer for Child Absence History"""

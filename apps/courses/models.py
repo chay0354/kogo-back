@@ -36,6 +36,21 @@ class Course(models.Model):
     min_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מינימום")
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    instructor = models.ForeignKey(
+        Instructor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='courses',
+        verbose_name="מדריך",
+    )
+    instructor_salary_override = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="שכר מדריך מותאם",
+    )
     managers = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
         related_name='assigned_courses',
@@ -54,6 +69,13 @@ class Course(models.Model):
 
     def __str__(self):
         return f"{self.course_type.name} - {self.name}"
+
+    def sync_instructor_to_lessons(self):
+        """Propagate team instructor settings to all lessons."""
+        self.lessons.update(
+            instructor=self.instructor,
+            instructor_salary_override=self.instructor_salary_override,
+        )
 
 
 class Lesson(models.Model):

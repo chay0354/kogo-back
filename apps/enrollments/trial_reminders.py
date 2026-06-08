@@ -109,7 +109,7 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
     qs = (
         LessonEnrollment.objects
         .select_related(
-            'lesson', 'lesson__course', 'lesson__branch',
+            'lesson', 'lesson__course', 'lesson__course__branch',
             'child', 'child__family',
         )
         .prefetch_related('child__family__parents')

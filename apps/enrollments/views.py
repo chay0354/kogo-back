@@ -18,8 +18,16 @@ from apps.customers.models import Child
 logger = logging.getLogger(__name__)
 
 
-def _is_trial_registration_request(data) -> bool:
-    return str((data or {}).get('trial_registration', '')).lower() in ('1', 'true', 'yes')
+def _is_trial_registration(request, validated_data) -> bool:
+    """Accept trial flag from validated payload or raw request (bool/string)."""
+    raw = validated_data.get('trial_registration', request.data.get('trial_registration'))
+    if raw is True:
+        return True
+    if raw in (False, None, ''):
+        return False
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 class EnrollmentViewSet(viewsets.ModelViewSet):
@@ -76,30 +84,47 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsManager]
 
     def create(self, request, *args, **kwargs):
-        trial_registration = _is_trial_registration_request(request.data)
-        response = super().create(request, *args, **kwargs)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-        if response.status_code == status.HTTP_201_CREATED and trial_registration:
-            enrollment_id = response.data.get('id') if isinstance(response.data, dict) else None
-            child_id = response.data.get('child') if isinstance(response.data, dict) else None
-            whatsapp_result = None
+        trial_registration = _is_trial_registration(request, serializer.validated_data)
+        lesson = serializer.validated_data['lesson']
+        child = serializer.validated_data['child']
 
-            if enrollment_id:
-                try:
-                    whatsapp_result = self._stamp_and_notify_trial_enrollment(enrollment_id)
-                except Exception:
-                    logger.exception("Trial WhatsApp notification failed (non-fatal)")
-                    whatsapp_result = {'sent': False, 'reason': 'exception'}
+        existing = LessonEnrollment.objects.filter(lesson=lesson, child=child).first()
+        if existing:
+            for field in ('status', 'start_date', 'end_date', 'notes'):
+                if field in serializer.validated_data:
+                    setattr(existing, field, serializer.validated_data[field])
+            existing.save()
+            enrollment = existing
+            status_code = status.HTTP_200_OK
+        else:
+            enrollment = serializer.save()
+            status_code = status.HTTP_201_CREATED
 
-            if child_id:
-                Child.objects.filter(id=child_id).update(status='trial_signed')
+        data = dict(self.get_serializer(enrollment).data)
+        whatsapp_result = None
 
-            if isinstance(response.data, dict):
-                payload = dict(response.data)
-                payload['whatsapp'] = whatsapp_result or {'sent': False, 'reason': 'skipped'}
-                response.data = payload
+        if trial_registration:
+            try:
+                whatsapp_result = self._stamp_and_notify_trial_enrollment(str(enrollment.id))
+            except Exception:
+                logger.exception("Trial WhatsApp notification failed (non-fatal)")
+                whatsapp_result = {'sent': False, 'reason': 'exception'}
 
-        return response
+            Child.objects.filter(pk=child.pk).update(status='trial_signed')
+            data['trial_applied'] = True
+            data['whatsapp'] = whatsapp_result or {'sent': False, 'reason': 'skipped'}
+            logger.info(
+                "Trial registration for child %s lesson %s whatsapp=%s",
+                child.pk,
+                lesson.pk,
+                data['whatsapp'],
+            )
+
+        headers = self.get_success_headers(data)
+        return Response(data, status=status_code, headers=headers)
 
     @staticmethod
     def _stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
@@ -113,7 +138,13 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
         enrollment = (
             LessonEnrollment.objects
-            .select_related('lesson', 'lesson__course', 'lesson__branch', 'child', 'child__family')
+            .select_related(
+                'lesson',
+                'lesson__course',
+                'lesson__course__branch',
+                'child',
+                'child__family',
+            )
             .prefetch_related('child__family__parents')
             .filter(id=enrollment_id)
             .first()
