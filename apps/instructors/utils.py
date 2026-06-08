@@ -8,6 +8,7 @@ from typing import Optional
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, is_paying_enrollment
+from apps.enrollments.models import LessonEnrollment
 
 
 # Constants
