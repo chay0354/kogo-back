@@ -10,7 +10,8 @@ from decimal import Decimal
 from apps.instructors.models import Instructor, InstructorBonus
 from apps.instructors.serializers import (
     InstructorListSerializer, InstructorDetailSerializer,
-    InstructorCreateUpdateSerializer, InstructorBonusSerializer
+    InstructorCreateUpdateSerializer, InstructorBonusSerializer,
+    InstructorDropdownSerializer,
 )
 from apps.instructors.utils import (
     calculate_instructor_monthly_metrics, calculate_lesson_profitability
@@ -82,8 +83,13 @@ class InstructorViewSet(viewsets.ModelViewSet):
         - max_students: Maximum number of students (all, 10, 15, 20, 25, 30+)
         - month: Month for financial calculations (YYYY-MM format)
         - simple: If 'true', use simplified approximation (salary_per_lesson × lesson_count × 4)
+        - dropdown: If 'true', return id/name/salary only (fast, for pickers)
         """
         queryset = self.filter_queryset(self.get_queryset())
+
+        if request.query_params.get('dropdown', '').lower() in ('1', 'true', 'yes'):
+            serializer = InstructorDropdownSerializer(queryset, many=True)
+            return Response(serializer.data)
 
         # Auto-finalize previous month snapshots (idempotent) so ended months become immutable automatically.
         from apps.instructors.utils import ensure_previous_month_finalized_for_all
@@ -187,14 +193,26 @@ class InstructorViewSet(viewsets.ModelViewSet):
         total_lessons = lessons.count()
         unique_students = set()
         total_salary = Decimal('0.00')
+        courses_with_monthly_pay = set()
         
         for lesson in lessons:
-            # Count active + payments_problem for student load
-            active_enrollments = lesson.enrollments.filter(status__in=['active', 'payments_problem'])
-            student_count = active_enrollments.count()
-            
+            active_enrollments = [
+                e for e in lesson.enrollments.all()
+                if e.status in ('active', 'payments_problem')
+                and getattr(e, 'child', None)
+                and e.child.status not in ('trial_signed', 'trial_completed')
+            ]
+            student_count = len(active_enrollments)
+
             for enrollment in active_enrollments:
                 unique_students.add(enrollment.child_id)
+
+            course = lesson.course
+            if course and course.instructor_salary_override is not None:
+                if course.id not in courses_with_monthly_pay:
+                    courses_with_monthly_pay.add(course.id)
+                    total_salary += Decimal(str(course.instructor_salary_override))
+                continue
             
             # Calculate per-lesson salary (respects tiers/override)
             per_lesson_salary = calculate_lesson_salary(student_count, instructor)
@@ -488,9 +506,18 @@ class InstructorViewSet(viewsets.ModelViewSet):
 
         total_occurrences = 0
         total_salary = Decimal('0.00')
+        courses_with_monthly_pay = set()
 
         # Salary for non-recurring (single occurrence each)
         for lesson in non_recurring:
+            course = lesson.course
+            if course and course.instructor_salary_override is not None:
+                if course.id not in courses_with_monthly_pay:
+                    courses_with_monthly_pay.add(course.id)
+                    total_salary += Decimal(str(course.instructor_salary_override))
+                total_occurrences += 1
+                continue
+
             student_count = lesson.enrollments.filter(status__in=['active', 'payments_problem']).count()
             per_occ_salary = calculate_lesson_salary_with_override(
                 student_count,
@@ -525,6 +552,14 @@ class InstructorViewSet(viewsets.ModelViewSet):
 
             effective_count = max(0, occ_count - cancelled_count)
             if effective_count == 0:
+                continue
+
+            course = lesson.course
+            if course and course.instructor_salary_override is not None:
+                if course.id not in courses_with_monthly_pay:
+                    courses_with_monthly_pay.add(course.id)
+                    total_salary += Decimal(str(course.instructor_salary_override))
+                total_occurrences += effective_count
                 continue
 
             student_count = lesson.enrollments.filter(status__in=['active', 'payments_problem']).count()

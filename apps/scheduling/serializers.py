@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from apps.courses.models import Lesson
-from apps.enrollments.models import LessonEnrollment, LessonAttendance
+from apps.enrollments.enrollment_counts import count_paying_enrollments, is_paying_enrollment
+from apps.enrollments.models import LessonAttendance
 
 
 class LessonListSerializer(serializers.ModelSerializer):
@@ -28,7 +29,9 @@ class LessonListSerializer(serializers.ModelSerializer):
         ]
     
     def get_enrollment_count(self, obj):
-        return obj.enrollments.filter(status='active').count()
+        if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
+            return sum(1 for e in obj.enrollments.all() if is_paying_enrollment(e))
+        return count_paying_enrollments(lesson=obj)
 
 
 class LessonDetailSerializer(serializers.ModelSerializer):

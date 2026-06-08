@@ -26,6 +26,7 @@ from apps.customers.discount_service import DiscountService
 from apps.core.tranzila_service import TranzilaService
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment
+from apps.enrollments.enrollment_counts import paying_enrollments
 from apps.instructors.utils import get_lesson_price_for_course_index
 from apps.store.stock_utils import (
     decrement_product_stock as _decrement_product_stock,
@@ -54,9 +55,11 @@ def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
     The selected lesson is excluded so re-opening payment for the same lesson
     does not incorrectly move the child into the next price tier.
     """
-    signed_lessons_count = LessonEnrollment.objects.filter(
-        child=child,
-        status__in=BILLING_ENROLLMENT_STATUSES,
+    signed_lessons_count = paying_enrollments(
+        LessonEnrollment.objects.filter(
+            child=child,
+            status__in=BILLING_ENROLLMENT_STATUSES,
+        )
     ).exclude(lesson=lesson).count()
     return signed_lessons_count + 1
 

@@ -49,7 +49,8 @@ class Course(models.Model):
         decimal_places=2,
         null=True,
         blank=True,
-        verbose_name="שכר מדריך מותאם",
+        verbose_name="שכר מדריך חודשי לקבוצה",
+        help_text="תשלום חודשי למדריך עבור הקבוצה (לא לשיעור בודד).",
     )
     managers = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
@@ -71,10 +72,10 @@ class Course(models.Model):
         return f"{self.course_type.name} - {self.name}"
 
     def sync_instructor_to_lessons(self):
-        """Propagate team instructor settings to all lessons."""
+        """Propagate team instructor to all lessons. Monthly pay stays on the course."""
         self.lessons.update(
             instructor=self.instructor,
-            instructor_salary_override=self.instructor_salary_override,
+            instructor_salary_override=None,
         )
 
 

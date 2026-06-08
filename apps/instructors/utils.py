@@ -7,7 +7,7 @@ import calendar
 from typing import Optional
 from django.db import transaction
 from django.db.models import Count, Q, Sum
-from apps.enrollments.models import LessonEnrollment
+from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, is_paying_enrollment
 
 
 # Constants
@@ -71,6 +71,27 @@ def calculate_lesson_salary_with_override(student_count, instructor, salary_over
     if salary_override is not None:
         return salary_override
     return calculate_lesson_salary(student_count, instructor)
+
+
+def get_course_team_monthly_salary(course) -> Optional[Decimal]:
+    """Monthly instructor pay configured on the team (Course.instructor_salary_override)."""
+    if course is None or course.instructor_salary_override is None:
+        return None
+    return Decimal(str(course.instructor_salary_override))
+
+
+def _count_recurring_lesson_templates(course) -> int:
+    count = course.lessons.filter(is_recurring=True).exclude(status='cancelled').count()
+    return count or 1
+
+
+def get_lesson_monthly_salary_share(lesson) -> Optional[Decimal]:
+    """Split course monthly instructor pay evenly across recurring lesson slots."""
+    course = getattr(lesson, 'course', None)
+    monthly = get_course_team_monthly_salary(course)
+    if monthly is None:
+        return None
+    return monthly / Decimal(_count_recurring_lesson_templates(course))
 
 
 def get_lesson_price(lesson):
@@ -148,7 +169,9 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
     """
     enrollments = getattr(lesson, "enrollments", None)
     if enrollments is None:
-        qs = LessonEnrollment.objects.filter(lesson=lesson, status__in=statuses)
+        qs = LessonEnrollment.objects.filter(lesson=lesson, status__in=statuses).exclude(
+            child__status__in=TRIAL_CHILD_STATUSES,
+        )
         return qs.filter(
             Q(start_date__isnull=True) | Q(start_date__lte=end_d),
             Q(end_date__isnull=True) | Q(end_date__gte=start_d),
@@ -157,6 +180,8 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
     cnt = 0
     for e in enrollments.all():
         if e.status in statuses and _enrollment_overlaps_range(e, start_d, end_d):
+            if getattr(e, 'child', None) and e.child.status in TRIAL_CHILD_STATUSES:
+                continue
             cnt += 1
     return cnt
 
@@ -168,7 +193,9 @@ def _unique_students_for_period(lesson, start_d: date, end_d: date, statuses: tu
     s: set = set()
     enrollments = getattr(lesson, "enrollments", None)
     if enrollments is None:
-        qs = LessonEnrollment.objects.filter(lesson=lesson, status__in=statuses).filter(
+        qs = LessonEnrollment.objects.filter(lesson=lesson, status__in=statuses).exclude(
+            child__status__in=TRIAL_CHILD_STATUSES,
+        ).filter(
             Q(start_date__isnull=True) | Q(start_date__lte=end_d),
             Q(end_date__isnull=True) | Q(end_date__gte=start_d),
         )
@@ -176,6 +203,8 @@ def _unique_students_for_period(lesson, start_d: date, end_d: date, statuses: tu
 
     for e in enrollments.all():
         if e.status in statuses and _enrollment_overlaps_range(e, start_d, end_d):
+            if getattr(e, 'child', None) and e.child.status in TRIAL_CHILD_STATUSES:
+                continue
             s.add(e.child_id)
     return s
 
@@ -320,6 +349,7 @@ def calculate_effective_occurrences(
 def calculate_instructor_salary_for_month(instructor, month: str, branch_id=None, effective_end: Optional[date] = None):
     """
     Calculate instructor salary for a given month using per-lesson rules:
+    - Uses course.instructor_salary_override as monthly team pay (counted once per course)
     - Uses tiered pricing if defined (salary tiers)
     - Uses lesson.instructor_salary_override when provided ("שכר חריג")
     - Excludes cancelled lessons (status='cancelled')
@@ -346,6 +376,7 @@ def calculate_instructor_salary_for_month(instructor, month: str, branch_id=None
     total_salary = Decimal('0.00')
     total_occurrences = 0
     total_lesson_templates = 0  # Count of unique lesson slots
+    courses_with_monthly_pay = set()
 
     # Batch-load cancellations for all lessons (avoids N+1 queries)
     cancellations_dict = _batch_load_cancellations(qs, month_start, month_end, effective_end=effective_end)
@@ -361,6 +392,15 @@ def calculate_instructor_salary_for_month(instructor, month: str, branch_id=None
             cancellations_dict=cancellations_dict
         )
         if occ <= 0:
+            continue
+
+        course = lesson.course
+        course_monthly = get_course_team_monthly_salary(course)
+        if course_monthly is not None:
+            if course.id not in courses_with_monthly_pay:
+                courses_with_monthly_pay.add(course.id)
+                total_salary += course_monthly
+            total_occurrences += occ
             continue
 
         # For salary tiers and load we include both active + payments_problem
@@ -401,6 +441,7 @@ def calculate_branch_instructor_costs_for_month(branch, month: str, effective_en
     cancellations_dict = _batch_load_cancellations(lessons, month_start, month_end, effective_end=effective_end)
 
     total = Decimal('0.00')
+    courses_with_monthly_pay = set()
 
     for lesson in lessons:
         if not lesson.instructor:
@@ -413,6 +454,14 @@ def calculate_branch_instructor_costs_for_month(branch, month: str, effective_en
             cancellations_dict=cancellations_dict
         )
         if occ <= 0:
+            continue
+
+        course = lesson.course
+        course_monthly = get_course_team_monthly_salary(course)
+        if course_monthly is not None:
+            if course.id not in courses_with_monthly_pay:
+                courses_with_monthly_pay.add(course.id)
+                total += course_monthly
             continue
 
         end_cap = effective_end if effective_end is not None else month_end
@@ -817,10 +866,17 @@ def calculate_lesson_profitability(lesson, instructor, month: Optional[str] = No
     revenue = payment_totals['actual_revenue'] or Decimal('0.00')
     total_discounts = payment_totals['total_discounts'] or Decimal('0.00')
     
-    # Calculate salary: per-occurrence salary × number of occurrences
-    salary_override = lesson.instructor_salary_override
-    salary_per_occurrence = calculate_lesson_salary_with_override(salary_student_count, instructor, salary_override=salary_override)
-    salary = salary_per_occurrence * Decimal(occurrences_in_month)
+    # Calculate salary: course monthly pay split by slot, or per-occurrence tier/override
+    course_monthly_share = get_lesson_monthly_salary_share(lesson)
+    if course_monthly_share is not None:
+        salary = course_monthly_share
+        salary_override = lesson.course.instructor_salary_override
+    else:
+        salary_override = lesson.instructor_salary_override
+        salary_per_occurrence = calculate_lesson_salary_with_override(
+            salary_student_count, instructor, salary_override=salary_override
+        )
+        salary = salary_per_occurrence * Decimal(occurrences_in_month)
     
     # Calculate profit
     profit = revenue - salary

@@ -50,6 +50,15 @@ class InstructorBonusSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class InstructorDropdownSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for instructor pickers (no financial metrics)."""
+    full_name = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Instructor
+        fields = ['id', 'full_name', 'first_name', 'last_name', 'fixed_salary_per_lesson']
+
+
 class InstructorListSerializer(serializers.ModelSerializer):
     """Serializer for instructor list with basic info"""
     full_name = serializers.CharField(read_only=True)

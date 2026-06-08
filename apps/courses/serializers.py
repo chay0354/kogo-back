@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.enrollments.models import LessonEnrollment
+from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments
 from apps.core.models import Branch, UserProfile
 from apps.core.scoping import scope_courses
 from apps.instructors.models import Instructor
@@ -120,12 +121,9 @@ class CourseTypeWithStatsSerializer(serializers.ModelSerializer):
         ).count()
     
     def get_students_count(self, obj):
-        """Count active enrolled students under this course type (scoped)."""
+        """Count paying enrolled students under this course type (scoped)."""
         courses = _scoped_courses_for(self, obj.courses.all())
-        return LessonEnrollment.objects.filter(
-            lesson__course__in=courses,
-            status='active'
-        ).count()
+        return count_paying_enrollments(courses=courses)
     
     def get_branches(self, obj):
         """Get distinct branches that host (visible) courses of this course type."""
@@ -187,8 +185,8 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
         return _normalize_additional_course_prices(value)
 
     def get_enrolled_count(self, obj):
-        """Get count of active enrollments for this lesson (for income calculation)"""
-        return obj.enrollments.filter(status='active').count()
+        """Paying active enrollments only (trial test signups excluded)."""
+        return count_paying_enrollments(lesson=obj)
     
     def get_total_students_count(self, obj):
         """Get count of all enrollments regardless of status (for student count display)"""
@@ -267,11 +265,8 @@ class CourseSerializer(serializers.ModelSerializer):
         return obj.lessons.filter(status='scheduled').count()
     
     def get_enrolled_students_count(self, obj):
-        """Count enrolled students across all lessons of this course"""
-        return LessonEnrollment.objects.filter(
-            lesson__course=obj,
-            status='active'
-        ).values('child').distinct().count()
+        """Count distinct paying children across all lessons of this course."""
+        return count_distinct_paying_children(course=obj)
     
     def get_lessons(self, obj):
         """Get lessons for this course (only for detail view)"""
@@ -323,7 +318,6 @@ class LessonSerializer(serializers.ModelSerializer):
         course = validated_data.get('course') or getattr(self.instance, 'course', None)
         if course is not None:
             validated_data['instructor'] = course.instructor
-            validated_data['instructor_salary_override'] = course.instructor_salary_override
         return validated_data
 
     def create(self, validated_data):
@@ -347,8 +341,8 @@ class LessonSerializer(serializers.ModelSerializer):
         return days[obj.day_of_week] if 0 <= obj.day_of_week < 7 else ''
     
     def get_enrolled_students_count(self, obj):
-        """Count enrolled students for this lesson"""
-        return LessonEnrollment.objects.filter(lesson=obj, status='active').count()
+        """Count paying enrollments for this lesson."""
+        return count_paying_enrollments(lesson=obj)
     
     def get_room_capacity(self, obj):
         """Get room capacity for this lesson"""
