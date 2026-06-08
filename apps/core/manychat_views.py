@@ -256,6 +256,120 @@ class WhatsAppViewSet(viewsets.ViewSet):
             'results': results[:50],
         })
 
+    @action(detail=False, methods=['get'], url_path='automations')
+    def automations(self, request):
+        """ManyChat automations available for manual broadcast."""
+        svc = ManyChatService()
+        if not svc.is_configured:
+            return Response({'automations': [], 'configured': False})
+        try:
+            items = svc.list_available_automations()
+        except ManyChatError as exc:
+            return Response({'error': str(exc), 'automations': []}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response({'configured': True, 'automations': items})
+
+    @action(detail=False, methods=['post'], url_path='bulk-flow')
+    def bulk_flow(self, request):
+        """
+        Trigger the same ManyChat automation for multiple contacts.
+
+        Body: {
+          "automation_type": "kind" | "flow",
+          "automation_id": "<kind or flow_ns>",
+          "contacts": [{"phone": "...", "name": "...", "branch_name": "..."}],
+          "dry_run": false
+        }
+        """
+        automation_type = (request.data.get('automation_type') or '').strip()
+        automation_id = (request.data.get('automation_id') or '').strip()
+        raw_contacts = request.data.get('contacts') or []
+        dry_run = bool(request.data.get('dry_run', False))
+
+        if automation_type not in ('kind', 'flow'):
+            return Response({'error': 'נדרש automation_type (kind או flow)'}, status=status.HTTP_400_BAD_REQUEST)
+        if not automation_id:
+            return Response({'error': 'נדרש automation_id'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(raw_contacts, list) or not raw_contacts:
+            return Response({'error': 'נדרש רשימת אנשי קשר'}, status=status.HTTP_400_BAD_REQUEST)
+
+        svc = ManyChatService()
+        if not svc.is_configured:
+            return Response({'error': 'ManyChat לא מוגדר'}, status=status.HTTP_400_BAD_REQUEST)
+
+        contacts = raw_contacts[:100]
+        results: list[dict] = []
+        sent = 0
+        failed = 0
+        skipped = 0
+
+        for item in contacts:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            phone = (item.get('phone') or '').strip()
+            name = (item.get('name') or '').strip()
+            branch_name = (item.get('branch_name') or '').strip() or None
+            if not phone:
+                skipped += 1
+                results.append({'phone': '', 'name': name, 'status': 'skipped', 'reason': 'no_phone'})
+                continue
+
+            if dry_run:
+                results.append({'phone': phone, 'name': name, 'status': 'preview'})
+                continue
+
+            try:
+                outcome = svc.send_automation_to_contact(
+                    automation_type=automation_type,
+                    automation_id=automation_id,
+                    phone=phone,
+                    name=name,
+                    branch_name=branch_name,
+                )
+                if outcome.get('sent'):
+                    sent += 1
+                    results.append({
+                        'phone': phone,
+                        'name': name,
+                        'status': 'sent',
+                        'method': outcome.get('method'),
+                        'subscriber_id': outcome.get('subscriber_id'),
+                    })
+                else:
+                    failed += 1
+                    results.append({
+                        'phone': phone,
+                        'name': name,
+                        'status': 'failed',
+                        'error': outcome.get('error') or outcome.get('reason', 'unknown'),
+                    })
+            except ManyChatError as exc:
+                failed += 1
+                results.append({
+                    'phone': phone,
+                    'name': name,
+                    'status': 'failed',
+                    'error': str(exc),
+                })
+
+        label = (
+            ManyChatService.AUTOMATION_LABELS.get(automation_id)
+            if automation_type == 'kind'
+            else automation_id
+        )
+        return Response({
+            'dry_run': dry_run,
+            'automation_type': automation_type,
+            'automation_id': automation_id,
+            'automation_label': label,
+            'total': len(contacts),
+            'sent': sent,
+            'failed': failed,
+            'skipped': skipped,
+            'preview_count': sum(1 for r in results if r.get('status') == 'preview'),
+            'results': results[:50],
+        })
+
     @action(detail=False, methods=['post'], url_path='test-enrollment')
     def test_enrollment(self, request):
         """

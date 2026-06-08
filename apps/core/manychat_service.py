@@ -231,11 +231,48 @@ class ManyChatService:
         return self._request('POST', '/fb/sending/sendFlow', json_body=payload)
 
     def get_flows(self) -> list[dict]:
-        """List published automations (name + ns)."""
+        """List automations from ManyChat (name + ns)."""
         result = self._request('GET', '/fb/page/getFlows')
-        data = result.get('data') or {}
-        flows = data.get('flows') if isinstance(data, dict) else []
-        return flows if isinstance(flows, list) else []
+        data = result.get('data')
+
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+
+        if isinstance(data, dict):
+            flows = data.get('flows')
+            if isinstance(flows, list):
+                return [row for row in flows if isinstance(row, dict)]
+
+        top_flows = result.get('flows')
+        if isinstance(top_flows, list):
+            return [row for row in top_flows if isinstance(row, dict)]
+
+        return []
+
+    def _kind_by_flow_ns_from_flows(self, flows: list[dict]) -> dict[str, str]:
+        """Map ManyChat flow ns → Kogo kind using settings + one getFlows payload."""
+        mapping: dict[str, str] = {}
+        for kind, entry in self._REGISTRATION_KINDS.items():
+            setting_name = entry['flow_setting']
+            configured = (getattr(settings, setting_name, '') or '').strip()
+            if configured:
+                mapping[configured] = kind
+                continue
+            aliases = self._FLOW_NAME_ALIASES.get(setting_name, ())
+            alias_set = {a.strip().lower() for a in aliases if a.strip()}
+            if not alias_set:
+                continue
+            for flow in flows:
+                if not isinstance(flow, dict):
+                    continue
+                name = (flow.get('name') or '').strip().lower()
+                if name not in alias_set:
+                    continue
+                ns = (flow.get('ns') or flow.get('flow_ns') or '').strip()
+                if ns:
+                    mapping[ns] = kind
+                    break
+        return mapping
 
     # Fallback names when flow ns is not set in Django settings.
     _FLOW_NAME_ALIASES: dict[str, tuple[str, ...]] = {
@@ -346,6 +383,125 @@ class ManyChatService:
             ),
         },
     }
+
+    AUTOMATION_LABELS: dict[str, str] = {
+        REGISTRATION_KIND_SUBSCRIPTION: 'הרשמה למנוי',
+        REGISTRATION_KIND_TRIAL: 'רישום לשיעור ניסיון',
+        REGISTRATION_KIND_TRIAL_10AM: 'תזכורת שיעור ניסיון (10:00)',
+        REGISTRATION_KIND_TRIAL_AFTER_TEST: 'אחרי שיעור ניסיון',
+        REGISTRATION_KIND_PAYMENT_FAILED: 'תשלום נכשל',
+        REGISTRATION_KIND_DIDNT_ARRIVE: 'לא הגיע (3 פעמים)',
+    }
+
+    def list_available_automations(self) -> list[dict]:
+        """
+        Every automation returned by ManyChat getFlows (source of truth).
+        Kogo kinds are matched by flow_ns for richer field handling when sending.
+        """
+        items: list[dict] = []
+        seen_ns: set[str] = set()
+
+        try:
+            flows = self.get_flows()
+        except ManyChatError:
+            logger.warning('ManyChat getFlows failed while listing automations')
+            flows = []
+
+        kind_by_ns = self._kind_by_flow_ns_from_flows(flows)
+
+        for flow in flows:
+            ns = (flow.get('ns') or flow.get('flow_ns') or '').strip()
+            if not ns or ns in seen_ns:
+                continue
+            seen_ns.add(ns)
+            name = (flow.get('name') or flow.get('title') or '').strip() or ns
+            kind = kind_by_ns.get(ns)
+            item: dict[str, Any] = {
+                'flow_ns': ns,
+                'label': name,
+                'manychat_name': name,
+            }
+            if kind:
+                item['automation_type'] = 'kind'
+                item['automation_id'] = kind
+                item['kogo_label'] = self.AUTOMATION_LABELS.get(kind, kind)
+                item['needs_enrollment_context'] = True
+            else:
+                item['automation_type'] = 'flow'
+                item['automation_id'] = ns
+                item['needs_enrollment_context'] = False
+            items.append(item)
+
+        # Flows configured in Django but missing from getFlows (rare).
+        for kind, entry in self._REGISTRATION_KINDS.items():
+            ns = self.resolve_flow_ns(entry['flow_setting'])
+            if not ns or ns in seen_ns:
+                continue
+            seen_ns.add(ns)
+            items.append({
+                'automation_type': 'kind',
+                'automation_id': kind,
+                'flow_ns': ns,
+                'label': self.AUTOMATION_LABELS.get(kind, kind),
+                'manychat_name': None,
+                'kogo_label': self.AUTOMATION_LABELS.get(kind, kind),
+                'needs_enrollment_context': True,
+            })
+
+        items.sort(key=lambda row: (row.get('label') or '').casefold())
+        return items
+
+    def send_automation_to_contact(
+        self,
+        *,
+        automation_type: str,
+        automation_id: str,
+        phone: str,
+        name: str = '',
+        branch_name: str | None = None,
+    ) -> dict:
+        """Trigger one ManyChat automation for a phone (broadcast row)."""
+        if automation_type == 'kind':
+            if automation_id not in self._REGISTRATION_KINDS:
+                return {'sent': False, 'reason': 'unknown_kind'}
+            display_name = (name or '').strip() or 'הורה'
+            branch = (branch_name or '').strip() or '—'
+            return self.notify_registration(
+                kind=automation_id,
+                phone=phone,
+                parent_name=display_name,
+                child_name='—',
+                course_name='—',
+                branch_name=branch,
+                day_name='—',
+                start_time='',
+                end_time='',
+                lookup_names=[display_name] if display_name else None,
+            )
+
+        if automation_type == 'flow':
+            flow_ns = (automation_id or '').strip()
+            if not flow_ns:
+                return {'sent': False, 'reason': 'missing_flow_ns'}
+            resolved = self.lookup_or_create(phone, name)
+            sid = resolved.get('subscriber_id')
+            if not sid:
+                return {'sent': False, 'reason': 'no_subscriber_id'}
+            if (name or '').strip():
+                try:
+                    self.set_custom_fields(sid, {'kogo_parent_name': name.strip()})
+                except ManyChatError as exc:
+                    logger.warning('ManyChat setCustomFields (broadcast) failed for %s: %s', sid, exc)
+            self.send_flow(sid, flow_ns)
+            return {
+                'sent': True,
+                'method': 'flow',
+                'subscriber_id': sid,
+                'flow_ns': flow_ns,
+                'phone': phone,
+            }
+
+        return {'sent': False, 'reason': 'invalid_automation_type'}
 
     def notify_registration(
         self,

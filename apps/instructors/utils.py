@@ -74,17 +74,7 @@ def calculate_lesson_salary_with_override(student_count, instructor, salary_over
 
 
 def get_lesson_price(lesson):
-    """
-    Get the price for a lesson, using override if available, otherwise course price
-    
-    Args:
-        lesson: Lesson instance
-    
-    Returns:
-        Decimal: Price for the lesson
-    """
-    if lesson.lesson_price_override:
-        return lesson.lesson_price_override
+    """Monthly subscription price for the group (course); not per meeting."""
     return lesson.course.price if lesson.course else Decimal('0.00')
 
 
@@ -100,10 +90,9 @@ def get_lesson_price_for_course_index(lesson, course_index: int) -> Decimal:
        match. If none, fall back to the closest tier with course_index <= the
        requested index (so a tier defined at "3" also covers index 4 unless a
        higher tier overrides).
-    2. Otherwise, fall back to the regular lesson/course price (lesson.price or
-       lesson.course.price), which is also the value returned for course_index <= 1.
+    2. Otherwise, fall back to the course monthly price (course_index <= 1).
     """
-    base_price = lesson.price if lesson.price else (lesson.course.price if lesson.course else Decimal('0.00'))
+    base_price = lesson.course.price if lesson.course else Decimal('0.00')
 
     try:
         idx = int(course_index)

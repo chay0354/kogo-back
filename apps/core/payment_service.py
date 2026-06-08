@@ -120,10 +120,9 @@ class PaymentService:
         # 1 = first signed lesson, 2 = second, 3 = third, etc.
         course_index = get_child_lesson_index_for_billing(child, lesson)
 
-        # Lesson price: prefer the matching tier in `additional_course_prices`,
-        # then fall back to lesson.price or course.price.
+        # Monthly price: tier in `additional_course_prices`, else course price.
         tier_price = get_lesson_price_for_course_index(lesson, course_index)
-        regular_price = lesson.price or lesson.course.price
+        regular_price = lesson.course.price
         base_price = tier_price if tier_price and tier_price > 0 else regular_price
         if not base_price:
             raise ValueError("Lesson/Course price not configured")

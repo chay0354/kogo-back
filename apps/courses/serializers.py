@@ -300,7 +300,11 @@ class LessonSerializer(serializers.ModelSerializer):
 
     def validate_additional_course_prices(self, value):
         return _normalize_additional_course_prices(value)
-    
+
+    def validate_price(self, value):
+        """Pricing is monthly at course level only; ignore per-lesson price."""
+        return None
+
     def get_day_name(self, obj):
         """Convert day number to Hebrew name"""
         days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
