@@ -22,6 +22,7 @@ from apps.store.serializers import (
     PaymentInitiationResponseSerializer, InventoryAdjustmentSerializer
 )
 from apps.core.payment_service import PaymentService
+from apps.core.scoping import scope_store_products, is_scoped_partner, partner_branch_ids
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Filter products by query parameters."""
         queryset = super().get_queryset()
+        queryset = scope_store_products(queryset, self.request.user)
 
         # Search by name/category
         search = self.request.query_params.get('search', '')
@@ -456,6 +458,7 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
         Query params:
         - days: int (default 30) — lookback window for sales
         - branch: uuid | 'delivery' — filter all data to one branch
+        - city: uuid — filter all data to branches in one city
 
         Returns KPIs, chart data, low-stock list, recent sales, inventory value,
         shrinkage by reason, and top product.
@@ -463,6 +466,7 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
         days = int(request.query_params.get('days', 30))
         start_date = date.today() - timedelta(days=days)
         branch_param = request.query_params.get('branch', '')
+        city_param = request.query_params.get('city', '')
 
         # Base sales queryset — completed only
         completed_sales = StoreSale.objects.filter(
@@ -485,10 +489,22 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
                 completed_sales = completed_sales.filter(branch_id=branch_param)
                 products_qs = products_qs.filter(branch_id=branch_param)
                 adjustments_qs = adjustments_qs.filter(size_stock__branch_id=branch_param)
+        elif city_param and city_param != 'all':
+            completed_sales = completed_sales.filter(branch__city_id=city_param)
+            products_qs = products_qs.filter(
+                Q(branch__city_id=city_param) | Q(size_stocks__branch__city_id=city_param)
+            ).distinct()
+            adjustments_qs = adjustments_qs.filter(size_stock__branch__city_id=city_param)
+
+        if is_scoped_partner(request.user):
+            partner_ids = partner_branch_ids(request.user)
+            completed_sales = completed_sales.filter(branch_id__in=partner_ids)
+            products_qs = scope_store_products(products_qs, request.user)
+            adjustments_qs = adjustments_qs.filter(size_stock__branch_id__in=partner_ids)
 
         logger.info(
-            "[ANALYTICS] last %s days, branch=%s; completed sales: %s",
-            days, branch_param or 'all', completed_sales.count(),
+            "[ANALYTICS] last %s days, branch=%s, city=%s; completed sales: %s",
+            days, branch_param or 'all', city_param or 'all', completed_sales.count(),
         )
 
         # KPI 1: Total Revenue

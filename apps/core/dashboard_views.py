@@ -13,7 +13,8 @@ from django.utils import timezone
 from datetime import datetime, timedelta, date
 from decimal import Decimal
 
-from apps.core.permissions import IsManager
+from apps.core.permissions import IsManager, IsManagerOrPartner
+from apps.core.scoping import is_scoped_partner, partner_branch_ids, partner_course_ids
 
 logger = logging.getLogger(__name__)
 from apps.core.models import (
@@ -77,10 +78,17 @@ class DashboardViewSet(viewsets.ViewSet):
     Dashboard data endpoints
     All endpoints require authentication and manager role.
     """
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def _scope(self, request):
-        """Managers see all dashboard data."""
+        """Partners see dashboard data only for assigned branches."""
+        user = request.user
+        if is_scoped_partner(user):
+            branch_ids = partner_branch_ids(user)
+            course_ids = partner_course_ids(user)
+            if not branch_ids:
+                return True, [], [], None
+            return True, course_ids, branch_ids, None
         return False, None, None, None
     
     @action(detail=False, methods=['get'], url_path='financial')
@@ -373,8 +381,10 @@ class DashboardViewSet(viewsets.ViewSet):
         - student_status: Filter by status
         - date_from: Start date (YYYY-MM-DD)
         - date_to: End date (YYYY-MM-DD)
-        - quit_date_from / quit_date_to: optional; when both set, limits churn (אחוז נשירה)
-          and נושרים לפי תחום to this window instead of date_from/date_to.
+        - quit_date_from / quit_date_to: optional; limits churn (אחוז נשירה)
+          and נושרים לפי תחום. Defaults to all-time when omitted.
+        - quit_chart_breakdown: course_type (default) or course — bar chart grouping
+        - quit_chart_filter_id: optional; limits bar chart to one course type or course
         """
         from apps.customers.status_history_models import ChildStatusHistory
         
@@ -382,9 +392,13 @@ class DashboardViewSet(viewsets.ViewSet):
         course_id = request.query_params.get('course_id', 'all')
         branch_id = request.query_params.get('branch_id', 'all')
         student_status = request.query_params.get('student_status', 'all')
+        quit_chart_breakdown = request.query_params.get('quit_chart_breakdown', 'course_type')
+        if quit_chart_breakdown not in ('course_type', 'course'):
+            quit_chart_breakdown = 'course_type'
+        quit_chart_filter_id = request.query_params.get('quit_chart_filter_id', 'all')
         date_from, date_to = parse_date_filters(request)
         
-        # Optional narrower window for quit / churn only (defaults to main date range)
+        # Optional window for quit / churn only (defaults to all-time, not main date range)
         quit_df_str = request.query_params.get('quit_date_from')
         quit_dt_str = request.query_params.get('quit_date_to')
         if quit_df_str and quit_dt_str:
@@ -394,36 +408,61 @@ class DashboardViewSet(viewsets.ViewSet):
                 if quit_date_from > quit_date_to:
                     quit_date_from, quit_date_to = quit_date_to, quit_date_from
             except ValueError:
-                quit_date_from, quit_date_to = date_from, date_to
+                quit_date_from = date(2020, 1, 1)
+                quit_date_to = timezone.now().date()
         else:
-            quit_date_from, quit_date_to = date_from, date_to
+            quit_date_from = date(2020, 1, 1)
+            quit_date_to = timezone.now().date()
         
-        scoped, scoped_course_ids, _b_ids, _i_ids = self._scope(request)
+        scoped, scoped_course_ids, scoped_branch_ids, _i_ids = self._scope(request)
 
-        # Get all children
-        children = Child.objects.all()
+        # Base children queryset (search/status/scoped manager — before branch/course KPI filter)
+        base_children = Child.objects.all()
         if scoped:
-            children = children.filter(
+            base_children = base_children.filter(
                 lesson_enrollments__lesson__course_id__in=scoped_course_ids
             ).distinct()
         
         if search_query:
-            children = children.filter(
+            base_children = base_children.filter(
                 Q(first_name__icontains=search_query) | Q(last_name__icontains=search_query)
             )
         
         if student_status and student_status != 'all':
-            children = children.filter(status=student_status)
-        
-        # Apply branch/course filters if needed
+            base_children = base_children.filter(status=student_status)
+
+        # KPIs: branch/course filters use currently active enrollments only
+        children = base_children
         if course_id != 'all' or branch_id != 'all':
             filtered_enrollments = LessonEnrollment.objects.filter(status='active')
+            if scoped:
+                filtered_enrollments = filtered_enrollments.filter(
+                    lesson__course_id__in=scoped_course_ids
+                )
             if course_id != 'all':
                 filtered_enrollments = filtered_enrollments.filter(lesson__course_id=course_id)
             if branch_id != 'all':
                 filtered_enrollments = filtered_enrollments.filter(lesson__course__branch_id=branch_id)
             filtered_child_ids = filtered_enrollments.values_list('child_id', flat=True).distinct()
             children = children.filter(id__in=filtered_child_ids)
+
+        # Churn scope: any enrollment in branch/course (includes kids who already quit)
+        quit_scope_child_ids = None
+        if course_id != 'all' or branch_id != 'all':
+            quit_enrollments = LessonEnrollment.objects.all()
+            if scoped:
+                quit_enrollments = quit_enrollments.filter(
+                    lesson__course_id__in=scoped_course_ids
+                )
+            if course_id != 'all':
+                quit_enrollments = quit_enrollments.filter(lesson__course_id=course_id)
+            if branch_id != 'all':
+                quit_enrollments = quit_enrollments.filter(lesson__course__branch_id=branch_id)
+            quit_scope_child_ids = base_children.filter(
+                id__in=quit_enrollments.values_list('child_id', flat=True).distinct()
+            ).values_list('id', flat=True)
+        elif scoped:
+            quit_scope_child_ids = base_children.values_list('id', flat=True)
         
         # KPI 1: Active Students
         active_students = children.filter(status='active').count()
@@ -442,36 +481,36 @@ class DashboardViewSet(viewsets.ViewSet):
         # KPI 5: Done Trial
         done_trial = children.filter(status='trial_completed').count()
         
-        # Abnormal Attendance by Branch
+        # Abnormal Attendance by Branch (via active lesson enrollment branch, not family branch)
         abnormal_by_branch = []
+        abnormal_base = base_children.filter(absent_irregularly=True)
+
+        def _abnormal_count_for_branch(branch):
+            qs = abnormal_base.filter(
+                lesson_enrollments__lesson__course__branch=branch,
+                lesson_enrollments__status='active',
+            )
+            if course_id != 'all':
+                qs = qs.filter(lesson_enrollments__lesson__course_id=course_id)
+            return qs.distinct().count()
+
         if branch_id == 'all':
-            # Get all branches with abnormal attendance count
-            from apps.core.models import Branch
             branches = Branch.objects.filter(is_active=True)
+            if scoped and scoped_branch_ids:
+                branches = branches.filter(id__in=scoped_branch_ids)
             for branch in branches:
-                count = children.filter(
-                    absent_irregularly=True,
-                    family__branch=branch
-                ).count()
-                if count > 0:
-                    abnormal_by_branch.append({
-                        'branch_id': str(branch.id),
-                        'branch_name': branch.name,
-                        'count': count
-                    })
-        else:
-            # Single branch filter
-            from apps.core.models import Branch
-            try:
-                branch = Branch.objects.get(id=branch_id)
-                count = children.filter(
-                    absent_irregularly=True,
-                    family__branch=branch
-                ).count()
                 abnormal_by_branch.append({
                     'branch_id': str(branch.id),
                     'branch_name': branch.name,
-                    'count': count
+                    'count': _abnormal_count_for_branch(branch),
+                })
+        else:
+            try:
+                branch = Branch.objects.get(id=branch_id)
+                abnormal_by_branch.append({
+                    'branch_id': str(branch.id),
+                    'branch_name': branch.name,
+                    'count': _abnormal_count_for_branch(branch),
                 })
             except Branch.DoesNotExist:
                 pass
@@ -485,11 +524,8 @@ class DashboardViewSet(viewsets.ViewSet):
             changed_at__date__lte=quit_date_to
         ).exclude(new_status='active')
         
-        # Filter by branch/course if specified
-        if course_id != 'all' or branch_id != 'all':
-            # Get child IDs that match the filters
-            child_ids_for_quit = children.values_list('id', flat=True)
-            status_changes = status_changes.filter(child_id__in=child_ids_for_quit)
+        if quit_scope_child_ids is not None:
+            status_changes = status_changes.filter(child_id__in=quit_scope_child_ids)
         
         # Group by target status
         quit_by_status = status_changes.values('new_status').annotate(
@@ -535,95 +571,148 @@ class DashboardViewSet(viewsets.ViewSet):
                 'children': child_details  # Add child details
             })
 
-        # Quit Percentage breakdown by course type (each dropout counted once
-        # per distinct course type the child was enrolled in).
+        # Quit breakdown by course type or course (bar chart only)
         quit_by_course_type = []
-        if total_quit > 0:
+        quit_by_course = []
+
+        def _build_quit_breakdown(breakdown_by, filter_id):
+            if total_quit <= 0:
+                return []
+
             child_ids_in_quit = list(
                 status_changes.values_list('child_id', flat=True).distinct()
             )
+            if not child_ids_in_quit:
+                return []
 
-            child_course_types: dict = {}
-            if child_ids_in_quit:
-                enrollment_rows = LessonEnrollment.objects.filter(
-                    child_id__in=child_ids_in_quit,
+            enrollment_rows = LessonEnrollment.objects.filter(
+                child_id__in=child_ids_in_quit,
+            )
+            if course_id != 'all':
+                enrollment_rows = enrollment_rows.filter(lesson__course_id=course_id)
+            if branch_id != 'all':
+                enrollment_rows = enrollment_rows.filter(lesson__course__branch_id=branch_id)
+            if filter_id != 'all':
+                if breakdown_by == 'course_type':
+                    enrollment_rows = enrollment_rows.filter(
+                        lesson__course__course_type_id=filter_id
+                    )
+                else:
+                    enrollment_rows = enrollment_rows.filter(lesson__course_id=filter_id)
+
+            child_groups: dict = {}
+            if breakdown_by == 'course_type':
+                rows = enrollment_rows.filter(
                     lesson__course__course_type__isnull=False,
                 ).values_list(
                     'child_id',
                     'lesson__course__course_type_id',
                     'lesson__course__course_type__name',
                 ).distinct()
-
-                for child_id, ct_id, ct_name in enrollment_rows:
-                    if not ct_id:
+                for child_id, group_id, group_name in rows:
+                    if not group_id:
                         continue
-                    child_course_types.setdefault(child_id, set()).add((str(ct_id), ct_name))
+                    child_groups.setdefault(child_id, set()).add((str(group_id), group_name))
+                unknown_label = 'ללא תחום'
+                agg_key = lambda gid, gname: gid
+                item_builder = lambda gid, gname: {
+                    'course_type_id': gid,
+                    'course_type_name': gname,
+                    'count': 0,
+                }
+            else:
+                rows = enrollment_rows.values_list(
+                    'child_id',
+                    'lesson__course_id',
+                    'lesson__course__name',
+                ).distinct()
+                for child_id, group_id, group_name in rows:
+                    if not group_id:
+                        continue
+                    child_groups.setdefault(child_id, set()).add((str(group_id), group_name))
+                unknown_label = 'ללא חוג'
+                agg_key = lambda gid, gname: gid
+                item_builder = lambda gid, gname: {
+                    'course_id': gid,
+                    'course_name': gname,
+                    'count': 0,
+                }
 
             agg: dict = {}
             unknown_count = 0
             for change in status_changes.only('id', 'child_id'):
-                types = child_course_types.get(change.child_id)
-                if not types:
+                groups = child_groups.get(change.child_id)
+                if not groups:
                     unknown_count += 1
                     continue
-                for ct_id, ct_name in types:
+                for group_id, group_name in groups:
                     entry = agg.setdefault(
-                        ct_id,
-                        {'course_type_id': ct_id, 'course_type_name': ct_name, 'count': 0},
+                        agg_key(group_id, group_name),
+                        item_builder(group_id, group_name),
                     )
                     entry['count'] += 1
 
-            quit_by_course_type = sorted(
-                agg.values(), key=lambda x: x['count'], reverse=True
-            )
-
+            result = sorted(agg.values(), key=lambda x: x['count'], reverse=True)
             if unknown_count > 0:
-                quit_by_course_type.append({
-                    'course_type_id': None,
-                    'course_type_name': 'ללא תחום',
-                    'count': unknown_count,
-                })
+                if breakdown_by == 'course_type':
+                    result.append({
+                        'course_type_id': None,
+                        'course_type_name': unknown_label,
+                        'count': unknown_count,
+                    })
+                else:
+                    result.append({
+                        'course_id': None,
+                        'course_name': unknown_label,
+                        'count': unknown_count,
+                    })
+            return result
 
-        # Student list (top 10)
-        student_list = []
-        active_enrollments = LessonEnrollment.objects.filter(status='active')
-        if scoped:
-            active_enrollments = active_enrollments.filter(
-                lesson__course_id__in=scoped_course_ids
-            )
+        type_filter = quit_chart_filter_id if quit_chart_breakdown == 'course_type' else 'all'
+        course_filter = quit_chart_filter_id if quit_chart_breakdown == 'course' else 'all'
+        quit_by_course_type = _build_quit_breakdown('course_type', type_filter)
+        quit_by_course = _build_quit_breakdown('course', course_filter)
+
+        # Monthly attendance rate from start of year through current month (respects filters)
+        today = timezone.now().date()
+        attendance_year_start = date(today.year, 1, 1)
+        attendance_end = min(date_to, today) if date_to else today
+
+        attendance_qs = LessonAttendance.objects.filter(
+            occurrence_date__gte=attendance_year_start,
+            occurrence_date__lte=attendance_end,
+        ).exclude(status='not_marked').filter(child__in=children)
+
         if course_id != 'all':
-            active_enrollments = active_enrollments.filter(lesson__course_id=course_id)
+            attendance_qs = attendance_qs.filter(lesson__course_id=course_id)
         if branch_id != 'all':
-            active_enrollments = active_enrollments.filter(lesson__course__branch_id=branch_id)
+            attendance_qs = attendance_qs.filter(lesson__course__branch_id=branch_id)
 
-        active_student_ids = active_enrollments.values_list('child_id', flat=True).distinct()
-        top_students = children.filter(id__in=active_student_ids)[:10]
+        attendance_by_month = []
+        for month_str in dates_to_month_list(attendance_year_start, attendance_end):
+            year_num, month_num = map(int, month_str.split('-'))
+            month_start = date(year_num, month_num, 1)
+            if month_num == 12:
+                month_end = date(year_num + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end = date(year_num, month_num + 1, 1) - timedelta(days=1)
+            month_end = min(month_end, attendance_end)
+            if month_start > attendance_end:
+                continue
 
-        for child in top_students:
-            # Get child's enrollment info
-            enrollment = active_enrollments.filter(child=child).select_related(
-                'lesson__course__branch', 'lesson__course'
-            ).first()
-
-            # Calculate attendance for this child
-            child_attendance = LessonAttendance.objects.filter(
-                child=child,
-                occurrence_date__gte=date_from,
-                occurrence_date__lte=date_to
+            month_records = attendance_qs.filter(
+                occurrence_date__gte=month_start,
+                occurrence_date__lte=month_end,
             )
-            child_total = child_attendance.count()
-            child_present = child_attendance.filter(status='present').count()
-            child_attendance_rate = (child_present / child_total * 100) if child_total > 0 else 0
-
-            student_list.append({
-                'id': str(child.id),
-                'name': child.full_name,
-                'branch': enrollment.lesson.course.branch.name if enrollment else '',
-                'course': enrollment.lesson.course.name if enrollment else '',
-                'attendance': round(child_attendance_rate, 1),
-                'is_trial': child.status in ['trial_signed', 'trial_completed']
+            total = month_records.count()
+            present = month_records.filter(status='present').count()
+            attendance_by_month.append({
+                'month': month_str,
+                'attendance_rate': round((present / total * 100), 1) if total > 0 else 0,
+                'total_records': total,
+                'present_count': present,
             })
-        
+
         return Response({
             'kpis': {
                 'active_students': active_students,
@@ -637,8 +726,9 @@ class DashboardViewSet(viewsets.ViewSet):
                 'total_quit': total_quit,
                 'by_status': quit_data,
                 'by_course_type': quit_by_course_type,
+                'by_course': quit_by_course,
             },
-            'student_list': student_list
+            'attendance_by_month': attendance_by_month,
         })
     
     @action(detail=False, methods=['get'], url_path='courses')

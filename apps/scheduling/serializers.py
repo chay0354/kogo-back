@@ -10,9 +10,12 @@ class LessonListSerializer(serializers.ModelSerializer):
     course_type_name = serializers.CharField(source='course.course_type.name', read_only=True)
     instructor_id = serializers.UUIDField(source='instructor.id', read_only=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True)
-    branch_id = serializers.UUIDField(source='branch.id', read_only=True)
-    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    branch_id = serializers.UUIDField(source='course.branch.id', read_only=True)
+    branch_name = serializers.CharField(source='course.branch.name', read_only=True)
+    city_id = serializers.UUIDField(source='course.branch.city.id', read_only=True, allow_null=True)
+    city_name = serializers.CharField(source='course.branch.city.name', read_only=True, allow_null=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
+    room_capacity = serializers.IntegerField(source='course.capacity', read_only=True)
     enrollment_count = serializers.SerializerMethodField()
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
     
@@ -21,8 +24,8 @@ class LessonListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'course_name', 'course_type_name',
             'instructor_id', 'instructor_name',
-            'branch_id', 'branch_name',
-            'room_name', 'day_of_week', 'day_of_week_display',
+            'branch_id', 'branch_name', 'city_id', 'city_name',
+            'room_name', 'room_capacity', 'day_of_week', 'day_of_week_display',
             'start_time', 'end_time', 'lesson_date',
             'status', 'cancellation_reason', 'cancelled_at', 'enrollment_count', 'notes',
             'is_recurring'
@@ -41,9 +44,12 @@ class LessonDetailSerializer(serializers.ModelSerializer):
     instructor_id = serializers.UUIDField(source='instructor.id', read_only=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True)
     instructor_email = serializers.EmailField(source='instructor.email', read_only=True)
-    branch_id = serializers.UUIDField(source='branch.id', read_only=True)
-    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    branch_id = serializers.UUIDField(source='course.branch.id', read_only=True)
+    branch_name = serializers.CharField(source='course.branch.name', read_only=True)
+    city_id = serializers.UUIDField(source='course.branch.city.id', read_only=True, allow_null=True)
+    city_name = serializers.CharField(source='course.branch.city.name', read_only=True, allow_null=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
+    room_capacity = serializers.IntegerField(source='course.capacity', read_only=True)
     enrollments = serializers.SerializerMethodField()
     attendance = serializers.SerializerMethodField()
     cancellation_reason = serializers.SerializerMethodField()
@@ -53,7 +59,7 @@ class LessonDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'course_name', 'course_type_name',
             'instructor_id', 'instructor_name', 'instructor_email',
-            'branch_id', 'branch_name', 'room_name',
+            'branch_id', 'branch_name', 'city_id', 'city_name', 'room_name', 'room_capacity',
             'day_of_week', 'start_time', 'end_time',
             'lesson_date', 'status', 'cancellation_reason', 'cancelled_at', 'notes', 'is_recurring',
             'enrollments', 'attendance', 'created_at', 'updated_at'

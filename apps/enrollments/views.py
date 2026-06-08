@@ -11,7 +11,7 @@ from apps.enrollments.trial_reminders import (
     compute_trial_lesson_date,
     send_due_trial_reminders,
 )
-from apps.core.permissions import IsManager
+from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.courses.models import Lesson
 from apps.customers.models import Child
 
@@ -40,7 +40,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     """
     queryset = Enrollment.objects.all().select_related('course', 'child', 'child__family')
     serializer_class = EnrollmentSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def create(self, request, *args, **kwargs):
         """
@@ -81,7 +81,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
     """
     queryset = LessonEnrollment.objects.all().select_related('lesson', 'lesson__course', 'child')
     serializer_class = LessonEnrollmentSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

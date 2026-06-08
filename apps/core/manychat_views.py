@@ -47,12 +47,26 @@ class WhatsAppViewSet(viewsets.ViewSet):
     def contacts(self, request):
         """Kogo families/parents with phones — used as contact list (ManyChat has no list-all API)."""
         q = (request.query_params.get('q') or '').strip()
+        branch_id = (request.query_params.get('branch_id') or '').strip()
+        course_type_id = (request.query_params.get('course_type_id') or '').strip()
         rows: list[dict] = []
         seen_phones: set[str] = set()
+
+        family_ids_for_course_type = None
+        if course_type_id:
+            from apps.enrollments.models import LessonEnrollment
+            family_ids_for_course_type = LessonEnrollment.objects.filter(
+                status='active',
+                lesson__course__course_type_id=course_type_id,
+            ).values_list('child__family_id', flat=True).distinct()
 
         families = Family.objects.select_related('branch').filter(~Q(phone=''))
         if q:
             families = families.filter(Q(name__icontains=q) | Q(phone__icontains=q))
+        if branch_id:
+            families = families.filter(branch_id=branch_id)
+        if family_ids_for_course_type is not None:
+            families = families.filter(id__in=family_ids_for_course_type)
 
         for fam in families.order_by('name')[:200]:
             phone = (fam.phone or '').strip()
@@ -74,6 +88,10 @@ class WhatsAppViewSet(viewsets.ViewSet):
             parents = parents.filter(
                 Q(first_name__icontains=q) | Q(last_name__icontains=q) | Q(phone__icontains=q)
             )
+        if branch_id:
+            parents = parents.filter(family__branch_id=branch_id)
+        if family_ids_for_course_type is not None:
+            parents = parents.filter(family_id__in=family_ids_for_course_type)
         for p in parents.order_by('family__name', 'last_name')[:200]:
             phone = (p.phone or '').strip()
             norm = ManyChatService.normalize_phone_e164(phone)

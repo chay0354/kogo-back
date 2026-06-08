@@ -27,8 +27,8 @@ from apps.customers.serializers import (
 from apps.customers.discount_service import DiscountService
 from apps.core.payment_service import PaymentService
 from apps.enrollments.models import LessonEnrollment
-from apps.core.permissions import IsManager
-from apps.core.scoping import scope_courses
+from apps.core.permissions import IsManager, IsManagerOrPartner
+from apps.core.scoping import scope_courses, is_scoped_partner, partner_branch_ids
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +43,23 @@ class FamilyViewSet(viewsets.ModelViewSet):
     """
     queryset = Family.objects.all().prefetch_related('parents', 'children')
     serializer_class = FamilySerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name', 'phone', 'email']
     ordering_fields = ['name', 'created_at']
     ordering = ['-created_at']
 
     def get_queryset(self):
-        return super().get_queryset()
+        queryset = super().get_queryset()
+        if is_scoped_partner(self.request.user):
+            branch_ids = partner_branch_ids(self.request.user)
+            if not branch_ids:
+                return queryset.none()
+            queryset = queryset.filter(
+                Q(branch_id__in=branch_ids)
+                | Q(children__lesson_enrollments__lesson__course__branch_id__in=branch_ids)
+            ).distinct()
+        return queryset
 
 
 class ParentViewSet(viewsets.ModelViewSet):
@@ -62,7 +71,7 @@ class ParentViewSet(viewsets.ModelViewSet):
     """
     queryset = Parent.objects.all().select_related('family')
     serializer_class = ParentSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'phone', 'email']
     ordering_fields = ['last_name', 'created_at']
@@ -87,7 +96,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
         ))
     )
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'family__name', 'family__phone', 'id_number']
     ordering_fields = ['first_name', 'last_name', 'created_at', 'birth_date']
@@ -127,6 +136,16 @@ class ChildViewSet(viewsets.ModelViewSet):
                 distinct=True,
             ),
         )
+
+        # Partners only see children in their assigned branches
+        if is_scoped_partner(self.request.user):
+            partner_ids = partner_branch_ids(self.request.user)
+            if not partner_ids:
+                return queryset.none()
+            queryset = queryset.filter(
+                Q(family__branch_id__in=partner_ids)
+                | Q(lesson_enrollments__lesson__course__branch_id__in=partner_ids)
+            ).distinct()
         
         # Filter by branch (only children enrolled in lessons in this branch)
         branch_id = self.request.query_params.get('branch')
@@ -521,7 +540,7 @@ class DiscountViewSet(viewsets.ModelViewSet):
     """
     queryset = Discount.objects.all().order_by('-created_at')
     serializer_class = DiscountSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on the discount type"""
@@ -838,7 +857,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         'child', 'family', 'parent', 'tranzila_transaction', 'branch', 'lesson', 'lesson__course'
     ).prefetch_related('discount_snapshots')
     serializer_class = PaymentSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['child__first_name', 'child__last_name', 'family__name']
     ordering_fields = ['created_at', 'payment_date', 'final_amount']
@@ -1073,7 +1092,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         'initial_payment__branch'
     )
     serializer_class = RecurringPaymentSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['child__first_name', 'child__last_name']
     ordering_fields = ['created_at', 'next_billing_date', 'amount']

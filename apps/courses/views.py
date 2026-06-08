@@ -19,8 +19,8 @@ from apps.courses.serializers import (
 )
 from apps.instructors.models import Instructor
 from apps.enrollments.models import LessonEnrollment
-from apps.core.permissions import IsManager
-from apps.core.scoping import scope_courses
+from apps.core.permissions import IsManager, IsManagerOrPartner, StaffAccessMixin
+from apps.core.scoping import scope_courses, is_scoped_partner, partner_branch_ids
 
 
 class CourseTypeViewSet(viewsets.ModelViewSet):
@@ -37,7 +37,7 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
     """
     queryset = CourseType.objects.filter(is_active=True).order_by('name')
     pagination_class = None  # Disable pagination for simpler responses
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -50,6 +50,11 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Optimize queryset based on action"""
         queryset = super().get_queryset()
+        if is_scoped_partner(self.request.user):
+            branch_ids = partner_branch_ids(self.request.user)
+            if not branch_ids:
+                return queryset.none()
+            queryset = queryset.filter(courses__branch_id__in=branch_ids, courses__is_active=True).distinct()
 
         nested_courses = Course.objects.filter(is_active=True).select_related(
             'branch', 'instructor'
@@ -108,7 +113,7 @@ class CourseViewSet(viewsets.ModelViewSet):
     """
     serializer_class = CourseSerializer
     pagination_class = None  # Disable pagination
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_queryset(self):
         """Filter active courses, optionally by course type or branch"""
@@ -152,7 +157,7 @@ class LessonViewSet(viewsets.ModelViewSet):
     """
     serializer_class = LessonSerializer
     pagination_class = None  # Disable pagination
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_queryset(self):
         """Filter lessons, optionally by course, instructor, room"""
@@ -247,7 +252,7 @@ class CourseListViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = Course.objects.filter(is_active=True).select_related('course_type', 'branch')
     serializer_class = CourseListSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def get_queryset(self):
         return scope_courses(super().get_queryset(), self.request.user)
@@ -260,7 +265,7 @@ class LessonListViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = Lesson.objects.filter(status='scheduled').select_related('course')
     serializer_class = LessonListSerializer
-    permission_classes = [IsAuthenticated, IsManager]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def get_queryset(self):
         return scope_courses(super().get_queryset(), self.request.user, 'course')

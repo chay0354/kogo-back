@@ -109,13 +109,16 @@ class UserProfile(models.Model):
     Roles:
     - manager: full access
     - worker: limited access (schedule-only in frontend; backend restricts management APIs)
+    - partner: full UI scoped to assigned branches (שותף)
     """
 
     ROLE_MANAGER = 'manager'
     ROLE_WORKER = 'worker'
+    ROLE_PARTNER = 'partner'
     ROLE_CHOICES = [
         (ROLE_MANAGER, 'Manager'),
         (ROLE_WORKER, 'Worker'),
+        (ROLE_PARTNER, 'Partner'),
     ]
 
     user = models.OneToOneField(
@@ -129,6 +132,13 @@ class UserProfile(models.Model):
         choices=ROLE_CHOICES,
         default=ROLE_WORKER,
         verbose_name="תפקיד",
+    )
+    assigned_branches = models.ManyToManyField(
+        Branch,
+        blank=True,
+        related_name='assigned_partners',
+        verbose_name="סניפים משויכים",
+        help_text="סניפים שהשותף רשאי לראות ולנהל",
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")

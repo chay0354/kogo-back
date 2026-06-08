@@ -8,7 +8,8 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.core.permissions import IsManager
+from apps.core.permissions import IsManager, IsManagerOrPartner
+from apps.core.scoping import partner_branch_ids
 from apps.core.models import UserProfile
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
@@ -43,7 +44,7 @@ class LessonViewSet(viewsets.ModelViewSet):
         """Filter lessons based on user role"""
         user = self.request.user
         qs = Lesson.objects.select_related(
-            'course', 'course__course_type', 'course__branch', 'instructor', 'room'
+            'course', 'course__course_type', 'course__branch', 'course__branch__city', 'instructor', 'room'
         ).prefetch_related('enrollments')
         
         try:
@@ -53,6 +54,12 @@ class LessonViewSet(viewsets.ModelViewSet):
         
         if user_role == UserProfile.ROLE_MANAGER:
             return qs
+        elif user_role == UserProfile.ROLE_PARTNER:
+            from apps.core.scoping import partner_branch_ids
+            branch_ids = partner_branch_ids(user)
+            if not branch_ids:
+                return qs.none()
+            return qs.filter(course__branch_id__in=branch_ids)
         elif user_role == UserProfile.ROLE_WORKER:
             # Workers see only their own lessons (matched by email)
             return qs.filter(instructor__email__iexact=user.email)
@@ -171,9 +178,9 @@ class LessonViewSet(viewsets.ModelViewSet):
 
             queryset = queryset.filter(non_recurring_q | recurring_q)
         if branch_id:
-            queryset = queryset.filter(branch_id=branch_id)
+            queryset = queryset.filter(course__branch_id=branch_id)
         if city_id:
-            queryset = queryset.filter(branch__city_id=city_id)
+            queryset = queryset.filter(course__branch__city_id=city_id)
         if instructor_id:
             queryset = queryset.filter(instructor_id=instructor_id)
         if lesson_status:
@@ -508,9 +515,9 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         return ScheduleEventListSerializer
     
     def get_permissions(self):
-        """Only managers can create, update, or delete events"""
+        """Managers and partners can create, update, or delete events"""
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsAuthenticated(), IsManager()]
+            return [IsAuthenticated(), IsManagerOrPartner()]
         return [IsAuthenticated()]
     
     def get_queryset(self):
@@ -534,6 +541,12 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
                     ).distinct()
                 else:
                     queryset = queryset.none()
+            elif user_role == UserProfile.ROLE_PARTNER:
+                branch_ids = partner_branch_ids(user)
+                if not branch_ids:
+                    queryset = queryset.none()
+                else:
+                    queryset = queryset.filter(branch_id__in=branch_ids)
             elif user_role == UserProfile.ROLE_MANAGER:
                 pass
         except (UserProfile.DoesNotExist, AttributeError):

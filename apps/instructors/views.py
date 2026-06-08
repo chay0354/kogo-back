@@ -18,12 +18,13 @@ from apps.instructors.utils import (
 )
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment
-from apps.core.permissions import IsManager
+from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
+from apps.core.scoping import scope_instructors
 from apps.scheduling.models import LessonCancellation
 from apps.instructors.utils import calculate_lesson_salary_with_override
 
 
-class InstructorViewSet(viewsets.ModelViewSet):
+class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     ViewSet for Instructor CRUD and financial calculations
     
@@ -35,7 +36,6 @@ class InstructorViewSet(viewsets.ModelViewSet):
         'salary_tiers',
         'bonuses'
     )
-    permission_classes = [IsAuthenticated, IsManager]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'phone', 'email', 'specialization']
     ordering_fields = ['first_name', 'last_name', 'created_at']
@@ -54,6 +54,7 @@ class InstructorViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Apply filters to queryset"""
         queryset = super().get_queryset()
+        queryset = scope_instructors(queryset, self.request.user)
 
         # Filter by branch
         branch_id = self.request.query_params.get('branch')

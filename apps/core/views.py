@@ -8,7 +8,8 @@ from django.utils import timezone
 from decimal import Decimal
 from datetime import timedelta
 from apps.core.models import City, Branch, Room, BranchFile
-from apps.core.permissions import IsManager
+from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
+from apps.core.scoping import scope_branches
 from apps.core.serializers import (
     CitySerializer, BranchSerializer, BranchListSerializer, 
     BranchDetailSerializer, BranchWithStatsSerializer,
@@ -16,24 +17,22 @@ from apps.core.serializers import (
 )
 
 
-class CityViewSet(viewsets.ModelViewSet):
+class CityViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     USAGE: Registered at /api/v1/core/cities/
     USAGE: Used by frontend for city selection in branch forms
     """
     queryset = City.objects.all()
     serializer_class = CitySerializer
-    permission_classes = [IsAuthenticated, IsManager]
 
 
-class BranchViewSet(viewsets.ModelViewSet):
+class BranchViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     USAGE: Available at /api/v1/core/branches/ endpoint
     USAGE: Supports list with statistics, detail view, create, update, delete
     """
     queryset = Branch.objects.filter(is_active=True).select_related('city')
-    permission_classes = [IsAuthenticated, IsManager]
-    
+
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
         if self.action == 'list':
@@ -51,6 +50,7 @@ class BranchViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Optimize queryset based on action"""
         queryset = super().get_queryset()
+        queryset = scope_branches(queryset, self.request.user)
         
         if self.action == 'list' and self.request.query_params.get('with_stats') == 'true':
             # Annotate with counts for statistics
@@ -214,18 +214,18 @@ class BranchViewSet(viewsets.ModelViewSet):
         instance.save()
 
 
-class RoomViewSet(viewsets.ModelViewSet):
+class RoomViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     USAGE: Registered at /api/v1/core/rooms/
     USAGE: Supports filtering by branch_id
     """
     queryset = Room.objects.filter(is_active=True).select_related('branch')
     serializer_class = RoomSerializer
-    permission_classes = [IsAuthenticated, IsManager]
     
     def get_queryset(self):
         """Filter by branch if branch_id is provided"""
         queryset = super().get_queryset()
+        queryset = scope_branches(queryset, self.request.user, 'branch')
         branch_id = self.request.query_params.get('branch_id')
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
@@ -237,7 +237,7 @@ class RoomViewSet(viewsets.ModelViewSet):
         instance.save()
 
 
-class BranchFileViewSet(viewsets.ModelViewSet):
+class BranchFileViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     USAGE: Registered at /api/v1/core/branch-files/
     USAGE: Handles file uploads for branches
@@ -245,11 +245,11 @@ class BranchFileViewSet(viewsets.ModelViewSet):
     queryset = BranchFile.objects.all().select_related('branch')
     serializer_class = BranchFileSerializer
     parser_classes = (MultiPartParser, FormParser)
-    permission_classes = [IsAuthenticated, IsManager]
     
     def get_queryset(self):
         """Filter by branch if branch_id is provided"""
         queryset = super().get_queryset()
+        queryset = scope_branches(queryset, self.request.user, 'branch')
         branch_id = self.request.query_params.get('branch_id')
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
