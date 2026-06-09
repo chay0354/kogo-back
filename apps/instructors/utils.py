@@ -364,7 +364,7 @@ def calculate_instructor_salary_for_month(instructor, month: str, branch_id=None
 
     qs = Lesson.objects.filter(instructor=instructor).exclude(status='cancelled')
     if branch_id:
-        qs = qs.filter(branch_id=branch_id)
+        qs = qs.filter(course__branch_id=branch_id)
 
     # Include:
     # - Dated lessons inside the month
@@ -534,7 +534,7 @@ def calculate_instructor_students_for_month(instructor, month: str, branch_id=No
 
     qs = Lesson.objects.filter(instructor=instructor).exclude(status='cancelled')
     if branch_id:
-        qs = qs.filter(branch_id=branch_id)
+        qs = qs.filter(course__branch_id=branch_id)
 
     qs = qs.filter(
         Q(lesson_date__gte=month_start, lesson_date__lte=month_end) |
