@@ -26,7 +26,7 @@ from decimal import Decimal
 
 from django.db.models import Count, Q
 from apps.customers.financial_models import Discount
-from apps.customers.models import Family, Child
+from apps.customers.models import Child
 
 
 @dataclass
@@ -196,49 +196,38 @@ class DiscountService:
     ) -> Optional[Discount]:
         """
         Check if second child discount applies.
-        
+
         Logic:
-        - Family must have 2+ children
-        - The specific child must be 2nd or later (by creation date)
-        - Only applies to 2nd child onwards, not the first
-        
+        - Another child in the same family must already be signed to a team:
+          an active LessonEnrollment that is NOT a trial (trial_lesson_date empty).
+        - Trial-lesson enrollments don't count — a sibling who only did/booked
+          a trial does not make this child eligible.
+        - Order of registration doesn't matter; whichever sibling pays while
+          another sibling is already on a team gets the discount.
+
         Args:
             family_id: UUID of the family
             child_id: UUID of the child being charged
-            
+
         Returns:
             Discount object if applicable, None otherwise
         """
-        try:
-            family = Family.objects.prefetch_related('children').get(id=family_id)
-            
-            # Check if family has at least 2 children
-            children_count = family.children.count()
-            if children_count < 2:
-                return None
-            
-            # Get all children ordered by creation date
-            children = list(family.children.order_by('created_at'))
-            
-            # Find the position of this child (0-indexed)
-            child_position = None
-            for idx, child in enumerate(children):
-                if str(child.id) == str(child_id):
-                    child_position = idx
-                    break
-            
-            # If this is NOT the first child (position > 0), apply discount
-            if child_position is not None and child_position > 0:
-                return Discount.objects.filter(
-                    is_active=True,
-                    is_built_in=True,
-                    name__contains=self.SECOND_CHILD_IDENTIFIER
-                ).first()
-            
+        from apps.enrollments.models import LessonEnrollment
+
+        sibling_on_team = LessonEnrollment.objects.filter(
+            child__family_id=family_id,
+            status='active',
+            trial_lesson_date__isnull=True,
+        ).exclude(child_id=child_id).exists()
+
+        if not sibling_on_team:
             return None
-            
-        except Family.DoesNotExist:
-            return None
+
+        return Discount.objects.filter(
+            is_active=True,
+            is_built_in=True,
+            name__contains=self.SECOND_CHILD_IDENTIFIER
+        ).first()
     
     def check_additional_lesson_discount(
         self,

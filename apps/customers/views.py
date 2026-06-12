@@ -28,7 +28,12 @@ from apps.customers.discount_service import DiscountService
 from apps.core.payment_service import PaymentService
 from apps.enrollments.models import LessonEnrollment
 from apps.core.permissions import IsManager, IsManagerOrPartner
-from apps.core.scoping import scope_courses, is_scoped_partner, partner_branch_ids
+from apps.core.scoping import (
+    scope_courses,
+    is_scoped_partner,
+    partner_branch_ids,
+    partner_visible_children_q,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +62,10 @@ class FamilyViewSet(viewsets.ModelViewSet):
                 return queryset.none()
             queryset = queryset.filter(
                 Q(branch_id__in=branch_ids)
-                | Q(children__lesson_enrollments__lesson__course__branch_id__in=branch_ids)
+                | Q(
+                    children__lesson_enrollments__lesson__course__branch_id__in=branch_ids,
+                    children__lesson_enrollments__status__in=['active', 'payments_problem'],
+                )
             ).distinct()
         return queryset
 
@@ -137,15 +145,12 @@ class ChildViewSet(viewsets.ModelViewSet):
             ),
         )
 
-        # Partners only see children in their assigned branches
+        # Partners only see children tied to their assigned branches
         if is_scoped_partner(self.request.user):
             partner_ids = partner_branch_ids(self.request.user)
             if not partner_ids:
                 return queryset.none()
-            queryset = queryset.filter(
-                Q(family__branch_id__in=partner_ids)
-                | Q(lesson_enrollments__lesson__course__branch_id__in=partner_ids)
-            ).distinct()
+            queryset = queryset.filter(partner_visible_children_q(partner_ids)).distinct()
         
         # Filter by branch (only children enrolled in lessons in this branch)
         branch_id = self.request.query_params.get('branch')

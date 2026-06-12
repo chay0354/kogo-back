@@ -104,27 +104,57 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         
         # Check if simple approximation mode is requested
         use_simple = request.query_params.get('simple', '').lower() == 'true'
-        
+        force_refresh = request.query_params.get('refresh', '').lower() in ('1', 'true', 'yes')
+
+        # Fast path: serve metrics from fresh monthly snapshots in one query instead of
+        # recalculating per instructor (each recalc is many round-trips to the DB).
+        # Snapshots are per instructor across all branches, so skip when filtering by branch.
+        from apps.core.models import InstructorMonthlySnapshot
+        snapshot_map = {}
+        if not branch_id and not force_refresh:
+            target_month = month or timezone.now().strftime('%Y-%m')
+            freshness_cutoff = timezone.now() - timedelta(minutes=10)
+            snaps = InstructorMonthlySnapshot.objects.filter(month=target_month)
+            for snap in snaps:
+                if snap.is_finalized or snap.updated_at >= freshness_cutoff:
+                    snapshot_map[snap.instructor_id] = snap
+
         # Calculate metrics for each instructor
         instructors_data = []
         for instructor in queryset:
+            snap = snapshot_map.get(instructor.id)
             if use_simple and branch_id:
                 # Simplified calculation for branch view: 
                 # salary = (instructor salary per lesson) × (lesson count in branch) × 4
                 metrics = self._calculate_simple_metrics(instructor, branch_id)
+            elif snap is not None:
+                metrics = {
+                    'lessons_count': snap.lesson_count or snap.total_lessons,
+                    'students_count': snap.total_students,
+                    'base_revenue': snap.base_revenue,
+                    'total_discounts': snap.total_discounts,
+                    'revenue': snap.total_revenue,
+                    'salary': snap.total_salary,
+                    'bonuses': snap.total_bonuses,
+                    'profit': snap.profit,
+                    'cancelled_count': snap.cancelled_count,
+                    'avg_attendance_rate': snap.avg_attendance_rate,
+                    'salary_is_finalized': snap.is_finalized,
+                }
             else:
                 # Full calendar-month accurate calculation
                 metrics = calculate_instructor_monthly_metrics(instructor, month, branch_id)
             
-            # Calculate bonuses for the selected month
+            # Calculate bonuses for the selected month (in Python over the prefetched relation,
+            # so this adds no extra queries)
             bonuses_amount = Decimal('0.00')
             if month:
-                # Filter bonuses by the selected month (YYYY-MM format)
-                bonuses = instructor.bonuses.filter(
-                    bonus_date__year=int(month.split('-')[0]),
-                    bonus_date__month=int(month.split('-')[1])
+                year_val, month_val = int(month.split('-')[0]), int(month.split('-')[1])
+                bonuses_amount = sum(
+                    (b.amount for b in instructor.bonuses.all()
+                     if b.bonus_date.year == year_val and b.bonus_date.month == month_val),
+                    Decimal('0.00'),
                 )
-                bonuses_amount = sum(bonus.amount for bonus in bonuses)
             
             # Serialize instructor with metrics
             serializer = self.get_serializer(instructor)

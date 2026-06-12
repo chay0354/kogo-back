@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from rest_framework import serializers
 
@@ -73,7 +74,11 @@ class PartnerSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         password = attrs.get('password')
         if password:
-            validate_password(password)
+            try:
+                validate_password(password)
+            except DjangoValidationError as exc:
+                # Surface under the password field so the UI shows it next to the input
+                raise serializers.ValidationError({'password': list(exc.messages)})
         if not self.instance and not password:
             raise serializers.ValidationError({'password': 'סיסמה נדרשת'})
         branch_ids = attrs.get('branch_ids')

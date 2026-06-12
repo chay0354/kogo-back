@@ -177,6 +177,80 @@ def scope_store_products(qs, user):
     ).distinct()
 
 
+def partner_instructor_ids(user):
+    """Instructor ids linked to a partner's assigned branches."""
+    from apps.instructors.models import Instructor
+
+    ids = partner_branch_ids(user)
+    if not ids:
+        return []
+    return list(
+        Instructor.objects.filter(
+            Q(primary_branch_id__in=ids)
+            | Q(branch_assignments__branch_id__in=ids)
+            | Q(lessons__course__branch_id__in=ids)
+        )
+        .values_list('id', flat=True)
+        .distinct()
+    )
+
+
+ACTIVE_ENROLLMENT_STATUSES = ('active', 'payments_problem')
+
+
+def partner_visible_children_q(branch_ids):
+    """
+    Children visible to a partner on the customers page:
+    - families registered at an assigned branch, or
+    - active lesson enrollments at an assigned branch.
+    """
+    return Q(family__branch_id__in=branch_ids) | Q(
+        lesson_enrollments__lesson__course__branch_id__in=branch_ids,
+        lesson_enrollments__status__in=ACTIVE_ENROLLMENT_STATUSES,
+    )
+
+
+def partner_child_display_branch(child, branch_ids):
+    """
+    Branch id/name to show a partner for a child — prefer an active enrollment
+    at one of the partner's branches over the family's home branch elsewhere.
+    """
+    enrollment = (
+        child.lesson_enrollments.filter(
+            status__in=ACTIVE_ENROLLMENT_STATUSES,
+            lesson__course__branch_id__in=branch_ids,
+        )
+        .select_related('lesson__course__branch')
+        .order_by('-updated_at')
+        .first()
+    )
+    if enrollment and enrollment.lesson.course.branch_id:
+        branch = enrollment.lesson.course.branch
+        return branch.id, branch.name
+    if child.family.branch_id in branch_ids and child.family.branch_id:
+        branch = child.family.branch
+        return branch.id, branch.name if branch else None
+    branch = child.family.branch
+    return (branch.id if branch else None, branch.name if branch else None)
+
+
+def scope_cities(qs, user):
+    """Restrict cities to those with at least one branch visible to `user`."""
+    if is_scoped_partner(user):
+        ids = partner_branch_ids(user)
+        if not ids:
+            return qs.none()
+        return qs.filter(branches__id__in=ids, branches__is_active=True).distinct()
+
+    if is_scoped_instructor(user):
+        ids = assigned_branch_ids(user)
+        if not ids:
+            return qs.none()
+        return qs.filter(branches__id__in=ids, branches__is_active=True).distinct()
+
+    return qs
+
+
 def scope_instructors(qs, user):
     """Restrict instructors to those linked to partner branches."""
     if not is_scoped_partner(user):

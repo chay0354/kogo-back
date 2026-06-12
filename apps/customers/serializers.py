@@ -77,8 +77,8 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     """ילד עם כל הפרטים לדף לקוחות"""
     family_name = serializers.CharField(source='family.name', read_only=True)
     family_phone = serializers.CharField(source='family.phone', read_only=True)
-    branch_id = serializers.UUIDField(source='family.branch.id', read_only=True, allow_null=True)
-    branch_name = serializers.CharField(source='family.branch.name', read_only=True, allow_null=True)
+    branch_id = serializers.SerializerMethodField()
+    branch_name = serializers.SerializerMethodField()
     age = serializers.IntegerField(read_only=True)
     
     # Parent info
@@ -109,6 +109,31 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'enrollments', 'attendance_rate',
             'created_at'
         ]
+
+    def _partner_branch_ids(self):
+        request = self.context.get('request')
+        if not request:
+            return None
+        from apps.core.scoping import is_scoped_partner, partner_branch_ids
+        if not is_scoped_partner(request.user):
+            return None
+        return partner_branch_ids(request.user)
+
+    def get_branch_id(self, obj):
+        partner_ids = self._partner_branch_ids()
+        if partner_ids is not None:
+            from apps.core.scoping import partner_child_display_branch
+            branch_id, _name = partner_child_display_branch(obj, partner_ids)
+            return str(branch_id) if branch_id else None
+        return str(obj.family.branch_id) if obj.family.branch_id else None
+
+    def get_branch_name(self, obj):
+        partner_ids = self._partner_branch_ids()
+        if partner_ids is not None:
+            from apps.core.scoping import partner_child_display_branch
+            _branch_id, name = partner_child_display_branch(obj, partner_ids)
+            return name
+        return obj.family.branch.name if obj.family.branch else None
     
     def get_parent_name(self, obj):
         """

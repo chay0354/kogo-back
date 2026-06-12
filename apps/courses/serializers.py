@@ -261,11 +261,17 @@ class CourseSerializer(serializers.ModelSerializer):
         ]
     
     def get_lessons_count(self, obj):
-        """Count lessons for this course"""
+        """Count lessons for this course (batched in list view via context)."""
+        counts = self.context.get('lessons_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
         return obj.lessons.filter(status='scheduled').count()
     
     def get_enrolled_students_count(self, obj):
         """Count distinct paying children across all lessons of this course."""
+        counts = self.context.get('paying_children_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
         return count_distinct_paying_children(course=obj)
     
     def get_lessons(self, obj):
@@ -341,7 +347,10 @@ class LessonSerializer(serializers.ModelSerializer):
         return days[obj.day_of_week] if 0 <= obj.day_of_week < 7 else ''
     
     def get_enrolled_students_count(self, obj):
-        """Count paying enrollments for this lesson."""
+        """Count paying enrollments for this lesson (batched in list view via context)."""
+        counts = self.context.get('paying_enrollment_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
         return count_paying_enrollments(lesson=obj)
     
     def get_room_capacity(self, obj):

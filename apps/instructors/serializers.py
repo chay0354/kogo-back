@@ -96,8 +96,8 @@ class InstructorListSerializer(serializers.ModelSerializer):
         if obj.primary_branch_id and obj.primary_branch:
             branches.append({'id': str(obj.primary_branch_id), 'name': obj.primary_branch.name})
 
-        # Include additional assigned branches
-        branch_assignments = obj.branch_assignments.select_related('branch').all()
+        # Include additional assigned branches (uses prefetch cache; .select_related here would re-query per row)
+        branch_assignments = obj.branch_assignments.all()
         for ba in branch_assignments:
             branches.append({'id': str(ba.branch.id), 'name': ba.branch.name})
 

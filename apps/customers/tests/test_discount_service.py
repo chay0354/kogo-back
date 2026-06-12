@@ -15,6 +15,19 @@ from django.test import TestCase
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.customers.discount_service import DiscountService
 from apps.customers.financial_models import Discount
+from apps.enrollments.models import LessonEnrollment
+
+
+def enroll_child_to_team(child, lesson=None, trial=False):
+    """Create a lesson enrollment; trial=True marks it as a trial-lesson enrollment."""
+    if lesson is None:
+        lesson = TestDataFactory.create_lesson()
+    return LessonEnrollment.objects.create(
+        lesson=lesson,
+        child=child,
+        status='active',
+        trial_lesson_date=date.today() if trial else None,
+    )
 
 
 class DiscountServiceEarlySignupTest(TestCase):
@@ -143,7 +156,7 @@ class DiscountServiceSecondChildTest(TestCase):
         self.branch = self.family.branch
     
     def test_second_child_discount_applied(self):
-        """Test second child discount is applied to 2nd child"""
+        """Discount applies to a child only when a sibling is already on a team"""
         # Create second child discount - must be is_built_in=True and name contains "ילד שני"
         discount = Discount.objects.create(
             name="הנחת ילד שני",
@@ -155,11 +168,12 @@ class DiscountServiceSecondChildTest(TestCase):
             is_built_in=True
         )
         
-        # Create two children
+        # Create two children; first child is signed to a team
         child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
         child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+        enroll_child_to_team(child1)
         
-        # First child - no discount
+        # First child - no discount (no OTHER sibling on a team)
         result1 = self.service.evaluate_discounts_for_payment(
             family_id=str(self.family.id),
             child_id=str(child1.id),
@@ -170,7 +184,7 @@ class DiscountServiceSecondChildTest(TestCase):
         self.assertEqual(result1.final_price, Decimal('350.00'))
         self.assertEqual(len(result1.applicable_discounts), 0)
         
-        # Second child - discount applied
+        # Second child - discount applied (sibling already on a team)
         result2 = self.service.evaluate_discounts_for_payment(
             family_id=str(self.family.id),
             child_id=str(child2.id),
@@ -197,6 +211,7 @@ class DiscountServiceSecondChildTest(TestCase):
         child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
         child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
         child3 = TestDataFactory.create_child(family=self.family, first_name="שלישי")
+        enroll_child_to_team(child1)
         
         # Third child should also get discount
         result = self.service.evaluate_discounts_for_payment(
@@ -207,6 +222,85 @@ class DiscountServiceSecondChildTest(TestCase):
         )
         
         self.assertEqual(result.total_discount_amount, Decimal('50.00'))
+
+    def test_no_enrolled_sibling_no_discount(self):
+        """Two kids in the family but none on a team — no discount"""
+        Discount.objects.create(
+            name="הנחת ילד שני",
+            discount_type='fixed',
+            value=Decimal('50.00'),
+            applies_to='child',
+            promotion_type='permanent',
+            is_active=True,
+            is_built_in=True
+        )
+
+        TestDataFactory.create_child(family=self.family, first_name="ראשון")
+        child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+
+        result = self.service.evaluate_discounts_for_payment(
+            family_id=str(self.family.id),
+            child_id=str(child2.id),
+            payment_date=date.today(),
+            base_price=Decimal('350.00')
+        )
+
+        self.assertEqual(result.final_price, Decimal('350.00'))
+        self.assertEqual(len(result.applicable_discounts), 0)
+
+    def test_trial_sibling_does_not_grant_discount(self):
+        """Sibling with only a trial-lesson enrollment doesn't grant the discount"""
+        Discount.objects.create(
+            name="הנחת ילד שני",
+            discount_type='fixed',
+            value=Decimal('50.00'),
+            applies_to='child',
+            promotion_type='permanent',
+            is_active=True,
+            is_built_in=True
+        )
+
+        child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
+        child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+        enroll_child_to_team(child1, trial=True)
+
+        result = self.service.evaluate_discounts_for_payment(
+            family_id=str(self.family.id),
+            child_id=str(child2.id),
+            payment_date=date.today(),
+            base_price=Decimal('350.00')
+        )
+
+        self.assertEqual(result.final_price, Decimal('350.00'))
+        self.assertEqual(len(result.applicable_discounts), 0)
+
+    def test_inactive_sibling_enrollment_no_discount(self):
+        """Sibling whose team enrollment is inactive doesn't grant the discount"""
+        Discount.objects.create(
+            name="הנחת ילד שני",
+            discount_type='fixed',
+            value=Decimal('50.00'),
+            applies_to='child',
+            promotion_type='permanent',
+            is_active=True,
+            is_built_in=True
+        )
+
+        child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
+        child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+        enrollment = enroll_child_to_team(child1)
+        enrollment.status = 'inactive'
+        enrollment.save(update_fields=['status'])
+
+        result = self.service.evaluate_discounts_for_payment(
+            family_id=str(self.family.id),
+            child_id=str(child2.id),
+            payment_date=date.today(),
+            base_price=Decimal('350.00')
+        )
+
+        self.assertEqual(result.final_price, Decimal('350.00'))
+        self.assertEqual(len(result.applicable_discounts), 0)
 
 
 class DiscountServiceMultipleDiscountsTest(TestCase):
@@ -242,9 +336,10 @@ class DiscountServiceMultipleDiscountsTest(TestCase):
             is_built_in=True
         )
         
-        # Create two children
+        # Create two children; first child signed to a team
         child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
         child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+        enroll_child_to_team(child1)
         
         # Second child during early signup period - should get both discounts
         result = self.service.evaluate_discounts_for_payment(
@@ -287,6 +382,7 @@ class DiscountServiceMultipleDiscountsTest(TestCase):
         
         child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
         child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+        enroll_child_to_team(child1)
         
         # Fixed price should override second child discount
         result = self.service.evaluate_discounts_for_payment(

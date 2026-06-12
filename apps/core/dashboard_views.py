@@ -14,7 +14,12 @@ from datetime import datetime, timedelta, date
 from decimal import Decimal
 
 from apps.core.permissions import IsManager, IsManagerOrPartner
-from apps.core.scoping import is_scoped_partner, partner_branch_ids, partner_course_ids
+from apps.core.scoping import (
+    is_scoped_partner,
+    partner_branch_ids,
+    partner_course_ids,
+    partner_instructor_ids,
+)
 
 logger = logging.getLogger(__name__)
 from apps.core.models import (
@@ -81,14 +86,17 @@ class DashboardViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def _scope(self, request):
-        """Partners see dashboard data only for assigned branches."""
+        """Partners see dashboard data only for assigned branches.
+
+        Returns (scoped, course_ids, branch_ids, instructor_ids); the id lists
+        are always real lists when scoped=True so they're safe for __in filters.
+        """
         user = request.user
         if is_scoped_partner(user):
             branch_ids = partner_branch_ids(user)
-            course_ids = partner_course_ids(user)
             if not branch_ids:
-                return True, [], [], None
-            return True, course_ids, branch_ids, None
+                return True, [], [], []
+            return True, partner_course_ids(user), branch_ids, partner_instructor_ids(user)
         return False, None, None, None
     
     @action(detail=False, methods=['get'], url_path='financial')
@@ -107,12 +115,12 @@ class DashboardViewSet(viewsets.ViewSet):
         date_from, date_to = parse_date_filters(request)
         months = dates_to_month_list(date_from, date_to)
         
-        # Auto-refresh current month snapshots (dynamic calculation)
-        from apps.instructors.utils import generate_monthly_snapshots
+        # Refresh current month snapshots only when stale (heavy operation)
+        from apps.instructors.utils import refresh_current_month_snapshots_if_stale
         current_month = timezone.now().strftime('%Y-%m')
         if current_month in months:
             try:
-                generate_monthly_snapshots(current_month, finalize=False)
+                refresh_current_month_snapshots_if_stale()
             except Exception as e:
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
@@ -156,6 +164,7 @@ class DashboardViewSet(viewsets.ViewSet):
             date_to,
             branch_id if branch_id and branch_id != 'all' else None,
             None,
+            branch_ids=scoped_branch_ids if scoped else None,
         )
         rental_total = rental_agg['total'] or Decimal('0.00')
         total_revenue += rental_total
@@ -287,12 +296,12 @@ class DashboardViewSet(viewsets.ViewSet):
         date_from, date_to = parse_date_filters(request)
         months = dates_to_month_list(date_from, date_to)
         
-        # Auto-refresh current month snapshots (dynamic calculation)
-        from apps.instructors.utils import generate_monthly_snapshots
+        # Refresh current month snapshots only when stale (heavy operation)
+        from apps.instructors.utils import refresh_current_month_snapshots_if_stale
         current_month = timezone.now().strftime('%Y-%m')
         if current_month in months:
             try:
-                generate_monthly_snapshots(current_month, finalize=False)
+                refresh_current_month_snapshots_if_stale()
             except Exception as e:
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
@@ -751,12 +760,12 @@ class DashboardViewSet(viewsets.ViewSet):
         date_from, date_to = parse_date_filters(request)
         months = dates_to_month_list(date_from, date_to)
         
-        # Auto-refresh current month snapshots (dynamic calculation)
-        from apps.instructors.utils import generate_monthly_snapshots
+        # Refresh current month snapshots only when stale (heavy operation)
+        from apps.instructors.utils import refresh_current_month_snapshots_if_stale
         current_month = timezone.now().strftime('%Y-%m')
         if current_month in months:
             try:
-                generate_monthly_snapshots(current_month, finalize=False)
+                refresh_current_month_snapshots_if_stale()
             except Exception as e:
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
@@ -912,12 +921,12 @@ class DashboardViewSet(viewsets.ViewSet):
         date_from, date_to = parse_date_filters(request)
         months = dates_to_month_list(date_from, date_to)
         
-        # Auto-refresh current month snapshots (dynamic calculation)
-        from apps.instructors.utils import generate_monthly_snapshots
+        # Refresh current month snapshots only when stale (heavy operation)
+        from apps.instructors.utils import refresh_current_month_snapshots_if_stale
         current_month = timezone.now().strftime('%Y-%m')
         if current_month in months:
             try:
-                generate_monthly_snapshots(current_month, finalize=False)
+                refresh_current_month_snapshots_if_stale()
             except Exception as e:
                 # Log error but continue - use existing snapshot if refresh fails
                 logger.error(f"Failed to refresh current month snapshots: {e}")
@@ -985,6 +994,7 @@ class DashboardViewSet(viewsets.ViewSet):
             date_to,
             branch_id if branch_id and branch_id != 'all' else None,
             city_id if city_id and city_id != 'all' else None,
+            branch_ids=scoped_branch_ids if scoped else None,
         )
         rental_dec = rental_agg['total'] or Decimal('0.00')
         total_profit = total_profit + rental_dec

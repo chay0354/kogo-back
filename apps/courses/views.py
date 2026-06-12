@@ -50,15 +50,18 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Optimize queryset based on action"""
         queryset = super().get_queryset()
+
+        nested_courses = Course.objects.filter(is_active=True).select_related(
+            'branch', 'instructor'
+        ).prefetch_related('instructor__salary_tiers')
+
         if is_scoped_partner(self.request.user):
             branch_ids = partner_branch_ids(self.request.user)
             if not branch_ids:
                 return queryset.none()
             queryset = queryset.filter(courses__branch_id__in=branch_ids, courses__is_active=True).distinct()
-
-        nested_courses = Course.objects.filter(is_active=True).select_related(
-            'branch', 'instructor'
-        ).prefetch_related('instructor__salary_tiers')
+            # Partners must only see groups (courses/lessons) at their own branches
+            nested_courses = nested_courses.filter(branch_id__in=branch_ids)
 
         if self.action == 'details':
             # Prefetch all related data for details view
@@ -119,7 +122,7 @@ class CourseViewSet(viewsets.ModelViewSet):
         """Filter active courses, optionally by course type or branch"""
         queryset = Course.objects.filter(is_active=True).select_related(
             'course_type', 'branch', 'instructor'
-        )
+        ).prefetch_related('managers', 'instructor__salary_tiers')
         queryset = scope_courses(queryset, self.request.user)
 
         course_type_id = self.request.query_params.get('course_type', None)
@@ -131,6 +134,34 @@ class CourseViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(branch_id=branch_id)
         
         return queryset.order_by('course_type', 'name')
+
+    def list(self, request, *args, **kwargs):
+        """List with batched per-course counts (avoids per-course queries against a remote DB)."""
+        from django.db.models import Count
+        from apps.enrollments.enrollment_counts import paying_enrollments
+
+        courses = list(self.filter_queryset(self.get_queryset()))
+        course_ids = [c.id for c in courses]
+
+        lessons_counts = dict(
+            Lesson.objects.filter(course_id__in=course_ids, status='scheduled')
+            .values_list('course_id')
+            .annotate(c=Count('id'))
+            .values_list('course_id', 'c')
+        )
+        paying_children_counts = dict(
+            paying_enrollments()
+            .filter(lesson__course_id__in=course_ids)
+            .values_list('lesson__course_id')
+            .annotate(c=Count('child_id', distinct=True))
+            .values_list('lesson__course_id', 'c')
+        )
+
+        context = self.get_serializer_context()
+        context['lessons_counts'] = lessons_counts
+        context['paying_children_counts'] = paying_children_counts
+        serializer = CourseSerializer(courses, many=True, context=context)
+        return Response(serializer.data)
     
     def destroy(self, request, *args, **kwargs):
         """Soft delete: set is_active to False, but only if no active lessons"""
@@ -190,6 +221,26 @@ class LessonViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_recurring=is_recurring.lower() == 'true')
         
         return queryset.order_by('day_of_week', 'start_time')
+
+    def list(self, request, *args, **kwargs):
+        """List with batched per-lesson enrollment counts (avoids one query per lesson)."""
+        from django.db.models import Count
+        from apps.enrollments.enrollment_counts import paying_enrollments
+
+        lessons = list(self.filter_queryset(self.get_queryset()))
+        lesson_ids = [lesson.id for lesson in lessons]
+        enrollment_counts = dict(
+            paying_enrollments()
+            .filter(lesson_id__in=lesson_ids)
+            .values_list('lesson_id')
+            .annotate(c=Count('id'))
+            .values_list('lesson_id', 'c')
+        )
+
+        context = self.get_serializer_context()
+        context['paying_enrollment_counts'] = enrollment_counts
+        serializer = LessonSerializer(lessons, many=True, context=context)
+        return Response(serializer.data)
 
     def _next_occurrence_date(self, day_of_week: int, start_from=None):
         """

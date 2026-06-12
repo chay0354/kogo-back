@@ -49,24 +49,37 @@ class WhatsAppViewSet(viewsets.ViewSet):
         q = (request.query_params.get('q') or '').strip()
         branch_id = (request.query_params.get('branch_id') or '').strip()
         course_type_id = (request.query_params.get('course_type_id') or '').strip()
+        course_id = (request.query_params.get('course_id') or '').strip()
+        instructor_id = (request.query_params.get('instructor_id') or '').strip()
         rows: list[dict] = []
         seen_phones: set[str] = set()
 
-        family_ids_for_course_type = None
-        if course_type_id:
+        # All filters resolve through active lesson enrollments of the family's kids,
+        # so "branch" means the branch the kids actually learn at (not the family's home branch).
+        enrolled_family_ids = None
+        if course_id or course_type_id or branch_id or instructor_id:
             from apps.enrollments.models import LessonEnrollment
-            family_ids_for_course_type = LessonEnrollment.objects.filter(
-                status='active',
-                lesson__course__course_type_id=course_type_id,
+            enrollment_q = Q(status='active')
+            if course_id:
+                enrollment_q &= Q(lesson__course_id=course_id)
+            if course_type_id:
+                enrollment_q &= Q(lesson__course__course_type_id=course_type_id)
+            if branch_id:
+                enrollment_q &= Q(lesson__course__branch_id=branch_id)
+            if instructor_id:
+                enrollment_q &= (
+                    Q(lesson__instructor_id=instructor_id)
+                    | Q(lesson__course__instructor_id=instructor_id)
+                )
+            enrolled_family_ids = LessonEnrollment.objects.filter(
+                enrollment_q
             ).values_list('child__family_id', flat=True).distinct()
 
         families = Family.objects.select_related('branch').filter(~Q(phone=''))
         if q:
             families = families.filter(Q(name__icontains=q) | Q(phone__icontains=q))
-        if branch_id:
-            families = families.filter(branch_id=branch_id)
-        if family_ids_for_course_type is not None:
-            families = families.filter(id__in=family_ids_for_course_type)
+        if enrolled_family_ids is not None:
+            families = families.filter(id__in=enrolled_family_ids)
 
         for fam in families.order_by('name')[:200]:
             phone = (fam.phone or '').strip()
@@ -88,10 +101,8 @@ class WhatsAppViewSet(viewsets.ViewSet):
             parents = parents.filter(
                 Q(first_name__icontains=q) | Q(last_name__icontains=q) | Q(phone__icontains=q)
             )
-        if branch_id:
-            parents = parents.filter(family__branch_id=branch_id)
-        if family_ids_for_course_type is not None:
-            parents = parents.filter(family_id__in=family_ids_for_course_type)
+        if enrolled_family_ids is not None:
+            parents = parents.filter(family_id__in=enrolled_family_ids)
         for p in parents.order_by('family__name', 'last_name')[:200]:
             phone = (p.phone or '').strip()
             norm = ManyChatService.normalize_phone_e164(phone)

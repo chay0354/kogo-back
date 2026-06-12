@@ -6,7 +6,7 @@ from apps.scheduling.models import ScheduleEvent
 from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range
 
 
-def aggregate_studio_rental_revenue(date_from, date_to, branch_id=None, city_id=None):
+def aggregate_studio_rental_revenue(date_from, date_to, branch_id=None, city_id=None, branch_ids=None):
     """
     Returns:
       total: Decimal
@@ -25,6 +25,10 @@ def aggregate_studio_rental_revenue(date_from, date_to, branch_id=None, city_id=
 
     if branch_id and branch_id != 'all':
         qs = qs.filter(branch_id=branch_id)
+    elif branch_ids is not None:
+        if not branch_ids:
+            return {'total': total, 'by_branch_id': {}, 'by_month': {}}
+        qs = qs.filter(branch_id__in=branch_ids)
 
     if city_id and city_id != 'all':
         qs = qs.filter(branch__city_id=city_id)

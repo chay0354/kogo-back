@@ -906,6 +906,32 @@ def calculate_lesson_profitability(lesson, instructor, month: Optional[str] = No
     }
 
 
+def refresh_current_month_snapshots_if_stale(ttl_minutes=10, force=False):
+    """
+    Regenerate current-month snapshots only when stale (or forced).
+
+    Full regeneration is expensive (hundreds of queries against a remote DB),
+    so dashboard GET endpoints call this instead of regenerating on every
+    request. Freshness is judged by the newest BranchMonthlySnapshot row of
+    the current month, which generate_monthly_snapshots always touches.
+    Returns True when a regeneration ran.
+    """
+    from django.utils import timezone as tz
+    from apps.core.models import BranchMonthlySnapshot
+    from django.db.models import Max
+
+    now = tz.now()
+    current_month = now.strftime('%Y-%m')
+    if not force:
+        last = BranchMonthlySnapshot.objects.filter(month=current_month).aggregate(
+            m=Max('updated_at')
+        )['m']
+        if last and (now - last) < timedelta(minutes=ttl_minutes):
+            return False
+    generate_monthly_snapshots(current_month, finalize=False)
+    return True
+
+
 def generate_monthly_snapshots(month, finalize=False):
     """
     Generate monthly snapshots for all instructors, lessons, and branches
@@ -1046,7 +1072,7 @@ def generate_monthly_snapshots(month, finalize=False):
         
         # Count active courses - using same filter logic as lesson snapshots
         active_courses = Lesson.objects.filter(
-            branch=branch
+            course__branch=branch
         ).exclude(
             status='cancelled'
         ).values('course').distinct().count()

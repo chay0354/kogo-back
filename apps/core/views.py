@@ -9,7 +9,7 @@ from decimal import Decimal
 from datetime import timedelta
 from apps.core.models import City, Branch, Room, BranchFile
 from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
-from apps.core.scoping import scope_branches
+from apps.core.scoping import scope_branches, scope_cities
 from apps.core.serializers import (
     CitySerializer, BranchSerializer, BranchListSerializer, 
     BranchDetailSerializer, BranchWithStatsSerializer,
@@ -24,6 +24,9 @@ class CityViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     queryset = City.objects.all()
     serializer_class = CitySerializer
+
+    def get_queryset(self):
+        return scope_cities(super().get_queryset(), self.request.user)
 
 
 class BranchViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
