@@ -735,3 +735,89 @@ class TranzilaService:
         except Exception as e:
             logger.error(f"Unexpected error in Tranzila API request: {str(e)}", exc_info=True)
             return self._build_error_response(str(e), '999', 'Unexpected error')
+
+    def _make_billing_request(self, payload: dict, endpoint: str) -> dict:
+        """POST to billing5.tranzila.com — same auth headers as the main API."""
+        from django.conf import settings
+        billing_base = getattr(settings, 'TRANZILA_BILLING_BASE_URL', 'https://billing5.tranzila.com')
+        url = f"{billing_base}{endpoint}"
+
+        nonce = secrets.token_bytes(40).hex()
+        request_time = str(int(time.time()))
+        access_token_signature = self._generate_access_token_signature(nonce, request_time)
+
+        headers = {
+            'X-tranzila-api-access-token': access_token_signature,
+            'X-tranzila-api-app-key': self.public_key,
+            'X-tranzila-api-nonce': nonce,
+            'X-tranzila-api-request-time': request_time,
+            'Content-Type': 'application/json',
+        }
+
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            data = response.json()
+            if response.status_code not in (200, 201):
+                logger.error(f"Tranzila billing API error {response.status_code}: {data}")
+                return {'success': False, 'error': data}
+            return data
+        except Exception as e:
+            logger.error(f"Tranzila billing API exception: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
+
+    def create_formal_document(
+        self,
+        terminal_name: str,
+        document_type: str,
+        document_date: str,
+        items: list,
+        payments: list,
+        vat_percent: float = 18.0,
+    ) -> dict:
+        """
+        Issue a formal document (invoice/receipt/credit note) via Tranzila billing API.
+        document_type: 'IN' | 'IR' | 'RE' | 'DI'
+        Returns dict with doc_id, retrieval_key, pdf_url on success.
+        """
+        payload = {
+            'terminal_name': terminal_name,
+            'document_type': document_type,
+            'document_date': document_date,
+            'vat_percent': vat_percent,
+            'items': [
+                {
+                    'description': item.get('description', 'פריט'),
+                    'quantity': item.get('quantity', 1),
+                    'unit_price': item.get('unit_price', item.get('price', 0)),
+                }
+                for item in items
+            ],
+        }
+        if payments:
+            payload['payments'] = payments
+
+        result = self._make_billing_request(payload, '/api/documents_db/create_document')
+        logger.info(f"Tranzila create_formal_document ({document_type}): {result}")
+        return result
+
+    def create_credit_note(
+        self,
+        terminal_name: str,
+        original_doc_id: str,
+        credit_amount: float,
+        reason: str = '',
+    ) -> dict:
+        """
+        Issue a credit note cancelling an existing Tranzila document.
+        Uses update_document with relation_type=2.
+        """
+        payload = {
+            'terminal_name': terminal_name,
+            'doc_id': original_doc_id,
+            'relation_type': 2,
+            'credit_amount': credit_amount,
+            'reason': reason,
+        }
+        result = self._make_billing_request(payload, '/api/documents_db/update_document')
+        logger.info(f"Tranzila create_credit_note for doc {original_doc_id}: {result}")
+        return result

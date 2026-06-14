@@ -655,3 +655,32 @@ class PaymentDiscountSnapshot(models.Model):
     def __str__(self):
         return f"{self.discount_name} - ₪{self.amount_deducted}"
 
+
+class BusinessCustomer(models.Model):
+    """לקוחות עסקיים — used for manual document issuance to non-registered customers."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    first_name = models.CharField(max_length=100, verbose_name="שם פרטי")
+    last_name = models.CharField(max_length=100, verbose_name="שם משפחה")
+    email = models.EmailField(blank=True, verbose_name="אימייל")
+    phone = models.CharField(max_length=20, blank=True, verbose_name="טלפון")
+    id_number = models.CharField(max_length=20, blank=True, verbose_name="ת.ז")
+    company_number = models.CharField(max_length=20, blank=True, verbose_name="ח.פ")
+    business_type = models.CharField(max_length=100, blank=True, verbose_name="שיוך לעסק")
+    category = models.CharField(max_length=100, blank=True, verbose_name="קטגוריה")
+    notes = models.TextField(blank=True, verbose_name="הערות")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'business_customers'
+        verbose_name = "לקוח עסקי"
+        verbose_name_plural = "לקוחות עסקיים"
+        ordering = ['last_name', 'first_name']
+
+    def __str__(self):
+        return self.full_name
+
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+

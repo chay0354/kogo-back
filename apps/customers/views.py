@@ -10,7 +10,7 @@ from django.db.models.functions import Concat
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date
-from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment
+from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
 from apps.customers.serializers import (
@@ -22,7 +22,7 @@ from apps.customers.serializers import (
     PaymentSerializer, RecurringPaymentSerializer,
     PaymentInitiationRequestSerializer, PaymentInitiationResponseSerializer,
     WebhookCallbackSerializer, RecurringPaymentUpdateSerializer,
-    RecurringPaymentCancelSerializer
+    RecurringPaymentCancelSerializer, BusinessCustomerSerializer
 )
 from apps.customers.discount_service import DiscountService
 from apps.core.payment_service import PaymentService
@@ -1197,3 +1197,15 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                 'error': f'שגיאה בביטול מנוי: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+
+class BusinessCustomerViewSet(viewsets.ModelViewSet):
+    """לקוחות עסקיים — search, create, update."""
+    serializer_class = BusinessCustomerSerializer
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['first_name', 'last_name', 'company_number', 'email', 'phone']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        return BusinessCustomer.objects.all()
