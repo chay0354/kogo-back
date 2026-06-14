@@ -5,7 +5,7 @@ from rest_framework import serializers
 from datetime import date
 from apps.customers.models import (
     Family, Parent, Child, Payment, RecurringPayment,
-    TranzilaTransaction, PaymentDiscountSnapshot
+    TranzilaTransaction, PaymentDiscountSnapshot, BusinessCustomer
 )
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
@@ -578,4 +578,18 @@ class RecurringPaymentUpdateSerializer(serializers.Serializer):
 class RecurringPaymentCancelSerializer(serializers.Serializer):
     """ביטול מנוי חוזר - Cancel recurring payment"""
     cancellation_reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class BusinessCustomerSerializer(serializers.ModelSerializer):
+    full_name = serializers.ReadOnlyField()
+
+    class Meta:
+        model = BusinessCustomer
+        fields = [
+            'id', 'first_name', 'last_name', 'full_name',
+            'email', 'phone', 'id_number', 'company_number',
+            'business_type', 'category', 'notes',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'full_name', 'created_at', 'updated_at']
 

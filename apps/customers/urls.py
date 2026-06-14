@@ -11,6 +11,7 @@ router.register(r'children', views.ChildViewSet, basename='child')
 router.register(r'discounts', views.DiscountViewSet, basename='discount')
 router.register(r'payments', views.PaymentViewSet, basename='payment')
 router.register(r'recurring-payments', views.RecurringPaymentViewSet, basename='recurring-payment')
+router.register(r'business-customers', views.BusinessCustomerViewSet, basename='business-customer')
 
 urlpatterns = [
     path('', include(router.urls)),

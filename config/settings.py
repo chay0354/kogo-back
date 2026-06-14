@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     'apps.instructors',
     'apps.courses',
     'apps.customers',
+    'apps.documents',
     'apps.enrollments',
     'apps.scheduling',
     'apps.store',
@@ -221,6 +222,11 @@ TRANZILA_WEBHOOK_SECRET = config('TRANZILA_WEBHOOK_SECRET', default='mock-webhoo
 TRANZILA_API_BASE_URL = config('TRANZILA_API_BASE_URL', default='https://api.tranzila.com')
 TRANZILA_BASE_URL = config('TRANZILA_BASE_URL', default='https://direct.tranzila.com')  # Iframe endpoint
 TRANZILA_ENVIRONMENT = config('TRANZILA_ENVIRONMENT', default='development')
+
+# Tranzila billing / document API (billing5.tranzila.com)
+# Leave TRANZILA_BILLING_TERMINAL empty until activated by Tranzila — document issuance will be skipped.
+TRANZILA_BILLING_TERMINAL = config('TRANZILA_BILLING_TERMINAL', default='')
+TRANZILA_BILLING_BASE_URL = config('TRANZILA_BILLING_BASE_URL', default='https://billing5.tranzila.com')
 
 # Supabase (URL + publishable key for client-style access; service role only via env/secrets, never in frontend)
 SUPABASE_URL = config('SUPABASE_URL', default='')
