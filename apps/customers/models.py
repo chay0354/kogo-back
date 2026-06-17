@@ -665,6 +665,7 @@ class BusinessCustomer(models.Model):
     phone = models.CharField(max_length=20, blank=True, verbose_name="טלפון")
     id_number = models.CharField(max_length=20, blank=True, verbose_name="ת.ז")
     company_number = models.CharField(max_length=20, blank=True, verbose_name="ח.פ")
+    address = models.TextField(blank=True, verbose_name="כתובת")
     business_type = models.CharField(max_length=100, blank=True, verbose_name="שיוך לעסק")
     category = models.CharField(max_length=100, blank=True, verbose_name="קטגוריה")
     notes = models.TextField(blank=True, verbose_name="הערות")

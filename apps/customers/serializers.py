@@ -587,7 +587,7 @@ class BusinessCustomerSerializer(serializers.ModelSerializer):
         model = BusinessCustomer
         fields = [
             'id', 'first_name', 'last_name', 'full_name',
-            'email', 'phone', 'id_number', 'company_number',
+            'email', 'phone', 'id_number', 'company_number', 'address',
             'business_type', 'category', 'notes',
             'created_at', 'updated_at',
         ]
