@@ -11,14 +11,6 @@ DOCUMENT_TYPE_CHOICES = [
     ('credit_invoice', 'חשבונית מס זיכוי'),
 ]
 
-DOCUMENT_NUMBER_PREFIX = {
-    'tax_invoice': 'INV',
-    'receipt': 'REC',
-    'combined': 'INV',
-    'transaction_invoice': 'TXN',
-    'credit_invoice': 'CRD',
-}
-
 TRANZILA_DOCUMENT_TYPE = {
     'tax_invoice': 'IN',
     'receipt': 'RE',
@@ -41,20 +33,17 @@ CURRENCY_CHOICES = [
 
 
 class DocumentCounter(models.Model):
-    """Sequential counter per document type per year."""
-    document_type = models.CharField(max_length=30)
-    year = models.PositiveIntegerField()
+    """Global sequential counter per year — one sequence across all document types."""
+    year = models.PositiveIntegerField(unique=True)
     counter = models.PositiveIntegerField(default=0)
 
     class Meta:
         db_table = 'document_counters'
-        unique_together = [('document_type', 'year')]
 
     @classmethod
-    def next_number(cls, document_type: str, year: int) -> int:
+    def next_number(cls, year: int) -> int:
         with transaction.atomic():
             obj, _ = cls.objects.select_for_update().get_or_create(
-                document_type=document_type,
                 year=year,
                 defaults={'counter': 0},
             )

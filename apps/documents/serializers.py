@@ -120,6 +120,7 @@ class CreateDocumentSerializer(serializers.Serializer):
     client_type = serializers.ChoiceField(choices=['business', 'existing'])
     child_id = serializers.UUIDField(required=False, allow_null=True)
     business_customer_id = serializers.UUIDField(required=False, allow_null=True)
+    branch_id = serializers.IntegerField(required=False, allow_null=True)
     document_date = serializers.DateField(required=False)
 
     invoice_details = InvoiceDetailsInputSerializer(required=False)

@@ -5,7 +5,7 @@ from django.db import transaction
 
 from apps.documents.models import (
     DocumentCounter, FormalDocument, DocumentLineItem, DocumentPayment,
-    DOCUMENT_NUMBER_PREFIX, TRANZILA_DOCUMENT_TYPE,
+    TRANZILA_DOCUMENT_TYPE,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,9 +15,8 @@ VAT_RATE = Decimal('0.18')
 
 def _generate_document_number(document_type: str) -> str:
     year = timezone.now().year
-    prefix = DOCUMENT_NUMBER_PREFIX.get(document_type, 'DOC')
-    seq = DocumentCounter.next_number(document_type, year)
-    return f"{prefix}-{year}-{seq:04d}"
+    seq = DocumentCounter.next_number(year)
+    return f"{year}-{seq:04d}"
 
 
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,
@@ -55,6 +54,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        branch_id=data.get('branch_id'),
         document_date=invoice_data['document_date'],
         due_date=invoice_data.get('due_date') or None,
         description=invoice_data.get('description', ''),
@@ -99,6 +99,7 @@ def create_combined(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        branch_id=data.get('branch_id'),
         document_date=invoice_data['document_date'],
         due_date=invoice_data.get('due_date') or None,
         description=invoice_data.get('description', ''),
@@ -145,6 +146,7 @@ def create_receipt(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        branch_id=data.get('branch_id'),
         document_date=data.get('document_date', str(timezone.now().date())),
         currency='ILS',
         vat_exempt=True,
@@ -225,6 +227,7 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        branch_id=data.get('branch_id'),
         document_date=credit['document_date'],
         vat_exempt=vat_exempt,
         vat_percent=Decimal('18'),
