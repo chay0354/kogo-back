@@ -26,7 +26,7 @@ from apps.customers.serializers import (
 )
 from apps.customers.discount_service import DiscountService
 from apps.core.payment_service import PaymentService
-from apps.enrollments.models import LessonEnrollment
+from apps.enrollments.models import Enrollment, LessonEnrollment
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.core.scoping import (
     scope_courses,
@@ -100,9 +100,18 @@ class ChildViewSet(viewsets.ModelViewSet):
         'family', 'family__branch'
     ).prefetch_related(
         'family__parents',
-        Prefetch('lesson_enrollments', queryset=LessonEnrollment.objects.select_related(
-            'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
-        ))
+        Prefetch(
+            'enrollments',
+            queryset=Enrollment.objects.filter(is_active=True).select_related(
+                'course', 'course__branch', 'course__course_type'
+            ),
+        ),
+        Prefetch(
+            'lesson_enrollments',
+            queryset=LessonEnrollment.objects.select_related(
+                'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+            ),
+        ),
     )
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]

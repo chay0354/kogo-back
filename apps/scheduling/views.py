@@ -203,29 +203,27 @@ class LessonViewSet(viewsets.ModelViewSet):
             )
             cancel_map = {(str(c.lesson_id), c.occurrence_date): c for c in cancellations}
 
+            lessons_list = list(queryset)
+            lesson_serializer = LessonListSerializer(context={'request': request})
             expanded = []
-            for lesson in queryset:
+            for lesson in lessons_list:
                 if not lesson.is_recurring:
-                    # Non-recurring: keep as-is (must match the range already via filters)
-                    data = LessonListSerializer(lesson).data
-                    expanded.append(data)
+                    expanded.append(lesson_serializer.to_representation(lesson))
                     continue
 
-                # Recurring: generate occurrence dates within [start, end], but not before lesson.lesson_date (start date)
                 start_from = start
                 if lesson.lesson_date and lesson.lesson_date > start_from:
                     start_from = lesson.lesson_date
 
-                # Map our day_of_week (0=Sunday) to python weekday (0=Mon..6=Sun)
                 target_py_weekday = (lesson.day_of_week - 1) % 7
                 days_ahead = (target_py_weekday - start_from.weekday()) % 7
                 first_occ = start_from + timedelta(days=days_ahead)
 
+                base_data = lesson_serializer.to_representation(lesson)
                 occ = first_occ
                 while occ <= end:
                     c = cancel_map.get((str(lesson.id), occ))
-                    data = LessonListSerializer(lesson).data
-                    # Override occurrence date and per-occurrence cancellation status
+                    data = dict(base_data)
                     data['lesson_date'] = occ.isoformat()
                     if c:
                         data['status'] = 'cancelled'
@@ -238,7 +236,6 @@ class LessonViewSet(viewsets.ModelViewSet):
                     expanded.append(data)
                     occ = occ + timedelta(days=7)
 
-            # Sort by date/time
             expanded.sort(key=lambda x: (x.get('lesson_date') or '', x.get('start_time') or ''))
             return Response(expanded)
 

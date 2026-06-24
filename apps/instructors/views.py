@@ -92,40 +92,89 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             serializer = InstructorDropdownSerializer(queryset, many=True)
             return Response(serializer.data)
 
-        # Auto-finalize previous month snapshots (idempotent) so ended months become immutable automatically.
-        from apps.instructors.utils import ensure_previous_month_finalized_for_all
-        ensure_previous_month_finalized_for_all()
-        
         # Get filter parameters
         month = request.query_params.get('month', None)
         branch_id = request.query_params.get('branch', None)
         if branch_id == 'all':
             branch_id = None
-        
-        # Check if simple approximation mode is requested
+
         use_simple = request.query_params.get('simple', '').lower() == 'true'
         force_refresh = request.query_params.get('refresh', '').lower() in ('1', 'true', 'yes')
+        target_month = month or timezone.now().strftime('%Y-%m')
 
-        # Fast path: serve metrics from fresh monthly snapshots in one query instead of
-        # recalculating per instructor (each recalc is many round-trips to the DB).
-        # Snapshots are per instructor across all branches, so skip when filtering by branch.
-        from apps.core.models import InstructorMonthlySnapshot
+        from apps.core.models import InstructorMonthlySnapshot, LessonMonthlySnapshot
+
         snapshot_map = {}
-        if not branch_id and not force_refresh:
-            target_month = month or timezone.now().strftime('%Y-%m')
-            freshness_cutoff = timezone.now() - timedelta(minutes=10)
-            snaps = InstructorMonthlySnapshot.objects.filter(month=target_month)
-            for snap in snaps:
-                if snap.is_finalized or snap.updated_at >= freshness_cutoff:
-                    snapshot_map[snap.instructor_id] = snap
+        branch_snapshot_metrics = {}
+        if not force_refresh:
+            if branch_id:
+                branch_rows = LessonMonthlySnapshot.objects.filter(
+                    month=target_month,
+                    branch_id=branch_id,
+                ).values('instructor_id').annotate(
+                    lessons_count=Count('lesson_id', distinct=True),
+                    students_count=Sum('enrolled_students'),
+                    base_revenue=Sum('base_revenue'),
+                    total_discounts=Sum('total_discounts'),
+                    revenue=Sum('revenue'),
+                    salary=Sum('instructor_salary'),
+                    profit=Sum('profit'),
+                )
+                for row in branch_rows:
+                    branch_snapshot_metrics[row['instructor_id']] = row
+            else:
+                snapshot_map = {
+                    snap.instructor_id: snap
+                    for snap in InstructorMonthlySnapshot.objects.filter(month=target_month)
+                }
 
-        # Calculate metrics for each instructor
+        def _metrics_from_branch_row(row):
+            return {
+                'lessons_count': row['lessons_count'] or 0,
+                'students_count': int(row['students_count'] or 0),
+                'base_revenue': row['base_revenue'] or Decimal('0.00'),
+                'total_discounts': row['total_discounts'] or Decimal('0.00'),
+                'revenue': row['revenue'] or Decimal('0.00'),
+                'salary': row['salary'] or Decimal('0.00'),
+                'bonuses': Decimal('0.00'),
+                'profit': row['profit'] or Decimal('0.00'),
+                'cancelled_count': 0,
+                'avg_attendance_rate': Decimal('0.00'),
+                'salary_is_finalized': False,
+            }
+
+        def _empty_metrics():
+            return {
+                'lessons_count': 0,
+                'students_count': 0,
+                'base_revenue': Decimal('0.00'),
+                'total_discounts': Decimal('0.00'),
+                'revenue': Decimal('0.00'),
+                'salary': Decimal('0.00'),
+                'bonuses': Decimal('0.00'),
+                'profit': Decimal('0.00'),
+                'cancelled_count': 0,
+                'avg_attendance_rate': Decimal('0.00'),
+                'salary_is_finalized': False,
+            }
+
+        instructors_list = list(queryset)
+        base_rows = InstructorListSerializer(
+            instructors_list,
+            many=True,
+            context={'request': request},
+        ).data
+        base_by_id = {row['id']: row for row in base_rows}
+
         instructors_data = []
-        for instructor in queryset:
+        for instructor in instructors_list:
             snap = snapshot_map.get(instructor.id)
+            branch_row = branch_snapshot_metrics.get(instructor.id)
             if use_simple and branch_id:
-                # Simplified calculation for branch view: 
-                # salary = (instructor salary per lesson) × (lesson count in branch) × 4
+                metrics = self._calculate_simple_metrics(instructor, branch_id)
+            elif branch_id and branch_row is not None:
+                metrics = _metrics_from_branch_row(branch_row)
+            elif branch_id:
                 metrics = self._calculate_simple_metrics(instructor, branch_id)
             elif snap is not None:
                 metrics = {
@@ -141,12 +190,11 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
                     'avg_attendance_rate': snap.avg_attendance_rate,
                     'salary_is_finalized': snap.is_finalized,
                 }
-            else:
-                # Full calendar-month accurate calculation
+            elif force_refresh:
                 metrics = calculate_instructor_monthly_metrics(instructor, month, branch_id)
-            
-            # Calculate bonuses for the selected month (in Python over the prefetched relation,
-            # so this adds no extra queries)
+            else:
+                metrics = _empty_metrics()
+
             bonuses_amount = Decimal('0.00')
             if month:
                 year_val, month_val = int(month.split('-')[0]), int(month.split('-')[1])
@@ -155,15 +203,10 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
                      if b.bonus_date.year == year_val and b.bonus_date.month == month_val),
                     Decimal('0.00'),
                 )
-            
-            # Serialize instructor with metrics
-            serializer = self.get_serializer(instructor)
-            instructor_dict = serializer.data
-            
-            # Add calculated metrics
+
+            instructor_dict = dict(base_by_id[str(instructor.id)])
             instructor_dict.update(metrics)
             instructor_dict['bonuses_amount'] = str(bonuses_amount)
-            
             instructors_data.append(instructor_dict)
         
         # Apply student count filters if specified
@@ -268,62 +311,108 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         """
         Retrieve single instructor with detailed financial information
         """
-        from apps.core.models import InstructorMonthlySnapshot
+        from apps.core.models import InstructorMonthlySnapshot, LessonMonthlySnapshot
         from apps.instructors.serializers import InstructorMonthlySnapshotSerializer
+        from apps.instructors.utils import lesson_profitability_from_snapshot, _batch_load_cancellations, _month_start_end, _parse_month_str
         
         instructor = self.get_object()
-        
-        # Get month parameter (YYYY-MM). Used for profitability and totals.
         month = request.query_params.get('month', None)
-        
-        # Calculate overall metrics
-        metrics = calculate_instructor_monthly_metrics(instructor, month)
-        
-        # Get all lessons with profitability
-        lessons = Lesson.objects.filter(
+        target_month = month or timezone.now().strftime('%Y-%m')
+        force_refresh = request.query_params.get('refresh', '').lower() in ('1', 'true', 'yes')
+
+        snap = InstructorMonthlySnapshot.objects.filter(
             instructor=instructor,
-            is_recurring=True
-        ).select_related('course', 'course__branch', 'room').prefetch_related('enrollments')
-        
-        lessons_data = []
-        unique_courses = {}
-        
-        for lesson in lessons:
-            lesson_profit = calculate_lesson_profitability(lesson, instructor, month=month)
-            lessons_data.append(lesson_profit)
-            
-            # Track unique courses
-            if lesson.course and lesson.course.id not in unique_courses:
-                unique_courses[lesson.course.id] = {
-                    'id': str(lesson.course.id),
-                    'name': lesson.course.name,
-                    'course_type': lesson.course.course_type.name if lesson.course.course_type else None
-                }
-        
-        # Get last 6 monthly snapshots
+            month=target_month,
+        ).first()
+
+        if snap is not None and not force_refresh:
+            metrics = {
+                'students_count': snap.total_students,
+                'revenue': snap.total_revenue,
+                'salary': snap.total_salary,
+                'profit': snap.profit,
+            }
+        elif force_refresh:
+            metrics = calculate_instructor_monthly_metrics(instructor, month)
+        else:
+            metrics = {
+                'students_count': snap.total_students if snap else 0,
+                'revenue': snap.total_revenue if snap else Decimal('0.00'),
+                'salary': snap.total_salary if snap else Decimal('0.00'),
+                'profit': snap.profit if snap else Decimal('0.00'),
+            }
+
+        lesson_snaps = list(LessonMonthlySnapshot.objects.filter(
+            instructor=instructor,
+            month=target_month,
+            lesson__is_recurring=True,
+        ).select_related(
+            'lesson',
+            'lesson__room',
+            'course',
+            'course__branch',
+            'course__course_type',
+            'branch',
+        ))
+
+        if lesson_snaps and not force_refresh:
+            lessons_data = [lesson_profitability_from_snapshot(s) for s in lesson_snaps]
+            unique_courses = {}
+            for row in lessons_data:
+                course_id = row.get('course_id')
+                if course_id and course_id not in unique_courses:
+                    unique_courses[course_id] = {
+                        'id': course_id,
+                        'name': row.get('course_name'),
+                        'course_type': None,
+                    }
+            for snap in lesson_snaps:
+                course = snap.course
+                if course and str(course.id) in unique_courses and course.course_type:
+                    unique_courses[str(course.id)]['course_type'] = course.course_type.name
+        else:
+            lessons = Lesson.objects.filter(
+                instructor=instructor,
+                is_recurring=True,
+            ).select_related('course', 'course__branch', 'course__course_type', 'room').prefetch_related('enrollments')
+
+            year_val, month_val = _parse_month_str(target_month)
+            month_start, month_end = _month_start_end(year_val, month_val)
+            cancellations_dict = _batch_load_cancellations(lessons, month_start, month_end, effective_end=None)
+
+            lessons_data = []
+            unique_courses = {}
+            for lesson in lessons:
+                lesson_profit = calculate_lesson_profitability(
+                    lesson,
+                    instructor,
+                    month=target_month,
+                    cancellations_dict=cancellations_dict,
+                )
+                lessons_data.append(lesson_profit)
+                if lesson.course and str(lesson.course.id) not in unique_courses:
+                    unique_courses[str(lesson.course.id)] = {
+                        'id': str(lesson.course.id),
+                        'name': lesson.course.name,
+                        'course_type': lesson.course.course_type.name if lesson.course.course_type else None,
+                    }
+
         snapshots = InstructorMonthlySnapshot.objects.filter(
             instructor=instructor
         ).order_by('-month')[:6]
-        
         snapshots_serializer = InstructorMonthlySnapshotSerializer(snapshots, many=True)
-        
-        # Serialize instructor
+
         serializer = self.get_serializer(instructor, context={
             'lessons': lessons_data,
-            'courses': list(unique_courses.values())
+            'courses': list(unique_courses.values()),
         })
-        
         instructor_dict = serializer.data
-        
-        # Add financial metrics
         instructor_dict['total_students'] = metrics['students_count']
         instructor_dict['total_revenue'] = str(metrics['revenue'])
         instructor_dict['total_salary'] = str(metrics['salary'])
         instructor_dict['total_profit'] = str(metrics['profit'])
-        
-        # Add monthly snapshots
         instructor_dict['monthly_snapshots'] = snapshots_serializer.data
-        
+
         return Response(instructor_dict)
     
     def destroy(self, request, *args, **kwargs):
@@ -483,124 +572,31 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         """
         instructor = self.get_object()
         
-        # Get year and month from query params (default to current)
         now = timezone.now()
         year = int(request.query_params.get('year', now.year))
         month = int(request.query_params.get('month', now.month))
         
         today = timezone.now().date()
-
         month_start = date(year, month, 1)
-        # Compute month end
         if month == 12:
             month_end = date(year + 1, 1, 1) - timedelta(days=1)
         else:
             month_end = date(year, month + 1, 1) - timedelta(days=1)
 
-        # For "current" month, only count occurrences that already happened
         effective_end = min(month_end, today - timedelta(days=1))
+        month_str = f'{year:04d}-{month:02d}'
+
+        from apps.instructors.utils import calculate_instructor_salary_for_month
+
         if effective_end < month_start:
-            effective_end = month_start - timedelta(days=1)
-
-        # 1) Non-recurring lessons: one occurrence on lesson_date
-        non_recurring = Lesson.objects.filter(
-            instructor=instructor,
-            is_recurring=False,
-            lesson_date__gte=month_start,
-            lesson_date__lte=effective_end,
-        ).exclude(status='cancelled').select_related('course').prefetch_related('enrollments')
-
-        # 2) Recurring lessons: count occurrences by weekday in [month_start, effective_end], starting from lesson.lesson_date
-        recurring = Lesson.objects.filter(
-            instructor=instructor,
-            is_recurring=True,
-            status='scheduled',
-        ).select_related('course').prefetch_related('enrollments')
-
-        # Preload cancellations for this instructor/month range
-        cancellations = LessonCancellation.objects.filter(
-            lesson__in=recurring,
-            occurrence_date__gte=month_start,
-            occurrence_date__lte=effective_end,
-        )
-        cancelled_set = {(c.lesson_id, c.occurrence_date) for c in cancellations}
-
-        def count_weekday_occurrences(start_d: date, end_d: date, target_py_weekday: int):
-            if end_d < start_d:
-                return 0, None
-            days_ahead = (target_py_weekday - start_d.weekday()) % 7
-            first = start_d + timedelta(days=days_ahead)
-            if first > end_d:
-                return 0, None
-            delta_days = (end_d - first).days
-            return (delta_days // 7) + 1, first
-
-        total_occurrences = 0
-        total_salary = Decimal('0.00')
-        courses_with_monthly_pay = set()
-
-        # Salary for non-recurring (single occurrence each)
-        for lesson in non_recurring:
-            course = lesson.course
-            if course and course.instructor_salary_override is not None:
-                if course.id not in courses_with_monthly_pay:
-                    courses_with_monthly_pay.add(course.id)
-                    total_salary += Decimal(str(course.instructor_salary_override))
-                total_occurrences += 1
-                continue
-
-            student_count = lesson.enrollments.filter(status__in=['active', 'payments_problem']).count()
-            per_occ_salary = calculate_lesson_salary_with_override(
-                student_count,
+            total_occurrences = 0
+            total_salary = Decimal('0.00')
+        else:
+            total_salary, total_occurrences, _ = calculate_instructor_salary_for_month(
                 instructor,
-                salary_override=lesson.instructor_salary_override,
+                month_str,
+                effective_end=effective_end,
             )
-            total_occurrences += 1
-            total_salary += Decimal(per_occ_salary)
-
-        # Salary for recurring occurrences in range
-        for lesson in recurring:
-            # Determine start date for this lesson
-            start_from = month_start
-            if lesson.lesson_date and lesson.lesson_date > start_from:
-                start_from = lesson.lesson_date
-            if effective_end < start_from:
-                continue
-
-            target_py_weekday = (lesson.day_of_week - 1) % 7
-            occ_count, first = count_weekday_occurrences(start_from, effective_end, target_py_weekday)
-            if occ_count <= 0:
-                continue
-
-            # Subtract cancelled occurrences
-            cancelled_count = 0
-            if first:
-                d = first
-                for _ in range(occ_count):
-                    if (lesson.id, d) in cancelled_set:
-                        cancelled_count += 1
-                    d = d + timedelta(days=7)
-
-            effective_count = max(0, occ_count - cancelled_count)
-            if effective_count == 0:
-                continue
-
-            course = lesson.course
-            if course and course.instructor_salary_override is not None:
-                if course.id not in courses_with_monthly_pay:
-                    courses_with_monthly_pay.add(course.id)
-                    total_salary += Decimal(str(course.instructor_salary_override))
-                total_occurrences += effective_count
-                continue
-
-            student_count = lesson.enrollments.filter(status__in=['active', 'payments_problem']).count()
-            per_occ_salary = calculate_lesson_salary_with_override(
-                student_count,
-                instructor,
-                salary_override=lesson.instructor_salary_override,
-            )
-            total_occurrences += effective_count
-            total_salary += Decimal(per_occ_salary) * Decimal(effective_count)
         
         return Response({
             'instructor_id': str(instructor.id),

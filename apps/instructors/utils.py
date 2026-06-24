@@ -906,6 +906,39 @@ def calculate_lesson_profitability(lesson, instructor, month: Optional[str] = No
     }
 
 
+def lesson_profitability_from_snapshot(snapshot):
+    """Build lesson profitability payload from a precomputed monthly snapshot."""
+    lesson = snapshot.lesson
+    course = snapshot.course or (lesson.course if lesson else None)
+    branch = snapshot.branch or (course.branch if course and course.branch_id else None)
+    salary_override = lesson.instructor_salary_override if lesson else None
+    if course and course.instructor_salary_override is not None:
+        salary_override = course.instructor_salary_override
+    monthly_price = get_lesson_price(lesson) if lesson else Decimal('0.00')
+    return {
+        'lesson_id': str(lesson.id) if lesson else '',
+        'course_name': course.name if course else '',
+        'course_id': str(course.id) if course else None,
+        'day_of_week': lesson.day_of_week if lesson else 0,
+        'start_time': lesson.start_time.strftime('%H:%M') if lesson and lesson.start_time else '',
+        'end_time': lesson.end_time.strftime('%H:%M') if lesson and lesson.end_time else '',
+        'branch_name': branch.name if branch else '',
+        'branch_id': str(branch.id) if branch else None,
+        'room_name': lesson.room.name if lesson and lesson.room else '',
+        'student_count': snapshot.enrolled_students,
+        'lesson_price': str(monthly_price),
+        'base_revenue': str(snapshot.base_revenue),
+        'total_discounts': str(snapshot.total_discounts),
+        'revenue': str(snapshot.revenue),
+        'salary': str(snapshot.instructor_salary),
+        'profit': str(snapshot.profit),
+        'status': lesson.status if lesson else 'scheduled',
+        'salary_override': bool(salary_override),
+        'salary_override_amount': str(salary_override) if salary_override is not None else None,
+        'revenue_calculation_method': 'snapshot',
+    }
+
+
 def refresh_current_month_snapshots_if_stale(ttl_minutes=10, force=False):
     """
     Regenerate current-month snapshots only when stale (or forced).

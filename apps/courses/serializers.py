@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.enrollments.models import LessonEnrollment
-from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments
+from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments, is_paying_enrollment
 from apps.core.models import Branch, UserProfile
 from apps.core.scoping import scope_courses
 from apps.instructors.models import Instructor
@@ -108,12 +108,18 @@ class CourseTypeWithStatsSerializer(serializers.ModelSerializer):
     
     def get_courses_count(self, obj):
         """Count active courses under this course type (scoped to the manager)."""
+        annotated = getattr(obj, 'courses_count', None)
+        if annotated is not None:
+            return annotated
         return _scoped_courses_for(
             self, obj.courses.filter(is_active=True)
         ).count()
     
     def get_lessons_count(self, obj):
         """Count recurring lessons under this course type (scoped to the manager)."""
+        annotated = getattr(obj, 'lessons_count', None)
+        if annotated is not None:
+            return annotated
         courses = _scoped_courses_for(self, obj.courses.all())
         return Lesson.objects.filter(
             course__in=courses,
@@ -122,11 +128,20 @@ class CourseTypeWithStatsSerializer(serializers.ModelSerializer):
     
     def get_students_count(self, obj):
         """Count paying enrolled students under this course type (scoped)."""
+        annotated = getattr(obj, 'students_count', None)
+        if annotated is not None:
+            return annotated
         courses = _scoped_courses_for(self, obj.courses.all())
         return count_paying_enrollments(courses=courses)
     
     def get_branches(self, obj):
         """Get distinct branches that host (visible) courses of this course type."""
+        branches_by_id = {}
+        for course in obj.courses.all():
+            if course.branch_id and course.is_active:
+                branches_by_id[str(course.branch_id)] = course.branch
+        if branches_by_id:
+            return BranchMinimalSerializer(branches_by_id.values(), many=True).data
         courses = _scoped_courses_for(self, obj.courses.all())
         branches = Branch.objects.filter(
             courses__in=courses
@@ -186,11 +201,21 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
 
     def get_enrolled_count(self, obj):
         """Paying active enrollments only (trial test signups excluded)."""
+        counts = self.context.get('paying_enrollment_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
+        if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
+            return sum(1 for e in obj.enrollments.all() if is_paying_enrollment(e))
         return count_paying_enrollments(lesson=obj)
     
     def get_total_students_count(self, obj):
         """Get count of all enrollments regardless of status (for student count display)"""
-        return obj.enrollments.count()
+        counts = self.context.get('total_enrollment_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
+        if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
+            return sum(1 for e in obj.enrollments.all() if e.status == 'active')
+        return obj.enrollments.filter(status='active').count()
     
     def get_day_name(self, obj):
         """Convert day number to Hebrew name"""

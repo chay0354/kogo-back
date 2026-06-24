@@ -5,7 +5,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Count, Q
 from apps.courses.models import CourseType, Course, Lesson
 from apps.courses.serializers import (
     CourseTypeSerializer, 
@@ -18,9 +18,47 @@ from apps.courses.serializers import (
     LessonListSerializer
 )
 from apps.instructors.models import Instructor
+from apps.enrollments.enrollment_counts import is_paying_enrollment
 from apps.enrollments.models import LessonEnrollment
 from apps.core.permissions import IsManager, IsManagerOrPartner, StaffAccessMixin
-from apps.core.scoping import scope_courses, is_scoped_partner, partner_branch_ids
+from apps.core.scoping import (
+    scope_courses,
+    is_scoped_partner,
+    partner_branch_ids,
+    is_scoped_instructor,
+    instructor_course_ids,
+)
+from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES
+
+
+def _course_type_stats_q(user):
+    """Build scoped Q filters for course-type stat annotations."""
+    course_q = Q(courses__is_active=True)
+    lesson_q = course_q & Q(courses__lessons__is_recurring=True)
+    enrollment_q = (
+        course_q
+        & Q(courses__lessons__enrollments__status='active')
+        & ~Q(courses__lessons__enrollments__child__status__in=TRIAL_CHILD_STATUSES)
+    )
+
+    if is_scoped_partner(user):
+        branch_ids = partner_branch_ids(user)
+        if not branch_ids:
+            return None
+        branch_q = Q(courses__branch_id__in=branch_ids)
+        course_q &= branch_q
+        lesson_q &= branch_q
+        enrollment_q &= branch_q
+    elif is_scoped_instructor(user):
+        course_ids = instructor_course_ids(user)
+        if not course_ids:
+            return None
+        id_q = Q(courses__id__in=course_ids)
+        course_q &= id_q
+        lesson_q &= id_q
+        enrollment_q &= id_q
+
+    return course_q, lesson_q, enrollment_q
 
 
 class CourseTypeViewSet(viewsets.ModelViewSet):
@@ -63,7 +101,23 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
             # Partners must only see groups (courses/lessons) at their own branches
             nested_courses = nested_courses.filter(branch_id__in=branch_ids)
 
-        if self.action == 'details':
+        if self.action == 'list':
+            stats_q = _course_type_stats_q(self.request.user)
+            if stats_q is None:
+                return queryset.none()
+            course_q, lesson_q, enrollment_q = stats_q
+            visible_courses = scope_courses(
+                Course.objects.filter(is_active=True),
+                self.request.user,
+            ).select_related('branch')
+            queryset = queryset.annotate(
+                courses_count=Count('courses', filter=course_q, distinct=True),
+                lessons_count=Count('courses__lessons', filter=lesson_q, distinct=True),
+                students_count=Count('courses__lessons__enrollments', filter=enrollment_q),
+            ).prefetch_related(
+                Prefetch('courses', queryset=visible_courses),
+            )
+        elif self.action == 'details':
             # Prefetch all related data for details view
             queryset = queryset.prefetch_related(
                 Prefetch(
@@ -101,7 +155,25 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
         Includes instructor salary tiers for financial calculations
         """
         course_type = self.get_object()
-        serializer = self.get_serializer(course_type)
+        paying_enrollment_counts = {}
+        total_enrollment_counts = {}
+        for course in course_type.courses.all():
+            for lesson in course.lessons.all():
+                enrollments = list(lesson.enrollments.all())
+                paying_enrollment_counts[lesson.id] = sum(
+                    1 for e in enrollments if is_paying_enrollment(e)
+                )
+                total_enrollment_counts[lesson.id] = sum(
+                    1 for e in enrollments if e.status == 'active'
+                )
+        serializer = self.get_serializer(
+            course_type,
+            context={
+                **self.get_serializer_context(),
+                'paying_enrollment_counts': paying_enrollment_counts,
+                'total_enrollment_counts': total_enrollment_counts,
+            },
+        )
         return Response(serializer.data)
 
 

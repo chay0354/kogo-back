@@ -66,7 +66,11 @@ class LessonDetailSerializer(serializers.ModelSerializer):
         ]
     
     def get_enrollments(self, obj):
-        enrollments = obj.enrollments.filter(status='active').select_related('child')
+        enrollments = obj.enrollments.all()
+        if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
+            enrollments = [e for e in enrollments if e.status == 'active']
+        else:
+            enrollments = enrollments.filter(status='active').select_related('child')
         return [{
             'id': str(e.id),
             'child_id': str(e.child.id),
@@ -75,7 +79,10 @@ class LessonDetailSerializer(serializers.ModelSerializer):
         } for e in enrollments]
     
     def get_attendance(self, obj):
-        attendance = obj.attendance_records.select_related('child')
+        if hasattr(obj, '_prefetched_objects_cache') and 'attendance_records' in obj._prefetched_objects_cache:
+            attendance = list(obj.attendance_records.all())
+        else:
+            attendance = obj.attendance_records.select_related('child')
         return [{
             'id': str(a.id),
             'child_id': str(a.child.id),

@@ -119,6 +119,14 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             return None
         return partner_branch_ids(request.user)
 
+    def _primary_parent(self, obj):
+        """Use prefetched family.parents to avoid per-child parent queries."""
+        parents = list(obj.family.parents.all())
+        for parent in parents:
+            if parent.is_primary:
+                return parent
+        return parents[0] if parents else None
+
     def get_branch_id(self, obj):
         partner_ids = self._partner_branch_ids()
         if partner_ids is not None:
@@ -142,12 +150,8 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         USAGE: Used in ChildWithDetailsSerializer
         Returns primary parent name or first parent name
         """
-        primary_parent = obj.family.parents.filter(is_primary=True).first()
-        if primary_parent:
-            return primary_parent.full_name
-        # אם אין הורה ראשי, קח את הראשון
-        first_parent = obj.family.parents.first()
-        return first_parent.full_name if first_parent else None
+        parent = self._primary_parent(obj)
+        return parent.full_name if parent else None
     
     def get_parent_phone(self, obj):
         """
@@ -156,11 +160,10 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         USAGE: Used in ChildWithDetailsSerializer
         Returns primary parent phone or fallback to family phone
         """
-        primary_parent = obj.family.parents.filter(is_primary=True).first()
-        if primary_parent:
-            return primary_parent.phone
-        first_parent = obj.family.parents.first()
-        return first_parent.phone if first_parent else obj.family.phone
+        parent = self._primary_parent(obj)
+        if parent:
+            return parent.phone
+        return obj.family.phone
     
     def get_parent_id(self, obj):
         """
@@ -169,11 +172,8 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         USAGE: Used in ChildWithDetailsSerializer
         Returns primary parent ID or first parent ID
         """
-        primary_parent = obj.family.parents.filter(is_primary=True).first()
-        if primary_parent:
-            return str(primary_parent.id)
-        first_parent = obj.family.parents.first()
-        return str(first_parent.id) if first_parent else None
+        parent = self._primary_parent(obj)
+        return str(parent.id) if parent else None
     
     def get_enrollments(self, obj):
         """
@@ -181,18 +181,11 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         
         USAGE: Used in ChildWithDetailsSerializer to display child's enrollments
         """
-        from apps.enrollments.models import Enrollment
-        
         result = []
         seen_courses = set()
         
-        # Get course-level enrollments (DEPRECATED - kept for backward compatibility)
-        course_enrollments = Enrollment.objects.filter(
-            child=obj,
-            is_active=True
-        ).select_related('course', 'course__branch', 'course__course_type')
-        
-        for enrollment in course_enrollments:
+        # Course-level enrollments (prefetched on ChildViewSet queryset)
+        for enrollment in obj.enrollments.all():
             course = enrollment.course
             if str(course.id) not in seen_courses:
                 seen_courses.add(str(course.id))
@@ -209,13 +202,10 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                     'status': 'active'
                 })
         
-        # Also get lesson-level enrollments (if any)
-        lesson_enrollments = LessonEnrollment.objects.filter(
-            child=obj,
-            status='active'
-        ).select_related('lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor')
-        
-        for enrollment in lesson_enrollments:
+        # Lesson-level enrollments (prefetched; filter active in Python)
+        for enrollment in obj.lesson_enrollments.all():
+            if enrollment.status != 'active':
+                continue
             lesson = enrollment.lesson
             course_id = str(lesson.course.id)
             if course_id not in seen_courses:
