@@ -8,14 +8,18 @@ This service orchestrates the payment flow, including:
 - Invoice creation
 - Child subscription status updates
 """
+import calendar
 import logging
 import time
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 from django.db import transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
+
+JERUSALEM_TZ = ZoneInfo('Asia/Jerusalem')
 
 from apps.customers.models import (
     Child, Family, Parent, Payment, RecurringPayment,
@@ -45,6 +49,28 @@ def log_payment_operation(operation: str, **kwargs):
     for key, value in kwargs.items():
         log_parts.append(f"{key}={value}")
     logger.info(" ".join(log_parts))
+
+
+def _compute_prorate(enrollment_date: date) -> tuple:
+    """
+    Compute pro-rata values for a mid-month enrollment.
+
+    Returns (factor, days_remaining, days_in_month, next_billing_date).
+    When enrollment_date is the 1st, factor is 1 (no reduction).
+    next_billing_date is always the 1st of the following month.
+    """
+    days_in_month = calendar.monthrange(enrollment_date.year, enrollment_date.month)[1]
+    if enrollment_date.month == 12:
+        next_billing_date = date(enrollment_date.year + 1, 1, 1)
+    else:
+        next_billing_date = date(enrollment_date.year, enrollment_date.month + 1, 1)
+
+    if enrollment_date.day == 1:
+        return Decimal('1'), days_in_month, days_in_month, next_billing_date
+
+    days_remaining = days_in_month - enrollment_date.day + 1
+    factor = Decimal(days_remaining) / Decimal(days_in_month)
+    return factor, days_remaining, days_in_month, next_billing_date
 
 
 def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
@@ -156,6 +182,15 @@ class PaymentService:
                 lesson_id=str(lesson.id),
             )
 
+        # Pro-rate the first payment to the remaining days of the current month.
+        today_local = timezone.now().astimezone(JERUSALEM_TZ).date()
+        prorate_factor, prorate_days_remaining, days_in_month, next_billing_date = _compute_prorate(today_local)
+        full_monthly_amount = discount_calculation.final_price
+        prorated_final = max(
+            Decimal('1.00'),
+            (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
+        )
+
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
         payment = None
         max_attempts = 5
@@ -172,7 +207,7 @@ class PaymentService:
                         status='pending',
                         base_amount=discount_calculation.base_price,
                         discount_amount=discount_calculation.total_discount_amount,
-                        final_amount=discount_calculation.final_price,
+                        final_amount=prorated_final,
                         description=f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
                     )
                     
@@ -208,7 +243,7 @@ class PaymentService:
         
         # Generate Tranzila payment URL
         tranzila_url= self.tranzila_service.create_recurring_payment_request(
-            amount=discount_calculation.final_price,
+            amount=prorated_final,
             currency='ILS',
             description=payment.description,
             customer_name=child.family.name,
@@ -233,7 +268,11 @@ class PaymentService:
             'course_index': course_index,
             'base_amount': float(discount_calculation.base_price),
             'discount_amount': float(discount_calculation.total_discount_amount),
-            'final_amount': float(discount_calculation.final_price),
+            'final_amount': float(prorated_final),
+            'prorate_factor': float(prorate_factor),
+            'prorate_days_remaining': prorate_days_remaining,
+            'days_in_month': days_in_month,
+            'next_billing_date': next_billing_date.isoformat(),
             'discounts_applied': [
                 {
                     'name': d.name,
@@ -342,7 +381,11 @@ class PaymentService:
                         'amount_deducted': str(snapshot.amount_deducted),
                         'reason': snapshot.reason
                     })
-                
+
+                enrollment_date = payment.created_at.astimezone(JERUSALEM_TZ).date()
+                _, _, _, next_billing_date = _compute_prorate(enrollment_date)
+                full_monthly_amount = payment.base_amount - payment.discount_amount
+
                 recurring_payment = RecurringPayment.objects.create(
                     child=payment.child,
                     initial_payment=payment,
@@ -352,11 +395,11 @@ class PaymentService:
                     status='active',
                     base_amount=payment.base_amount,
                     discount_amount=payment.discount_amount,
-                    amount=payment.final_amount,
+                    amount=full_monthly_amount,
                     discount_details=discount_details,
-                    billing_day=date.today().day,
-                    start_date=date.today(),
-                    next_billing_date=date.today() + timedelta(days=30)
+                    billing_day=1,
+                    start_date=enrollment_date,
+                    next_billing_date=next_billing_date,
                 )
                 
                 log_payment_operation(
@@ -373,9 +416,11 @@ class PaymentService:
             
             # Update Child status and subscription dates
             child = payment.child
+            enrollment_date_child = payment.created_at.astimezone(JERUSALEM_TZ).date()
+            _, _, _, next_billing_date_child = _compute_prorate(enrollment_date_child)
             child.status = 'active'
-            child.subscription_start_date = date.today()
-            child.paid_until_date = date.today() + timedelta(days=30)
+            child.subscription_start_date = enrollment_date_child
+            child.paid_until_date = next_billing_date_child - timedelta(days=1)
             child.save()
             
             # Create LessonEnrollment if payment has an associated lesson
@@ -505,6 +550,14 @@ class PaymentService:
                 lesson_id=str(lesson.id),
             )
 
+        # Pro-rate the first payment to the remaining days of the current month.
+        prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date)
+        full_monthly_amount_c = discount_calculation.final_price
+        prorated_final_c = max(
+            Decimal('1.00'),
+            (full_monthly_amount_c * prorate_factor_c).quantize(Decimal('0.01'))
+        )
+
         # Create Payment (pending)
         payment = Payment.objects.create(
             child=child,
@@ -516,7 +569,7 @@ class PaymentService:
             status='pending',
             base_amount=discount_calculation.base_price,
             discount_amount=discount_calculation.total_discount_amount,
-            final_amount=discount_calculation.final_price,
+            final_amount=prorated_final_c,
             description=f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
         )
 
@@ -537,7 +590,7 @@ class PaymentService:
         items = [{
             'name': f"{lesson.course.name} - {child.full_name}",
             'type': 'I',
-            'unit_price': float(discount_calculation.final_price),
+            'unit_price': float(prorated_final_c),
             'units_number': 1,
             'unit_type': 1,
             'price_type': 'G',
@@ -550,7 +603,7 @@ class PaymentService:
             expiry_year=expiry_year,
             cvv=cvv,
             card_holder_id=card_holder_id,
-            amount=discount_calculation.final_price,
+            amount=prorated_final_c,
             description=payment.description,
             items=items,
         )
@@ -598,11 +651,11 @@ class PaymentService:
                     status='active',
                     base_amount=payment.base_amount,
                     discount_amount=payment.discount_amount,
-                    amount=payment.final_amount,
+                    amount=full_monthly_amount_c,
                     discount_details=discount_details,
-                    billing_day=date.today().day,
-                    start_date=date.today(),
-                    next_billing_date=date.today() + timedelta(days=30),
+                    billing_day=1,
+                    start_date=payment_date,
+                    next_billing_date=next_billing_date_c,
                 )
 
             # Invoice
@@ -610,8 +663,8 @@ class PaymentService:
 
             # Child status
             child.status = 'active'
-            child.subscription_start_date = date.today()
-            child.paid_until_date = date.today() + timedelta(days=30)
+            child.subscription_start_date = payment_date
+            child.paid_until_date = next_billing_date_c - timedelta(days=1)
             child.save()
 
             # LessonEnrollment
