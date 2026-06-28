@@ -51,12 +51,16 @@ def log_payment_operation(operation: str, **kwargs):
     logger.info(" ".join(log_parts))
 
 
-def _compute_prorate(enrollment_date: date) -> tuple:
-    """
-    Compute pro-rata values for a mid-month enrollment.
+_DJANGO_DOW_TO_PYTHON = {0: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+# Django: Sun=0..Sat=6  →  Python date.weekday(): Mon=0..Sun=6
 
-    Returns (factor, days_remaining, days_in_month, next_billing_date).
-    When enrollment_date is the 1st, factor is 1 (no reduction).
+
+def _compute_prorate(enrollment_date: date, day_of_week: int) -> tuple:
+    """
+    Compute pro-rata values based on remaining lesson occurrences this month.
+
+    day_of_week: Django convention (Sunday=0 … Saturday=6).
+    Returns (factor, lessons_remaining, total_lessons, next_billing_date).
     next_billing_date is always the 1st of the following month.
     """
     days_in_month = calendar.monthrange(enrollment_date.year, enrollment_date.month)[1]
@@ -65,12 +69,22 @@ def _compute_prorate(enrollment_date: date) -> tuple:
     else:
         next_billing_date = date(enrollment_date.year, enrollment_date.month + 1, 1)
 
-    if enrollment_date.day == 1:
-        return Decimal('1'), days_in_month, days_in_month, next_billing_date
+    python_wd = _DJANGO_DOW_TO_PYTHON[day_of_week]
 
-    days_remaining = days_in_month - enrollment_date.day + 1
-    factor = Decimal(days_remaining) / Decimal(days_in_month)
-    return factor, days_remaining, days_in_month, next_billing_date
+    total_lessons = sum(
+        1 for d in range(1, days_in_month + 1)
+        if date(enrollment_date.year, enrollment_date.month, d).weekday() == python_wd
+    )
+    remaining_lessons = sum(
+        1 for d in range(enrollment_date.day, days_in_month + 1)
+        if date(enrollment_date.year, enrollment_date.month, d).weekday() == python_wd
+    )
+
+    if total_lessons == 0:
+        return Decimal('1'), 0, 0, next_billing_date
+
+    factor = Decimal(remaining_lessons) / Decimal(total_lessons)
+    return factor, remaining_lessons, total_lessons, next_billing_date
 
 
 def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
@@ -182,9 +196,11 @@ class PaymentService:
                 lesson_id=str(lesson.id),
             )
 
-        # Pro-rate the first payment to the remaining days of the current month.
+        # Pro-rate the first payment to the remaining lessons of the current month.
         today_local = timezone.now().astimezone(JERUSALEM_TZ).date()
-        prorate_factor, prorate_days_remaining, days_in_month, next_billing_date = _compute_prorate(today_local)
+        prorate_factor, prorate_lessons_remaining, total_lessons_this_month, next_billing_date = _compute_prorate(
+            today_local, lesson.day_of_week
+        )
         full_monthly_amount = discount_calculation.final_price
         prorated_final = max(
             Decimal('1.00'),
@@ -270,8 +286,8 @@ class PaymentService:
             'discount_amount': float(discount_calculation.total_discount_amount),
             'final_amount': float(prorated_final),
             'prorate_factor': float(prorate_factor),
-            'prorate_days_remaining': prorate_days_remaining,
-            'days_in_month': days_in_month,
+            'prorate_lessons_remaining': prorate_lessons_remaining,
+            'total_lessons_this_month': total_lessons_this_month,
             'next_billing_date': next_billing_date.isoformat(),
             'discounts_applied': [
                 {
@@ -383,7 +399,8 @@ class PaymentService:
                     })
 
                 enrollment_date = payment.created_at.astimezone(JERUSALEM_TZ).date()
-                _, _, _, next_billing_date = _compute_prorate(enrollment_date)
+                lesson_dow = payment.lesson.day_of_week if payment.lesson else 1
+                _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
                 full_monthly_amount = payment.base_amount - payment.discount_amount
 
                 recurring_payment = RecurringPayment.objects.create(
@@ -417,7 +434,8 @@ class PaymentService:
             # Update Child status and subscription dates
             child = payment.child
             enrollment_date_child = payment.created_at.astimezone(JERUSALEM_TZ).date()
-            _, _, _, next_billing_date_child = _compute_prorate(enrollment_date_child)
+            lesson_dow_child = payment.lesson.day_of_week if payment.lesson else 1
+            _, _, _, next_billing_date_child = _compute_prorate(enrollment_date_child, lesson_dow_child)
             child.status = 'active'
             child.subscription_start_date = enrollment_date_child
             child.paid_until_date = next_billing_date_child - timedelta(days=1)
@@ -550,8 +568,8 @@ class PaymentService:
                 lesson_id=str(lesson.id),
             )
 
-        # Pro-rate the first payment to the remaining days of the current month.
-        prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date)
+        # Pro-rate the first payment to the remaining lessons of the current month.
+        prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date, lesson.day_of_week)
         full_monthly_amount_c = discount_calculation.final_price
         prorated_final_c = max(
             Decimal('1.00'),
