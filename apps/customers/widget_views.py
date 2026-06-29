@@ -457,7 +457,10 @@ class WidgetBranchesView(APIView):
     def get(self, request):
         branches = (
             Branch.objects.filter(is_active=True)
-            .values('id', 'name', 'city_id')
+            .values('id', 'name', 'city_id', 'is_external')
             .order_by('name')
         )
-        return Response([{'id': b['id'], 'name': b['name'], 'city': b['city_id']} for b in branches])
+        return Response([
+            {'id': b['id'], 'name': b['name'], 'city': b['city_id'], 'is_external': b['is_external']}
+            for b in branches
+        ])
