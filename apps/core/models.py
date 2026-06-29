@@ -41,6 +41,7 @@ class Branch(models.Model):
     custom_details = models.JSONField(default=list, blank=True, verbose_name="פרטים מותאמים אישית")
 
     is_external = models.BooleanField(default=False, verbose_name="סניף חיצוני")
+    external_link = models.CharField(max_length=500, blank=True, verbose_name="לינק לסניף")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
