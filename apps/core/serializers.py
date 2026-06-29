@@ -36,7 +36,7 @@ class BranchSerializer(serializers.ModelSerializer):
             'city', 'city_name', 
             'branch_codes', 'cleaning_managers', 'cleaning_cost', 'monthly_cost',
             'wifi_name', 'wifi_code', 'bluetooth_codes', 'custom_details',
-            'is_external', 'is_active', 'created_at', 'updated_at'
+            'is_external', 'external_link', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -54,7 +54,7 @@ class BranchDetailSerializer(serializers.ModelSerializer):
             'city', 'city_name',
             'branch_codes', 'cleaning_managers', 'cleaning_cost', 'monthly_cost',
             'wifi_name', 'wifi_code', 'bluetooth_codes', 'custom_details',
-            'is_external', 'is_active', 'created_at', 'updated_at',
+            'is_external', 'external_link', 'is_active', 'created_at', 'updated_at',
             'rooms', 'rooms_count'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']

@@ -2,7 +2,7 @@ from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Q, Prefetch, Count
+from django.db.models import Q, Prefetch, Count, Sum
 from django.utils import timezone
 from datetime import datetime, date, timedelta
 from decimal import Decimal
@@ -259,7 +259,7 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         
         lessons = Lesson.objects.filter(
             instructor=instructor,
-            branch_id=branch_id,
+            course__branch_id=branch_id,
             status='scheduled',
             is_recurring=True
         ).prefetch_related('enrollments')
