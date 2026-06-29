@@ -36,7 +36,7 @@ class BranchSerializer(serializers.ModelSerializer):
             'city', 'city_name', 
             'branch_codes', 'cleaning_managers', 'cleaning_cost', 'monthly_cost',
             'wifi_name', 'wifi_code', 'bluetooth_codes', 'custom_details',
-            'is_active', 'created_at', 'updated_at'
+            'is_external', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -46,15 +46,15 @@ class BranchDetailSerializer(serializers.ModelSerializer):
     city_name = serializers.CharField(source='city.name', read_only=True, allow_null=True)
     rooms = RoomSerializer(many=True, read_only=True)
     rooms_count = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Branch
         fields = [
-            'id', 'name', 'address', 'phone', 'email', 'manager_name', 
-            'city', 'city_name', 
+            'id', 'name', 'address', 'phone', 'email', 'manager_name',
+            'city', 'city_name',
             'branch_codes', 'cleaning_managers', 'cleaning_cost', 'monthly_cost',
             'wifi_name', 'wifi_code', 'bluetooth_codes', 'custom_details',
-            'is_active', 'created_at', 'updated_at',
+            'is_external', 'is_active', 'created_at', 'updated_at',
             'rooms', 'rooms_count'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -75,7 +75,7 @@ class BranchWithStatsSerializer(serializers.ModelSerializer):
         model = Branch
         fields = [
             'id', 'name', 'address', 'city_name', 
-            'branch_codes', 'monthly_cost', 'is_active',
+            'branch_codes', 'monthly_cost', 'is_external', 'is_active',
             'families_count', 'courses_count', 'instructors_count', 'rooms_count'
         ]
 

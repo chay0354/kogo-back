@@ -39,7 +39,8 @@ class Branch(models.Model):
     wifi_code = models.CharField(max_length=100, blank=True, verbose_name="סיסמת WiFi")
     bluetooth_codes = models.JSONField(default=list, blank=True, verbose_name="קודי Bluetooth")
     custom_details = models.JSONField(default=list, blank=True, verbose_name="פרטים מותאמים אישית")
-    
+
+    is_external = models.BooleanField(default=False, verbose_name="סניף חיצוני")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
