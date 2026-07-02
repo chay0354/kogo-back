@@ -36,6 +36,7 @@ class Course(models.Model):
     min_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מינימום")
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    is_adult = models.BooleanField(default=False, verbose_name="18+")
     instructor = models.ForeignKey(
         Instructor,
         on_delete=models.SET_NULL,

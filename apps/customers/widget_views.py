@@ -432,6 +432,7 @@ class WidgetCoursesView(APIView):
                 'price': str(course.price),
                 'min_age': course.min_age,
                 'max_age': course.max_age,
+                'is_adult': course.is_adult,
                 'lessons_count': len(lessons),
                 'lessons': lessons,
             })
