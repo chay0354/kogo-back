@@ -433,6 +433,7 @@ class WidgetCoursesView(APIView):
                 'min_age': course.min_age,
                 'max_age': course.max_age,
                 'is_adult': course.is_adult,
+                'external_link': course.external_link,
                 'lessons_count': len(lessons),
                 'lessons': lessons,
             })

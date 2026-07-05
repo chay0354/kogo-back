@@ -22,7 +22,7 @@ class BranchListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Branch
-        fields = ['id', 'name', 'city', 'city_name']
+        fields = ['id', 'name', 'city', 'city_name', 'is_external']
 
 
 class BranchSerializer(serializers.ModelSerializer):
