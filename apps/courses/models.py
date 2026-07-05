@@ -37,6 +37,12 @@ class Course(models.Model):
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     is_adult = models.BooleanField(default=False, verbose_name="18+")
+    external_link = models.CharField(
+        max_length=500,
+        blank=True,
+        verbose_name="לינק חיצוני לחוג",
+        help_text="לינק הרשמה חיצוני ספציפי לחוג זה (רלוונטי רק לסניפים חיצוניים). ריק = שימוש בלינק של הסניף.",
+    )
     instructor = models.ForeignKey(
         Instructor,
         on_delete=models.SET_NULL,
