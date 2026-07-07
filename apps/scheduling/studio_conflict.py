@@ -1,5 +1,5 @@
 """Studio time-slot overlap checks for schedule events and lessons."""
-from datetime import date, timedelta
+from datetime import date, time as time_cls, timedelta
 
 from django.db.models import Q
 
@@ -25,6 +25,55 @@ def times_overlap(a_start, a_end, b_start, b_end) -> bool:
     if not all([a_start, a_end, b_start, b_end]):
         return False
     return not (a_end <= b_start or b_end <= a_start)
+
+
+def _parse_time_value(value):
+    """Accept a datetime.time (from a model field) or an 'HH:MM[:SS]' string (from weekly_day_times JSON)."""
+    if isinstance(value, time_cls) or value is None:
+        return value
+    try:
+        parts = [int(p) for p in str(value).split(':')]
+        while len(parts) < 3:
+            parts.append(0)
+        h, m, s = parts[:3]
+        return time_cls(hour=h, minute=m, second=s)
+    except (TypeError, ValueError):
+        return None
+
+
+def event_day_time_pairs(event) -> list[tuple[int, object, object]]:
+    """
+    (lesson_dow, start_time, end_time) tuples this event actually occupies:
+    - one_time: a single pair at its anchor weekday.
+    - weekly: one pair per repeat day — the per-day override from weekly_day_times when
+      present, otherwise the event's single start_time/end_time (legacy rentals not yet
+      migrated, and non-rental weekly events which don't use per-day times at all).
+    """
+    if event.event_type != 'weekly':
+        return [(event_anchor_lesson_day_of_week(event), event.start_time, event.end_time)]
+
+    day_times = getattr(event, 'weekly_day_times', None) or {}
+    pairs: list[tuple[int, object, object]] = []
+    for dow in normalized_weekly_repeat_lesson_dows(event):
+        entry = day_times.get(str(dow)) if isinstance(day_times, dict) else None
+        if entry:
+            s = _parse_time_value(entry.get('start_time'))
+            e = _parse_time_value(entry.get('end_time'))
+        else:
+            s, e = event.start_time, event.end_time
+        pairs.append((dow, s, e))
+    return pairs
+
+
+def occurrence_time_for_date(event, occurrence_date: date):
+    """Resolve the (start_time, end_time) that applies to one concrete weekly occurrence date."""
+    if event.event_type != 'weekly':
+        return event.start_time, event.end_time
+    dow = lesson_style_dow_from_date(occurrence_date)
+    for pair_dow, start, end in event_day_time_pairs(event):
+        if pair_dow == dow:
+            return start, end
+    return event.start_time, event.end_time
 
 
 def iter_occurrence_dates_in_range(event, range_start: date, range_end: date):
@@ -69,7 +118,7 @@ def lesson_conflicts_studio_slot(
         Q(
             day_of_week=lesson_style_dow,
             status='scheduled',
-            branch_id=branch_id,
+            course__branch_id=branch_id,
             room_id=room_id,
         )
         & _lesson_time_overlap_q(start_time, end_time)
@@ -91,13 +140,17 @@ def lesson_conflicts_studio_slot(
 def event_conflicts_other_events(candidate, exclude_pk=None):
     """
     Another active timed event overlaps same branch+studio+time pattern.
-    Works for one_time and weekly (compares anchor weekday for weekly series).
+    Checks every (weekday, time) pair the candidate occupies against every pair the
+    other event occupies (not just each event's anchor weekday), so a weekly series
+    with different per-day times is checked day-by-day.
     """
     from apps.scheduling.models import ScheduleEvent
 
     if candidate.is_daily_event or not candidate.studio_id or not candidate.branch_id:
         return False
-    if not candidate.start_time or not candidate.end_time:
+
+    cand_pairs = [(d, s, e) for d, s, e in event_day_time_pairs(candidate) if s and e]
+    if not cand_pairs:
         return False
 
     others = ScheduleEvent.objects.filter(
@@ -105,58 +158,47 @@ def event_conflicts_other_events(candidate, exclude_pk=None):
         branch_id=candidate.branch_id,
         studio_id=candidate.studio_id,
         is_daily_event=False,
-    ).exclude(start_time__isnull=True).exclude(end_time__isnull=True)
+    )
 
     if exclude_pk:
         others = others.exclude(pk=exclude_pk)
 
-    cand_dow = event_anchor_lesson_day_of_week(candidate)
-
     for other in others:
-        if not times_overlap(candidate.start_time, candidate.end_time, other.start_time, other.end_time):
-            continue
-        if other.event_type == 'weekly':
-            if event_anchor_lesson_day_of_week(other) != cand_dow:
-                continue
-            return True
-        if other.event_type == 'one_time':
-            if candidate.event_type == 'one_time':
-                if other.event_date == candidate.event_date:
-                    return True
-            else:
-                # candidate weekly: conflicts if one_time falls on candidate's weekday
-                if _python_weekday_to_lesson_dow(other.event_date.weekday()) == cand_dow:
+        other_pairs = [(d, s, e) for d, s, e in event_day_time_pairs(other) if s and e]
+        for cand_dow, cand_start, cand_end in cand_pairs:
+            for other_dow, other_start, other_end in other_pairs:
+                if other.event_type == 'weekly' or candidate.event_type == 'weekly':
+                    # A recurring series only conflicts on the weekday(s) it actually repeats on.
+                    if cand_dow != other_dow:
+                        continue
+                else:
+                    # Both one_time: only the exact same calendar date can conflict.
+                    if other.event_date != candidate.event_date:
+                        continue
+                if times_overlap(cand_start, cand_end, other_start, other_end):
                     return True
     return False
 
 
 def event_conflicts_lessons(candidate):
-    """Scheduled lessons block this event (same studio slot)."""
+    """Scheduled lessons block this event (same studio slot), checked per day/time pair."""
     if candidate.is_daily_event or not candidate.studio_id or not candidate.branch_id:
         return False
-    if not candidate.start_time or not candidate.end_time:
-        return False
 
-    cand_dow = event_anchor_lesson_day_of_week(candidate)
-
-    if candidate.event_type == 'one_time':
-        return lesson_conflicts_studio_slot(
+    for dow, start, end in event_day_time_pairs(candidate):
+        if not start or not end:
+            continue
+        occurrence_date = candidate.event_date if candidate.event_type == 'one_time' else None
+        if lesson_conflicts_studio_slot(
             candidate.branch_id,
             candidate.studio_id,
-            cand_dow,
-            candidate.start_time,
-            candidate.end_time,
-            candidate.event_date,
-        )
-
-    return lesson_conflicts_studio_slot(
-        candidate.branch_id,
-        candidate.studio_id,
-        cand_dow,
-        candidate.start_time,
-        candidate.end_time,
-        None,
-    )
+            dow,
+            start,
+            end,
+            occurrence_date,
+        ):
+            return True
+    return False
 
 
 def timed_event_conflicts_lesson(
@@ -172,7 +214,8 @@ def timed_event_conflicts_lesson(
     """
     Any active timed schedule event in the same studio blocks this lesson slot.
 
-    - Weekly events: same weekday (lesson day_of_week) + overlapping times.
+    - Weekly events: conflict if the lesson's weekday matches any of the event's
+      (per-day-time-aware) repeat days, with overlapping times.
     - One-time events: overlapping times only if the lesson occurs on that event_date
       (non-recurring: lesson_date must match; recurring: lesson_date must match when set).
     """
@@ -189,19 +232,22 @@ def timed_event_conflicts_lesson(
         branch_id=bid,
         studio_id=rid,
         is_daily_event=False,
-    ).exclude(start_time__isnull=True).exclude(end_time__isnull=True)
+    )
 
     for ev in q:
-        if not times_overlap(start_time, end_time, ev.start_time, ev.end_time):
-            continue
-        if ev.event_type == 'weekly':
-            if event_anchor_lesson_day_of_week(ev) != day_of_week:
+        for ev_dow, ev_start, ev_end in event_day_time_pairs(ev):
+            if not ev_start or not ev_end:
                 continue
-            return True
-        if ev.event_type == 'one_time':
-            if lesson_date is None or lesson_date != ev.event_date:
+            if not times_overlap(start_time, end_time, ev_start, ev_end):
                 continue
-            if day_of_week != event_anchor_lesson_day_of_week(ev):
-                continue
-            return True
+            if ev.event_type == 'weekly':
+                if ev_dow != day_of_week:
+                    continue
+                return True
+            if ev.event_type == 'one_time':
+                if lesson_date is None or lesson_date != ev.event_date:
+                    continue
+                if day_of_week != ev_dow:
+                    continue
+                return True
     return False

@@ -14,7 +14,7 @@ from apps.core.models import UserProfile
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
-from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range
+from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range, occurrence_time_for_date
 from .serializers import (
     LessonListSerializer,
     LessonDetailSerializer,  # kept for other uses
@@ -628,6 +628,9 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
                     for occ in iter_occurrence_dates_in_range(event, start, end):
                         data = ScheduleEventListSerializer(event).data
                         data['event_date'] = occ.isoformat()
+                        occ_start, occ_end = occurrence_time_for_date(event, occ)
+                        data['start_time'] = occ_start.isoformat() if occ_start else data['start_time']
+                        data['end_time'] = occ_end.isoformat() if occ_end else data['end_time']
                         expanded.append(data)
             
             # Sort by date and time
