@@ -39,6 +39,15 @@ class ScheduleEvent(models.Model):
         blank=True,
         verbose_name="ימי חזרה שבועית",
     )
+    # Per-weekday time overrides for weekly events, keyed by weekday string '0'..'6':
+    # {'0': {'start_time': 'HH:MM:SS', 'end_time': 'HH:MM:SS'}, ...}.
+    # Empty dict => every day in weekly_repeat_days shares the event's single start_time/end_time
+    # (legacy weekly events and non-rental weekly events from EventDialog).
+    weekly_day_times = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="שעות לפי יום",
+    )
     assigned_instructors = models.ManyToManyField('instructors.Instructor', blank=True, related_name='assigned_events', verbose_name="מדריכים משויכים")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     is_studio_rental = models.BooleanField(
