@@ -1,6 +1,7 @@
 from datetime import date as date_cls, timedelta
 
 import logging
+from django.http import HttpResponse
 from django.utils import timezone
 from django.db.models import Q
 from rest_framework import viewsets, status
@@ -15,6 +16,7 @@ from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
 from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range, occurrence_time_for_date
+from apps.scheduling.rental_agreement.generator import generate_rental_agreement_pdf
 from .serializers import (
     LessonListSerializer,
     LessonDetailSerializer,  # kept for other uses
@@ -643,3 +645,20 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         # No range: return as stored
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def rental_agreement(self, request, pk=None):
+        """Generate and return the studio rental agreement PDF for this event."""
+        event = self.get_object()
+        if not event.is_studio_rental:
+            return Response(
+                {'error': 'האירוע אינו שכירות סטודיו'}, status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            pdf_bytes = generate_rental_agreement_pdf(event)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="rental-agreement-{event.id}.pdf"'
+        return response

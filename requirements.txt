@@ -13,3 +13,8 @@ django-celery-beat==2.5.0  # Optional: manage periodic tasks via Django admin
 
 requests==2.31.0
 
+# Rental agreement PDF generation (pure-Python, no OS-level deps — safe on
+# both Fly.io and Vercel serverless, unlike an HTML/CSS renderer)
+reportlab==5.0.0
+python-bidi==0.6.11
+
