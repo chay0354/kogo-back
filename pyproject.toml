@@ -18,6 +18,8 @@ dependencies = [
   "redis==5.0.1",
   "django-celery-beat==2.5.0",
   "requests==2.31.0",
+  "reportlab==5.0.0",
+  "python-bidi==0.6.11",
 ]
 
 [tool.uv]

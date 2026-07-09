@@ -41,7 +41,8 @@ class ScheduleEventSerializer(serializers.ModelSerializer):
             'studio', 'studio_name', 'city', 'city_name', 'location',
             'assigned_instructors', 'assigned_instructor_names',
             'color', 'notes', 'files', 'is_active', 'is_studio_rental', 'renter_name',
-            'price_per_session', 'weekly_repeat_days', 'weekly_day_times',
+            'renter_id_number', 'price_per_session', 'contract_start_date', 'contract_end_date',
+            'weekly_repeat_days', 'weekly_day_times',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -184,6 +185,21 @@ class ScheduleEventSerializer(serializers.ModelSerializer):
             if price_per_session is None or price_per_session < 0:
                 raise serializers.ValidationError({
                     'price_per_session': 'מחיר למופע חייב להיות 0 או חיובי'
+                })
+            renter_id_number = attrs.get('renter_id_number', inst.renter_id_number if inst else '')
+            if not renter_id_number:
+                raise serializers.ValidationError({
+                    'renter_id_number': 'ת.ז / ח.פ של השוכר נדרש לשכירות סטודיו'
+                })
+            contract_start_date = attrs.get('contract_start_date', inst.contract_start_date if inst else None)
+            contract_end_date = attrs.get('contract_end_date', inst.contract_end_date if inst else None)
+            if not contract_start_date or not contract_end_date:
+                raise serializers.ValidationError({
+                    'contract_start_date': 'יש להזין תאריך תחילת וסיום תוקף ההסכם'
+                })
+            if contract_start_date >= contract_end_date:
+                raise serializers.ValidationError({
+                    'contract_end_date': 'תאריך סיום ההסכם חייב להיות אחרי תאריך ההתחלה'
                 })
             attrs.pop('assigned_instructors', None)
 

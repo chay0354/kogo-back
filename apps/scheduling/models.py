@@ -56,12 +56,19 @@ class ScheduleEvent(models.Model):
         help_text="When true, price_per_session is counted as revenue per occurrence in dashboards.",
     )
     renter_name = models.CharField(max_length=200, blank=True, verbose_name="שם השוכר")
+    renter_id_number = models.CharField(max_length=20, blank=True, verbose_name="ת.ז / ח.פ השוכר")
     price_per_session = models.DecimalField(
         max_digits=10,
         decimal_places=2,
         default=0,
         verbose_name="מחיר למופע",
         help_text="Revenue per rental occurrence (one_time = once; weekly = each week in range).",
+    )
+    contract_start_date = models.DateField(
+        null=True, blank=True, verbose_name="תחילת תוקף הסכם השכירות"
+    )
+    contract_end_date = models.DateField(
+        null=True, blank=True, verbose_name="סיום תוקף הסכם השכירות"
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
