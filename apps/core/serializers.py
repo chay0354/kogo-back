@@ -7,6 +7,17 @@ class CitySerializer(serializers.ModelSerializer):
         model = City
         fields = ['id', 'name', 'created_at', 'updated_at']
 
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('שם העיר הוא שדה חובה')
+        qs = City.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError('עיר בשם זה כבר קיימת במערכת')
+        return name
+
 
 class RoomSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)

@@ -357,3 +357,11 @@ class CityAPITests(TestCase):
         self.assertEqual(response.data['count'], 3)
         self.assertEqual(len(response.data['results']), 3)
 
+    def test_create_duplicate_city_rejected(self):
+        City.objects.create(name='רמלה')
+
+        response = self.client.post('/api/v1/core/cities/', {'name': ' רמלה '}, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', response.data)
+
