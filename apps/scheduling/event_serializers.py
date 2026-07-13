@@ -251,6 +251,7 @@ class ScheduleEventListSerializer(serializers.ModelSerializer):
             'id', 'name', 'event_date', 'start_time', 'end_time',
             'event_type', 'is_daily_event', 'branch_name', 'studio_name',
             'city_name', 'location', 'color', 'notes', 'is_active',
-            'is_studio_rental', 'renter_name', 'price_per_session',
+            'is_studio_rental', 'renter_name', 'renter_id_number', 'price_per_session',
+            'contract_start_date', 'contract_end_date',
             'weekly_repeat_days', 'weekly_day_times',
         ]
