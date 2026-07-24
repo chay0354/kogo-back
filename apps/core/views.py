@@ -221,10 +221,11 @@ class RoomViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     """
     USAGE: Registered at /api/v1/core/rooms/
     USAGE: Supports filtering by branch_id
+    USAGE: dropdown=true returns the full unpaginated list (for pickers)
     """
     queryset = Room.objects.filter(is_active=True).select_related('branch')
     serializer_class = RoomSerializer
-    
+
     def get_queryset(self):
         """Filter by branch if branch_id is provided"""
         queryset = super().get_queryset()
@@ -233,6 +234,14 @@ class RoomViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
         return queryset
+
+    def list(self, request, *args, **kwargs):
+        """dropdown=true bypasses pagination so pickers see every room, not just page 1"""
+        if request.query_params.get('dropdown', '').lower() in ('1', 'true', 'yes'):
+            queryset = self.filter_queryset(self.get_queryset())
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+        return super().list(request, *args, **kwargs)
     
     def perform_destroy(self, instance):
         """Soft delete - set is_active to False"""
