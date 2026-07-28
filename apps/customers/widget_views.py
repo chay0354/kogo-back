@@ -10,9 +10,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework import status
 from django.db import transaction
+from django.db.models import Prefetch
 
 from apps.customers.models import Family, Parent, Child
-from apps.courses.models import Lesson, Course
+from apps.courses.models import Lesson, Course, LessonBundle
 from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
@@ -95,6 +96,10 @@ class WidgetRegisterView(APIView):
       discount_confirmed  (bool) — parent confirmed the discount question
       existing_child_id   (str)  — returned by lookup when child is already active
       success_url, error_url, callback_url
+      bundle_id (str) — register for a combined "twice a week" LessonBundle of this
+        course instead of the course's first lesson. Creates one Payment per member
+        lesson (each billed at combined_price / lesson_count); response has
+        `is_bundle: True` and a `payments` list instead of a single payment_id.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -124,6 +129,16 @@ class WidgetRegisterView(APIView):
         if not lessons:
             return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
         lesson = lessons[0]
+
+        bundle = None
+        bundle_id = (data.get('bundle_id') or '').strip()
+        if bundle_id:
+            try:
+                bundle = LessonBundle.objects.prefetch_related('lessons').get(
+                    id=bundle_id, course=course, is_active=True
+                )
+            except LessonBundle.DoesNotExist:
+                return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
         parent_id_number  = data['parent_id_number'].strip()
         child_first       = data['child_first_name'].strip()
@@ -189,6 +204,27 @@ class WidgetRegisterView(APIView):
 
         # ── 3. Initiate payment (pricing + pending Payment record) ───────
         try:
+            if bundle:
+                payments = [
+                    PaymentService().initiate_subscription_payment(
+                        child_id=str(child.id),
+                        lesson_id=str(member_lesson.id),
+                        success_url=data.get('success_url', ''),
+                        error_url=data.get('error_url', ''),
+                        callback_url=data.get('callback_url', ''),
+                        bundle_id=str(bundle.id),
+                    )
+                    for member_lesson in bundle.lessons.all()
+                ]
+                return Response({
+                    'is_bundle': True,
+                    'bundle_id': str(bundle.id),
+                    'payments': payments,
+                    'base_amount': sum(p['base_amount'] for p in payments),
+                    'discount_amount': sum(p['discount_amount'] for p in payments),
+                    'final_amount': sum(p['final_amount'] for p in payments),
+                }, status=status.HTTP_201_CREATED)
+
             result = PaymentService().initiate_subscription_payment(
                 child_id=str(child.id),
                 lesson_id=str(lesson.id),
@@ -212,7 +248,9 @@ class WidgetChargeView(APIView):
 
     POST /api/v1/customers/widget/charge/
     Body: {
-        "payment_id": "uuid",
+        "payment_id": "uuid",              # single-lesson registration
+        # or, for a bundle registration (see WidgetRegisterView `payments` list):
+        "payment_ids": ["uuid", "uuid"],   # one per bundle member lesson, charged with the same card
         "card_details": {
             "card_number": "...",
             "expiry_month": 12,
@@ -226,6 +264,26 @@ class WidgetChargeView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        card_details = request.data.get('card_details') or {}
+        if not card_details.get('card_number'):
+            return Response({'error': 'פרטי כרטיס נדרשים'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payment_ids = request.data.get('payment_ids')
+        if payment_ids:
+            results = [self._charge_one(str(pid), card_details) for pid in payment_ids]
+            all_success = all(r.get('success') for r in results)
+            status_code = status.HTTP_200_OK if all_success else status.HTTP_400_BAD_REQUEST
+            return Response({'success': all_success, 'results': results}, status=status_code)
+
+        payment_id = (request.data.get('payment_id') or '').strip()
+        if not payment_id:
+            return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = self._charge_one(payment_id, card_details)
+        status_code = status.HTTP_200_OK if result.get('success') else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=status_code)
+
+    def _charge_one(self, payment_id, card_details):
         from apps.customers.models import Payment
         from apps.core.tranzila_service import TranzilaService
         from apps.customers.models import TranzilaTransaction, RecurringPayment
@@ -237,20 +295,12 @@ class WidgetChargeView(APIView):
 
         logger = logging.getLogger(__name__)
 
-        payment_id = (request.data.get('payment_id') or '').strip()
-        card_details = request.data.get('card_details') or {}
-
-        if not payment_id:
-            return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
-        if not card_details.get('card_number'):
-            return Response({'error': 'פרטי כרטיס נדרשים'}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
-            payment = Payment.objects.select_related('child', 'family', 'lesson__course__branch').get(
+            payment = Payment.objects.select_related('child', 'family', 'lesson__course__branch', 'bundle').get(
                 id=payment_id, status='pending'
             )
         except Payment.DoesNotExist:
-            return Response({'error': 'תשלום לא נמצא או כבר עובד'}, status=status.HTTP_404_NOT_FOUND)
+            return {'success': False, 'payment_id': payment_id, 'error': 'תשלום לא נמצא או כבר עובד'}
 
         child = payment.child
         lesson = payment.lesson
@@ -262,7 +312,7 @@ class WidgetChargeView(APIView):
             cvv = str(card_details['cvv'])
             card_holder_id = str(card_details.get('card_holder_id', ''))
         except (KeyError, ValueError, TypeError) as e:
-            return Response({'error': f'פרטי כרטיס שגויים: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+            return {'success': False, 'payment_id': payment_id, 'error': f'פרטי כרטיס שגויים: {e}'}
 
         tranzila = TranzilaService()
         items = [{
@@ -370,15 +420,17 @@ class WidgetChargeView(APIView):
                     enrollment, created = LessonEnrollment.objects.get_or_create(
                         child=child,
                         lesson=lesson,
-                        defaults={'start_date': date.today(), 'status': 'active'},
+                        defaults={'start_date': date.today(), 'status': 'active', 'bundle': payment.bundle},
                     )
                     if not created:
                         enrollment.status = 'active'
                         if not enrollment.start_date:
                             enrollment.start_date = date.today()
+                        if payment.bundle and not enrollment.bundle:
+                            enrollment.bundle = payment.bundle
                         enrollment.save()
 
-            return Response({'success': True, 'payment_id': str(payment.id)})
+            return {'success': True, 'payment_id': str(payment.id)}
 
         else:
             payment.status = 'failed'
@@ -386,10 +438,7 @@ class WidgetChargeView(APIView):
             payment.save()
             child.status = 'payment_problem'
             child.save()
-            return Response(
-                {'success': False, 'error': result.get('error', 'התשלום נכשל')},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
 
 
 class WidgetCoursesView(APIView):
@@ -406,7 +455,13 @@ class WidgetCoursesView(APIView):
             Course.objects
             .filter(branch_id=branch_id, is_active=True)
             .select_related('course_type', 'branch')
-            .prefetch_related('lessons__instructor')
+            .prefetch_related(
+                'lessons__instructor',
+                Prefetch(
+                    'lesson_bundles',
+                    queryset=LessonBundle.objects.filter(is_active=True).prefetch_related('lessons'),
+                ),
+            )
             .order_by('course_type__name', 'name')
         )
 
@@ -422,6 +477,25 @@ class WidgetCoursesView(APIView):
                     'price': str(lesson.lesson_price_override or course.price),
                     'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
                 })
+
+            bundles = []
+            for bundle in course.lesson_bundles.all():
+                bundle_lessons = list(bundle.lessons.all())
+                bundles.append({
+                    'id': str(bundle.id),
+                    'name': bundle.name,
+                    'combined_price': str(bundle.combined_price),
+                    'lessons': [
+                        {
+                            'id': str(bl.id),
+                            'day_of_week': bl.day_of_week,
+                            'start_time': str(bl.start_time)[:5],
+                            'end_time': str(bl.end_time)[:5],
+                        }
+                        for bl in bundle_lessons
+                    ],
+                })
+
             result.append({
                 'id': str(course.id),
                 'name': course.name,
@@ -436,6 +510,7 @@ class WidgetCoursesView(APIView):
                 'external_link': course.external_link,
                 'lessons_count': len(lessons),
                 'lessons': lessons,
+                'bundles': bundles,
             })
 
         return Response(result)

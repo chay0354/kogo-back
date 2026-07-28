@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from django.conf import settings
 from django.db import models
 from apps.core.models import Branch, Room
@@ -149,9 +150,42 @@ class Lesson(models.Model):
         """Check if lesson occurred (for salary calculation)"""
         from django.utils import timezone
         return (
-            self.status != 'cancelled' and 
-            self.lesson_date and 
+            self.status != 'cancelled' and
+            self.lesson_date and
             self.lesson_date < timezone.now().date()
         )
+
+
+class LessonBundle(models.Model):
+    """
+    מסלול משולב - a combined-price package of 2+ Lessons belonging to the
+    same Course (e.g. "twice a week" — Sunday + Wednesday sold together at
+    a discounted combined price). Registering for the bundle creates a
+    separate LessonEnrollment per member lesson (see LessonEnrollment.bundle),
+    each billed at combined_price / lessons.count().
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='lesson_bundles', verbose_name="חוג")
+    lessons = models.ManyToManyField(Lesson, related_name='bundles', verbose_name="שיעורים במסלול")
+    name = models.CharField(max_length=200, blank=True, verbose_name="שם המסלול")
+    combined_price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="מחיר משולב")
+    is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'lesson_bundles'
+        verbose_name = "מסלול משולב"
+        verbose_name_plural = "מסלולים משולבים"
+        ordering = ['course', 'name']
+
+    def __str__(self):
+        return self.name or f"מסלול משולב - {self.course.name}"
+
+    def price_per_lesson(self):
+        count = self.lessons.count()
+        if not count:
+            return self.combined_price
+        return (self.combined_price / count).quantize(Decimal('0.01'))
 
 

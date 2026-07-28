@@ -257,6 +257,15 @@ class Payment(models.Model):
         verbose_name="שיעור",
         help_text="The lesson this payment is for (if applicable)"
     )
+    bundle = models.ForeignKey(
+        'courses.LessonBundle',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+        verbose_name="מסלול משולב",
+        help_text="Set when this payment was billed as one lesson of a combined bundle registration.",
+    )
     product = models.ForeignKey(
         'store.StoreProduct',
         on_delete=models.SET_NULL,

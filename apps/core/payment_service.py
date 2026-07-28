@@ -28,7 +28,7 @@ from apps.customers.models import (
 from apps.customers.financial_models import Invoice, InvoiceChild, Discount
 from apps.customers.discount_service import DiscountService
 from apps.core.tranzila_service import TranzilaService
-from apps.courses.models import Lesson
+from apps.courses.models import Lesson, LessonBundle
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import paying_enrollments
 from apps.instructors.utils import get_lesson_price_for_course_index
@@ -104,6 +104,58 @@ def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
     return signed_lessons_count + 1
 
 
+def validate_bundle_capacity(bundle: 'LessonBundle') -> None:
+    """
+    Raise ValueError naming the first lesson without capacity. Called before any
+    charge is made for a bundle registration so the whole registration fails
+    fast rather than leaving the family charged for only some of the lessons.
+    """
+    for lesson in bundle.lessons.select_related('room', 'course').all():
+        if not lesson.room:
+            raise ValueError(f"לא ניתן להירשם למסלול — לשיעור {lesson} אין חדר מוגדר")
+        active_count = LessonEnrollment.objects.filter(lesson=lesson, status='active').count()
+        if active_count >= lesson.room.capacity:
+            raise ValueError(f"השיעור {lesson} מלא - קיבולת מקסימלית: {lesson.room.capacity} תלמידים")
+
+
+def resolve_billing_price(child: Child, lesson: Lesson, bundle_id: Optional[str] = None) -> Tuple[Decimal, bool, int, Optional['LessonBundle']]:
+    """
+    Resolve the monthly base price to bill for a lesson, and whether the
+    generic "additional lesson" discount should be skipped because a
+    per-child/per-lesson discount already applied.
+
+    When bundle_id is given, the lesson is billed at
+    bundle.combined_price / bundle.lessons.count() instead of going through
+    the additional_course_prices tier resolution — a bundle registration
+    creates one Payment per member lesson (see initiate_subscription_payment/
+    charge_subscription_with_card), each at this split price, so per-lesson
+    revenue/instructor-salary reporting stays accurate.
+
+    Returns: (base_price, used_lesson_tier, course_index, bundle)
+    """
+    course_index = get_child_lesson_index_for_billing(child, lesson)
+
+    if bundle_id:
+        try:
+            bundle = LessonBundle.objects.prefetch_related('lessons').get(id=bundle_id, is_active=True)
+        except LessonBundle.DoesNotExist:
+            raise ValueError("Lesson bundle not found or inactive")
+        if not bundle.lessons.filter(pk=lesson.pk).exists():
+            raise ValueError("Lesson is not a member of the given bundle")
+        validate_bundle_capacity(bundle)
+        return bundle.price_per_lesson(), True, course_index, bundle
+
+    tier_price = get_lesson_price_for_course_index(lesson, course_index)
+    regular_price = lesson.course.price
+    base_price = tier_price if tier_price and tier_price > 0 else regular_price
+    used_lesson_tier = (
+        course_index >= 2
+        and tier_price is not None
+        and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
+    )
+    return base_price, used_lesson_tier, course_index, None
+
+
 class PaymentService:
     """
     Service for managing payment operations and business logic.
@@ -125,11 +177,12 @@ class PaymentService:
         payment_date: Optional[date] = None,
         success_url: str = '',
         error_url: str = '',
-        callback_url: str = ''
+        callback_url: str = '',
+        bundle_id: Optional[str] = None,
     ) -> Dict:
         """
         Initiate a recurring subscription payment for a child's lesson enrollment.
-        
+
         Flow:
         1. Validate child and lesson
         2. Get lesson pricing
@@ -137,7 +190,7 @@ class PaymentService:
         4. Create Payment record (pending)
         5. Generate Tranzila payment URL
         6. Return payment details for frontend
-        
+
         Args:
             child_id: UUID of child
             lesson_id: UUID of lesson
@@ -145,38 +198,28 @@ class PaymentService:
             success_url: URL to redirect on success
             error_url: URL to redirect on error
             callback_url: Webhook callback URL
-            
+            bundle_id: when set, bill at bundle.combined_price / lesson_count instead
+                of the regular/tiered course price (see resolve_billing_price). Caller
+                is responsible for calling this once per member lesson of the bundle.
+
         Returns:
             Dict with payment_id, tranzila_url, amount, discounts_applied
         """
         if payment_date is None:
             payment_date = date.today()
-        
+
         try:
             child = Child.objects.select_related('family').get(id=child_id)
             lesson = Lesson.objects.select_related('course__branch').get(id=lesson_id)
         except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
             logger.error(f"Child or Lesson not found: {e}")
             raise ValueError("Child or Lesson not found")
-        
-        # Determine which lesson number this is for the child:
-        # 1 = first signed lesson, 2 = second, 3 = third, etc.
-        course_index = get_child_lesson_index_for_billing(child, lesson)
 
-        # Monthly price: tier in `additional_course_prices`, else course price.
-        tier_price = get_lesson_price_for_course_index(lesson, course_index)
-        regular_price = lesson.course.price
-        base_price = tier_price if tier_price and tier_price > 0 else regular_price
+        base_price, used_lesson_tier, course_index, bundle = resolve_billing_price(child, lesson, bundle_id)
         if not base_price:
             raise ValueError("Lesson/Course price not configured")
 
-        used_lesson_tier = (
-            course_index >= 2
-            and tier_price is not None
-            and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
-        )
-
-        # Calculate discounts. If a per-lesson tier already kicked in for this
+        # Calculate discounts. If a per-lesson tier (or bundle price) already kicked in for this
         # course-index, skip the global "additional_lesson" discount so the
         # price isn't reduced twice.
         if used_lesson_tier:
@@ -219,14 +262,19 @@ class PaymentService:
                         parent=child.family.parents.filter(is_primary=True).first(),
                         branch=lesson.course.branch,
                         lesson=lesson,
+                        bundle=bundle,
                         payment_type='recurring_subscription',
                         status='pending',
                         base_amount=discount_calculation.base_price,
                         discount_amount=discount_calculation.total_discount_amount,
                         final_amount=prorated_final,
-                        description=f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
+                        description=(
+                            f"מנוי חודשי - {lesson.course.name} ({bundle.name or 'מסלול משולב'}) - {child.full_name}"
+                            if bundle else
+                            f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
+                        )
                     )
-                    
+
                     # Create discount snapshots
                     for applied_discount in discount_calculation.applicable_discounts:
                         discount_kwargs = {
@@ -282,6 +330,7 @@ class PaymentService:
             'payment_id': str(payment.id),
             'tranzila_url': tranzila_url,
             'course_index': course_index,
+            'bundle_id': str(bundle.id) if bundle else None,
             'base_amount': float(discount_calculation.base_price),
             'discount_amount': float(discount_calculation.total_discount_amount),
             'final_amount': float(prorated_final),
@@ -305,7 +354,7 @@ class PaymentService:
                 'time': lesson.start_time.strftime('%H:%M')
             }
         }
-    
+
     @transaction.atomic
     def process_webhook_callback(
         self,
@@ -448,7 +497,8 @@ class PaymentService:
                     lesson=payment.lesson,
                     defaults={
                         'start_date': date.today(),
-                        'status': 'active'
+                        'status': 'active',
+                        'bundle': payment.bundle,
                     }
                 )
                 if created:
@@ -458,6 +508,8 @@ class PaymentService:
                     enrollment.status = 'active'
                     if not enrollment.start_date:
                         enrollment.start_date = date.today()
+                    if payment.bundle and not enrollment.bundle:
+                        enrollment.bundle = payment.bundle
                     enrollment.save()
                     logger.info(f"Updated existing LessonEnrollment: {enrollment.id}")
 
@@ -522,11 +574,14 @@ class PaymentService:
         cvv: str,
         card_holder_id: str = '',
         payment_date: Optional[date] = None,
+        bundle_id: Optional[str] = None,
     ) -> Dict:
         """
         Charge a subscription payment directly with card details (synchronous, no iframe/webhook).
         Reuses the same pricing/discount logic as initiate_subscription_payment and the same
         post-success logic as process_webhook_callback.
+
+        bundle_id: when set, bill at bundle.combined_price / lesson_count (see resolve_billing_price).
         """
         if payment_date is None:
             payment_date = date.today()
@@ -537,19 +592,22 @@ class PaymentService:
         except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
             raise ValueError("Child or Lesson not found")
 
-        # Pricing (identical to initiate_subscription_payment)
-        course_index = get_child_lesson_index_for_billing(child, lesson)
-        tier_price = get_lesson_price_for_course_index(lesson, course_index)
-        regular_price = lesson.price or lesson.course.price
-        base_price = tier_price if tier_price and tier_price > 0 else regular_price
+        # Pricing (identical to initiate_subscription_payment, plus bundle override)
+        if bundle_id:
+            base_price, used_lesson_tier, course_index, bundle = resolve_billing_price(child, lesson, bundle_id)
+        else:
+            course_index = get_child_lesson_index_for_billing(child, lesson)
+            tier_price = get_lesson_price_for_course_index(lesson, course_index)
+            regular_price = lesson.price or lesson.course.price
+            base_price = tier_price if tier_price and tier_price > 0 else regular_price
+            used_lesson_tier = (
+                course_index >= 2
+                and tier_price is not None
+                and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
+            )
+            bundle = None
         if not base_price:
             raise ValueError("Lesson/Course price not configured")
-
-        used_lesson_tier = (
-            course_index >= 2
-            and tier_price is not None
-            and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
-        )
 
         if used_lesson_tier:
             discount_calculation = self.discount_service.evaluate_discounts_for_payment(
@@ -583,12 +641,17 @@ class PaymentService:
             parent=child.family.parents.filter(is_primary=True).first(),
             branch=lesson.course.branch,
             lesson=lesson,
+            bundle=bundle,
             payment_type='recurring_subscription',
             status='pending',
             base_amount=discount_calculation.base_price,
             discount_amount=discount_calculation.total_discount_amount,
             final_amount=prorated_final_c,
-            description=f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
+            description=(
+                f"מנוי חודשי - {lesson.course.name} ({bundle.name or 'מסלול משולב'}) - {child.full_name}"
+                if bundle else
+                f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
+            )
         )
 
         for applied_discount in discount_calculation.applicable_discounts:
@@ -689,12 +752,14 @@ class PaymentService:
             enrollment, created = LessonEnrollment.objects.get_or_create(
                 child=child,
                 lesson=lesson,
-                defaults={'start_date': date.today(), 'status': 'active'}
+                defaults={'start_date': date.today(), 'status': 'active', 'bundle': bundle}
             )
             if not created:
                 enrollment.status = 'active'
                 if not enrollment.start_date:
                     enrollment.start_date = date.today()
+                if bundle and not enrollment.bundle:
+                    enrollment.bundle = bundle
                 enrollment.save()
 
             log_payment_operation("SUBSCRIPTION_CHARGED", child=child.full_name, payment_id=payment.id, amount=payment.final_amount)
@@ -704,6 +769,7 @@ class PaymentService:
                 'payment_id': str(payment.id),
                 'invoice_number': invoice.invoice_number,
                 'token_saved': bool(token),
+                'bundle_id': str(bundle.id) if bundle else None,
                 'base_amount': float(payment.base_amount),
                 'discount_amount': float(payment.discount_amount),
                 'final_amount': float(payment.final_amount),

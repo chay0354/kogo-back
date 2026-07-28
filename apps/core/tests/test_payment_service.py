@@ -16,6 +16,7 @@ from apps.core.tests.test_fixtures import TestDataFactory
 from apps.core.payment_service import PaymentService
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 from apps.customers.discount_service import DiscountCalculation, ApplicableDiscount
+from apps.courses.models import LessonBundle
 from apps.enrollments.models import LessonEnrollment
 
 
@@ -213,6 +214,67 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         )
         self.assertEqual(third_result['course_index'], 3)
         self.assertEqual(third_result['base_amount'], 200.00)
+
+
+class PaymentServiceLessonBundleTest(TestCase):
+    """Bundle-aware pricing and capacity guard (see resolve_billing_price)."""
+
+    def setUp(self):
+        self.service = PaymentService()
+        self.child = TestDataFactory.create_child()
+        self.course = TestDataFactory.create_course(price=Decimal('200.00'))
+        self.lesson_a = TestDataFactory.create_lesson(course=self.course, day_of_week=0)
+        self.lesson_b = TestDataFactory.create_lesson(course=self.course, day_of_week=3)
+
+        self.bundle = LessonBundle.objects.create(course=self.course, combined_price=Decimal('300.00'))
+        self.bundle.lessons.set([self.lesson_a, self.lesson_b])
+
+        def passthrough_discount(**kwargs):
+            return DiscountCalculation(
+                applicable_discounts=[],
+                total_discount_amount=Decimal('0.00'),
+                final_price=kwargs['base_price'],
+                base_price=kwargs['base_price'],
+            )
+        self.passthrough_discount = passthrough_discount
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_bundle_bills_each_lesson_at_half_combined_price(self, mock_discount, mock_tranzila):
+        mock_discount.side_effect = self.passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        result_a = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_a.id),
+            bundle_id=str(self.bundle.id),
+        )
+        self.assertEqual(result_a['base_amount'], 150.00)
+        self.assertEqual(result_a['bundle_id'], str(self.bundle.id))
+
+        payment = Payment.objects.get(id=result_a['payment_id'])
+        self.assertEqual(payment.bundle, self.bundle)
+        self.assertEqual(payment.base_amount, Decimal('150.00'))
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_bundle_registration_rejected_when_a_member_lesson_is_full(self, mock_discount, mock_tranzila):
+        mock_discount.side_effect = self.passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        self.lesson_b.room.capacity = 1
+        self.lesson_b.room.save()
+        other_child = TestDataFactory.create_child(first_name="אחר")
+        LessonEnrollment.objects.create(child=other_child, lesson=self.lesson_b, status='active')
+
+        with self.assertRaises(ValueError) as ctx:
+            self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson_a.id),
+                bundle_id=str(self.bundle.id),
+            )
+        self.assertIn('מלא', str(ctx.exception))
+        self.assertFalse(Payment.objects.filter(child=self.child).exists())
 
 
 class PaymentServiceWebhookTest(TestCase):
