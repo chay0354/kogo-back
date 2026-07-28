@@ -3,7 +3,7 @@ from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Q
-from apps.courses.models import CourseType, Course, Lesson
+from apps.courses.models import CourseType, Course, Lesson, LessonBundle
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments, is_paying_enrollment
 from apps.core.models import Branch, UserProfile
@@ -446,6 +446,56 @@ class LessonSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'instructor': f'המדריך תפוס ביום זה בין השעות {conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
                 })
+
+        return data
+
+
+class LessonBundleLessonSerializer(serializers.ModelSerializer):
+    """Minimal lesson info nested inside a bundle (day/time display only)."""
+    day_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lesson
+        fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time']
+
+    def get_day_name(self, obj):
+        days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+        return days[obj.day_of_week] if 0 <= obj.day_of_week < 7 else ''
+
+
+class LessonBundleSerializer(serializers.ModelSerializer):
+    """CRUD serializer for LessonBundle — combined-price packages of a course's own lessons."""
+    lessons_detail = LessonBundleLessonSerializer(source='lessons', many=True, read_only=True)
+    price_per_lesson = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LessonBundle
+        fields = [
+            'id', 'course', 'name', 'lessons', 'lessons_detail',
+            'combined_price', 'price_per_lesson', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_price_per_lesson(self, obj):
+        return obj.price_per_lesson()
+
+    def validate(self, data):
+        course = data.get('course') or (self.instance.course if self.instance else None)
+        lessons = data.get('lessons')
+        if lessons is None and self.instance is not None:
+            lessons = list(self.instance.lessons.all())
+
+        if lessons is not None:
+            if len(lessons) < 2:
+                raise serializers.ValidationError({'lessons': 'יש לבחור לפחות 2 שיעורים'})
+            outside_course = [l for l in lessons if course and l.course_id != course.id]
+            if outside_course:
+                raise serializers.ValidationError({'lessons': 'כל השיעורים במסלול חייבים להשתייך לאותו חוג'})
+
+        combined_price = data.get('combined_price', getattr(self.instance, 'combined_price', None))
+        if combined_price is not None and combined_price < 0:
+            raise serializers.ValidationError({'combined_price': 'המחיר לא יכול להיות שלילי'})
 
         return data
 

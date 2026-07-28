@@ -27,7 +27,7 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         model = LessonEnrollment
         fields = [
             'id', 'lesson', 'lesson_info', 'child', 'child_name', 'status',
-            'start_date', 'end_date', 'notes', 'trial_registration', 'created_at',
+            'bundle', 'start_date', 'end_date', 'notes', 'trial_registration', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
     
@@ -48,14 +48,20 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         """Validate that lesson has capacity for new enrollment"""
         lesson = data.get('lesson')
         child = data.get('child')
-        
+        bundle = data.get('bundle')
+
         if not lesson:
             return data
-        
+
+        if bundle and not bundle.lessons.filter(pk=lesson.pk).exists():
+            raise serializers.ValidationError({
+                'bundle': 'השיעור אינו חלק מהמסלול המשולב שנבחר'
+            })
+
         # Skip capacity check if updating existing enrollment
         if self.instance:
             return data
-        
+
         # Get room capacity
         if not lesson.room:
             raise serializers.ValidationError({

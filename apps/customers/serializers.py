@@ -513,6 +513,7 @@ class PaymentInitiationRequestSerializer(serializers.Serializer):
     """בקשה ליצירת תשלום - Request to initiate payment"""
     child_id = serializers.UUIDField(required=True)
     lesson_id = serializers.UUIDField(required=False)
+    bundle_id = serializers.UUIDField(required=False, allow_null=True)
     amount = serializers.DecimalField(
         max_digits=10, 
         decimal_places=2, 

@@ -6,6 +6,7 @@ router = DefaultRouter()
 router.register(r'types', views.CourseTypeViewSet, basename='coursetype')
 router.register(r'courses', views.CourseViewSet, basename='course')
 router.register(r'lessons', views.LessonViewSet, basename='lesson')
+router.register(r'bundles', views.LessonBundleViewSet, basename='lesson-bundle')
 
 # Legacy routes for backward compatibility
 router.register(r'course-list', views.CourseListViewSet, basename='course-list')

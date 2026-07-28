@@ -6,14 +6,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Prefetch, Count, Q
-from apps.courses.models import CourseType, Course, Lesson
+from apps.courses.models import CourseType, Course, Lesson, LessonBundle
 from apps.courses.serializers import (
-    CourseTypeSerializer, 
+    CourseTypeSerializer,
     CourseTypeWithStatsSerializer,
     CourseTypeDetailsSerializer,
     CourseSerializer,
     CourseWithLessonsSerializer,
     LessonSerializer,
+    LessonBundleSerializer,
     CourseListSerializer,
     LessonListSerializer
 )
@@ -364,6 +365,40 @@ class LessonViewSet(viewsets.ModelViewSet):
         
         # Proceed with deletion
         instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LessonBundleViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing lesson bundles (מסלולים משולבים) — combined-price
+    packages of 2+ lessons belonging to the same course.
+
+    USAGE: /api/courses/bundles/?course=<id> — used by the admin
+    ManageLessonBundlesDialog and read by the widget/EnrollToLessonDialog.
+    """
+    serializer_class = LessonBundleSerializer
+    pagination_class = None
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+
+    def get_queryset(self):
+        queryset = LessonBundle.objects.select_related('course').prefetch_related('lessons')
+        queryset = scope_courses(queryset, self.request.user, 'course')
+
+        course_id = self.request.query_params.get('course', None)
+        if course_id:
+            queryset = queryset.filter(course_id=course_id)
+
+        if self.request.query_params.get('is_active', None) is not None:
+            is_active = self.request.query_params['is_active'].lower() == 'true'
+            queryset = queryset.filter(is_active=is_active)
+
+        return queryset.order_by('name')
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft delete: set is_active to False instead of deleting, to preserve billing history."""
+        instance = self.get_object()
+        instance.is_active = False
+        instance.save(update_fields=['is_active'])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

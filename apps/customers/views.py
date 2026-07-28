@@ -926,6 +926,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            bundle_id = serializer.validated_data.get('bundle_id')
             payment_service = PaymentService()
             result = payment_service.initiate_subscription_payment(
                 child_id=str(serializer.validated_data['child_id']),
@@ -933,7 +934,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 payment_date=serializer.validated_data.get('payment_date'),
                 success_url=serializer.validated_data.get('success_url', ''),
                 error_url=serializer.validated_data.get('error_url', ''),
-                callback_url=serializer.validated_data.get('callback_url', '')
+                callback_url=serializer.validated_data.get('callback_url', ''),
+                bundle_id=str(bundle_id) if bundle_id else None,
             )
             # Don't re-validate response with a serializer (Decimals/floats can trip it and cause 500).
             return Response(result, status=status.HTTP_201_CREATED)
@@ -1023,6 +1025,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         """
         child_id = request.data.get('child_id')
         lesson_id = request.data.get('lesson_id')
+        bundle_id = request.data.get('bundle_id')
         card_details = request.data.get('card_details', {})
 
         if not child_id or not lesson_id:
@@ -1040,6 +1043,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 expiry_year=int(card_details['expiry_year']),
                 cvv=str(card_details['cvv']),
                 card_holder_id=str(card_details.get('card_holder_id', '')),
+                bundle_id=str(bundle_id) if bundle_id else None,
             )
             if result['success']:
                 return Response(result, status=status.HTTP_200_OK)

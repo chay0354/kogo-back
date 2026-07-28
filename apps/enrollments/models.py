@@ -1,6 +1,6 @@
 import uuid
 from django.db import models
-from apps.courses.models import Course, Lesson
+from apps.courses.models import Course, Lesson, LessonBundle
 from apps.customers.models import Child
 
 
@@ -43,6 +43,15 @@ class LessonEnrollment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='enrollments', verbose_name="שיעור")
     child = models.ForeignKey(Child, on_delete=models.CASCADE, related_name='lesson_enrollments', verbose_name="ילד")
+    bundle = models.ForeignKey(
+        LessonBundle,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='enrollments',
+        verbose_name="מסלול משולב",
+        help_text="מוגדר כאשר הרישום נוצר דרך הרשמה למסלול משולב — קובע חישוב מחיר לפי combined_price / מספר השיעורים במסלול.",
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active', verbose_name="סטטוס")
     start_date = models.DateField(null=True, blank=True, verbose_name="תאריך התחלה")
     end_date = models.DateField(null=True, blank=True, verbose_name="תאריך סיום")
