@@ -100,6 +100,8 @@ class WidgetRegisterView(APIView):
         course instead of the course's first lesson. Creates one Payment per member
         lesson (each billed at combined_price / lesson_count); response has
         `is_bundle: True` and a `payments` list instead of a single payment_id.
+      lesson_id (str) — register for this specific Lesson of the course instead of
+        the course's first lesson. Ignored if bundle_id is also provided.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -128,7 +130,14 @@ class WidgetRegisterView(APIView):
         lessons = list(course.lessons.select_related('course__branch').all())
         if not lessons:
             return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
-        lesson = lessons[0]
+
+        lesson_id = (data.get('lesson_id') or '').strip()
+        if lesson_id:
+            lesson = next((l for l in lessons if str(l.id) == lesson_id), None)
+            if lesson is None:
+                return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            lesson = lessons[0]
 
         bundle = None
         bundle_id = (data.get('bundle_id') or '').strip()
