@@ -54,6 +54,61 @@ def compute_trial_lesson_date(lesson: Lesson, *, now: Optional[datetime] = None)
     return next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=now)
 
 
+def stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
+    """
+    Immediately after trial signup (הרשם לניסיון):
+      • store trial_lesson_date for later reminder cron
+      • send ManyChat test-lesson-register flow to parent WhatsApp
+    """
+    from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
+    from apps.core.manychat_service import ManyChatService
+
+    enrollment = (
+        LessonEnrollment.objects
+        .select_related(
+            'lesson',
+            'lesson__course',
+            'lesson__course__branch',
+            'child',
+            'child__family',
+        )
+        .prefetch_related('child__family__parents')
+        .filter(id=enrollment_id)
+        .first()
+    )
+    if not enrollment or not enrollment.lesson_id:
+        return {'sent': False, 'reason': 'enrollment_not_found'}
+
+    lesson = enrollment.lesson
+
+    try:
+        trial_date = compute_trial_lesson_date(lesson)
+        if enrollment.trial_lesson_date != trial_date:
+            enrollment.trial_lesson_date = trial_date
+            enrollment.save(update_fields=['trial_lesson_date', 'updated_at'])
+    except Exception:
+        logger.exception("Failed to compute trial_lesson_date for enrollment %s", enrollment_id)
+
+    child = enrollment.child
+    ctx = build_enrollment_whatsapp_context(child=child, lesson=lesson)
+    if not ctx:
+        return {'sent': False, 'reason': 'no_parent_phone'}
+
+    if enrollment.trial_lesson_date:
+        ctx['trial_date'] = enrollment.trial_lesson_date.strftime('%d/%m/%Y')
+
+    lookup_names = ctx.pop('lookup_names', None)
+    trial_date = ctx.pop('trial_date', '')
+    result = ManyChatService().notify_registration(
+        kind=ManyChatService.REGISTRATION_KIND_TRIAL,
+        lookup_names=lookup_names,
+        trial_date=trial_date,
+        **ctx,
+    )
+    logger.info("Trial registration WhatsApp (instant): %s", result)
+    return result
+
+
 def _trial_day_10am_send_at(trial_date: date) -> datetime:
     """10:00 (configurable) on the calendar day of the trial lesson."""
     hour = int(getattr(settings, 'TRIAL_10AM_REMINDER_HOUR', 10) or 10)
