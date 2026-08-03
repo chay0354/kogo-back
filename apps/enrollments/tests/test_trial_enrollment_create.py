@@ -54,7 +54,7 @@ class TrialLessonEnrollmentTest(TestCase):
         token, _ = Token.objects.get_or_create(user=user)
         self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
 
-    @patch('apps.enrollments.views.LessonEnrollmentViewSet._stamp_and_notify_trial_enrollment')
+    @patch('apps.enrollments.views.stamp_and_notify_trial_enrollment')
     def test_trial_registration_updates_status_and_returns_whatsapp(self, mock_notify):
         mock_notify.return_value = {'sent': True, 'method': 'flow'}
 

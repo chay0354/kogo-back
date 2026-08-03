@@ -8,8 +8,8 @@ from rest_framework.response import Response
 from apps.enrollments.models import Enrollment, LessonEnrollment
 from apps.enrollments.serializers import EnrollmentSerializer, LessonEnrollmentSerializer
 from apps.enrollments.trial_reminders import (
-    compute_trial_lesson_date,
     send_due_trial_reminders,
+    stamp_and_notify_trial_enrollment,
 )
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.courses.models import Lesson
@@ -108,7 +108,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
         if trial_registration:
             try:
-                whatsapp_result = self._stamp_and_notify_trial_enrollment(str(enrollment.id))
+                whatsapp_result = stamp_and_notify_trial_enrollment(str(enrollment.id))
             except Exception:
                 logger.exception("Trial WhatsApp notification failed (non-fatal)")
                 whatsapp_result = {'sent': False, 'reason': 'exception'}
@@ -125,61 +125,6 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
         headers = self.get_success_headers(data)
         return Response(data, status=status_code, headers=headers)
-
-    @staticmethod
-    def _stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
-        """
-        Immediately after trial signup (הרשם לניסיון):
-          • store trial_lesson_date for later reminder cron
-          • send ManyChat test-lesson-register flow to parent WhatsApp
-        """
-        from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
-        from apps.core.manychat_service import ManyChatService
-
-        enrollment = (
-            LessonEnrollment.objects
-            .select_related(
-                'lesson',
-                'lesson__course',
-                'lesson__course__branch',
-                'child',
-                'child__family',
-            )
-            .prefetch_related('child__family__parents')
-            .filter(id=enrollment_id)
-            .first()
-        )
-        if not enrollment or not enrollment.lesson_id:
-            return {'sent': False, 'reason': 'enrollment_not_found'}
-
-        lesson = enrollment.lesson
-
-        try:
-            trial_date = compute_trial_lesson_date(lesson)
-            if enrollment.trial_lesson_date != trial_date:
-                enrollment.trial_lesson_date = trial_date
-                enrollment.save(update_fields=['trial_lesson_date', 'updated_at'])
-        except Exception:
-            logger.exception("Failed to compute trial_lesson_date for enrollment %s", enrollment_id)
-
-        child = enrollment.child
-        ctx = build_enrollment_whatsapp_context(child=child, lesson=lesson)
-        if not ctx:
-            return {'sent': False, 'reason': 'no_parent_phone'}
-
-        if enrollment.trial_lesson_date:
-            ctx['trial_date'] = enrollment.trial_lesson_date.strftime('%d/%m/%Y')
-
-        lookup_names = ctx.pop('lookup_names', None)
-        trial_date = ctx.pop('trial_date', '')
-        result = ManyChatService().notify_registration(
-            kind=ManyChatService.REGISTRATION_KIND_TRIAL,
-            lookup_names=lookup_names,
-            trial_date=trial_date,
-            **ctx,
-        )
-        logger.info("Trial registration WhatsApp (instant): %s", result)
-        return result
 
 
 @api_view(['GET', 'POST'])

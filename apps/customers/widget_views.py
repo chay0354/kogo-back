@@ -18,6 +18,70 @@ from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
 
+def _resolve_family_and_child(data, branch):
+    """
+    Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
+    the Child (existing active child on discount confirmation, or a new record).
+
+    Shared by WidgetRegisterView (paid flow) and WidgetTrialRegisterView (trial flow).
+    """
+    parent_id_number = data['parent_id_number'].strip()
+    child_first = data['child_first_name'].strip()
+    child_last = data['child_last_name'].strip()
+    discount_confirmed = bool(data.get('discount_confirmed', False))
+    existing_child_id = (data.get('existing_child_id') or '').strip()
+
+    # ── 1. Find or create Family ──────────────────────────────
+    family = Family.objects.filter(parent_id_number=parent_id_number).first()
+    if not family:
+        family = Family.objects.create(
+            name=data['parent_last_name'].strip(),
+            phone=data['parent_phone'].strip(),
+            parent_id_number=parent_id_number,
+            branch=branch,
+        )
+        Parent.objects.create(
+            family=family,
+            first_name=data['parent_first_name'].strip(),
+            last_name=data['parent_last_name'].strip(),
+            phone=data['parent_phone'].strip(),
+            is_primary=True,
+        )
+
+    # ── 2. Resolve child ──────────────────────────────────────
+    child = None
+
+    # If lookup returned an existing active child and parent confirmed
+    if existing_child_id and discount_confirmed:
+        try:
+            child = Child.objects.get(id=existing_child_id, family=family)
+        except Child.DoesNotExist:
+            pass
+
+    # Fallback: look for active name match (handles re-submission edge cases)
+    if child is None and discount_confirmed:
+        child = family.children.filter(
+            first_name__iexact=child_first,
+            last_name__iexact=child_last,
+            status='active',
+        ).first()
+
+    # Otherwise create a new child
+    if child is None:
+        child = Child.objects.create(
+            family=family,
+            first_name=child_first,
+            last_name=child_last,
+            birth_date=data['child_birth_date'],
+            gender=data['child_gender'],
+            phone_number=(data.get('child_phone') or '').strip(),
+            id_number=(data.get('child_id_number') or '').strip(),
+            status='pending',
+        )
+
+    return family, child
+
+
 class WidgetLookupView(APIView):
     """
     Check parent ID + child name against existing records to determine discount eligibility.
@@ -149,62 +213,9 @@ class WidgetRegisterView(APIView):
             except LessonBundle.DoesNotExist:
                 return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        parent_id_number  = data['parent_id_number'].strip()
-        child_first       = data['child_first_name'].strip()
-        child_last        = data['child_last_name'].strip()
-        discount_confirmed = bool(data.get('discount_confirmed', False))
-        existing_child_id  = data.get('existing_child_id', '').strip()
-
         try:
             with transaction.atomic():
-                # ── 1. Find or create Family ──────────────────────────────
-                family = Family.objects.filter(parent_id_number=parent_id_number).first()
-                if not family:
-                    family = Family.objects.create(
-                        name=data['parent_last_name'].strip(),
-                        phone=data['parent_phone'].strip(),
-                        parent_id_number=parent_id_number,
-                        branch=lesson.course.branch,
-                    )
-                    Parent.objects.create(
-                        family=family,
-                        first_name=data['parent_first_name'].strip(),
-                        last_name=data['parent_last_name'].strip(),
-                        phone=data['parent_phone'].strip(),
-                        is_primary=True,
-                    )
-
-                # ── 2. Resolve child ──────────────────────────────────────
-                child = None
-
-                # If lookup returned an existing active child and parent confirmed
-                if existing_child_id and discount_confirmed:
-                    try:
-                        child = Child.objects.get(id=existing_child_id, family=family)
-                    except Child.DoesNotExist:
-                        pass
-
-                # Fallback: look for active name match (handles re-submission edge cases)
-                if child is None and discount_confirmed:
-                    child = family.children.filter(
-                        first_name__iexact=child_first,
-                        last_name__iexact=child_last,
-                        status='active',
-                    ).first()
-
-                # Otherwise create a new child
-                if child is None:
-                    child = Child.objects.create(
-                        family=family,
-                        first_name=child_first,
-                        last_name=child_last,
-                        birth_date=data['child_birth_date'],
-                        gender=data['child_gender'],
-                        phone_number=(data.get('child_phone') or '').strip(),
-                        id_number=(data.get('child_id_number') or '').strip(),
-                        status='pending',
-                    )
-
+                family, child = _resolve_family_and_child(data, lesson.course.branch)
         except Exception as exc:
             return Response(
                 {'error': f'שגיאה ביצירת הרשומה: {exc}'},
@@ -249,6 +260,94 @@ class WidgetRegisterView(APIView):
                 {'error': f'שגיאה בתהליך התשלום: {exc}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class WidgetTrialRegisterView(APIView):
+    """
+    Register a child for a single free trial lesson — no payment involved.
+
+    Required fields:
+      parent_id_number, parent_first_name, parent_last_name, parent_phone
+      child_first_name, child_last_name, child_birth_date, child_gender
+      course_id
+
+    Optional:
+      lesson_id (str) — specific Lesson of the course; defaults to the course's first lesson.
+      child_id_number, child_phone
+      discount_confirmed  (bool) — parent confirmed the discount question
+      existing_child_id   (str)  — returned by lookup when child is already active
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        data = request.data
+
+        required = [
+            'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
+            'child_first_name', 'child_last_name', 'child_birth_date', 'child_gender',
+            'course_id',
+        ]
+        missing = [f for f in required if not data.get(f)]
+        if missing:
+            return Response(
+                {'error': f'שדות חובה חסרים: {", ".join(missing)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        course_id = data['course_id']
+        try:
+            course = Course.objects.prefetch_related('lessons').get(id=course_id)
+        except Course.DoesNotExist:
+            return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        lessons = list(course.lessons.select_related('course__branch').all())
+        if not lessons:
+            return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
+
+        lesson_id = (data.get('lesson_id') or '').strip()
+        if lesson_id:
+            lesson = next((l for l in lessons if str(l.id) == lesson_id), None)
+            if lesson is None:
+                return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            lesson = lessons[0]
+
+        from apps.enrollments.models import LessonEnrollment
+        from apps.enrollments.trial_reminders import stamp_and_notify_trial_enrollment
+        from datetime import date
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            with transaction.atomic():
+                family, child = _resolve_family_and_child(data, lesson.course.branch)
+                enrollment, _created = LessonEnrollment.objects.get_or_create(
+                    child=child,
+                    lesson=lesson,
+                    defaults={'start_date': date.today(), 'status': 'active'},
+                )
+        except Exception as exc:
+            return Response(
+                {'error': f'שגיאה ביצירת הרשומה: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        try:
+            whatsapp_result = stamp_and_notify_trial_enrollment(str(enrollment.id))
+        except Exception:
+            logger.exception("Trial WhatsApp notification failed (non-fatal)")
+            whatsapp_result = {'sent': False, 'reason': 'exception'}
+
+        Child.objects.filter(pk=child.pk).update(status='trial_signed')
+
+        return Response({
+            'enrollment_id': str(enrollment.id),
+            'child_id': str(child.id),
+            'trial_applied': True,
+            'whatsapp': whatsapp_result,
+        }, status=status.HTTP_201_CREATED)
 
 
 class WidgetChargeView(APIView):
