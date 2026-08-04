@@ -621,17 +621,18 @@ class WidgetCoursesView(APIView):
         result = []
         for course in courses:
             lessons = []
-            for lesson in course.lessons.all():
-                lessons.append({
-                    'id': str(lesson.id),
-                    'day_of_week': lesson.day_of_week,
-                    'start_time': str(lesson.start_time)[:5],
-                    'end_time': str(lesson.end_time)[:5],
-                    'price': str(lesson.lesson_price_override or course.price),
-                    'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
-                    'lesson_date': lesson.lesson_date.isoformat() if lesson.lesson_date else None,
-                    'is_recurring': lesson.is_recurring,
-                })
+            if not course.must_attend_all_lessons:
+                for lesson in course.lessons.all():
+                    lessons.append({
+                        'id': str(lesson.id),
+                        'day_of_week': lesson.day_of_week,
+                        'start_time': str(lesson.start_time)[:5],
+                        'end_time': str(lesson.end_time)[:5],
+                        'price': str(lesson.lesson_price_override or course.price),
+                        'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
+                        'lesson_date': lesson.lesson_date.isoformat() if lesson.lesson_date else None,
+                        'is_recurring': lesson.is_recurring,
+                    })
 
             bundles = []
             for bundle in course.lesson_bundles.all():
@@ -662,6 +663,7 @@ class WidgetCoursesView(APIView):
                 'min_age': course.min_age,
                 'max_age': course.max_age,
                 'is_adult': course.is_adult,
+                'must_attend_all_lessons': course.must_attend_all_lessons,
                 'external_link': course.external_link,
                 'lessons_count': len(lessons),
                 'lessons': lessons,
