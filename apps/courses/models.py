@@ -38,6 +38,7 @@ class Course(models.Model):
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     is_adult = models.BooleanField(default=False, verbose_name="18+")
+    must_attend_all_lessons = models.BooleanField(default=False, verbose_name="מחוייב בכל השיעורים")
     external_link = models.CharField(
         max_length=500,
         blank=True,
