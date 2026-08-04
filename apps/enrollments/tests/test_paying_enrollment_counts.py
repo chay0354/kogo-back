@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 from apps.core.models import Branch, Room, UserProfile
 from apps.courses.models import Course, CourseType, Lesson
 from apps.customers.models import Child, Family
-from apps.enrollments.enrollment_counts import count_paying_enrollments
+from apps.enrollments.enrollment_counts import count_capacity_enrollments, count_paying_enrollments
 from apps.enrollments.models import LessonEnrollment
 
 
@@ -76,3 +76,31 @@ class PayingEnrollmentCountTest(TestCase):
         self.trial_child.status = 'active'
         self.trial_child.save(update_fields=['status'])
         self.assertEqual(count_paying_enrollments(lesson=self.lesson), 2)
+
+    def test_count_capacity_includes_trial_on_trial_date_only(self):
+        trial_date = date(2026, 6, 10)
+        self.assertEqual(
+            count_capacity_enrollments(lesson=self.lesson, occurrence_date=trial_date),
+            2,
+        )
+        self.assertEqual(
+            count_capacity_enrollments(lesson=self.lesson, occurrence_date=date(2026, 6, 17)),
+            1,
+        )
+        self.assertEqual(count_capacity_enrollments(lesson=self.lesson), 1)
+
+    def test_course_enrollment_count_same_across_lessons_includes_trial(self):
+        lesson_two = Lesson.objects.create(
+            course=self.course,
+            room=self.room,
+            day_of_week=2,
+            start_time='18:00',
+            end_time='19:00',
+        )
+        res = self.client.get(f'/api/v1/courses/types/{self.ct.id}/details/')
+        self.assertEqual(res.status_code, 200)
+        course = res.data['courses'][0]
+        self.assertEqual(course['course_enrollment_count'], 2)
+        counts_by_lesson = {l['id']: l['total_students_count'] for l in course['lessons']}
+        self.assertEqual(counts_by_lesson[str(self.lesson.id)], 2)
+        self.assertEqual(counts_by_lesson[str(lesson_two.id)], 0)

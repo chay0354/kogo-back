@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
-from .widget_views import WidgetLookupView, WidgetRegisterView, WidgetTrialRegisterView, WidgetChargeView, WidgetCitiesView, WidgetBranchesView, WidgetCoursesView
+from .widget_views import WidgetLookupView, WidgetRegisterView, WidgetTrialRegisterView, WidgetChargeView, WidgetCitiesView, WidgetBranchesView, WidgetCoursesView, WidgetLessonOccurrencesView
 
 router = DefaultRouter()
 router.register(r'families', views.FamilyViewSet, basename='family')
@@ -22,5 +22,6 @@ urlpatterns = [
     path('widget/courses/', WidgetCoursesView.as_view(), name='widget-courses'),
     path('widget/cities/', WidgetCitiesView.as_view(), name='widget-cities'),
     path('widget/branches/', WidgetBranchesView.as_view(), name='widget-branches'),
+    path('widget/lesson-occurrences/', WidgetLessonOccurrencesView.as_view(), name='widget-lesson-occurrences'),
 ]
 

@@ -32,6 +32,9 @@ class LessonListSerializer(serializers.ModelSerializer):
         ]
     
     def get_enrollment_count(self, obj):
+        annotated = getattr(obj, 'paying_enrollment_count', None)
+        if annotated is not None:
+            return annotated
         if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
             return sum(1 for e in obj.enrollments.all() if is_paying_enrollment(e))
         return count_paying_enrollments(lesson=obj)

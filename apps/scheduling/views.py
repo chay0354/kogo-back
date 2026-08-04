@@ -3,7 +3,7 @@ from datetime import date as date_cls, timedelta
 import logging
 from django.http import HttpResponse
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Count, Prefetch, Q
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -13,6 +13,9 @@ from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.core.scoping import partner_branch_ids
 from apps.core.models import UserProfile
 from apps.courses.models import Lesson
+from collections import defaultdict
+
+from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, counts_toward_capacity
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
 from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range, occurrence_time_for_date
@@ -47,7 +50,19 @@ class LessonViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = Lesson.objects.select_related(
             'course', 'course__course_type', 'course__branch', 'course__branch__city', 'instructor', 'room'
-        ).prefetch_related('enrollments')
+        )
+
+        if self.action == 'list':
+            qs = qs.annotate(
+                paying_enrollment_count=Count(
+                    'enrollments',
+                    filter=Q(enrollments__status='active')
+                    & ~Q(enrollments__child__status__in=TRIAL_CHILD_STATUSES),
+                    distinct=True,
+                )
+            )
+        else:
+            qs = qs.prefetch_related('enrollments')
         
         try:
             user_role = user.profile.role
@@ -55,16 +70,24 @@ class LessonViewSet(viewsets.ModelViewSet):
             return qs.none()
         
         if user_role == UserProfile.ROLE_MANAGER:
-            return qs
+            return qs.filter(
+                course__is_active=True,
+            ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         elif user_role == UserProfile.ROLE_PARTNER:
             from apps.core.scoping import partner_branch_ids
             branch_ids = partner_branch_ids(user)
             if not branch_ids:
                 return qs.none()
-            return qs.filter(course__branch_id__in=branch_ids)
+            return qs.filter(
+                course__branch_id__in=branch_ids,
+                course__is_active=True,
+            ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         elif user_role == UserProfile.ROLE_WORKER:
             # Workers see only their own lessons (matched by email)
-            return qs.filter(instructor__email__iexact=user.email)
+            return qs.filter(
+                instructor__email__iexact=user.email,
+                course__is_active=True,
+            ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         
         return qs.none()
     
@@ -123,18 +146,34 @@ class LessonViewSet(viewsets.ModelViewSet):
         
         visible_enrollments = []
         for e in enrollments:
+            # Trial / test-lesson enrollments: only on the specific date the parent chose
+            if e.trial_lesson_date:
+                if not occ_date or e.trial_lesson_date != occ_date:
+                    continue
+            elif e.child.status == 'trial_signed':
+                # Legacy trial rows without a stored date — hide from attendance roster
+                continue
+
             # Check if ghost child is visible (within 30 days of creation from the lesson date)
             if e.child.status == 'ghost' and occ_date:
                 # Calculate days between lesson date and ghost child creation
                 days_since_creation = (occ_date - e.child.created_at.date()).days
                 if days_since_creation > 30:
                     continue  # Skip invisible ghost children (older than 30 days from lesson date)
-            
+
+            is_trial = bool(
+                e.trial_lesson_date
+                and occ_date
+                and e.trial_lesson_date == occ_date
+                and e.child.status in ('trial_signed', 'trial_completed')
+            )
             visible_enrollments.append({
                 'id': str(e.id),
                 'child_id': str(e.child.id),
                 'child_name': e.child.full_name,
                 'child_status': e.child.status,
+                'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
+                'is_trial': is_trial,
             })
         
         data['enrollments'] = visible_enrollments
@@ -207,10 +246,28 @@ class LessonViewSet(viewsets.ModelViewSet):
 
             lessons_list = list(queryset)
             lesson_serializer = LessonListSerializer(context={'request': request})
+
+            enrollments_by_lesson: dict = defaultdict(list)
+            for enr in LessonEnrollment.objects.filter(
+                lesson_id__in=[lesson.id for lesson in lessons_list],
+                status='active',
+            ).select_related('child'):
+                enrollments_by_lesson[enr.lesson_id].append(enr)
+
+            def capacity_count(lesson_id, occurrence_date):
+                return sum(
+                    1 for enr in enrollments_by_lesson.get(lesson_id, [])
+                    if counts_toward_capacity(enr, occurrence_date=occurrence_date)
+                )
+
             expanded = []
             for lesson in lessons_list:
                 if not lesson.is_recurring:
-                    expanded.append(lesson_serializer.to_representation(lesson))
+                    data = lesson_serializer.to_representation(lesson)
+                    occ = lesson.lesson_date or start
+                    if occ:
+                        data['enrollment_count'] = capacity_count(lesson.id, occ)
+                    expanded.append(data)
                     continue
 
                 start_from = start
@@ -227,6 +284,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     c = cancel_map.get((str(lesson.id), occ))
                     data = dict(base_data)
                     data['lesson_date'] = occ.isoformat()
+                    data['enrollment_count'] = capacity_count(lesson.id, occ)
                     if c:
                         data['status'] = 'cancelled'
                         data['cancellation_reason'] = c.reason or None

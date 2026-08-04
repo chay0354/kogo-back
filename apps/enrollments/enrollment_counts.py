@@ -1,6 +1,9 @@
 """Helpers for distinguishing trial vs paying lesson enrollments."""
 from __future__ import annotations
 
+from datetime import date
+from typing import Optional
+
 from django.db.models import QuerySet
 
 from apps.enrollments.models import LessonEnrollment
@@ -45,4 +48,42 @@ def is_paying_enrollment(enrollment: LessonEnrollment) -> bool:
     return (
         enrollment.status == 'active'
         and enrollment.child.status not in TRIAL_CHILD_STATUSES
+        and not enrollment.trial_lesson_date
+    )
+
+
+def counts_toward_capacity(
+    enrollment: LessonEnrollment,
+    *,
+    occurrence_date: Optional[date] = None,
+) -> bool:
+    """
+    Whether an enrollment occupies a seat for schedule capacity / max students.
+
+    Paying students always count. Trial students count only on their trial_lesson_date.
+    """
+    if enrollment.status != 'active':
+        return False
+    if enrollment.trial_lesson_date:
+        if occurrence_date is None:
+            return False
+        return enrollment.trial_lesson_date == occurrence_date
+    return enrollment.child.status not in TRIAL_CHILD_STATUSES
+
+
+def count_capacity_enrollments(
+    *,
+    lesson,
+    occurrence_date: Optional[date] = None,
+    enrollments=None,
+) -> int:
+    """Headcount for UI capacity (e.g. schedule card 3/20)."""
+    if enrollments is None:
+        enrollments = LessonEnrollment.objects.filter(
+            lesson=lesson,
+            status='active',
+        ).select_related('child')
+    return sum(
+        1 for e in enrollments
+        if counts_toward_capacity(e, occurrence_date=occurrence_date)
     )

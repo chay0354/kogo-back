@@ -1,4 +1,7 @@
 from rest_framework import serializers
+
+from apps.enrollments.enrollment_counts import count_capacity_enrollments
+from apps.enrollments.trial_reminders import compute_trial_lesson_date
 from apps.enrollments.models import Enrollment, LessonEnrollment, ChildAbsence
 
 
@@ -62,23 +65,24 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         if self.instance:
             return data
 
-        # Get room capacity
         if not lesson.room:
             raise serializers.ValidationError({
                 'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'
             })
-        
-        room_capacity = lesson.room.capacity
-        
-        # Count current active enrollments
-        active_enrollments = LessonEnrollment.objects.filter(
+
+        trial_registration = data.get('trial_registration', False)
+        occurrence_date = None
+        if trial_registration:
+            occurrence_date = data.get('trial_lesson_date') or compute_trial_lesson_date(lesson)
+
+        capacity = lesson.course.capacity or lesson.room.capacity
+        current = count_capacity_enrollments(
             lesson=lesson,
-            status='active'
-        ).count()
-        
-        if active_enrollments >= room_capacity:
+            occurrence_date=occurrence_date if trial_registration else None,
+        )
+        if current >= capacity:
             raise serializers.ValidationError({
-                'lesson': f'השיעור מלא - קיבולת מקסימלית: {room_capacity} תלמידים'
+                'lesson': f'השיעור מלא - קיבולת מקסימלית: {capacity} תלמידים'
             })
         
         return data

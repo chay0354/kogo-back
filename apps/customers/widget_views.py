@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework import status
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Q
 
 from apps.customers.models import Family, Parent, Child
 from apps.courses.models import Lesson, Course, LessonBundle
@@ -314,11 +314,39 @@ class WidgetTrialRegisterView(APIView):
             lesson = lessons[0]
 
         from apps.enrollments.models import LessonEnrollment
-        from apps.enrollments.trial_reminders import stamp_and_notify_trial_enrollment
+        from apps.enrollments.trial_reminders import (
+            stamp_and_notify_trial_enrollment,
+            validate_trial_lesson_date,
+        )
         from datetime import date
         import logging
 
         logger = logging.getLogger(__name__)
+
+        trial_date_str = (data.get('trial_lesson_date') or '').strip()
+        if not trial_date_str:
+            return Response(
+                {'error': 'יש לבחור תאריך לשיעור הניסיון'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            trial_date = date.fromisoformat(trial_date_str)
+        except ValueError:
+            return Response({'error': 'תאריך לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_trial_lesson_date(lesson, trial_date)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.enrollments.enrollment_counts import count_capacity_enrollments
+
+        capacity = course.capacity or 20
+        if count_capacity_enrollments(lesson=lesson, occurrence_date=trial_date) >= capacity:
+            return Response(
+                {'error': f'השיעור מלא בתאריך הנבחר (קיבולת: {capacity})'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             with transaction.atomic():
@@ -326,8 +354,20 @@ class WidgetTrialRegisterView(APIView):
                 enrollment, _created = LessonEnrollment.objects.get_or_create(
                     child=child,
                     lesson=lesson,
-                    defaults={'start_date': date.today(), 'status': 'active'},
+                    defaults={
+                        'start_date': trial_date,
+                        'status': 'active',
+                        'trial_lesson_date': trial_date,
+                    },
                 )
+                if not _created:
+                    enrollment.start_date = trial_date
+                    enrollment.trial_lesson_date = trial_date
+                    enrollment.status = 'active'
+                    enrollment.end_date = None
+                    enrollment.save(update_fields=[
+                        'start_date', 'trial_lesson_date', 'status', 'end_date', 'updated_at',
+                    ])
         except Exception as exc:
             return Response(
                 {'error': f'שגיאה ביצירת הרשומה: {exc}'},
@@ -345,6 +385,7 @@ class WidgetTrialRegisterView(APIView):
         return Response({
             'enrollment_id': str(enrollment.id),
             'child_id': str(child.id),
+            'trial_lesson_date': trial_date.isoformat(),
             'trial_applied': True,
             'whatsapp': whatsapp_result,
         }, status=status.HTTP_201_CREATED)
@@ -561,10 +602,14 @@ class WidgetCoursesView(APIView):
 
         courses = (
             Course.objects
-            .filter(branch_id=branch_id, is_active=True)
+            .filter(
+                branch_id=branch_id,
+                is_active=True,
+            )
+            .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
             .select_related('course_type', 'branch')
             .prefetch_related(
-                'lessons__instructor',
+                Prefetch('lessons', queryset=Lesson.objects.select_related('instructor').order_by('day_of_week', 'start_time')),
                 Prefetch(
                     'lesson_bundles',
                     queryset=LessonBundle.objects.filter(is_active=True).prefetch_related('lessons'),
@@ -584,6 +629,8 @@ class WidgetCoursesView(APIView):
                     'end_time': str(lesson.end_time)[:5],
                     'price': str(lesson.lesson_price_override or course.price),
                     'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
+                    'lesson_date': lesson.lesson_date.isoformat() if lesson.lesson_date else None,
+                    'is_recurring': lesson.is_recurring,
                 })
 
             bundles = []
@@ -648,4 +695,42 @@ class WidgetBranchesView(APIView):
         return Response([
             {'id': b['id'], 'name': b['name'], 'city': b['city_id'], 'is_external': b['is_external'], 'external_link': b['external_link']}
             for b in branches
+        ])
+
+
+class WidgetLessonOccurrencesView(APIView):
+    """Public endpoint — upcoming calendar dates for a lesson (trial date picker)."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+
+    def get(self, request):
+        lesson_id = (request.query_params.get('lesson_id') or '').strip()
+        if not lesson_id:
+            return Response({'error': 'lesson_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            count = int(request.query_params.get('count') or 8)
+        except (TypeError, ValueError):
+            count = 8
+        count = max(1, min(count, 16))
+
+        try:
+            lesson = Lesson.objects.get(id=lesson_id)
+        except Lesson.DoesNotExist:
+            return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.enrollments.trial_reminders import iter_upcoming_lesson_occurrences
+
+        dates = iter_upcoming_lesson_occurrences(lesson, count=count)
+        return Response([
+            {
+                'date': d.isoformat(),
+                'label': d.strftime('%d/%m/%Y'),
+                'day_name': self.DAY_NAMES[(d.weekday() + 1) % 7],
+                'start_time': str(lesson.start_time)[:5],
+                'end_time': str(lesson.end_time)[:5],
+            }
+            for d in dates
         ])

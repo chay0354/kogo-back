@@ -228,12 +228,33 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     instructor = InstructorMinimalSerializer(read_only=True)
     lessons = LessonWithEnrollmentsSerializer(many=True, read_only=True)
+    course_enrollment_count = serializers.SerializerMethodField()
     
     class Meta:
         model = Course
         fields = ['id', 'name', 'description', 'price', 'capacity',
                   'min_age', 'max_age', 'is_adult', 'branch', 'branch_name', 'instructor', 'instructor_salary_override',
-                  'external_link', 'lessons', 'is_active']
+                  'external_link', 'lessons', 'course_enrollment_count', 'is_active']
+
+    def get_course_enrollment_count(self, obj):
+        """
+        Distinct active students in this course (paying + trial), across all lessons.
+        Used so every lesson row and the course header show the same enrollment figure.
+        """
+        counts = self.context.get('course_enrollment_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
+        child_ids = set()
+        for lesson in obj.lessons.all():
+            enrollments = (
+                lesson.enrollments.all()
+                if hasattr(lesson, '_prefetched_objects_cache') and 'enrollments' in lesson._prefetched_objects_cache
+                else lesson.enrollments.filter(status='active')
+            )
+            for enrollment in enrollments:
+                if enrollment.status == 'active':
+                    child_ids.add(enrollment.child_id)
+        return len(child_ids)
 
 
 class CourseTypeDetailsSerializer(serializers.ModelSerializer):

@@ -54,6 +54,97 @@ def compute_trial_lesson_date(lesson: Lesson, *, now: Optional[datetime] = None)
     return next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=now)
 
 
+def iter_upcoming_lesson_occurrences(
+    lesson: Lesson,
+    *,
+    count: int = 8,
+    now: Optional[datetime] = None,
+) -> list[date]:
+    """Next N calendar dates when this lesson occurs (excluding cancellations)."""
+    from apps.scheduling.models import LessonCancellation
+
+    now = now or timezone.localtime()
+    count = max(1, min(int(count or 8), 16))
+
+    if not lesson.is_recurring:
+        if lesson.lesson_date and lesson.lesson_date >= now.date():
+            if not LessonCancellation.objects.filter(lesson=lesson, occurrence_date=lesson.lesson_date).exists():
+                return [lesson.lesson_date]
+        return []
+
+    cancelled = set(
+        LessonCancellation.objects.filter(lesson=lesson).values_list('occurrence_date', flat=True)
+    )
+
+    results: list[date] = []
+    cursor_now = now
+    while len(results) < count:
+        candidate = next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=cursor_now)
+        if candidate not in cancelled and candidate not in results:
+            results.append(candidate)
+
+        next_week = candidate + timedelta(days=7)
+        cursor_now = timezone.make_aware(
+            datetime.combine(next_week, time.min),
+            timezone.get_current_timezone(),
+        )
+        if next_week > now.date() + timedelta(days=366):
+            break
+
+    return results
+
+
+def validate_trial_lesson_date(lesson: Lesson, trial_date: date, *, now: Optional[datetime] = None) -> None:
+    allowed = iter_upcoming_lesson_occurrences(lesson, count=16, now=now)
+    if trial_date not in allowed:
+        raise ValueError('תאריך שיעור הניסיון אינו זמין')
+
+
+def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
+    """
+    After the trial lesson day ends, remove the child from the lesson roster
+    (first cron run on the day after trial_lesson_date).
+    """
+    from apps.customers.models import Child
+
+    now = timezone.localtime()
+    today = now.date()
+
+    qs = (
+        LessonEnrollment.objects
+        .select_related('lesson', 'child')
+        .filter(
+            trial_lesson_date__isnull=False,
+            child__status='trial_signed',
+            status='active',
+        )
+    )
+
+    removed = 0
+    skipped = 0
+
+    for enrollment in qs:
+        lesson = enrollment.lesson
+        trial_date = enrollment.trial_lesson_date
+        if not lesson or not trial_date:
+            skipped += 1
+            continue
+
+        if trial_date >= today:
+            skipped += 1
+            continue
+
+        if not dry_run:
+            enrollment.status = 'inactive'
+            enrollment.end_date = trial_date
+            enrollment.save(update_fields=['status', 'end_date', 'updated_at'])
+            Child.objects.filter(pk=enrollment.child_id, status='trial_signed').update(status='trial_completed')
+
+        removed += 1
+
+    return {'removed': removed, 'skipped': skipped}
+
+
 def stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
     """
     Immediately after trial signup (הרשם לניסיון):
@@ -82,8 +173,8 @@ def stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
     lesson = enrollment.lesson
 
     try:
-        trial_date = compute_trial_lesson_date(lesson)
-        if enrollment.trial_lesson_date != trial_date:
+        if not enrollment.trial_lesson_date:
+            trial_date = compute_trial_lesson_date(lesson)
             enrollment.trial_lesson_date = trial_date
             enrollment.save(update_fields=['trial_lesson_date', 'updated_at'])
     except Exception:
@@ -227,5 +318,8 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
             else:
                 logger.warning("after-test WhatsApp NOT sent for %s: %s", enr.id, result)
                 summary['errors'] += 1
+
+    cleanup = remove_expired_trial_enrollments(dry_run=dry_run)
+    summary['trial_cleanup'] = cleanup
 
     return summary

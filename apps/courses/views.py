@@ -158,7 +158,9 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
         course_type = self.get_object()
         paying_enrollment_counts = {}
         total_enrollment_counts = {}
+        course_enrollment_counts = {}
         for course in course_type.courses.all():
+            course_child_ids = set()
             for lesson in course.lessons.all():
                 enrollments = list(lesson.enrollments.all())
                 paying_enrollment_counts[lesson.id] = sum(
@@ -167,12 +169,17 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
                 total_enrollment_counts[lesson.id] = sum(
                     1 for e in enrollments if e.status == 'active'
                 )
+                for e in enrollments:
+                    if e.status == 'active':
+                        course_child_ids.add(e.child_id)
+            course_enrollment_counts[course.id] = len(course_child_ids)
         serializer = self.get_serializer(
             course_type,
             context={
                 **self.get_serializer_context(),
                 'paying_enrollment_counts': paying_enrollment_counts,
                 'total_enrollment_counts': total_enrollment_counts,
+                'course_enrollment_counts': course_enrollment_counts,
             },
         )
         return Response(serializer.data)
