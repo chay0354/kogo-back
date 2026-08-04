@@ -232,7 +232,7 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Course
         fields = ['id', 'name', 'description', 'price', 'capacity',
-                  'min_age', 'max_age', 'is_adult', 'branch', 'branch_name', 'instructor', 'instructor_salary_override',
+                  'min_age', 'max_age', 'is_adult', 'must_attend_all_lessons', 'branch', 'branch_name', 'instructor', 'instructor_salary_override',
                   'external_link', 'lessons', 'is_active']
 
 
