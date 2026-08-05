@@ -18,6 +18,63 @@ from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
 
+def _widget_bundles_queryset():
+    return LessonBundle.objects.prefetch_related('lessons').order_by('-is_active', 'name')
+
+
+def _widget_bundles_for_course(course):
+    """
+    Bundles exposed in the public widget catalog.
+
+    For must_attend_all_lessons courses, include an inactive bundle when it is
+    the only bundle with lessons (common after accidental soft-delete).
+    """
+    candidates = [b for b in course.lesson_bundles.all() if b.lessons.exists()]
+    active = [b for b in candidates if b.is_active]
+    if active:
+        return active
+    if course.must_attend_all_lessons and candidates:
+        return candidates
+    return []
+
+
+def _resolve_widget_bundle(*, course, bundle_id: str):
+    """Resolve a bundle for widget registration (allows inactive must-attend fallback)."""
+    try:
+        bundle = LessonBundle.objects.prefetch_related('lessons').get(id=bundle_id, course=course)
+    except LessonBundle.DoesNotExist:
+        return None
+    if bundle.is_active and bundle.lessons.exists():
+        return bundle
+    if course.must_attend_all_lessons and bundle.lessons.exists():
+        has_active = LessonBundle.objects.filter(
+            course=course,
+            is_active=True,
+            lessons__isnull=False,
+        ).exists()
+        if not has_active:
+            return bundle
+    return None
+
+
+def _serialize_widget_bundle(bundle):
+    bundle_lessons = list(bundle.lessons.all())
+    return {
+        'id': str(bundle.id),
+        'name': bundle.name,
+        'combined_price': str(bundle.combined_price),
+        'lessons': [
+            {
+                'id': str(bl.id),
+                'day_of_week': bl.day_of_week,
+                'start_time': str(bl.start_time)[:5],
+                'end_time': str(bl.end_time)[:5],
+            }
+            for bl in bundle_lessons
+        ],
+    }
+
+
 def _resolve_family_and_child(data, branch):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
@@ -206,11 +263,8 @@ class WidgetRegisterView(APIView):
         bundle = None
         bundle_id = (data.get('bundle_id') or '').strip()
         if bundle_id:
-            try:
-                bundle = LessonBundle.objects.prefetch_related('lessons').get(
-                    id=bundle_id, course=course, is_active=True
-                )
-            except LessonBundle.DoesNotExist:
+            bundle = _resolve_widget_bundle(course=course, bundle_id=bundle_id)
+            if bundle is None:
                 return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
         try:
@@ -612,7 +666,7 @@ class WidgetCoursesView(APIView):
                 Prefetch('lessons', queryset=Lesson.objects.select_related('instructor').order_by('day_of_week', 'start_time')),
                 Prefetch(
                     'lesson_bundles',
-                    queryset=LessonBundle.objects.filter(is_active=True).prefetch_related('lessons'),
+                    queryset=_widget_bundles_queryset(),
                 ),
             )
             .order_by('course_type__name', 'name')
@@ -634,23 +688,7 @@ class WidgetCoursesView(APIView):
                         'is_recurring': lesson.is_recurring,
                     })
 
-            bundles = []
-            for bundle in course.lesson_bundles.all():
-                bundle_lessons = list(bundle.lessons.all())
-                bundles.append({
-                    'id': str(bundle.id),
-                    'name': bundle.name,
-                    'combined_price': str(bundle.combined_price),
-                    'lessons': [
-                        {
-                            'id': str(bl.id),
-                            'day_of_week': bl.day_of_week,
-                            'start_time': str(bl.start_time)[:5],
-                            'end_time': str(bl.end_time)[:5],
-                        }
-                        for bl in bundle_lessons
-                    ],
-                })
+            bundles = [_serialize_widget_bundle(bundle) for bundle in _widget_bundles_for_course(course)]
 
             result.append({
                 'id': str(course.id),
