@@ -39,6 +39,18 @@ class Course(models.Model):
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     is_adult = models.BooleanField(default=False, verbose_name="18+")
     must_attend_all_lessons = models.BooleanField(default=False, verbose_name="מחוייב בכל השיעורים")
+    trial_lesson_is_paid = models.BooleanField(
+        default=False,
+        verbose_name="שיעור ניסיון בתשלום",
+        help_text="כאשר מופעל, הרשמה לשיעור ניסיון דרך הווידג'ט תחייב את המחיר שמוגדר.",
+    )
+    trial_lesson_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="מחיר שיעור ניסיון (₪)",
+    )
     external_link = models.CharField(
         max_length=500,
         blank=True,

@@ -233,7 +233,9 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Course
         fields = ['id', 'name', 'description', 'price', 'capacity',
-                  'min_age', 'max_age', 'is_adult', 'must_attend_all_lessons', 'branch', 'branch_name', 'instructor', 'instructor_salary_override',
+                  'min_age', 'max_age', 'is_adult', 'must_attend_all_lessons',
+                  'trial_lesson_is_paid', 'trial_lesson_price',
+                  'branch', 'branch_name', 'instructor', 'instructor_salary_override',
                   'external_link', 'lessons', 'course_enrollment_count', 'is_active']
 
     def get_course_enrollment_count(self, obj):
@@ -290,10 +292,30 @@ class CourseSerializer(serializers.ModelSerializer):
         model = Course
         fields = ['id', 'course_type', 'course_type_name', 'name', 'description',
                   'price', 'capacity', 'branch', 'branch_name',
-                  'min_age', 'max_age', 'is_active', 'is_adult', 'must_attend_all_lessons', 'external_link', 'lessons_count', 'enrolled_students_count',
+                  'min_age', 'max_age', 'is_active', 'is_adult', 'must_attend_all_lessons',
+                  'trial_lesson_is_paid', 'trial_lesson_price',
+                  'external_link', 'lessons_count', 'enrolled_students_count',
                   'lessons', 'managers', 'managers_detail', 'instructor', 'instructor_detail',
                   'instructor_salary_override', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        instance = getattr(self, 'instance', None)
+        is_paid = attrs.get(
+            'trial_lesson_is_paid',
+            instance.trial_lesson_is_paid if instance else False,
+        )
+        price = attrs.get(
+            'trial_lesson_price',
+            instance.trial_lesson_price if instance else None,
+        )
+        if is_paid and (price is None or price <= 0):
+            raise serializers.ValidationError({
+                'trial_lesson_price': 'יש להזין מחיר גדול מ-0 לשיעור ניסיון בתשלום',
+            })
+        if not is_paid:
+            attrs['trial_lesson_price'] = None
+        return attrs
 
     def get_managers_detail(self, obj):
         """Lightweight list of assigned managers for display in the course dialog."""

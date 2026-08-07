@@ -320,6 +320,14 @@ class Payment(models.Model):
         verbose_name="עסקת טרנזילה"
     )
     
+    # Trial lesson (one-time widget payment before enrollment is created)
+    trial_lesson_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="תאריך שיעור ניסיון",
+        help_text="מוגדר על תשלום ממתין לשיעור ניסיון בתשלום; ההרשמה נוצרת לאחר סליקה מוצלחת.",
+    )
+
     # Additional metadata
     description = models.TextField(blank=True, verbose_name="תיאור")
     payment_date = models.DateTimeField(null=True, blank=True, verbose_name="תאריך תשלום")

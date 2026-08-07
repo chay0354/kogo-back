@@ -402,6 +402,52 @@ class WidgetTrialRegisterView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        trial_is_paid = bool(course.trial_lesson_is_paid)
+        trial_price = course.trial_lesson_price
+        if trial_is_paid and (trial_price is None or trial_price <= 0):
+            return Response(
+                {'error': 'שיעור הניסיון מוגדר כבתשלום אך לא הוגדר מחיר'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if trial_is_paid:
+            from apps.customers.models import Payment
+            from decimal import Decimal
+
+            try:
+                with transaction.atomic():
+                    family, child = _resolve_family_and_child(data, lesson.course.branch)
+                    payment = Payment.objects.create(
+                        child=child,
+                        family=child.family,
+                        parent=child.family.parents.filter(is_primary=True).first(),
+                        branch=lesson.course.branch,
+                        lesson=lesson,
+                        payment_type='one_time',
+                        status='pending',
+                        base_amount=Decimal(trial_price),
+                        discount_amount=Decimal('0'),
+                        final_amount=Decimal(trial_price),
+                        trial_lesson_date=trial_date,
+                        description=f"שיעור ניסיון - {course.name} - {child.full_name}",
+                    )
+            except Exception as exc:
+                return Response(
+                    {'error': f'שגיאה ביצירת הרשומה: {exc}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+            return Response({
+                'requires_payment': True,
+                'payment_id': str(payment.id),
+                'child_id': str(child.id),
+                'base_amount': float(trial_price),
+                'discount_amount': 0,
+                'final_amount': float(trial_price),
+                'trial_applied': True,
+                'trial_lesson_date': trial_date.isoformat(),
+            }, status=status.HTTP_201_CREATED)
+
         try:
             with transaction.atomic():
                 family, child = _resolve_family_and_child(data, lesson.course.branch)
@@ -518,8 +564,14 @@ class WidgetChargeView(APIView):
             return {'success': False, 'payment_id': payment_id, 'error': f'פרטי כרטיס שגויים: {e}'}
 
         tranzila = TranzilaService()
+        is_trial_payment = payment.trial_lesson_date is not None
+        item_label = (
+            f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"
+            if is_trial_payment and lesson
+            else (f"{lesson.course.name} - {child.full_name}" if lesson else child.full_name)
+        )
         items = [{
-            'name': f"{lesson.course.name} - {child.full_name}" if lesson else child.full_name,
+            'name': item_label,
             'type': 'I',
             'unit_price': float(payment.final_amount),
             'units_number': 1,
@@ -535,11 +587,14 @@ class WidgetChargeView(APIView):
             cvv=cvv,
             card_holder_id=card_holder_id,
             amount=payment.final_amount,
-            description=payment.description or f"מנוי - {child.full_name}",
+            description=payment.description or (
+                f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
+            ),
             items=items,
         )
 
         if result['success']:
+            enrollment_id_for_whatsapp = None
             with transaction.atomic():
                 payment.status = 'completed'
                 payment.payment_date = timezone.now()
@@ -548,7 +603,7 @@ class WidgetChargeView(APIView):
                 tranzila_txn = TranzilaTransaction.objects.create(
                     transaction_id=result.get('transaction_id', ''),
                     confirmation_code=result.get('confirmation_code', ''),
-                    transaction_type='recurring_setup',
+                    transaction_type='charge' if is_trial_payment else 'recurring_setup',
                     response_code=result.get('response_code', '000'),
                     response_message='',
                     request_data={},
@@ -560,78 +615,132 @@ class WidgetChargeView(APIView):
                 payment.tranzila_transaction = tranzila_txn
                 payment.save(update_fields=['tranzila_transaction'])
 
-                token = result.get('token', '')
-                if token:
-                    discount_details = [
-                        {
-                            'name': s.discount_name,
-                            'type': s.discount_type,
-                            'value': str(s.discount_value),
-                            'amount_deducted': str(s.amount_deducted),
-                            'reason': s.reason,
-                        }
-                        for s in payment.discount_snapshots.all()
-                    ]
-                    RecurringPayment.objects.create(
-                        child=child,
-                        initial_payment=payment,
-                        tranzila_token=token,
-                        card_expire_month=expiry_month,
-                        card_expire_year=expiry_year,
-                        status='active',
-                        base_amount=payment.base_amount,
-                        discount_amount=payment.discount_amount,
-                        amount=payment.final_amount,
-                        discount_details=discount_details,
-                        billing_day=date.today().day,
-                        start_date=date.today(),
-                        next_billing_date=date.today() + timedelta(days=30),
-                    )
-
-                # Invoice
-                invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-                invoice = Invoice.objects.create(
-                    invoice_number=invoice_number,
-                    family=payment.family,
-                    parent=payment.parent,
-                    branch=payment.branch,
-                    payment=payment,
-                    amount=payment.final_amount,
-                    status='paid',
-                    payment_method='credit_card',
-                    payment_type='recurring',
-                    payer_name=payment.family.name,
-                    payer_email=payment.family.email if payment.family.email else '',
-                    payer_phone=payment.family.phone,
-                    tranzila_transaction_id=tranzila_txn.transaction_id,
-                    invoice_date=timezone.now(),
-                )
-                if child and lesson:
-                    InvoiceChild.objects.create(
-                        invoice=invoice,
-                        child=child,
-                        course=lesson.course,
-                        lesson=lesson,
-                    )
-
-                child.status = 'active'
-                child.subscription_start_date = date.today()
-                child.paid_until_date = date.today() + timedelta(days=30)
-                child.save()
-
-                if lesson:
+                if is_trial_payment:
+                    trial_date = payment.trial_lesson_date
                     enrollment, created = LessonEnrollment.objects.get_or_create(
                         child=child,
                         lesson=lesson,
-                        defaults={'start_date': date.today(), 'status': 'active', 'bundle': payment.bundle},
+                        defaults={
+                            'start_date': trial_date,
+                            'status': 'active',
+                            'trial_lesson_date': trial_date,
+                        },
                     )
                     if not created:
+                        enrollment.start_date = trial_date
+                        enrollment.trial_lesson_date = trial_date
                         enrollment.status = 'active'
-                        if not enrollment.start_date:
-                            enrollment.start_date = date.today()
-                        if payment.bundle and not enrollment.bundle:
-                            enrollment.bundle = payment.bundle
-                        enrollment.save()
+                        enrollment.end_date = None
+                        enrollment.save(update_fields=[
+                            'start_date', 'trial_lesson_date', 'status', 'end_date', 'updated_at',
+                        ])
+                    enrollment_id_for_whatsapp = str(enrollment.id)
+
+                    invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
+                    invoice = Invoice.objects.create(
+                        invoice_number=invoice_number,
+                        family=payment.family,
+                        parent=payment.parent,
+                        branch=payment.branch,
+                        payment=payment,
+                        amount=payment.final_amount,
+                        status='paid',
+                        payment_method='credit_card',
+                        payment_type='one_time',
+                        payer_name=payment.family.name,
+                        payer_email=payment.family.email if payment.family.email else '',
+                        payer_phone=payment.family.phone,
+                        tranzila_transaction_id=tranzila_txn.transaction_id,
+                        invoice_date=timezone.now(),
+                    )
+                    if child and lesson:
+                        InvoiceChild.objects.create(
+                            invoice=invoice,
+                            child=child,
+                            course=lesson.course,
+                            lesson=lesson,
+                        )
+
+                    Child.objects.filter(pk=child.pk).update(status='trial_signed')
+                else:
+                    token = result.get('token', '')
+                    if token:
+                        discount_details = [
+                            {
+                                'name': s.discount_name,
+                                'type': s.discount_type,
+                                'value': str(s.discount_value),
+                                'amount_deducted': str(s.amount_deducted),
+                                'reason': s.reason,
+                            }
+                            for s in payment.discount_snapshots.all()
+                        ]
+                        RecurringPayment.objects.create(
+                            child=child,
+                            initial_payment=payment,
+                            tranzila_token=token,
+                            card_expire_month=expiry_month,
+                            card_expire_year=expiry_year,
+                            status='active',
+                            base_amount=payment.base_amount,
+                            discount_amount=payment.discount_amount,
+                            amount=payment.final_amount,
+                            discount_details=discount_details,
+                            billing_day=date.today().day,
+                            start_date=date.today(),
+                            next_billing_date=date.today() + timedelta(days=30),
+                        )
+
+                    invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
+                    invoice = Invoice.objects.create(
+                        invoice_number=invoice_number,
+                        family=payment.family,
+                        parent=payment.parent,
+                        branch=payment.branch,
+                        payment=payment,
+                        amount=payment.final_amount,
+                        status='paid',
+                        payment_method='credit_card',
+                        payment_type='recurring',
+                        payer_name=payment.family.name,
+                        payer_email=payment.family.email if payment.family.email else '',
+                        payer_phone=payment.family.phone,
+                        tranzila_transaction_id=tranzila_txn.transaction_id,
+                        invoice_date=timezone.now(),
+                    )
+                    if child and lesson:
+                        InvoiceChild.objects.create(
+                            invoice=invoice,
+                            child=child,
+                            course=lesson.course,
+                            lesson=lesson,
+                        )
+
+                    child.status = 'active'
+                    child.subscription_start_date = date.today()
+                    child.paid_until_date = date.today() + timedelta(days=30)
+                    child.save()
+
+                    if lesson:
+                        enrollment, created = LessonEnrollment.objects.get_or_create(
+                            child=child,
+                            lesson=lesson,
+                            defaults={'start_date': date.today(), 'status': 'active', 'bundle': payment.bundle},
+                        )
+                        if not created:
+                            enrollment.status = 'active'
+                            if not enrollment.start_date:
+                                enrollment.start_date = date.today()
+                            if payment.bundle and not enrollment.bundle:
+                                enrollment.bundle = payment.bundle
+                            enrollment.save()
+
+            if enrollment_id_for_whatsapp:
+                try:
+                    from apps.enrollments.trial_reminders import stamp_and_notify_trial_enrollment
+                    stamp_and_notify_trial_enrollment(enrollment_id_for_whatsapp)
+                except Exception:
+                    logger.exception("Trial WhatsApp notification failed after paid trial charge (non-fatal)")
 
             return {'success': True, 'payment_id': str(payment.id)}
 
@@ -702,6 +811,8 @@ class WidgetCoursesView(APIView):
                 'max_age': course.max_age,
                 'is_adult': course.is_adult,
                 'must_attend_all_lessons': course.must_attend_all_lessons,
+                'trial_lesson_is_paid': course.trial_lesson_is_paid,
+                'trial_lesson_price': str(course.trial_lesson_price) if course.trial_lesson_price is not None else None,
                 'external_link': course.external_link,
                 'lessons_count': len(lessons),
                 'lessons': lessons,
