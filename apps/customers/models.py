@@ -445,6 +445,20 @@ class RecurringPayment(models.Model):
         verbose_name="סכום חיוב",
         help_text="Final recurring charge amount (base_amount - discount_amount)"
     )
+    pending_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="סכום מתוכנן",
+        help_text="סכום חודשי שיחול מהמחזור הבא (לא מהחיוב הנוכחי).",
+    )
+    pending_amount_effective_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="תאריך תחילת סכום מתוכנן",
+        help_text="תאריך שבו הסכום המתוכנן יחליף את הסכום הנוכחי.",
+    )
     discount_details = models.JSONField(
         default=dict,
         blank=True,

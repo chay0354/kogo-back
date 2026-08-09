@@ -1,6 +1,7 @@
 """
 Serializers for Customer models
 """
+from decimal import Decimal
 from rest_framework import serializers
 from datetime import date
 from apps.customers.models import (
@@ -499,7 +500,8 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
         model = RecurringPayment
         fields = [
             'id', 'child', 'child_name', 'initial_payment', 'initial_payment_details',
-            'status', 'amount', 'billing_day', 'start_date', 'end_date',
+            'status', 'amount', 'pending_amount', 'pending_amount_effective_date',
+            'billing_day', 'start_date', 'end_date',
             'next_billing_date', 'last_charge_date', 'cancelled_at',
             'cancellation_reason', 'created_at', 'updated_at'
         ]
@@ -564,6 +566,11 @@ class WebhookCallbackSerializer(serializers.Serializer):
 class RecurringPaymentUpdateSerializer(serializers.Serializer):
     """עדכון מנוי חוזר - Update recurring payment"""
     recalculate_discounts = serializers.BooleanField(default=True)
+
+
+class RecurringPaymentScheduleAmountSerializer(serializers.Serializer):
+    """Schedule a new monthly amount effective from the next billing cycle."""
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
 
 
 class RecurringPaymentCancelSerializer(serializers.Serializer):

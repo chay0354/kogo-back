@@ -21,7 +21,7 @@ from apps.customers.serializers import (
     AdditionalLessonDiscountSerializer,
     PaymentSerializer, RecurringPaymentSerializer,
     PaymentInitiationRequestSerializer, PaymentInitiationResponseSerializer,
-    WebhookCallbackSerializer, RecurringPaymentUpdateSerializer,
+    WebhookCallbackSerializer,     RecurringPaymentUpdateSerializer, RecurringPaymentScheduleAmountSerializer,
     RecurringPaymentCancelSerializer, BusinessCustomerSerializer
 )
 from apps.customers.discount_service import DiscountService
@@ -1118,7 +1118,10 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Filter recurring payments by status and child"""
+        from apps.customers.recurring_amount import apply_due_pending_recurring_amounts
+
         queryset = super().get_queryset()
+        apply_due_pending_recurring_amounts()
 
         # Scoped instructor users: only subscriptions tied to their assigned courses.
         queryset = scope_courses(
@@ -1141,6 +1144,34 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(child_id=child_id)
         
         return queryset
+
+    @action(detail=True, methods=['post'], url_path='schedule-amount')
+    def schedule_amount(self, request, pk=None):
+        """
+        Schedule a new monthly charge amount from the next billing cycle.
+
+        POST /api/v1/customers/recurring-payments/{id}/schedule-amount/
+        Body: { "amount": 150.00 }
+        """
+        from decimal import Decimal
+        from apps.customers.recurring_amount import schedule_recurring_amount
+
+        recurring = self.get_object()
+        serializer = RecurringPaymentScheduleAmountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            updated = schedule_recurring_amount(
+                recurring,
+                Decimal(serializer.validated_data['amount']),
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            RecurringPaymentSerializer(updated).data,
+            status=status.HTTP_200_OK,
+        )
     
     @action(detail=True, methods=['post'])
     def update_subscription(self, request, pk=None):
