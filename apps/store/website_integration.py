@@ -1,0 +1,193 @@
+"""
+Push store stock/price updates to the B2C public website.
+
+The website exposes POST /api/integrations/stock (Bearer INTEGRATION_API_KEY).
+CRM calls it whenever a linked product's stock or sale price changes.
+"""
+from __future__ import annotations
+
+import logging
+from decimal import Decimal
+
+import requests
+from django.conf import settings
+
+from apps.store.models import StoreProduct
+
+logger = logging.getLogger(__name__)
+
+
+def _integration_configured() -> bool:
+    return bool(getattr(settings, 'WEBSITE_INTEGRATION_URL', '') and getattr(settings, 'WEBSITE_INTEGRATION_API_KEY', ''))
+
+
+def product_in_stock(product: StoreProduct) -> bool:
+    return int(product.stock_quantity or 0) > 0
+
+
+def normalize_website_image_url(path: str) -> str:
+    """Turn B2C relative image paths into absolute URLs for CRM storage."""
+    path = (path or '').strip()
+    if not path:
+        return ''
+    if path.startswith(('http://', 'https://')):
+        return path
+    base = getattr(settings, 'WEBSITE_INTEGRATION_URL', '').rstrip('/')
+    if not base:
+        return path
+    return f'{base}{path}' if path.startswith('/') else f'{base}/{path}'
+
+
+def push_product_to_website(product: StoreProduct) -> bool:
+    return push_products_batch_to_website([product]) > 0
+
+
+def push_products_batch_to_website(products: list[StoreProduct]) -> int:
+    """Push stock/price for many linked products in one (or few) website API calls."""
+    if not _integration_configured() or not products:
+        return 0
+
+    items: list[dict] = []
+    seen: set[int] = set()
+    for product in products:
+        legacy_id = product.website_legacy_id
+        if not legacy_id or legacy_id in seen:
+            continue
+        seen.add(int(legacy_id))
+        items.append({
+            'legacy_id': int(legacy_id),
+            'in_stock': product_in_stock(product),
+            'price': float(product.sale_price or Decimal('0')),
+            'purchasable': not product.branch_only,
+        })
+    if not items:
+        return 0
+
+    url = settings.WEBSITE_INTEGRATION_URL.rstrip('/') + '/api/integrations/stock'
+    headers = {
+        'Authorization': f'Bearer {settings.WEBSITE_INTEGRATION_API_KEY}',
+        'Content-Type': 'application/json',
+    }
+    pushed = 0
+    chunk_size = 100
+    for i in range(0, len(items), chunk_size):
+        chunk = items[i:i + chunk_size]
+        try:
+            resp = requests.post(url, json={'items': chunk}, headers=headers, timeout=30)
+            if resp.status_code >= 400:
+                logger.warning('Website batch push failed: HTTP %s %s', resp.status_code, resp.text[:200])
+                continue
+            body = resp.json() if resp.content else {}
+            pushed += int(body.get('updated', len(chunk)))
+        except requests.RequestException as exc:
+            logger.warning('Website batch push error: %s', exc)
+    if pushed:
+        logger.info('Batch-pushed %s product(s) to website', pushed)
+    return pushed
+
+
+def link_product_to_website(*, product_id: str, website_legacy_id: int) -> StoreProduct:
+    """Set website_legacy_id on a CRM product (used by integration API)."""
+    product = StoreProduct.objects.get(pk=product_id, is_active=True)
+    product.website_legacy_id = int(website_legacy_id)
+    product.save(update_fields=['website_legacy_id', 'updated_at'])
+    push_product_to_website(product)
+    return product
+
+
+def sync_products_from_website() -> dict:
+    """
+    Import/update CRM store products from the B2C public shop catalog.
+    Creates missing products; links by website legacy_id; pushes CRM stock/price back.
+    """
+    if not _integration_configured():
+        raise ValueError('Website integration is not configured (WEBSITE_INTEGRATION_URL / API key)')
+
+    base = settings.WEBSITE_INTEGRATION_URL.rstrip('/')
+    created = 0
+    updated = 0
+    errors: list[str] = []
+    to_push: list[StoreProduct] = []
+
+    for brand in ('cogo', 'gaga'):
+        try:
+            resp = requests.get(f'{base}/api/products?brand={brand}', timeout=45)
+            resp.raise_for_status()
+            items = resp.json().get('products') or []
+        except requests.RequestException as exc:
+            errors.append(f'{brand}: fetch failed ({exc})')
+            continue
+
+        default_category = 'געגע' if brand == 'gaga' else 'קוגומלו'
+
+        for wp in items:
+            try:
+                legacy_id = int(wp['id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            name = (wp.get('name') or '').strip()
+            if not name:
+                continue
+
+            price = Decimal(str(wp.get('price') or 0))
+            in_stock = bool(wp.get('inStock', True))
+            images = wp.get('images') or []
+            image_url = normalize_website_image_url((images[0] if images else '') or '')
+            categories = wp.get('categories') or []
+            category = (categories[0] if categories else default_category) or default_category
+            branch_only = not bool(wp.get('purchasable', True))
+
+            product = StoreProduct.objects.filter(website_legacy_id=legacy_id).first()
+            is_new = product is None
+            if is_new:
+                product = (
+                    StoreProduct.objects.filter(
+                        website_legacy_id__isnull=True,
+                        name=name,
+                        is_active=True,
+                    ).first()
+                )
+
+            if product:
+                product.name = name
+                product.website_legacy_id = legacy_id
+                product.category = category
+                if image_url:
+                    product.image_url = image_url
+                product.branch = None
+                product.is_active = True
+                product.branch_only = branch_only
+                product.save()
+                updated += 1
+            else:
+                sale = price if price >= Decimal('0.01') else Decimal('0.01')
+                cost = Decimal('0.00')
+                qty = 10 if in_stock else 0
+                product = StoreProduct.objects.create(
+                    name=name,
+                    category=category,
+                    sale_price=sale,
+                    cost_price=cost,
+                    stock_quantity=qty,
+                    website_legacy_id=legacy_id,
+                    image_url=image_url,
+                    branch=None,
+                    is_active=True,
+                    branch_only=branch_only,
+                    notes=f'יובא מהאתר ({brand})',
+                )
+                created += 1
+
+            to_push.append(product)
+
+    pushed = push_products_batch_to_website(to_push)
+
+    return {
+        'ok': True,
+        'created': created,
+        'updated': updated,
+        'pushed': pushed,
+        'errors': errors,
+        'total_crm': StoreProduct.objects.filter(is_active=True).count(),
+    }

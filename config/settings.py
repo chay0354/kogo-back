@@ -141,6 +141,10 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800  # 50MB
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# B2C public website integration (stock sync + web orders)
+WEBSITE_INTEGRATION_URL = config('WEBSITE_INTEGRATION_URL', default='')
+WEBSITE_INTEGRATION_API_KEY = config('WEBSITE_INTEGRATION_API_KEY', default='')
+
 # CORS Settings
 CORS_ALLOWED_ORIGINS = [
     o.strip()

@@ -6,3 +6,6 @@ class StoreConfig(AppConfig):
     name = 'apps.store'
     verbose_name = 'Store Management'
 
+    def ready(self):
+        import apps.store.signals  # noqa: F401
+

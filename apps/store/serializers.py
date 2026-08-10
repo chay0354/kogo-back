@@ -131,6 +131,8 @@ class StoreProductSerializer(serializers.ModelSerializer):
     is_low_stock = serializers.BooleanField(read_only=True)
     profit_margin = serializers.DecimalField(max_digits=5, decimal_places=2, read_only=True)
     size_stocks = StoreProductSizeSerializer(many=True, required=False)
+    # B2C sync often stores site-relative paths (/images/...) — not strict URLs.
+    image_url = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
     class Meta:
         model = StoreProduct
@@ -140,6 +142,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
             'branch', 'branch_name',
             'stock_quantity', 'min_stock_alert', 'is_low_stock',
             'image_url', 'notes', 'is_active',
+            'website_legacy_id', 'branch_only',
             'profit_margin',
             'size_stocks',
             'created_at', 'updated_at'
@@ -161,6 +164,11 @@ class StoreProductSerializer(serializers.ModelSerializer):
             )
 
         return data
+
+    def validate_image_url(self, value):
+        if value is None:
+            return ''
+        return str(value).strip()
 
     def _sync_size_stocks(self, product, size_stocks):
         """

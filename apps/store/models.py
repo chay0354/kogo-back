@@ -96,6 +96,18 @@ class StoreProduct(models.Model):
         verbose_name="הערות",
         help_text="Internal notes"
     )
+    website_legacy_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="מזהה מוצר באתר",
+        help_text="Legacy product id on the public B2C website (links stock sync)",
+    )
+    branch_only = models.BooleanField(
+        default=False,
+        verbose_name="לסניפים בלבד",
+        help_text="When True, the B2C shop shows this product as branch-only (not purchasable online)",
+    )
     
     # Status
     is_active = models.BooleanField(
@@ -353,6 +365,20 @@ class StoreInvoice(models.Model):
     notes = models.TextField(
         blank=True,
         verbose_name="הערות"
+    )
+    website_order_number = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="מספר הזמנה מהאתר",
+    )
+    website_idempotency_key = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="מפתח כפילות מהאתר",
     )
     
     # Timestamps

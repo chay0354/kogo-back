@@ -313,6 +313,23 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(product)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['post'], url_path='sync-website')
+    def sync_website(self, request):
+        """
+        POST /api/v1/store/products/sync-website/
+        Pull product catalog from the B2C website into CRM (create/link missing items).
+        """
+        from apps.store.website_integration import sync_products_from_website
+
+        try:
+            result = sync_products_from_website()
+            return Response(result)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('sync_website failed')
+            return Response({'error': 'שגיאה בסנכרון מהאתר'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     def destroy(self, request, *args, **kwargs):
         """Soft delete: set is_active=False instead of deleting."""
         instance = self.get_object()

@@ -125,6 +125,7 @@ class DashboardViewSet(viewsets.ViewSet):
             snapshots = snapshots.filter(branch_id__in=scoped_branch_ids)
 
         from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
+        from apps.store.store_finance import aggregate_store_revenue
 
         rental_agg = aggregate_studio_rental_revenue(
             date_from,
@@ -133,7 +134,14 @@ class DashboardViewSet(viewsets.ViewSet):
             None,
             branch_ids=scoped_branch_ids if scoped else None,
         )
+        store_agg = aggregate_store_revenue(
+            date_from,
+            date_to,
+            branch_id if branch_id and branch_id != 'all' else None,
+            branch_ids=scoped_branch_ids if scoped else None,
+        )
         rental_total = rental_agg['total'] or Decimal('0.00')
+        store_total = store_agg['total'] or Decimal('0.00')
 
         kpi_agg = snapshots.aggregate(
             total_revenue=Sum('total_revenue'),
@@ -142,7 +150,7 @@ class DashboardViewSet(viewsets.ViewSet):
             instructor_bonuses=Sum('instructor_bonuses'),
             operational_costs=Sum('operational_costs'),
         )
-        total_revenue = (kpi_agg['total_revenue'] or Decimal('0.00')) + rental_total
+        total_revenue = (kpi_agg['total_revenue'] or Decimal('0.00')) + rental_total + store_total
         total_expenses = kpi_agg['total_expenses'] or Decimal('0.00')
         net_profit = total_revenue - total_expenses
 
@@ -169,6 +177,7 @@ class DashboardViewSet(viewsets.ViewSet):
         for item in branch_data:
             bid = str(item['branch_id'])
             extra = float(rental_agg['by_branch_id'].get(bid, 0) or 0)
+            extra += float(store_agg['by_branch_id'].get(bid, 0) or 0)
             revenue_by_branch.append({
                 'branch_name': item['branch__name'],
                 'branch_id': bid,
@@ -179,7 +188,8 @@ class DashboardViewSet(viewsets.ViewSet):
 
         known_ids = {r['branch_id'] for r in revenue_by_branch}
         missing_branch_ids = [
-            bid for bid in rental_agg['by_branch_id'] if bid not in known_ids
+            bid for bid in set(rental_agg['by_branch_id']) | set(store_agg['by_branch_id'])
+            if bid not in known_ids and bid != '__online__'
         ]
         extra_branches = {
             str(branch.id): branch
@@ -190,12 +200,23 @@ class DashboardViewSet(viewsets.ViewSet):
             if not branch:
                 continue
             extra = float(rental_agg['by_branch_id'].get(bid, 0) or 0)
+            extra += float(store_agg['by_branch_id'].get(bid, 0) or 0)
             revenue_by_branch.append({
                 'branch_name': branch.name,
                 'branch_id': bid,
                 'revenue': extra,
                 'expenses': 0.0,
                 'profit': extra,
+            })
+
+        online_store = float(store_agg['by_branch_id'].get('__online__', 0) or 0)
+        if online_store and (not branch_id or branch_id == 'all'):
+            revenue_by_branch.append({
+                'branch_name': 'חנות באתר (משלוח)',
+                'branch_id': '__online__',
+                'revenue': online_store,
+                'expenses': 0.0,
+                'profit': online_store,
             })
 
         monthly_by_month = {
@@ -209,6 +230,7 @@ class DashboardViewSet(viewsets.ViewSet):
         for month in sorted(months):
             row = monthly_by_month.get(month, {})
             extra_month = float(rental_agg['by_month'].get(month, 0) or 0)
+            extra_month += float(store_agg['by_month'].get(month, 0) or 0)
             monthly_trends.append({
                 'month': month,
                 'revenue': float(row.get('revenue') or 0) + extra_month,

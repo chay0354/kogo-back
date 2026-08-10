@@ -4,6 +4,7 @@ Store URLs - API Route Configuration
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from apps.store import views
+from apps.store import widget_views
 
 # Create router for ViewSets
 router = DefaultRouter()
@@ -15,6 +16,12 @@ router.register(r'sales', views.StoreSaleViewSet, basename='store-sale')
 urlpatterns = [
     # ViewSet routes
     path('', include(router.urls)),
+
+    # B2C website integration (shared secret, not staff auth)
+    path('integration/products/', widget_views.IntegrationProductsView.as_view(), name='store-integration-products'),
+    path('integration/link/', widget_views.IntegrationLinkView.as_view(), name='store-integration-link'),
+    path('widget/stock-check/', widget_views.WidgetStoreStockCheckView.as_view(), name='store-widget-stock-check'),
+    path('widget/order/', widget_views.WidgetStoreWebsiteOrderView.as_view(), name='store-widget-order'),
     
     # Payment endpoints
     path('payment/initiate/', views.initiate_payment, name='store-payment-initiate'),
