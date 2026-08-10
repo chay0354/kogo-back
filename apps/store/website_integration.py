@@ -155,15 +155,23 @@ def sync_products_from_website() -> dict:
                 )
 
             if product:
+                # Only touch catalog metadata — never sale_price on existing rows.
+                # Use update_fields so a concurrent staff price edit is not overwritten
+                # by a stale in-memory sale_price from when this row was loaded.
                 product.name = name
                 product.website_legacy_id = legacy_id
                 product.category = category
-                if image_url:
-                    product.image_url = image_url
                 product.branch = None
                 product.is_active = True
                 product.branch_only = branch_only
-                product.save()
+                update_fields = [
+                    'name', 'website_legacy_id', 'category', 'branch',
+                    'is_active', 'branch_only', 'updated_at',
+                ]
+                if image_url:
+                    product.image_url = image_url
+                    update_fields.append('image_url')
+                product.save(update_fields=update_fields)
                 updated += 1
             else:
                 sale = price if price >= Decimal('0.01') else Decimal('0.01')
