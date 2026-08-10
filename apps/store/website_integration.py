@@ -75,7 +75,12 @@ def push_products_batch_to_website(products: list[StoreProduct]) -> int:
         try:
             resp = requests.post(url, json={'items': chunk}, headers=headers, timeout=30)
             if resp.status_code >= 400:
-                logger.warning('Website batch push failed: HTTP %s %s', resp.status_code, resp.text[:200])
+                logger.error(
+                    'Website batch push failed: HTTP %s legacy_ids=%s body=%s',
+                    resp.status_code,
+                    [i.get('legacy_id') for i in chunk],
+                    resp.text[:500],
+                )
                 continue
             body = resp.json() if resp.content else {}
             pushed += int(body.get('updated', len(chunk)))

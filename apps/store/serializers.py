@@ -214,6 +214,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
             product = super().create(validated_data)
             if size_stocks is not None:
                 self._sync_size_stocks(product, size_stocks)
+        self._push_to_website(product)
         return product
 
     def update(self, instance, validated_data):
@@ -222,7 +223,14 @@ class StoreProductSerializer(serializers.ModelSerializer):
             product = super().update(instance, validated_data)
             if size_stocks is not None:
                 self._sync_size_stocks(product, size_stocks)
+        self._push_to_website(product)
         return product
+
+    def _push_to_website(self, product):
+        if not product.website_legacy_id:
+            return
+        from apps.store.website_integration import push_product_to_website
+        push_product_to_website(product)
 
 
 class StoreSaleSerializer(serializers.ModelSerializer):
