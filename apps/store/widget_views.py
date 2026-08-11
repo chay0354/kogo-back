@@ -403,6 +403,7 @@ class WidgetStorePaymentInitiateView(APIView):
                 invoice = StoreInvoice(
                     customer_name=name,
                     customer_phone=phone,
+                    customer_email=email,
                     total_amount=total,
                     payment_method='credit_card',
                     payment_status='pending',
@@ -487,6 +488,7 @@ class WidgetStoreWebsiteOrderView(APIView):
                 invoice = StoreInvoice(
                     customer_name=name,
                     customer_phone=phone,
+                    customer_email=email,
                     total_amount=total,
                     payment_method='credit_card',
                     # B2C checkout confirms the sale; stock is decremented immediately.
@@ -531,6 +533,12 @@ class WidgetStoreWebsiteOrderView(APIView):
         except Exception as exc:
             logger.exception('Website order failed')
             return Response({'error': 'שגיאה ביצירת ההזמנה'}, status=500)
+
+        try:
+            from apps.store.invoice_email import send_store_invoice_email
+            send_store_invoice_email(invoice)
+        except Exception:
+            logger.exception('Store invoice email failed for %s (non-fatal)', invoice.invoice_number)
 
         return Response({
             'ok': True,

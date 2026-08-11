@@ -1316,6 +1316,7 @@ class PaymentService:
 
             if invoice.website_order_number:
                 from apps.store.website_integration import notify_website_order_status, push_product_to_website
+                from apps.store.invoice_email import send_store_invoice_email
                 notify_website_order_status(
                     website_order_number=invoice.website_order_number,
                     invoice_number=invoice.invoice_number,
@@ -1329,6 +1330,13 @@ class PaymentService:
                         push_product_to_website(product)
                     except StoreProduct.DoesNotExist:
                         pass
+                try:
+                    send_store_invoice_email(invoice)
+                except Exception:
+                    logger.exception(
+                        'Store invoice email failed for %s (non-fatal)',
+                        invoice.invoice_number,
+                    )
 
             return {'success': True, 'invoice_id': str(invoice.id)}
         else:

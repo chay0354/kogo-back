@@ -288,6 +288,12 @@ class StoreInvoice(models.Model):
         verbose_name="טלפון לקוח",
         help_text="For walk-in customers"
     )
+    customer_email = models.EmailField(
+        blank=True,
+        default='',
+        verbose_name="אימייל לקוח",
+        help_text="For walk-in / website customers"
+    )
     
     # Payment details
     total_amount = models.DecimalField(
@@ -379,6 +385,11 @@ class StoreInvoice(models.Model):
         blank=True,
         unique=True,
         verbose_name="מפתח כפילות מהאתר",
+    )
+    invoice_email_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="חשבונית נשלחה במייל",
     )
     
     # Timestamps
