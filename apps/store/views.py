@@ -8,6 +8,7 @@ from collections import defaultdict
 
 from django.db import transaction as db_transaction
 from django.db.models import Sum, F, Q, Count
+from django.http import HttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -441,6 +442,23 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
             return Response({
                 'error': result.get('error', 'שגיאה בזיכוי החשבונית')
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'], url_path='download')
+    def download(self, request, pk=None):
+        """GET /api/v1/store/invoices/{id}/download/ — PDF receipt."""
+        from apps.store.invoice_pdf import generate_store_invoice_pdf
+
+        invoice = self.get_object()
+        try:
+            pdf_bytes = generate_store_invoice_pdf(invoice)
+        except Exception:
+            logger.exception('Store invoice PDF failed for %s', invoice.invoice_number)
+            return Response({'error': 'שגיאה ביצירת הקובץ'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        filename = f'{invoice.invoice_number}.pdf'
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
