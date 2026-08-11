@@ -445,22 +445,17 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='download')
     def download(self, request, pk=None):
-        """GET /api/v1/store/invoices/{id}/download/ — official Tranzila PDF or local receipt."""
+        """GET /api/v1/store/invoices/{id}/download/ — branded store invoice PDF."""
         from apps.store.invoice_pdf import generate_store_invoice_pdf
-        from apps.store.tranzila_store_invoice import get_store_tranzila_pdf_bytes
 
         invoice = self.get_object()
         try:
-            pdf_bytes = get_store_tranzila_pdf_bytes(invoice)
-            if not pdf_bytes:
-                pdf_bytes = generate_store_invoice_pdf(invoice)
+            pdf_bytes = generate_store_invoice_pdf(invoice)
         except Exception:
             logger.exception('Store invoice PDF failed for %s', invoice.invoice_number)
             return Response({'error': 'שגיאה ביצירת הקובץ'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         filename = f'{invoice.invoice_number}.pdf'
-        if invoice.formal_document_id and invoice.formal_document.tranzila_issued:
-            filename = f'{invoice.formal_document.document_number or invoice.invoice_number}.pdf'
         response = HttpResponse(pdf_bytes, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response

@@ -1,5 +1,5 @@
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -45,21 +45,25 @@ class StoreInvoiceEmailTests(TestCase):
         self.assertIn('CG-260811-TEST', text)
         self.assertIn('חולצה', html)
 
-    @patch('apps.store.invoice_email.send_mail')
-    def test_send_marks_sent_at(self, mock_send):
+    @override_settings(RESEND_API_KEY='', EMAIL_HOST='smtp.test', DEFAULT_FROM_EMAIL='noreply@kogomalo.com')
+    @patch('apps.store.invoice_email.EmailMultiAlternatives')
+    def test_send_marks_sent_at(self, mock_email_cls):
+        mock_email_cls.return_value.send = MagicMock(return_value=1)
         ok = send_store_invoice_email(self.invoice)
         self.assertTrue(ok)
-        mock_send.assert_called_once()
+        mock_email_cls.return_value.attach.assert_called_once()
+        mock_email_cls.return_value.send.assert_called_once()
         self.invoice.refresh_from_db()
         self.assertIsNotNone(self.invoice.invoice_email_sent_at)
 
-    @patch('apps.store.invoice_email.send_mail')
-    def test_send_is_idempotent(self, mock_send):
+    @override_settings(RESEND_API_KEY='', EMAIL_HOST='smtp.test', DEFAULT_FROM_EMAIL='noreply@kogomalo.com')
+    @patch('apps.store.invoice_email.EmailMultiAlternatives')
+    def test_send_is_idempotent(self, mock_email_cls):
         self.invoice.invoice_email_sent_at = timezone.now()
         self.invoice.save(update_fields=['invoice_email_sent_at'])
         ok = send_store_invoice_email(self.invoice)
         self.assertTrue(ok)
-        mock_send.assert_not_called()
+        mock_email_cls.assert_not_called()
 
     @override_settings(RESEND_API_KEY='re_test', EMAIL_HOST='')
     @patch('apps.store.invoice_email.send_resend_email')
@@ -67,5 +71,7 @@ class StoreInvoiceEmailTests(TestCase):
         ok = send_store_invoice_email(self.invoice)
         self.assertTrue(ok)
         mock_resend.assert_called_once()
-        self.invoice.refresh_from_db()
-        self.assertIsNotNone(self.invoice.invoice_email_sent_at)
+        attachments = mock_resend.call_args.kwargs.get('attachments') or []
+        self.assertEqual(len(attachments), 1)
+        self.assertTrue(attachments[0]['filename'].endswith('.pdf'))
+        self.assertTrue(attachments[0]['content'])
