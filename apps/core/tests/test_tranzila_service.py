@@ -22,7 +22,8 @@ from apps.core.tranzila_service import TranzilaService
     TRANZILA_SECRET_KEY='test_secret_key',
     TRANZILA_WEBHOOK_SECRET='test_webhook_secret',
     TRANZILA_BASE_URL='https://direct.tranzila.test',
-    TRANZILA_API_BASE_URL='https://api.tranzila.test'
+    TRANZILA_API_BASE_URL='https://api.tranzila.test',
+    TRANZILA_HANDSHAKE_ENABLED=False,
 )
 class TranzilaServicePaymentRequestTest(TestCase):
     """Test TranzilaService payment request generation"""
@@ -59,6 +60,15 @@ class TranzilaServicePaymentRequestTest(TestCase):
         )
         self.assertIn('pdesc=550e8400e29b41d4a716446655440000', url)
         self.assertNotIn('-', url.split('pdesc=')[1].split('&')[0])
+
+    @patch.object(TranzilaService, 'create_handshake_token', return_value='mock_thtk_token')
+    @override_settings(TRANZILA_HANDSHAKE_ENABLED=True)
+    def test_create_payment_request_includes_handshake_token(self, _mock_handshake):
+        """When handshake is enabled, thtk must be passed to the iframe URL."""
+        url = self.service.create_payment_request(amount=Decimal('1.98'))
+        self.assertIn('thtk=mock_thtk_token', url)
+        self.assertIn('new_process=1', url)
+        self.assertIn('sum=1.98', url)
     
     def test_create_recurring_payment_request(self):
         """Test recurring payment request URL generation"""

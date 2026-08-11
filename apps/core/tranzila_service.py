@@ -153,7 +153,7 @@ class TranzilaService:
         """Build payment parameters dict for Tranzila iframe."""
         params = {
             'supplier': self.terminal,
-            'sum': float(amount),
+            'sum': self._format_iframe_sum(amount),
             'currency': self._get_currency_code(currency),
             'tranmode': 'A',
             'trBgColor': 'ffffff',
@@ -186,6 +186,33 @@ class TranzilaService:
         
         params.update(extra_params)
         return params
+
+    def _format_iframe_sum(self, amount: Decimal) -> float:
+        """Tranzila iframe + handshake sum must match exactly (e.g. 1.98)."""
+        return float(amount.quantize(Decimal('0.01')))
+
+    def create_handshake_token(self, amount: Decimal, terminal_name: str | None = None) -> Optional[str]:
+        """
+        Handshake V2 — required when enabled on the Tranzila terminal.
+        Without thtk, iframe payments fail with "Illegal Operation XXXXXX".
+        https://docs.tranzila.com/docs/payments-and-billing/handshake-v2
+        """
+        terminal = terminal_name or self.terminal
+        if not terminal or not self.public_key or not self.secret_key:
+            logger.warning("Handshake skipped: terminal or API keys missing")
+            return None
+
+        payload = {
+            'terminal_name': terminal,
+            'sum': self._format_iframe_sum(amount),
+        }
+        result = self._make_api_request(payload, endpoint='/v2/handshake/create')
+        if isinstance(result, dict) and result.get('error_code') == 0 and result.get('thtk'):
+            self._log_api_call("HANDSHAKE_OK", amount=amount, terminal=terminal)
+            return str(result['thtk'])
+
+        logger.error("Tranzila handshake failed: %s", result)
+        return None
     
     def create_payment_request(
         self,
@@ -202,6 +229,16 @@ class TranzilaService:
         **extra_params
     ) -> str:
         """Create iframe payment URL for one-time payment."""
+        handshake_enabled = getattr(settings, 'TRANZILA_HANDSHAKE_ENABLED', True)
+        if handshake_enabled and self.public_key and self.secret_key:
+            thtk = self.create_handshake_token(amount)
+            if not thtk:
+                raise RuntimeError(
+                    'Tranzila handshake failed. Check TRANZILA_PUBLIC_KEY / TRANZILA_SECRET_KEY '
+                    'and that Handshake is enabled on your terminal.'
+                )
+            extra_params = {**extra_params, 'thtk': thtk, 'new_process': '1'}
+
         params = self._build_payment_params(
             amount=amount,
             currency=currency,

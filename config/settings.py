@@ -226,6 +226,8 @@ TRANZILA_WEBHOOK_SECRET = config('TRANZILA_WEBHOOK_SECRET', default='mock-webhoo
 TRANZILA_API_BASE_URL = config('TRANZILA_API_BASE_URL', default='https://api.tranzila.com')
 TRANZILA_BASE_URL = config('TRANZILA_BASE_URL', default='https://direct.tranzila.com')  # Iframe endpoint
 TRANZILA_ENVIRONMENT = config('TRANZILA_ENVIRONMENT', default='development')
+# When True (default), calls POST /v2/handshake/create and passes thtk to iframe (required on most terminals).
+TRANZILA_HANDSHAKE_ENABLED = config('TRANZILA_HANDSHAKE_ENABLED', default=True, cast=bool)
 
 # Tranzila billing / document API (billing5.tranzila.com)
 # Leave TRANZILA_BILLING_TERMINAL empty until activated by Tranzila — document issuance will be skipped.
