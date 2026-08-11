@@ -10,6 +10,7 @@ from apps.customers.models import (
 )
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
+from apps.core.models import Branch
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 
 
@@ -580,14 +581,21 @@ class RecurringPaymentCancelSerializer(serializers.Serializer):
 
 class BusinessCustomerSerializer(serializers.ModelSerializer):
     full_name = serializers.ReadOnlyField()
+    branch_id = serializers.PrimaryKeyRelatedField(
+        source='branch',
+        queryset=Branch.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
 
     class Meta:
         model = BusinessCustomer
         fields = [
             'id', 'first_name', 'last_name', 'full_name',
             'email', 'phone', 'id_number', 'company_number', 'address',
-            'business_type', 'category', 'notes',
+            'business_type', 'category', 'branch_id', 'branch_name', 'notes',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'full_name', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'full_name', 'branch_name', 'created_at', 'updated_at']
 

@@ -699,6 +699,14 @@ class BusinessCustomer(models.Model):
     address = models.TextField(blank=True, verbose_name="כתובת")
     business_type = models.CharField(max_length=100, blank=True, verbose_name="שיוך לעסק")
     category = models.CharField(max_length=100, blank=True, verbose_name="קטגוריה")
+    branch = models.ForeignKey(
+        'core.Branch',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='business_customers',
+        verbose_name="שיוך לסניף",
+    )
     notes = models.TextField(blank=True, verbose_name="הערות")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
