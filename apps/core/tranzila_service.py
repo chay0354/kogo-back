@@ -11,9 +11,11 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import requests
 import secrets
 import time
+import uuid
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlencode
 from decimal import Decimal
@@ -39,6 +41,33 @@ TRANZILA_RESPONSE_MESSAGES: dict[str, str] = {
     '955': 'שגיאת סטטוס תשלום',
     '959': 'התשלום לא הושלם בהצלחה',
 }
+
+
+def pdesc_for_tranzila(transaction_id: str) -> str:
+    """
+    Tranzila pdesc must be alphanumeric — UUIDs are sent without hyphens.
+    Webhook handlers should use invoice_id_from_pdesc() to decode.
+    """
+    raw = str(transaction_id or '').strip()
+    if not raw:
+        return ''
+    try:
+        return uuid.UUID(raw).hex
+    except ValueError:
+        return re.sub(r'[^a-zA-Z0-9]', '', raw)[:64]
+
+
+def invoice_id_from_pdesc(pdesc: str) -> str:
+    """Restore a Django UUID string from Tranzila pdesc (hex or standard UUID)."""
+    raw = (pdesc or '').strip()
+    if not raw:
+        return ''
+    try:
+        if len(raw) == 32 and '-' not in raw:
+            return str(uuid.UUID(hex=raw))
+        return str(uuid.UUID(raw))
+    except ValueError:
+        return raw
 
 
 class TranzilaService:
@@ -153,7 +182,7 @@ class TranzilaService:
             params['notify_url_address'] = callback_url
         if transaction_id:
             params['cred_type'] = '1'
-            params['pdesc'] = transaction_id
+            params['pdesc'] = pdesc_for_tranzila(transaction_id)
         
         params.update(extra_params)
         return params

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from decimal import Decimal
 
 from django.conf import settings
@@ -326,10 +327,10 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
     iframe_url = payment_service.tranzila_service.create_payment_request(
         amount=invoice.total_amount,
         currency='ILS',
-        description=f"הזמנה מהאתר {invoice.website_order_number or invoice.invoice_number}",
+        description=f"Website order {invoice.website_order_number or invoice.invoice_number}",
         customer_name=name,
         customer_email=email,
-        customer_phone=phone,
+        customer_phone=re.sub(r'\D', '', phone)[:15],
         success_url=success_url,
         error_url=error_url,
         callback_url=callback_url,
@@ -399,6 +400,9 @@ class WidgetStorePaymentInitiateView(APIView):
         try:
             with transaction.atomic():
                 total, resolved, product_items = _resolve_website_cart_items(items)
+
+                if total < Decimal('1.00'):
+                    raise ValueError('סכום מינימלי לתשלום מקוון: ₪1')
 
                 invoice = StoreInvoice(
                     customer_name=name,

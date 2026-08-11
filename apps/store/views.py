@@ -890,7 +890,8 @@ def payment_callback(request):
         tranzila_service = payment_service.tranzila_service
         parsed_response = tranzila_service.parse_webhook_response(request.data)
 
-        invoice_id = request.data.get('pdesc', '')
+        from apps.core.tranzila_service import invoice_id_from_pdesc
+        invoice_id = invoice_id_from_pdesc(request.data.get('pdesc', ''))
 
         logger.info("[STORE WEBHOOK] parsed invoice_id=%s response=%s", invoice_id, parsed_response)
 

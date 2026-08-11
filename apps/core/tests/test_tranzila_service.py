@@ -49,6 +49,16 @@ class TranzilaServicePaymentRequestTest(TestCase):
         self.assertIn('sum=350', url)
         self.assertIn('currency=1', url)  # ILS code
         self.assertIn('pdesc=test_txn_123', url)
+
+    def test_create_payment_request_uuid_pdesc_is_hex(self):
+        """UUID invoice ids must be sent without hyphens (Tranzila pdesc restriction)."""
+        uid = '550e8400-e29b-41d4-a716-446655440000'
+        url = self.service.create_payment_request(
+            amount=Decimal('100.00'),
+            transaction_id=uid,
+        )
+        self.assertIn('pdesc=550e8400e29b41d4a716446655440000', url)
+        self.assertNotIn('-', url.split('pdesc=')[1].split('&')[0])
     
     def test_create_recurring_payment_request(self):
         """Test recurring payment request URL generation"""
