@@ -169,8 +169,8 @@ def get_store_tranzila_pdf_bytes(invoice: StoreInvoice) -> bytes | None:
     if not formal or not formal.tranzila_issued or not formal.tranzila_doc_id:
         return None
 
-    terminal = (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
-    if not terminal:
+    terminal = _billing_terminal()
+    if not terminal or terminal == 'mock-terminal':
         return None
 
     return TranzilaService().get_formal_document_pdf(terminal, formal.tranzila_doc_id)
