@@ -26,7 +26,11 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
     """Return (subject, plain_text, html) for a completed store invoice."""
     customer = (invoice.customer_name or 'לקוח/ה').strip()
     order_ref = invoice.website_order_number or invoice.invoice_number
+    tranzila_ref = (invoice.tranzila_document_number or '').strip()
+    pdf_url = (invoice.pdf_url or '').strip()
     subject = f'חשבונית {invoice.invoice_number} — הזמנה {order_ref}'
+    if tranzila_ref:
+        subject = f'חשבונית מס {tranzila_ref} — הזמנה {order_ref}'
 
     lines = []
     html_rows = []
@@ -53,6 +57,13 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
     issue = timezone.localtime(invoice.issue_date).strftime('%d/%m/%Y %H:%M')
     txn = (invoice.tranzila_confirmation_code or invoice.tranzila_transaction_id or '').strip()
     txn_line = f'\nאישור תשלום: {txn}' if txn else ''
+    tranzila_line = f'\nמספר חשבונית מס (טרנזילה): {tranzila_ref}' if tranzila_ref else ''
+    pdf_text = f'\n\nלהורדת החשבונית הרשמית (PDF):\n{pdf_url}' if pdf_url else ''
+    pdf_html = (
+        f'<p style="margin-top:20px"><a href="{pdf_url}" style="color:#303094;font-weight:bold">'
+        f'להורדת חשבונית מס רשמית (PDF)</a></p>'
+        if pdf_url else ''
+    )
 
     text = (
         f'שלום {customer},\n\n'
@@ -60,18 +71,21 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
         f'מספר חשבונית: {invoice.invoice_number}\n'
         f'מספר הזמנה: {order_ref}\n'
         f'תאריך: {issue}\n'
+        f'{tranzila_line}'
         f'{txn_line}\n\n'
         f'פריטים:\n'
         + '\n'.join(lines)
-        + f'\n\nסה"כ ששולם: ₪{invoice.total_amount:.2f}\n\n'
-        f'בברכה,\nצוות קוגומלו'
+        + f'\n\nסה"כ ששולם: ₪{invoice.total_amount:.2f}'
+        + pdf_text
+        + '\n\nבברכה,\nצוות קוגומלו'
     )
 
     html = f'''
 <div dir="rtl" style="font-family:Arial,sans-serif;color:#25326a;max-width:620px;margin:auto">
-  <h2 style="color:#303094">חשבונית {invoice.invoice_number}</h2>
+  <h2 style="color:#303094">חשבונית {tranzila_ref or invoice.invoice_number}</h2>
   <p style="color:#888;margin:0 0 16px">הזמנה {order_ref} · {issue}</p>
   <p style="line-height:1.7">שלום <b>{customer}</b>,<br>תודה על הרכישה בחנות קוגומלו!</p>
+  {"<p><b>מספר חשבונית מס:</b> " + tranzila_ref + "</p>" if tranzila_ref else ""}
   {"<p><b>אישור תשלום:</b> " + txn + "</p>" if txn else ""}
   <table style="width:100%;border-collapse:collapse;margin-top:12px">
     <thead>
@@ -86,6 +100,7 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
   <p style="font-size:18px;font-weight:bold;margin-top:16px">
     סה"כ ששולם: <span dir="ltr">₪{invoice.total_amount:.2f}</span>
   </p>
+  {pdf_html}
   <p style="color:#666;margin-top:24px">בברכה,<br>צוות קוגומלו</p>
 </div>'''
 

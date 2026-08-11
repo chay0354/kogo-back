@@ -8,7 +8,7 @@ from collections import defaultdict
 
 from django.db import transaction as db_transaction
 from django.db.models import Sum, F, Q, Count
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -449,6 +449,9 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
         from apps.store.invoice_pdf import generate_store_invoice_pdf
 
         invoice = self.get_object()
+        if invoice.pdf_url:
+            return HttpResponseRedirect(invoice.pdf_url)
+
         try:
             pdf_bytes = generate_store_invoice_pdf(invoice)
         except Exception:

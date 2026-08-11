@@ -391,6 +391,35 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="חשבונית נשלחה במייל",
     )
+
+    # Tranzila formal document (tax invoice / receipt from billing API)
+    tranzila_doc_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        verbose_name="מזהה מסמך טרנזילה",
+    )
+    tranzila_retrieval_key = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        verbose_name="מפתח אחזור טרנזילה",
+    )
+    tranzila_document_number = models.CharField(
+        max_length=50,
+        blank=True,
+        default='',
+        verbose_name="מספר מסמך טרנזילה",
+    )
+    pdf_url = models.URLField(
+        blank=True,
+        default='',
+        verbose_name="קישור PDF טרנזילה",
+    )
+    tranzila_issued = models.BooleanField(
+        default=False,
+        verbose_name="הופק בטרנזילה",
+    )
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")

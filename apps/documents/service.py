@@ -304,7 +304,7 @@ def _attempt_tranzila(doc: FormalDocument) -> None:
             vat_percent=float(doc.vat_percent) if not doc.vat_exempt else 0,
         )
 
-        if result.get('success') or result.get('doc_id'):
+        if result.get('success'):
             doc.tranzila_doc_id = str(result.get('doc_id', ''))
             doc.tranzila_retrieval_key = str(result.get('retrieval_key', ''))
             doc.pdf_url = result.get('pdf_url', '')
