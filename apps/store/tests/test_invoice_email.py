@@ -60,3 +60,12 @@ class StoreInvoiceEmailTests(TestCase):
         ok = send_store_invoice_email(self.invoice)
         self.assertTrue(ok)
         mock_send.assert_not_called()
+
+    @override_settings(RESEND_API_KEY='re_test', EMAIL_HOST='')
+    @patch('apps.store.invoice_email.send_resend_email')
+    def test_send_via_resend(self, mock_resend):
+        ok = send_store_invoice_email(self.invoice)
+        self.assertTrue(ok)
+        mock_resend.assert_called_once()
+        self.invoice.refresh_from_db()
+        self.assertIsNotNone(self.invoice.invoice_email_sent_at)

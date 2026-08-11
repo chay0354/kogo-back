@@ -9,12 +9,15 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone
 
+from apps.core.resend_email import resend_configured, send_resend_email
 from apps.store.models import StoreInvoice
 
 logger = logging.getLogger(__name__)
 
 
 def _email_configured() -> bool:
+    if resend_configured():
+        return True
     host = getattr(settings, 'EMAIL_HOST', '') or ''
     return bool(host.strip())
 
@@ -110,7 +113,7 @@ def send_store_invoice_email(invoice: StoreInvoice) -> bool:
 
     if not _email_configured():
         logger.warning(
-            'EMAIL_HOST not configured — cannot send invoice %s to %s',
+            'No email provider configured — cannot send invoice %s to %s',
             invoice.invoice_number,
             email,
         )
@@ -123,16 +126,19 @@ def send_store_invoice_email(invoice: StoreInvoice) -> bool:
     )
 
     subject, text, html = build_store_invoice_email(invoice)
-    from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
 
-    send_mail(
-        subject,
-        text,
-        from_email,
-        [email],
-        html_message=html,
-        fail_silently=False,
-    )
+    if resend_configured():
+        send_resend_email(to=[email], subject=subject, text=text, html=html)
+    else:
+        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
+        send_mail(
+            subject,
+            text,
+            from_email,
+            [email],
+            html_message=html,
+            fail_silently=False,
+        )
 
     StoreInvoice.objects.filter(pk=invoice.pk).update(invoice_email_sent_at=timezone.now())
     logger.info('Sent store invoice email %s → %s', invoice.invoice_number, email)
