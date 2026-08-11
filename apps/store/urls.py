@@ -20,6 +20,7 @@ urlpatterns = [
     # B2C website integration (shared secret, not staff auth)
     path('integration/products/', widget_views.IntegrationProductsView.as_view(), name='store-integration-products'),
     path('integration/link/', widget_views.IntegrationLinkView.as_view(), name='store-integration-link'),
+    path('integration/update/', widget_views.IntegrationProductUpdateView.as_view(), name='store-integration-update'),
     path('widget/stock-check/', widget_views.WidgetStoreStockCheckView.as_view(), name='store-widget-stock-check'),
     path('widget/order/', widget_views.WidgetStoreWebsiteOrderView.as_view(), name='store-widget-order'),
     

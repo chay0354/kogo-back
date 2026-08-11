@@ -10,6 +10,7 @@ import logging
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -18,7 +19,13 @@ from rest_framework.views import APIView
 
 from apps.store.models import StoreProduct, StoreInvoice, StoreSale
 from apps.store.stock_utils import decrement_product_stock, store_line_item_branch_id
-from apps.store.website_integration import product_in_stock, link_product_to_website, push_product_to_website
+from apps.store.website_integration import (
+    link_product_to_website,
+    product_in_stock,
+    push_product_to_website,
+    unlink_product_from_website,
+    update_product_from_website,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +97,10 @@ class IntegrationLinkView(APIView):
     """
     POST /api/v1/store/integration/link/
     Body: { "crm_product_id": "<uuid>", "website_legacy_id": 12345 }
+
+    An explicit `"website_legacy_id": null` unlinks the product. The key must
+    still be present — treating "absent" as "unlink" would turn a malformed
+    request into silent data loss.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -98,17 +109,86 @@ class IntegrationLinkView(APIView):
         if not _check_integration_key(request):
             return _integration_denied()
         crm_product_id = (request.data.get('crm_product_id') or '').strip()
+        if not crm_product_id:
+            return Response({'error': 'crm_product_id is required'}, status=400)
+        if 'website_legacy_id' not in request.data:
+            return Response({'error': 'website_legacy_id is required (null to unlink)'}, status=400)
+
         website_legacy_id = request.data.get('website_legacy_id')
-        if not crm_product_id or website_legacy_id is None:
-            return Response({'error': 'crm_product_id and website_legacy_id are required'}, status=400)
         try:
-            website_legacy_id = int(website_legacy_id)
+            if website_legacy_id is None:
+                product = unlink_product_from_website(product_id=crm_product_id)
+            else:
+                product = link_product_to_website(
+                    product_id=crm_product_id,
+                    website_legacy_id=int(website_legacy_id),
+                )
         except (TypeError, ValueError):
-            return Response({'error': 'website_legacy_id must be an integer'}, status=400)
-        try:
-            product = link_product_to_website(product_id=crm_product_id, website_legacy_id=website_legacy_id)
+            return Response({'error': 'website_legacy_id must be an integer or null'}, status=400)
         except StoreProduct.DoesNotExist:
             return Response({'error': 'product not found'}, status=404)
+        except ValidationError:
+            return Response({'error': 'crm_product_id is not a valid id'}, status=400)
+        return Response({'ok': True, 'product': _serialize_integration_product(product)})
+
+
+class IntegrationProductUpdateView(APIView):
+    """
+    POST /api/v1/store/integration/update/
+    Body: {
+      "website_legacy_id": 12570,
+      "sale_price": 169,
+      "branch_only": false,
+      "in_stock": true
+    }
+    B2C admin pushes price/stock flags here; CRM post_save mirrors them to the site.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not _check_integration_key(request):
+            return _integration_denied()
+
+        website_legacy_id = request.data.get('website_legacy_id')
+        crm_product_id = (request.data.get('crm_product_id') or '').strip() or None
+        if website_legacy_id is None and not crm_product_id:
+            return Response({'error': 'website_legacy_id or crm_product_id is required'}, status=400)
+
+        sale_price = request.data.get('sale_price')
+        branch_only = request.data.get('branch_only')
+        in_stock = request.data.get('in_stock')
+        image_url = request.data.get('image_url')
+
+        if sale_price is None and branch_only is None and in_stock is None and not image_url:
+            return Response({'error': 'nothing to update'}, status=400)
+
+        try:
+            if website_legacy_id is not None:
+                website_legacy_id = int(website_legacy_id)
+        except (TypeError, ValueError):
+            return Response({'error': 'website_legacy_id must be an integer'}, status=400)
+
+        try:
+            if sale_price is not None:
+                sale_price = Decimal(str(sale_price))
+        except (TypeError, ValueError):
+            return Response({'error': 'sale_price must be a number'}, status=400)
+
+        try:
+            product = update_product_from_website(
+                website_legacy_id=website_legacy_id,
+                crm_product_id=crm_product_id,
+                sale_price=sale_price,
+                branch_only=branch_only if branch_only is not None else None,
+                in_stock=in_stock if in_stock is not None else None,
+                image_url=(image_url or '').strip() or None,
+            )
+        except StoreProduct.DoesNotExist:
+            return Response({'error': 'product not found'}, status=404)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=400)
+
         return Response({'ok': True, 'product': _serialize_integration_product(product)})
 
 

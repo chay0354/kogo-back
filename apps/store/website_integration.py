@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import requests
 from django.conf import settings
+from django.db import transaction
 
 from apps.store.models import StoreProduct
 
@@ -93,10 +94,73 @@ def push_products_batch_to_website(products: list[StoreProduct]) -> int:
 
 def link_product_to_website(*, product_id: str, website_legacy_id: int) -> StoreProduct:
     """Set website_legacy_id on a CRM product (used by integration API)."""
-    product = StoreProduct.objects.get(pk=product_id, is_active=True)
-    product.website_legacy_id = int(website_legacy_id)
-    product.save(update_fields=['website_legacy_id', 'updated_at'])
+    legacy_id = int(website_legacy_id)
+    with transaction.atomic():
+        product = StoreProduct.objects.get(pk=product_id, is_active=True)
+        # website_legacy_id is unique. Re-pointing a website product at a
+        # different CRM product would otherwise hit IntegrityError, so release
+        # the id from whoever holds it first.
+        StoreProduct.objects.filter(website_legacy_id=legacy_id).exclude(pk=product.pk).update(
+            website_legacy_id=None
+        )
+        product.website_legacy_id = legacy_id
+        product.save(update_fields=['website_legacy_id', 'updated_at'])
+    # Outside the transaction: an outbound HTTP call must not hold row locks.
     push_product_to_website(product)
+    return product
+
+
+def unlink_product_from_website(*, product_id: str) -> StoreProduct:
+    """Clear website_legacy_id so the CRM product is no longer synced to the site."""
+    product = StoreProduct.objects.get(pk=product_id)
+    if product.website_legacy_id is not None:
+        product.website_legacy_id = None
+        product.save(update_fields=['website_legacy_id', 'updated_at'])
+    return product
+
+
+def update_product_from_website(
+    *,
+    website_legacy_id: int | None = None,
+    crm_product_id: str | None = None,
+    sale_price: Decimal | float | None = None,
+    branch_only: bool | None = None,
+    in_stock: bool | None = None,
+    image_url: str | None = None,
+) -> StoreProduct:
+    """
+    Apply price/stock flags pushed from the B2C admin for a linked product.
+    post_save pushes the same values back to the website so both sides stay aligned.
+    """
+    if website_legacy_id is not None:
+        product = StoreProduct.objects.get(website_legacy_id=int(website_legacy_id), is_active=True)
+    elif crm_product_id:
+        product = StoreProduct.objects.get(pk=crm_product_id, is_active=True)
+    else:
+        raise ValueError('website_legacy_id or crm_product_id is required')
+
+    update_fields: list[str] = []
+    if sale_price is not None:
+        product.sale_price = Decimal(str(sale_price))
+        update_fields.append('sale_price')
+    if branch_only is not None:
+        product.branch_only = bool(branch_only)
+        update_fields.append('branch_only')
+    if in_stock is not None and not product.has_per_size_stock():
+        if not in_stock and int(product.stock_quantity or 0) > 0:
+            product.stock_quantity = 0
+            update_fields.append('stock_quantity')
+    if image_url:
+        normalized = normalize_website_image_url(image_url)
+        if normalized:
+            product.image_url = normalized
+            update_fields.append('image_url')
+
+    if not update_fields:
+        return product
+
+    update_fields.append('updated_at')
+    product.save(update_fields=update_fields)
     return product
 
 
