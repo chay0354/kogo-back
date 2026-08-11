@@ -268,3 +268,47 @@ def sync_products_from_website() -> dict:
         'errors': errors,
         'total_crm': StoreProduct.objects.filter(is_active=True).count(),
     }
+
+
+def notify_website_order_status(
+    *,
+    website_order_number: str,
+    invoice_number: str,
+    invoice_id: str,
+    status: str,
+    provider_txn_id: str = '',
+) -> bool:
+    """
+    Tell the B2C site that a website order was paid or failed (after Tranzila webhook).
+    POST /api/integrations/order-paid on the public shop.
+    """
+    if not _integration_configured() or not website_order_number:
+        return False
+
+    url = settings.WEBSITE_INTEGRATION_URL.rstrip('/') + '/api/integrations/order-paid'
+    headers = {
+        'Authorization': f'Bearer {settings.WEBSITE_INTEGRATION_API_KEY}',
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'website_order_number': website_order_number,
+        'invoice_number': invoice_number,
+        'invoice_id': invoice_id,
+        'status': status,
+        'provider_txn_id': provider_txn_id or None,
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code >= 400:
+            logger.error(
+                'Website order status push failed: HTTP %s order=%s body=%s',
+                resp.status_code,
+                website_order_number,
+                resp.text[:500],
+            )
+            return False
+        logger.info('Notified website order %s → %s', website_order_number, status)
+        return True
+    except requests.RequestException as exc:
+        logger.warning('Website order status push error for %s: %s', website_order_number, exc)
+        return False

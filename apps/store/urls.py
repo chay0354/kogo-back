@@ -23,6 +23,7 @@ urlpatterns = [
     path('integration/update/', widget_views.IntegrationProductUpdateView.as_view(), name='store-integration-update'),
     path('widget/stock-check/', widget_views.WidgetStoreStockCheckView.as_view(), name='store-widget-stock-check'),
     path('widget/order/', widget_views.WidgetStoreWebsiteOrderView.as_view(), name='store-widget-order'),
+    path('widget/payment/initiate/', widget_views.WidgetStorePaymentInitiateView.as_view(), name='store-widget-payment-initiate'),
     
     # Payment endpoints
     path('payment/initiate/', views.initiate_payment, name='store-payment-initiate'),

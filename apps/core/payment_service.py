@@ -1313,12 +1313,39 @@ class PaymentService:
                     _decrement_product_stock(product, item)
 
             logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
+
+            if invoice.website_order_number:
+                from apps.store.website_integration import notify_website_order_status, push_product_to_website
+                notify_website_order_status(
+                    website_order_number=invoice.website_order_number,
+                    invoice_number=invoice.invoice_number,
+                    invoice_id=str(invoice.id),
+                    status='paid',
+                    provider_txn_id=tranzila_response.get('transaction_id', ''),
+                )
+                for item in product_items:
+                    try:
+                        product = StoreProduct.objects.get(id=item['product_id'])
+                        push_product_to_website(product)
+                    except StoreProduct.DoesNotExist:
+                        pass
+
             return {'success': True, 'invoice_id': str(invoice.id)}
         else:
             # Mark as failed
             invoice.payment_status = 'failed'
             invoice.notes = f"Payment failed: {tranzila_response.get('error_message', 'Unknown')}"
             invoice.save()
+
+            if invoice.website_order_number:
+                from apps.store.website_integration import notify_website_order_status
+                notify_website_order_status(
+                    website_order_number=invoice.website_order_number,
+                    invoice_number=invoice.invoice_number,
+                    invoice_id=str(invoice.id),
+                    status='failed',
+                    provider_txn_id=tranzila_response.get('transaction_id', ''),
+                )
             
             return {
                 'success': False,

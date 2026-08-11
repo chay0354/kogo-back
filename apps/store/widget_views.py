@@ -6,6 +6,7 @@ same pattern as the registration widget (AllowAny + explicit key check).
 """
 from __future__ import annotations
 
+import json
 import logging
 from decimal import Decimal
 
@@ -254,7 +255,179 @@ class WidgetStoreStockCheckView(APIView):
                 'name': product.name,
             })
 
-        return Response({'ok': all_ok, 'items': results})
+        return Response({'ok': True, 'items': results})
+
+
+def _resolve_website_cart_items(items):
+    """
+    Resolve B2C legacy_id lines to CRM products under row lock.
+    Returns (total, resolved_lines, webhook_product_items).
+    """
+    total = Decimal('0.00')
+    resolved = []
+    product_items = []
+    for raw in items:
+        legacy_id = int(raw['legacy_id'])
+        qty = int(raw.get('quantity') or raw.get('qty') or 0)
+        variant = (raw.get('variant') or raw.get('size') or '').strip()
+        if qty <= 0:
+            raise ValueError('כמות לא תקינה')
+        product = (
+            StoreProduct.objects.select_for_update()
+            .prefetch_related('size_stocks')
+            .filter(website_legacy_id=legacy_id, is_active=True)
+            .first()
+        )
+        if not product:
+            raise ValueError(f'מוצר {legacy_id} לא מקושר ל-CRM')
+        if int(product.stock_quantity or 0) < qty:
+            raise ValueError(f'אין מספיק מלאי עבור {product.name}')
+        line_total = product.sale_price * qty
+        total += line_total
+        resolved.append({
+            'product': product,
+            'quantity': qty,
+            'size': variant,
+            'unit_price': product.sale_price,
+            'line_total': line_total,
+        })
+        product_items.append({
+            'product_id': str(product.id),
+            'quantity': qty,
+            'size': variant,
+            'branch': 'delivery',
+        })
+    return total, resolved, product_items
+
+
+def _website_payment_initiate_response(invoice, *, callback_url, success_url, error_url, customer, status=200):
+    """Build Tranzila iframe response for a pending website invoice (or short-circuit if already paid)."""
+    from apps.core.payment_service import PaymentService
+
+    if invoice.payment_status == 'completed':
+        return Response({
+            'ok': True,
+            'invoice_number': invoice.invoice_number,
+            'invoice_id': str(invoice.id),
+            'already_paid': True,
+        }, status=status)
+
+    if invoice.payment_status == 'failed':
+        return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
+
+    if not callback_url:
+        return Response({'error': 'callback_url required'}, status=400)
+
+    payment_service = PaymentService()
+    name = (customer.get('name') or invoice.customer_name or '').strip()
+    email = (customer.get('email') or '').strip()
+    phone = (customer.get('phone') or invoice.customer_phone or '').strip()
+
+    iframe_url = payment_service.tranzila_service.create_payment_request(
+        amount=invoice.total_amount,
+        currency='ILS',
+        description=f"הזמנה מהאתר {invoice.website_order_number or invoice.invoice_number}",
+        customer_name=name,
+        customer_email=email,
+        customer_phone=phone,
+        success_url=success_url,
+        error_url=error_url,
+        callback_url=callback_url,
+        transaction_id=str(invoice.id),
+    )
+
+    return Response({
+        'ok': True,
+        'iframe_url': iframe_url,
+        'invoice_number': invoice.invoice_number,
+        'invoice_id': str(invoice.id),
+    }, status=status)
+
+
+class WidgetStorePaymentInitiateView(APIView):
+    """
+    POST /api/v1/store/widget/payment/initiate/
+    Pending CRM invoice + Tranzila payment URL for a B2C website checkout.
+    Stock is decremented only after the Tranzila webhook confirms payment.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not _check_integration_key(request):
+            return _integration_denied()
+
+        idempotency_key = (request.data.get('idempotency_key') or '').strip() or None
+        website_order_number = (request.data.get('website_order_number') or '').strip() or None
+        customer = request.data.get('customer') or {}
+        items = request.data.get('items') or []
+        callback_url = (request.data.get('callback_url') or '').strip()
+        success_url = (request.data.get('success_url') or '').strip()
+        error_url = (request.data.get('error_url') or '').strip()
+
+        if not items:
+            return Response({'error': 'items required'}, status=400)
+        if not website_order_number:
+            return Response({'error': 'website_order_number required'}, status=400)
+
+        if idempotency_key:
+            existing = StoreInvoice.objects.filter(website_idempotency_key=idempotency_key).first()
+            if existing:
+                return _website_payment_initiate_response(
+                    existing,
+                    callback_url=callback_url,
+                    success_url=success_url,
+                    error_url=error_url,
+                    customer=customer,
+                )
+
+        if website_order_number:
+            existing = StoreInvoice.objects.filter(website_order_number=website_order_number).first()
+            if existing:
+                return _website_payment_initiate_response(
+                    existing,
+                    callback_url=callback_url,
+                    success_url=success_url,
+                    error_url=error_url,
+                    customer=customer,
+                )
+
+        name = (customer.get('name') or '').strip()
+        phone = (customer.get('phone') or '').strip()
+        email = (customer.get('email') or '').strip()
+
+        try:
+            with transaction.atomic():
+                total, resolved, product_items = _resolve_website_cart_items(items)
+
+                invoice = StoreInvoice(
+                    customer_name=name,
+                    customer_phone=phone,
+                    total_amount=total,
+                    payment_method='credit_card',
+                    payment_status='pending',
+                    charged_with_token=False,
+                    website_order_number=website_order_number,
+                    website_idempotency_key=idempotency_key,
+                    notes=json.dumps(product_items),
+                    branch=resolved[0]['product'].branch if resolved else None,
+                )
+                invoice.save()
+
+        except (KeyError, TypeError, ValueError) as exc:
+            return Response({'error': str(exc)}, status=400)
+        except Exception:
+            logger.exception('Website payment initiate failed')
+            return Response({'error': 'שגיאה בפתיחת התשלום'}, status=500)
+
+        return _website_payment_initiate_response(
+            invoice,
+            callback_url=callback_url,
+            success_url=success_url,
+            error_url=error_url,
+            customer=customer,
+            status=201,
+        )
 
 
 class WidgetStoreWebsiteOrderView(APIView):
@@ -303,33 +476,7 @@ class WidgetStoreWebsiteOrderView(APIView):
 
         try:
             with transaction.atomic():
-                total = Decimal('0.00')
-                resolved = []
-                for raw in items:
-                    legacy_id = int(raw['legacy_id'])
-                    qty = int(raw.get('quantity') or raw.get('qty') or 0)
-                    variant = (raw.get('variant') or raw.get('size') or '').strip()
-                    if qty <= 0:
-                        raise ValueError('כמות לא תקינה')
-                    product = (
-                        StoreProduct.objects.select_for_update()
-                        .prefetch_related('size_stocks')
-                        .filter(website_legacy_id=legacy_id, is_active=True)
-                        .first()
-                    )
-                    if not product:
-                        raise ValueError(f'מוצר {legacy_id} לא מקושר ל-CRM')
-                    if int(product.stock_quantity or 0) < qty:
-                        raise ValueError(f'אין מספיק מלאי עבור {product.name}')
-                    line_total = product.sale_price * qty
-                    total += line_total
-                    resolved.append({
-                        'product': product,
-                        'quantity': qty,
-                        'size': variant,
-                        'unit_price': product.sale_price,
-                        'line_total': line_total,
-                    })
+                total, resolved, _product_items = _resolve_website_cart_items(items)
 
                 notes_parts = ['הזמנה מהאתר']
                 if email:
