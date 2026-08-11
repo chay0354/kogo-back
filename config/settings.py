@@ -233,7 +233,6 @@ TRANZILA_HANDSHAKE_ENABLED = config('TRANZILA_HANDSHAKE_ENABLED', default=True, 
 # Leave TRANZILA_BILLING_TERMINAL empty until activated by Tranzila — document issuance will be skipped.
 TRANZILA_BILLING_TERMINAL = config('TRANZILA_BILLING_TERMINAL', default='')
 TRANZILA_BILLING_BASE_URL = config('TRANZILA_BILLING_BASE_URL', default='https://billing5.tranzila.com')
-TRANZILA_PDF_BASE_URL = config('TRANZILA_PDF_BASE_URL', default='https://my.tranzila.com')
 
 # Supabase (URL + publishable key for client-style access; service role only via env/secrets, never in frontend)
 SUPABASE_URL = config('SUPABASE_URL', default='')

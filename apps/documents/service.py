@@ -285,34 +285,47 @@ def _attempt_tranzila(doc: FormalDocument) -> None:
     try:
         from apps.core.tranzila_service import TranzilaService
         svc = TranzilaService()
+
+        client_name = ''
+        client_email = ''
+        if doc.child_id:
+            client_name = doc.child.full_name
+            family = getattr(doc.child, 'family', None)
+            if family:
+                client_email = (family.email or '').strip()
+
         result = svc.create_formal_document(
             terminal_name=billing_terminal,
             document_type=tranzila_type,
             document_date=str(doc.document_date),
             items=[
                 {
-                    'description': item.description or item.sku or 'פריט',
-                    'quantity': float(item.quantity),
+                    'name': item.description or item.sku or 'פריט',
+                    'units_number': float(item.quantity),
                     'unit_price': float(item.unit_price),
                 }
                 for item in doc.line_items.all()
-            ] or [{'description': doc.description or 'שירות', 'quantity': 1, 'unit_price': float(doc.total_amount)}],
+            ] or [{'name': doc.description or 'שירות', 'units_number': 1, 'unit_price': float(doc.total_amount)}],
             payments=[
-                {'payment_type': p.payment_method, 'amount': float(p.amount)}
+                {'payment_method': p.payment_method, 'amount': float(p.amount)}
                 for p in doc.payments.all()
             ],
             vat_percent=float(doc.vat_percent) if not doc.vat_exempt else 0,
+            client_name=client_name,
+            client_email=client_email,
+            prices_include_vat=doc.prices_include_vat,
         )
 
-        if result.get('success'):
-            doc.tranzila_doc_id = str(result.get('doc_id', ''))
-            doc.tranzila_retrieval_key = str(result.get('retrieval_key', ''))
-            doc.pdf_url = result.get('pdf_url', '')
+        parsed = svc.parse_billing_document_response(result)
+        if parsed.get('success'):
+            doc.tranzila_doc_id = parsed.get('doc_id', '')
+            doc.tranzila_retrieval_key = parsed.get('retrieval_key', '')
+            doc.pdf_url = parsed.get('pdf_url', '')
             doc.tranzila_issued = True
             doc.save(update_fields=['tranzila_doc_id', 'tranzila_retrieval_key', 'pdf_url', 'tranzila_issued'])
             logger.info(f"Tranzila document issued: {doc.tranzila_doc_id} for {doc.document_number}")
         else:
-            logger.warning(f"Tranzila document issuance failed for {doc.document_number}: {result}")
+            logger.warning(f"Tranzila document issuance failed for {doc.document_number}: {parsed.get('error') or result}")
 
     except Exception as e:
         logger.error(f"Tranzila document issuance exception for {doc.document_number}: {e}", exc_info=True)

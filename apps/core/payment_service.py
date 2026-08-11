@@ -1316,7 +1316,6 @@ class PaymentService:
 
             if invoice.website_order_number:
                 from apps.store.website_integration import notify_website_order_status, push_product_to_website
-                from apps.store.tranzila_document import issue_store_tranzila_document
                 from apps.store.invoice_email import send_store_invoice_email
                 notify_website_order_status(
                     website_order_number=invoice.website_order_number,
@@ -1332,16 +1331,13 @@ class PaymentService:
                     except StoreProduct.DoesNotExist:
                         pass
                 try:
-                    issue_store_tranzila_document(
-                        invoice,
-                        card_last4=tranzila_response.get('card_last4', ''),
-                    )
+                    from apps.store.tranzila_store_invoice import issue_store_tranzila_document
+                    issue_store_tranzila_document(invoice)
                 except Exception:
                     logger.exception(
                         'Tranzila store document failed for %s (non-fatal)',
                         invoice.invoice_number,
                     )
-                invoice.refresh_from_db()
                 try:
                     send_store_invoice_email(invoice)
                 except Exception:

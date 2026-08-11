@@ -3,6 +3,7 @@ Send store invoice / receipt emails to website customers after successful paymen
 """
 from __future__ import annotations
 
+import base64
 import logging
 
 from django.conf import settings
@@ -11,6 +12,7 @@ from django.utils import timezone
 
 from apps.core.resend_email import resend_configured, send_resend_email
 from apps.store.models import StoreInvoice
+from apps.store.tranzila_store_invoice import get_store_tranzila_pdf_bytes, tranzila_pdf_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +24,17 @@ def _email_configured() -> bool:
     return bool(host.strip())
 
 
-def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
+def build_store_invoice_email(
+    invoice: StoreInvoice,
+    *,
+    pdf_url: str = '',
+    formal_document_number: str = '',
+) -> tuple[str, str, str]:
     """Return (subject, plain_text, html) for a completed store invoice."""
     customer = (invoice.customer_name or 'לקוח/ה').strip()
     order_ref = invoice.website_order_number or invoice.invoice_number
-    tranzila_ref = (invoice.tranzila_document_number or '').strip()
-    pdf_url = (invoice.pdf_url or '').strip()
-    subject = f'חשבונית {invoice.invoice_number} — הזמנה {order_ref}'
-    if tranzila_ref:
-        subject = f'חשבונית מס {tranzila_ref} — הזמנה {order_ref}'
+    doc_ref = formal_document_number or invoice.invoice_number
+    subject = f'חשבונית {doc_ref} — הזמנה {order_ref}'
 
     lines = []
     html_rows = []
@@ -57,36 +61,28 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
     issue = timezone.localtime(invoice.issue_date).strftime('%d/%m/%Y %H:%M')
     txn = (invoice.tranzila_confirmation_code or invoice.tranzila_transaction_id or '').strip()
     txn_line = f'\nאישור תשלום: {txn}' if txn else ''
-    tranzila_line = f'\nמספר חשבונית מס (טרנזילה): {tranzila_ref}' if tranzila_ref else ''
-    pdf_text = f'\n\nלהורדת החשבונית הרשמית (PDF):\n{pdf_url}' if pdf_url else ''
-    pdf_html = (
-        f'<p style="margin-top:20px"><a href="{pdf_url}" style="color:#303094;font-weight:bold">'
-        f'להורדת חשבונית מס רשמית (PDF)</a></p>'
-        if pdf_url else ''
-    )
+    pdf_line = f'\nקישור לחשבונית רשמית: {pdf_url}' if pdf_url else ''
 
     text = (
         f'שלום {customer},\n\n'
         f'תודה על הרכישה בחנות קוגומלו!\n\n'
-        f'מספר חשבונית: {invoice.invoice_number}\n'
+        f'מספר חשבונית: {doc_ref}\n'
         f'מספר הזמנה: {order_ref}\n'
         f'תאריך: {issue}\n'
-        f'{tranzila_line}'
-        f'{txn_line}\n\n'
+        f'{txn_line}{pdf_line}\n\n'
         f'פריטים:\n'
         + '\n'.join(lines)
-        + f'\n\nסה"כ ששולם: ₪{invoice.total_amount:.2f}'
-        + pdf_text
-        + '\n\nבברכה,\nצוות קוגומלו'
+        + f'\n\nסה"כ ששולם: ₪{invoice.total_amount:.2f}\n\n'
+        f'בברכה,\nצוות קוגומלו'
     )
 
     html = f'''
 <div dir="rtl" style="font-family:Arial,sans-serif;color:#25326a;max-width:620px;margin:auto">
-  <h2 style="color:#303094">חשבונית {tranzila_ref or invoice.invoice_number}</h2>
+  <h2 style="color:#303094">חשבונית {doc_ref}</h2>
   <p style="color:#888;margin:0 0 16px">הזמנה {order_ref} · {issue}</p>
   <p style="line-height:1.7">שלום <b>{customer}</b>,<br>תודה על הרכישה בחנות קוגומלו!</p>
-  {"<p><b>מספר חשבונית מס:</b> " + tranzila_ref + "</p>" if tranzila_ref else ""}
   {"<p><b>אישור תשלום:</b> " + txn + "</p>" if txn else ""}
+  {"<p style=\"margin-top:12px\"><a href=\"" + pdf_url + "\" style=\"color:#303094;font-weight:bold\">הורדת חשבונית מס/קבלה (PDF)</a></p>" if pdf_url else ""}
   <table style="width:100%;border-collapse:collapse;margin-top:12px">
     <thead>
       <tr style="background:#f7f6fc">
@@ -100,7 +96,6 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
   <p style="font-size:18px;font-weight:bold;margin-top:16px">
     סה"כ ששולם: <span dir="ltr">₪{invoice.total_amount:.2f}</span>
   </p>
-  {pdf_html}
   <p style="color:#666;margin-top:24px">בברכה,<br>צוות קוגומלו</p>
 </div>'''
 
@@ -136,14 +131,39 @@ def send_store_invoice_email(invoice: StoreInvoice) -> bool:
 
     invoice = (
         StoreInvoice.objects
+        .select_related('formal_document')
         .prefetch_related('line_items__product')
         .get(pk=invoice.pk)
     )
 
-    subject, text, html = build_store_invoice_email(invoice)
+    formal = invoice.formal_document
+    pdf_url = tranzila_pdf_public_url(invoice)
+    formal_number = formal.document_number if formal and formal.tranzila_issued else ''
+
+    subject, text, html = build_store_invoice_email(
+        invoice,
+        pdf_url=pdf_url,
+        formal_document_number=formal_number,
+    )
+
+    attachments = None
+    if resend_configured():
+        pdf_bytes = get_store_tranzila_pdf_bytes(invoice)
+        if pdf_bytes:
+            filename = f'{formal_number or invoice.invoice_number}.pdf'
+            attachments = [{
+                'filename': filename,
+                'content': base64.b64encode(pdf_bytes).decode('ascii'),
+            }]
 
     if resend_configured():
-        send_resend_email(to=[email], subject=subject, text=text, html=html)
+        send_resend_email(
+            to=[email],
+            subject=subject,
+            text=text,
+            html=html,
+            attachments=attachments,
+        )
     else:
         from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
         send_mail(

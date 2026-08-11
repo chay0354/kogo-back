@@ -27,10 +27,27 @@ def resend_from_address() -> str:
     return 'קוגומלו <onboarding@resend.dev>'
 
 
-def send_resend_email(*, to: list[str], subject: str, text: str, html: str) -> str:
+def send_resend_email(
+    *,
+    to: list[str],
+    subject: str,
+    text: str,
+    html: str,
+    attachments: list[dict] | None = None,
+) -> str:
     api_key = (getattr(settings, 'RESEND_API_KEY', '') or '').strip()
     if not api_key:
         raise ValueError('RESEND_API_KEY not configured')
+
+    body: dict = {
+        'from': resend_from_address(),
+        'to': to,
+        'subject': subject,
+        'html': html,
+        'text': text,
+    }
+    if attachments:
+        body['attachments'] = attachments
 
     response = requests.post(
         RESEND_API_URL,
@@ -38,13 +55,7 @@ def send_resend_email(*, to: list[str], subject: str, text: str, html: str) -> s
             'Authorization': f'Bearer {api_key}',
             'Content-Type': 'application/json',
         },
-        json={
-            'from': resend_from_address(),
-            'to': to,
-            'subject': subject,
-            'html': html,
-            'text': text,
-        },
+        json=body,
         timeout=30,
     )
     if not response.ok:

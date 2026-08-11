@@ -831,6 +831,52 @@ class TranzilaService:
             logger.error(f"Tranzila billing API exception: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
 
+    TRANZILA_PAYMENT_METHOD = {
+        'credit_card': 1,
+        'cash': 5,
+        'check': 3,
+        'bank_transfer': 2,
+    }
+
+    TRANZILA_PDF_PUBLIC_BASE = 'https://my.tranzila.com/api/get_financial_document'
+
+    @classmethod
+    def parse_billing_document_response(cls, result: dict) -> dict:
+        """Normalize Tranzila billing create_document JSON into a flat dict."""
+        if not isinstance(result, dict):
+            return {'success': False, 'error': 'invalid response'}
+
+        status_code = result.get('status_code')
+        if status_code not in (0, '0', None) and not result.get('success'):
+            if status_code is not None and status_code != 0:
+                return {
+                    'success': False,
+                    'error': result.get('status_msg') or result.get('error') or result,
+                }
+
+        document = result.get('document') or {}
+        doc_id = (
+            result.get('doc_id')
+            or document.get('id')
+            or result.get('document_id')
+        )
+        retrieval_key = result.get('retrieval_key') or document.get('retrieval_key') or ''
+        document_number = result.get('document_number') or document.get('number') or ''
+
+        if doc_id or retrieval_key or result.get('success'):
+            pdf_url = result.get('pdf_url') or ''
+            if not pdf_url and retrieval_key:
+                pdf_url = f'{cls.TRANZILA_PDF_PUBLIC_BASE}/{retrieval_key}'
+            return {
+                'success': True,
+                'doc_id': str(doc_id or ''),
+                'retrieval_key': str(retrieval_key or ''),
+                'document_number': str(document_number or ''),
+                'pdf_url': pdf_url,
+            }
+
+        return {'success': False, 'error': result.get('status_msg') or result.get('error') or result}
+
     def create_formal_document(
         self,
         terminal_name: str,
@@ -842,26 +888,27 @@ class TranzilaService:
         *,
         client_name: str = '',
         client_email: str = '',
+        client_phone: str = '',
+        prices_include_vat: bool = True,
+        document_language: str = 'heb',
     ) -> dict:
         """
         Issue a formal document (invoice/receipt/credit note) via Tranzila billing API.
         document_type: 'IN' | 'IR' | 'RE' | 'DI'
-        Returns normalized dict from parse_create_document_response().
         """
         payload = {
             'terminal_name': terminal_name,
             'document_type': document_type,
             'document_date': document_date,
-            'document_language': 'heb',
-            'document_currency_code': 'ILS',
             'vat_percent': vat_percent,
+            'document_language': document_language,
+            'document_currency_code': 'ILS',
             'items': [
                 {
                     'name': item.get('name') or item.get('description', 'פריט'),
-                    'unit_price': item.get('unit_price', item.get('price', 0)),
-                    'units_number': item.get('units_number', item.get('quantity', 1)),
-                    'type': item.get('type', 'I'),
-                    'price_type': item.get('price_type', 'G'),
+                    'unit_price': float(item.get('unit_price', item.get('price', 0))),
+                    'units_number': float(item.get('units_number', item.get('quantity', 1))),
+                    'price_type': 'G' if prices_include_vat else 'N',
                 }
                 for item in items
             ],
@@ -870,35 +917,63 @@ class TranzilaService:
             payload['client_name'] = client_name
         if client_email:
             payload['client_email'] = client_email
+        if client_phone:
+            payload['client_phone'] = client_phone
+
         if payments:
-            payload['payments'] = [self._normalize_billing_payment(p) for p in payments]
+            tranzila_payments = []
+            for payment in payments:
+                method = payment.get('payment_method')
+                if isinstance(method, str):
+                    method = self.TRANZILA_PAYMENT_METHOD.get(method, 1)
+                tranzila_payments.append({
+                    'payment_method': int(method),
+                    'amount': float(payment.get('amount', 0)),
+                })
+            payload['payments'] = tranzila_payments
 
         result = self._make_billing_request(payload, '/api/documents_db/create_document')
         logger.info(f"Tranzila create_formal_document ({document_type}): {result}")
-        return parse_create_document_response(result)
+        return result
 
-    @staticmethod
-    def _normalize_billing_payment(payment: dict) -> dict:
-        if 'payment_method' in payment:
-            normalized = dict(payment)
-        else:
-            legacy_map = {
-                'credit_card': 1,
-                'cash': 5,
-                'check': 3,
-                'bank_transfer': 4,
-            }
-            normalized = {
-                'payment_method': legacy_map.get(payment.get('payment_type'), 1),
-                'amount': payment.get('amount', 0),
-            }
-            if payment.get('txnindex') is not None:
-                normalized['txnindex'] = payment['txnindex']
-            if payment.get('cc_last_4_digits'):
-                normalized['cc_last_4_digits'] = payment['cc_last_4_digits']
-            if payment.get('payment_date'):
-                normalized['payment_date'] = payment['payment_date']
-        return normalized
+    def get_formal_document_pdf(self, terminal_name: str, document_id: str) -> bytes | None:
+        """Download official PDF bytes for a Tranzila document."""
+        from django.conf import settings
+        import secrets
+        import time
+
+        billing_base = getattr(settings, 'TRANZILA_BILLING_BASE_URL', 'https://billing5.tranzila.com')
+        url = f'{billing_base}/api/documents_db/get_document'
+
+        nonce = secrets.token_bytes(40).hex()
+        request_time = str(int(time.time()))
+        access_token_signature = self._generate_access_token_signature(nonce, request_time)
+        headers = {
+            'X-tranzila-api-access-token': access_token_signature,
+            'X-tranzila-api-app-key': self.public_key,
+            'X-tranzila-api-nonce': nonce,
+            'X-tranzila-api-request-time': request_time,
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'terminal_name': terminal_name,
+            'document_id': str(document_id),
+            'response_language': 'heb',
+        }
+
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            content_type = (response.headers.get('Content-Type') or '').lower()
+            if 'application/pdf' in content_type:
+                return response.content
+            logger.warning(
+                'Tranzila get_document did not return PDF for %s: %s',
+                document_id,
+                response.text[:300],
+            )
+        except Exception as exc:
+            logger.error('Tranzila get_document failed for %s: %s', document_id, exc, exc_info=True)
+        return None
 
     def create_credit_note(
         self,
@@ -921,45 +996,3 @@ class TranzilaService:
         result = self._make_billing_request(payload, '/api/documents_db/update_document')
         logger.info(f"Tranzila create_credit_note for doc {original_doc_id}: {result}")
         return result
-
-
-def parse_create_document_response(result: dict) -> dict:
-    """Normalize Tranzila billing create_document API response."""
-    from django.conf import settings
-
-    if not result or result.get('success') is False:
-        return {
-            'success': False,
-            'error': result.get('error') if result else 'empty response',
-        }
-
-    status_code = result.get('status_code')
-    document = result.get('document') or {}
-
-    # New API: status_code 0 + nested document
-    if status_code not in (None, 0, '0') and not document:
-        return {
-            'success': False,
-            'error': result.get('status_msg') or result,
-        }
-
-    doc_id = str(document.get('id') or result.get('doc_id') or '')
-    retrieval_key = str(document.get('retrieval_key') or result.get('retrieval_key') or '')
-    document_number = str(document.get('number') or result.get('document_number') or '')
-
-    pdf_base = getattr(settings, 'TRANZILA_PDF_BASE_URL', 'https://my.tranzila.com').rstrip('/')
-    pdf_url = result.get('pdf_url') or ''
-    if not pdf_url and retrieval_key:
-        pdf_url = f'{pdf_base}/api/get_financial_document/{retrieval_key}'
-
-    if doc_id or retrieval_key or result.get('success'):
-        return {
-            'success': True,
-            'doc_id': doc_id,
-            'retrieval_key': retrieval_key,
-            'document_number': document_number,
-            'pdf_url': pdf_url,
-            'raw': result,
-        }
-
-    return {'success': False, 'error': result}
