@@ -9,7 +9,7 @@ Tests coverage:
 from decimal import Decimal
 from datetime import date, timedelta
 from unittest.mock import patch, MagicMock
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.core.tests.test_fixtures import TestDataFactory
@@ -20,6 +20,7 @@ from apps.courses.models import LessonBundle
 from apps.enrollments.models import LessonEnrollment
 
 
+@override_settings(REGISTRATION_FEE_ILS=120)
 class PaymentServiceInitiateSubscriptionTest(TestCase):
     """Test PaymentService.initiate_subscription_payment"""
     
@@ -64,7 +65,9 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         self.assertIn('tranzila_url', result)
         self.assertEqual(result['base_amount'], 350.00)
         self.assertEqual(result['discount_amount'], 50.00)
-        self.assertEqual(result['final_amount'], 300.00)
+        self.assertEqual(result['registration_fee'], 120.00)
+        self.assertAlmostEqual(result['final_amount'], result['prorated_amount'] + 120.00, places=2)
+        self.assertGreater(result['prorated_amount'], 0)
         self.assertEqual(len(result['discounts_applied']), 1)
         
         # Verify Payment record created
@@ -74,12 +77,34 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         self.assertEqual(payment.status, 'pending')
         self.assertEqual(payment.base_amount, Decimal('350.00'))
         self.assertEqual(payment.discount_amount, Decimal('50.00'))
-        self.assertEqual(payment.final_amount, Decimal('300.00'))
+        self.assertEqual(payment.registration_fee, Decimal('120.00'))
+        self.assertEqual(payment.final_amount, Decimal(str(result['final_amount'])))
         
         # Verify discount snapshots created
         snapshots = payment.discount_snapshots.all()
         self.assertEqual(snapshots.count(), 1)
         self.assertEqual(snapshots.first().discount_name, "הנחת ילד שני")
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_registration_fee_on_second_lesson(self, mock_discount, mock_tranzila):
+        """Each new lesson subscription includes דמי רישום."""
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        first = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(first['registration_fee'], 120.00)
+
+        other_lesson = TestDataFactory.create_lesson(course=self.lesson.course, day_of_week=2)
+        second = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(other_lesson.id),
+        )
+        self.assertEqual(second['registration_fee'], 120.00)
+        self.assertGreater(second['final_amount'], second['prorated_amount'])
     
     def test_child_not_found_error(self):
         """Test error when child doesn't exist"""
@@ -348,6 +373,7 @@ class PaymentServiceWebhookTest(TestCase):
         self.assertIsNotNone(recurring)
         self.assertEqual(recurring.tranzila_token, 'test_token_123')
         self.assertEqual(recurring.status, 'active')
+        self.assertEqual(recurring.amount, Decimal('350.00'))
         
         # Verify TranzilaTransaction created
         transaction = TranzilaTransaction.objects.filter(transaction_id='TRX123').first()

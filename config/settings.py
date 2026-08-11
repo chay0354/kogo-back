@@ -245,6 +245,9 @@ MANYCHAT_KEY = config('MANYCHAT_KEY', default='')
 MANYCHAT_PHONE_FIELD_ID = config('MANYCHAT_PHONE_FIELD_ID', default='')
 # Optional: published Automation Flow namespace that contains the approved WhatsApp Template
 # fired automatically when a subscription registration completes (any phone, no 24h window).
+# One-time fee (ILS) added to each new lesson subscription's first charge.
+REGISTRATION_FEE_ILS = config('REGISTRATION_FEE_ILS', default=120, cast=int)
+
 MANYCHAT_REGISTRATION_FLOW_NS = config('MANYCHAT_REGISTRATION_FLOW_NS', default='')
 # Same as above, but for trial-lesson confirmations (הרשם לניסיון).
 MANYCHAT_TRIAL_FLOW_NS = config('MANYCHAT_TRIAL_FLOW_NS', default='')

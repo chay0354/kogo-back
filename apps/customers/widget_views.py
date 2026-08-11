@@ -296,6 +296,8 @@ class WidgetRegisterView(APIView):
                     'payments': payments,
                     'base_amount': sum(p['base_amount'] for p in payments),
                     'discount_amount': sum(p['discount_amount'] for p in payments),
+                    'prorated_amount': sum(p['prorated_amount'] for p in payments),
+                    'registration_fee': sum(p['registration_fee'] for p in payments),
                     'final_amount': sum(p['final_amount'] for p in payments),
                 }, status=status.HTTP_201_CREATED)
 
@@ -533,13 +535,18 @@ class WidgetChargeView(APIView):
         return Response(result, status=status_code)
 
     def _charge_one(self, payment_id, card_details):
-        from apps.customers.models import Payment
-        from apps.core.tranzila_service import TranzilaService
-        from apps.customers.models import TranzilaTransaction, RecurringPayment
+        from apps.core.payment_service import (
+            payment_full_monthly_amount,
+            payment_prorated_lesson_amount,
+            subscription_tranzila_items,
+        )
+        from apps.customers.models import Payment, TranzilaTransaction, RecurringPayment
         from apps.customers.financial_models import Invoice, InvoiceChild
+        from apps.core.tranzila_service import TranzilaService
         from apps.enrollments.models import LessonEnrollment
         from django.utils import timezone
         from datetime import date, timedelta
+        from decimal import Decimal
         import logging
 
         logger = logging.getLogger(__name__)
@@ -570,15 +577,24 @@ class WidgetChargeView(APIView):
             if is_trial_payment and lesson
             else (f"{lesson.course.name} - {child.full_name}" if lesson else child.full_name)
         )
-        items = [{
-            'name': item_label,
-            'type': 'I',
-            'unit_price': float(payment.final_amount),
-            'units_number': 1,
-            'unit_type': 1,
-            'price_type': 'G',
-            'currency_code': 'ILS',
-        }]
+        if is_trial_payment:
+            items = [{
+                'name': item_label,
+                'type': 'I',
+                'unit_price': float(payment.final_amount),
+                'units_number': 1,
+                'unit_type': 1,
+                'price_type': 'G',
+                'currency_code': 'ILS',
+            }]
+        else:
+            registration_fee = payment.registration_fee or Decimal('0')
+            prorated_lesson = payment_prorated_lesson_amount(payment)
+            items = subscription_tranzila_items(
+                label=item_label,
+                prorated_lesson=prorated_lesson,
+                registration_fee=registration_fee,
+            )
 
         result = tranzila.charge_with_card(
             card_number=card_number,
@@ -684,7 +700,7 @@ class WidgetChargeView(APIView):
                             status='active',
                             base_amount=payment.base_amount,
                             discount_amount=payment.discount_amount,
-                            amount=payment.final_amount,
+                            amount=payment_full_monthly_amount(payment),
                             discount_details=discount_details,
                             billing_day=date.today().day,
                             start_date=date.today(),

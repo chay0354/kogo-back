@@ -15,6 +15,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
+from django.conf import settings
 from django.db import transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
@@ -41,6 +42,56 @@ from apps.store.stock_utils import (
 logger = logging.getLogger(__name__)
 
 BILLING_ENROLLMENT_STATUSES = ("active", "payments_problem")
+
+
+def registration_fee_amount() -> Decimal:
+    """One-time registration fee for each new lesson subscription."""
+    raw = getattr(settings, 'REGISTRATION_FEE_ILS', 120)
+    try:
+        fee = Decimal(str(raw or 0))
+    except Exception:
+        fee = Decimal('0')
+    return max(Decimal('0.00'), fee.quantize(Decimal('0.01')))
+
+
+def payment_full_monthly_amount(payment: Payment) -> Decimal:
+    """Full recurring monthly lesson price (excludes proration and registration fee)."""
+    return (payment.base_amount - payment.discount_amount).quantize(Decimal('0.01'))
+
+
+def payment_prorated_lesson_amount(payment: Payment) -> Decimal:
+    """Pro-rated lesson portion of a pending/completed first subscription charge."""
+    fee = payment.registration_fee or Decimal('0.00')
+    return (payment.final_amount - fee).quantize(Decimal('0.01'))
+
+
+def subscription_tranzila_items(
+    *,
+    label: str,
+    prorated_lesson: Decimal,
+    registration_fee: Decimal,
+) -> list[dict]:
+    """Tranzila line items for a first subscription charge."""
+    items = [{
+        'name': f'מנוי חודשי (יחסי) - {label}',
+        'type': 'I',
+        'unit_price': float(prorated_lesson),
+        'units_number': 1,
+        'unit_type': 1,
+        'price_type': 'G',
+        'currency_code': 'ILS',
+    }]
+    if registration_fee > 0:
+        items.append({
+            'name': 'דמי רישום',
+            'type': 'I',
+            'unit_price': float(registration_fee),
+            'units_number': 1,
+            'unit_type': 1,
+            'price_type': 'G',
+            'currency_code': 'ILS',
+        })
+    return items
 
 
 def log_payment_operation(operation: str, **kwargs):
@@ -245,10 +296,12 @@ class PaymentService:
             today_local, lesson.day_of_week
         )
         full_monthly_amount = discount_calculation.final_price
-        prorated_final = max(
+        prorated_lesson = max(
             Decimal('1.00'),
             (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
         )
+        registration_fee = registration_fee_amount()
+        prorated_final = prorated_lesson + registration_fee
 
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
         payment = None
@@ -268,6 +321,7 @@ class PaymentService:
                         base_amount=discount_calculation.base_price,
                         discount_amount=discount_calculation.total_discount_amount,
                         final_amount=prorated_final,
+                        registration_fee=registration_fee,
                         description=(
                             f"מנוי חודשי - {lesson.course.name} ({bundle.name or 'מסלול משולב'}) - {child.full_name}"
                             if bundle else
@@ -333,6 +387,8 @@ class PaymentService:
             'bundle_id': str(bundle.id) if bundle else None,
             'base_amount': float(discount_calculation.base_price),
             'discount_amount': float(discount_calculation.total_discount_amount),
+            'prorated_amount': float(prorated_lesson),
+            'registration_fee': float(registration_fee),
             'final_amount': float(prorated_final),
             'prorate_factor': float(prorate_factor),
             'prorate_lessons_remaining': prorate_lessons_remaining,
@@ -450,7 +506,7 @@ class PaymentService:
                 enrollment_date = payment.created_at.astimezone(JERUSALEM_TZ).date()
                 lesson_dow = payment.lesson.day_of_week if payment.lesson else 1
                 _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
-                full_monthly_amount = payment.base_amount - payment.discount_amount
+                full_monthly_amount = payment_full_monthly_amount(payment)
 
                 recurring_payment = RecurringPayment.objects.create(
                     child=payment.child,
@@ -629,10 +685,12 @@ class PaymentService:
         # Pro-rate the first payment to the remaining lessons of the current month.
         prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date, lesson.day_of_week)
         full_monthly_amount_c = discount_calculation.final_price
-        prorated_final_c = max(
+        prorated_lesson_c = max(
             Decimal('1.00'),
             (full_monthly_amount_c * prorate_factor_c).quantize(Decimal('0.01'))
         )
+        registration_fee_c = registration_fee_amount()
+        prorated_final_c = prorated_lesson_c + registration_fee_c
 
         # Create Payment (pending)
         payment = Payment.objects.create(
@@ -647,6 +705,7 @@ class PaymentService:
             base_amount=discount_calculation.base_price,
             discount_amount=discount_calculation.total_discount_amount,
             final_amount=prorated_final_c,
+            registration_fee=registration_fee_c,
             description=(
                 f"מנוי חודשי - {lesson.course.name} ({bundle.name or 'מסלול משולב'}) - {child.full_name}"
                 if bundle else
@@ -668,15 +727,12 @@ class PaymentService:
             PaymentDiscountSnapshot.objects.create(**discount_kwargs)
 
         # Charge card via Tranzila REST API
-        items = [{
-            'name': f"{lesson.course.name} - {child.full_name}",
-            'type': 'I',
-            'unit_price': float(prorated_final_c),
-            'units_number': 1,
-            'unit_type': 1,
-            'price_type': 'G',
-            'currency_code': 'ILS',
-        }]
+        label = f"{lesson.course.name} - {child.full_name}"
+        items = subscription_tranzila_items(
+            label=label,
+            prorated_lesson=prorated_lesson_c,
+            registration_fee=registration_fee_c,
+        )
 
         result = self.tranzila_service.charge_with_card(
             card_number=card_number,

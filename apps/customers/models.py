@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from django.db import models
 from django.utils import timezone
 from apps.core.models import Branch
@@ -308,6 +309,13 @@ class Payment(models.Model):
         decimal_places=2, 
         verbose_name="סכום סופי",
         help_text="הסכום הסופי לחיוב אחרי הנחות"
+    )
+    registration_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        verbose_name="דמי רישום",
+        help_text="דמי רישום חד-פעמיים בחיוב ראשון לכל הרשמה לשיעור",
     )
     
     # Tranzila reference
