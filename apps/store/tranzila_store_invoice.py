@@ -22,6 +22,14 @@ STORE_PAYMENT_METHOD = {
 }
 
 
+def _billing_terminal() -> str:
+    """Billing terminal for tax documents; falls back to payment terminal."""
+    explicit = (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
+    if explicit:
+        return explicit
+    return (getattr(settings, 'TRANZILA_TERMINAL', '') or '').strip()
+
+
 def _customer_details(invoice: StoreInvoice) -> tuple[str, str, str]:
     name = (invoice.customer_name or '').strip()
     email = (invoice.customer_email or '').strip()
@@ -67,10 +75,10 @@ def issue_store_tranzila_document(invoice: StoreInvoice) -> FormalDocument | Non
     if invoice.formal_document_id and invoice.formal_document.tranzila_issued:
         return invoice.formal_document
 
-    terminal = (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
-    if not terminal:
+    terminal = _billing_terminal()
+    if not terminal or terminal == 'mock-terminal':
         logger.info(
-            'TRANZILA_BILLING_TERMINAL not configured — skipping Tranzila doc for %s',
+            'No Tranzila billing terminal configured — skipping Tranzila doc for %s',
             invoice.invoice_number,
         )
         return None
