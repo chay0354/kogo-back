@@ -34,6 +34,32 @@ def shekels(agorot: int) -> str:
     return f'{(Decimal(agorot) / 100):.2f} ₪'
 
 
+def line_label(item: dict) -> str:
+    name = item['name']
+    if item.get('variant'):
+        name = f"{name} ({item['variant']})"
+    return name
+
+
+def format_product_summary(items: list[dict], max_len: int = 80) -> str:
+    if not items:
+        return ''
+    labels = [line_label(item) for item in items]
+    if len(labels) == 1:
+        summary = labels[0]
+    else:
+        summary = ', '.join(labels[:2])
+        if len(labels) > 2:
+            summary += f' +{len(labels) - 2}'
+    if len(summary) > max_len:
+        return summary[: max_len - 1] + '…'
+    return summary
+
+
+def with_product_suffix(base: str, products: str) -> str:
+    return f'{base} — {products}' if products else base
+
+
 def resend_send(*, api_key: str, to: list[str], subject: str, text: str, html: str,
                 reply_to: str | None = None, attachments: list[dict] | None = None) -> None:
     body: dict = {
@@ -116,7 +142,7 @@ def retry_b2c_staff_emails(api_key: str, b2c_env: dict[str, str]) -> None:
         return
 
     orders_r = requests.get(
-        f'{sb_url}/rest/v1/orders?select=id,order_number,brand,customer_name,customer_email,customer_phone,shipping_address,shipping_method,total_agorot,status,crm_invoice_number,provider_txn_id,created_at&status=in.(paid,pending)&order=created_at.asc',
+        f'{sb_url}/rest/v1/orders?select=id,order_number,brand,customer_name,customer_email,customer_phone,shipping_address,customer_notes,shipping_method,total_agorot,status,crm_invoice_number,provider_txn_id,created_at&status=in.(paid,pending)&order=created_at.asc',
         headers=h,
         timeout=30,
     )
@@ -141,13 +167,14 @@ def retry_b2c_staff_emails(api_key: str, b2c_env: dict[str, str]) -> None:
         customer_email = order.get('customer_email') or ''
         customer_phone = order.get('customer_phone') or ''
         shipping = order.get('shipping_address') or ''
+        notes = (order.get('customer_notes') or '').strip() or '—'
+        products = format_product_summary(items)
+        title = with_product_suffix(f'{heading} — {order_number}', products)
 
         text_lines = []
         html_rows = []
         for item in items:
-            name = item['name']
-            if item.get('variant'):
-                name = f"{name} ({item['variant']})"
+            name = line_label(item)
             text_lines.append(f"• {name} × {item['qty']} — {shekels(item['line_total_agorot'])}")
             html_rows.append(
                 f'<tr><td style="padding:8px;border-bottom:1px solid #eee">{name}</td>'
@@ -157,13 +184,14 @@ def retry_b2c_staff_emails(api_key: str, b2c_env: dict[str, str]) -> None:
 
         crm_inv = order.get('crm_invoice_number') or ''
         txn = order.get('provider_txn_id') or ''
-        subject = (
+        subject = with_product_suffix(
             f'הזמנה מהחנות של געגע {order_number} — {customer_name}'
             if brand == 'gaga'
-            else f'הזמנה חדשה {order_number} — {customer_name}'
+            else f'הזמנה חדשה {order_number} — {customer_name}',
+            products,
         )
         text = '\n'.join([
-            f'{heading} — {order_number}',
+            title,
             f'תאריך: {order.get("created_at", "")}',
             f'סטטוס: {status_label}' if status_label else '',
             f'חשבונית CRM: {crm_inv}' if crm_inv else '',
@@ -174,6 +202,7 @@ def retry_b2c_staff_emails(api_key: str, b2c_env: dict[str, str]) -> None:
             f'טלפון: {customer_phone}',
             f'אימייל: {customer_email}',
             f'כתובת למשלוח: {shipping}',
+            f'הערות: {notes}',
             '',
             'הפריטים:',
             *text_lines,
@@ -182,11 +211,11 @@ def retry_b2c_staff_emails(api_key: str, b2c_env: dict[str, str]) -> None:
         ])
         html = f'''
 <div dir="rtl" style="font-family:Arial,sans-serif;color:#25326a;max-width:620px;margin:auto">
-  <h2 style="color:#303094">{heading} — {order_number}</h2>
+  <h2 style="color:#303094">{title}</h2>
   <p style="color:#888">{order.get("created_at", "")}{f" · <b>{status_label}</b>" if status_label else ""}</p>
   {"<p><b>חשבונית CRM:</b> " + crm_inv + "</p>" if crm_inv else ""}
   {"<p><b>אסמכתא תשלום:</b> " + txn + "</p>" if txn else ""}
-  <p><b>שם:</b> {customer_name}<br><b>טלפון:</b> {customer_phone}<br><b>אימייל:</b> {customer_email}<br><b>כתובת:</b> {shipping}</p>
+  <p><b>שם:</b> {customer_name}<br><b>טלפון:</b> {customer_phone}<br><b>אימייל:</b> {customer_email}<br><b>כתובת:</b> {shipping}<br><b>הערות:</b> {notes}</p>
   <table style="width:100%;border-collapse:collapse"><tbody>{"".join(html_rows)}</tbody></table>
   <p style="font-weight:bold;margin-top:16px">סה"כ: {shekels(order.get("total_agorot") or 0)}</p>
 </div>'''
