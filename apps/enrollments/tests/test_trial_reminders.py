@@ -12,9 +12,11 @@ from apps.courses.models import Course, CourseType, Lesson
 from apps.customers.models import Child, Family
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.trial_reminders import (
+    TRIAL_LESSON_OCCURRENCE_LIMIT,
     _after_test_send_at,
     _trial_day_10am_send_at,
     compute_trial_lesson_date,
+    iter_merged_upcoming_lesson_occurrences,
     iter_upcoming_lesson_occurrences,
     remove_expired_trial_enrollments,
     validate_trial_lesson_date,
@@ -53,6 +55,30 @@ class TrialReminderTimingTest(TestCase):
         lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
         with self.assertRaises(ValueError):
             validate_trial_lesson_date(lesson, date(2020, 1, 1))
+
+    def test_iter_upcoming_lesson_occurrences_limits_to_three_for_widget(self):
+        lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
+        now = timezone.make_aware(datetime(2026, 5, 22, 10, 0), ZoneInfo('Asia/Jerusalem'))
+        dates = iter_upcoming_lesson_occurrences(lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now)
+        self.assertEqual(len(dates), TRIAL_LESSON_OCCURRENCE_LIMIT)
+        self.assertEqual((dates[1] - dates[0]).days, 7)
+        self.assertEqual((dates[2] - dates[1]).days, 7)
+
+    def test_validate_trial_lesson_date_rejects_beyond_third_occurrence(self):
+        lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
+        now = timezone.make_aware(datetime(2026, 5, 22, 10, 0), ZoneInfo('Asia/Jerusalem'))
+        fourth = iter_upcoming_lesson_occurrences(lesson, count=4, now=now)[3]
+        with self.assertRaises(ValueError):
+            validate_trial_lesson_date(lesson, fourth, now=now)
+
+    def test_merged_occurrences_return_earliest_dates_across_lessons(self):
+        lesson_a = Lesson(day_of_week=0, start_time=time(16, 45), end_time=time(17, 30), is_recurring=True)
+        lesson_b = Lesson(day_of_week=3, start_time=time(16, 45), end_time=time(17, 30), is_recurring=True)
+        now = timezone.make_aware(datetime(2026, 8, 10, 10, 0), ZoneInfo('Asia/Jerusalem'))
+        merged = iter_merged_upcoming_lesson_occurrences([lesson_a, lesson_b], count=3, now=now)
+        self.assertEqual(len(merged), 3)
+        dates = [occurrence for _, occurrence in merged]
+        self.assertEqual(dates, sorted(dates))
 
 
 class RemoveExpiredTrialEnrollmentTest(TestCase):

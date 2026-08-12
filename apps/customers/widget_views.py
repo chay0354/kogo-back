@@ -913,26 +913,53 @@ class WidgetLessonOccurrencesView(APIView):
     DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
 
     def get(self, request):
+        from apps.enrollments.trial_reminders import (
+            TRIAL_LESSON_OCCURRENCE_LIMIT,
+            iter_merged_upcoming_lesson_occurrences,
+            iter_upcoming_lesson_occurrences,
+        )
+
         lesson_id = (request.query_params.get('lesson_id') or '').strip()
-        if not lesson_id:
-            return Response({'error': 'lesson_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+        lesson_ids_raw = (request.query_params.get('lesson_ids') or '').strip()
 
         try:
-            count = int(request.query_params.get('count') or 8)
+            count = int(request.query_params.get('count') or TRIAL_LESSON_OCCURRENCE_LIMIT)
         except (TypeError, ValueError):
-            count = 8
-        count = max(1, min(count, 16))
+            count = TRIAL_LESSON_OCCURRENCE_LIMIT
+        count = max(1, min(count, TRIAL_LESSON_OCCURRENCE_LIMIT))
+
+        if lesson_ids_raw:
+            lesson_ids = [part.strip() for part in lesson_ids_raw.split(',') if part.strip()]
+            lessons = list(Lesson.objects.filter(id__in=lesson_ids))
+            if not lessons:
+                return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+            lesson_map = {str(lesson.id): lesson for lesson in lessons}
+            ordered_lessons = [lesson_map[lid] for lid in lesson_ids if lid in lesson_map]
+            occurrences = iter_merged_upcoming_lesson_occurrences(ordered_lessons, count=count)
+            return Response([
+                {
+                    'lesson_id': str(lesson.id),
+                    'date': occurrence.isoformat(),
+                    'label': occurrence.strftime('%d/%m/%Y'),
+                    'day_name': self.DAY_NAMES[(occurrence.weekday() + 1) % 7],
+                    'start_time': str(lesson.start_time)[:5],
+                    'end_time': str(lesson.end_time)[:5],
+                }
+                for lesson, occurrence in occurrences
+            ])
+
+        if not lesson_id:
+            return Response({'error': 'lesson_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             lesson = Lesson.objects.get(id=lesson_id)
         except Lesson.DoesNotExist:
             return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        from apps.enrollments.trial_reminders import iter_upcoming_lesson_occurrences
-
         dates = iter_upcoming_lesson_occurrences(lesson, count=count)
         return Response([
             {
+                'lesson_id': str(lesson.id),
                 'date': d.isoformat(),
                 'label': d.strftime('%d/%m/%Y'),
                 'day_name': self.DAY_NAMES[(d.weekday() + 1) % 7],

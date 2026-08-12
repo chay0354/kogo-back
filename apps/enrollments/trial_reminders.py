@@ -24,6 +24,9 @@ from apps.enrollments.models import LessonEnrollment
 
 logger = logging.getLogger(__name__)
 
+# Nearest N lesson dates offered in the registration widget for trial signup.
+TRIAL_LESSON_OCCURRENCE_LIMIT = 3
+
 
 def lesson_weekday_to_python(day_of_week: int) -> int:
     return (day_of_week - 1) % 7
@@ -94,8 +97,38 @@ def iter_upcoming_lesson_occurrences(
     return results
 
 
+def iter_merged_upcoming_lesson_occurrences(
+    lessons: list[Lesson],
+    *,
+    count: int = TRIAL_LESSON_OCCURRENCE_LIMIT,
+    now: Optional[datetime] = None,
+) -> list[tuple[Lesson, date]]:
+    """Earliest N lesson occurrences across one or more weekly lessons (e.g. bundle)."""
+    count = max(1, min(int(count or TRIAL_LESSON_OCCURRENCE_LIMIT), TRIAL_LESSON_OCCURRENCE_LIMIT))
+    candidates: list[tuple[Lesson, date]] = []
+    for lesson in lessons:
+        for occurrence in iter_upcoming_lesson_occurrences(
+            lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now,
+        ):
+            candidates.append((lesson, occurrence))
+    candidates.sort(key=lambda item: item[1])
+    seen: set[tuple[str, date]] = set()
+    merged: list[tuple[Lesson, date]] = []
+    for lesson, occurrence in candidates:
+        key = (str(lesson.id), occurrence)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append((lesson, occurrence))
+        if len(merged) >= count:
+            break
+    return merged
+
+
 def validate_trial_lesson_date(lesson: Lesson, trial_date: date, *, now: Optional[datetime] = None) -> None:
-    allowed = iter_upcoming_lesson_occurrences(lesson, count=16, now=now)
+    allowed = iter_upcoming_lesson_occurrences(
+        lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now,
+    )
     if trial_date not in allowed:
         raise ValueError('תאריך שיעור הניסיון אינו זמין')
 
