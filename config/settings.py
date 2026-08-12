@@ -281,6 +281,8 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@kogomalo.com')
 RESEND_API_KEY = config('RESEND_API_KEY', default='')
 RESEND_FROM_EMAIL = config('RESEND_FROM_EMAIL', default='')
+# Public CRM app URL for password-reset links (e.g. https://crm.kogomalo.com)
+CRM_FRONTEND_URL = config('CRM_FRONTEND_URL', default='')
 
 # ==========================
 # CELERY CONFIGURATION

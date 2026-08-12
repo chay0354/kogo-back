@@ -125,3 +125,17 @@ def test_celery(self):
     """
     logger.info('Test Celery task is running!')
     return {'success': True, 'message': 'Celery is working!'}
+
+
+@shared_task(bind=True, name='apps.core.tasks.process_recurring_subscription_charges')
+def process_recurring_subscription_charges(self):
+    """Daily task: charge due lesson subscriptions and email invoices."""
+    from apps.customers.recurring_billing import process_due_recurring_charges
+
+    try:
+        summary = process_due_recurring_charges(dry_run=False)
+        logger.info('Recurring billing completed: %s', summary)
+        return {'success': True, 'summary': summary}
+    except Exception as e:
+        logger.error('Recurring billing failed: %s', e, exc_info=True)
+        raise

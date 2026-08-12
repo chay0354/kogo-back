@@ -14,6 +14,43 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
 
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate(self, attrs):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_str
+        from django.utils.http import urlsafe_base64_decode
+
+        try:
+            uid = force_str(urlsafe_base64_decode(attrs['uid']))
+            user = User.objects.get(pk=uid, is_active=True)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            raise serializers.ValidationError({'token': 'קישור איפוס לא תקין או שפג תוקפו'})
+
+        if not default_token_generator.check_token(user, attrs['token']):
+            raise serializers.ValidationError({'token': 'קישור איפוס לא תקין או שפג תוקפו'})
+
+        validate_password(attrs['password'], user=user)
+        attrs['user'] = user
+        return attrs
+
+    def save(self):
+        from rest_framework.authtoken.models import Token
+
+        user = self.validated_data['user']
+        user.set_password(self.validated_data['password'])
+        user.save(update_fields=['password'])
+        Token.objects.filter(user=user).delete()
+        return user
+
+
 class CurrentUserSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     branch_ids = serializers.SerializerMethodField()

@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import logging
+
 from django.conf import settings
 from django.contrib.auth import authenticate
 from rest_framework import status, viewsets
@@ -9,11 +11,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from django.contrib.auth import get_user_model
-from apps.core.auth_serializers import LoginSerializer, CurrentUserSerializer, ManagedUserSerializer
+from apps.core.auth_serializers import (
+    LoginSerializer,
+    CurrentUserSerializer,
+    ManagedUserSerializer,
+    ForgotPasswordSerializer,
+    ResetPasswordSerializer,
+)
 from apps.core.permissions import IsManager
 
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class LoginView(APIView):
@@ -61,6 +70,47 @@ class LoginView(APIView):
         )
 
         return response
+
+
+class ForgotPasswordView(APIView):
+    """
+    Request a password-reset email. Always returns success to avoid email enumeration.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email'].strip().lower()
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user:
+            try:
+                from apps.core.password_reset_email import send_password_reset_email
+                send_password_reset_email(user)
+            except Exception:
+                logger.exception('Password reset email failed for %s', email)
+
+        return Response({
+            'ok': True,
+            'message': 'אם כתובת האימייל קיימת במערכת, נשלח אליך קישור לאיפוס סיסמה.',
+        })
+
+
+class ResetPasswordView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({
+            'ok': True,
+            'message': 'הסיסמה עודכנה בהצלחה. ניתן להתחבר עם הסיסמה החדשה.',
+        })
 
 
 class LogoutView(APIView):

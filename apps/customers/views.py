@@ -1,7 +1,7 @@
 import logging
 from decimal import Decimal
 from rest_framework import viewsets, filters, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -10,6 +10,7 @@ from django.db.models.functions import Concat
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date
+from django.conf import settings
 from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
@@ -1241,6 +1242,30 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                 'error': f'שגיאה בביטול מנוי: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def cron_recurring_billing(request):
+    """
+    Charge due monthly subscriptions and email invoices.
+
+    Auth: X-Cron-Token header or ?token= matching settings.CRON_TOKEN.
+    Schedule daily (e.g. 08:00 Israel) — charges when next_billing_date <= today.
+    """
+    expected = (getattr(settings, 'CRON_TOKEN', '') or '').strip()
+    provided = (
+        request.headers.get('X-Cron-Token')
+        or request.query_params.get('token')
+        or ''
+    ).strip()
+    if not expected or provided != expected:
+        return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    from apps.customers.recurring_billing import process_due_recurring_charges
+
+    dry_run = str(request.query_params.get('dry_run', '')).lower() in ('1', 'true', 'yes')
+    summary = process_due_recurring_charges(dry_run=dry_run)
+    return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
 
 
 class BusinessCustomerViewSet(viewsets.ModelViewSet):

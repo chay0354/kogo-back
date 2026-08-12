@@ -35,6 +35,13 @@ app.conf.beat_schedule = {
             'description': 'Auto-finalize previous month snapshots on the 1st',
         }
     },
+    'daily-recurring-billing': {
+        'task': 'apps.core.tasks.process_recurring_subscription_charges',
+        'schedule': crontab(hour=8, minute=0),
+        'options': {
+            'description': 'Charge due lesson subscriptions and email invoices',
+        }
+    },
 }
 
 # Celery Beat timezone

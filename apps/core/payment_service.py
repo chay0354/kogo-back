@@ -956,7 +956,13 @@ class PaymentService:
             logger.info(f"Linked child {payment.child.full_name} to invoice {invoice.invoice_number} ({item_desc})")
         
         logger.info(f"Created invoice: {invoice.invoice_number}")
-        
+
+        try:
+            from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+            send_subscription_invoice_email(invoice)
+        except Exception:
+            logger.exception('Subscription invoice email failed for %s (non-fatal)', invoice.invoice_number)
+
         return invoice
     
     def cancel_subscription(

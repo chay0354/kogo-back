@@ -83,6 +83,7 @@ def _resolve_family_and_child(data, branch):
     Shared by WidgetRegisterView (paid flow) and WidgetTrialRegisterView (trial flow).
     """
     parent_id_number = data['parent_id_number'].strip()
+    parent_email = (data.get('parent_email') or '').strip()
     child_first = data['child_first_name'].strip()
     child_last = data['child_last_name'].strip()
     discount_confirmed = bool(data.get('discount_confirmed', False))
@@ -94,6 +95,7 @@ def _resolve_family_and_child(data, branch):
         family = Family.objects.create(
             name=data['parent_last_name'].strip(),
             phone=data['parent_phone'].strip(),
+            email=parent_email,
             parent_id_number=parent_id_number,
             branch=branch,
         )
@@ -102,8 +104,31 @@ def _resolve_family_and_child(data, branch):
             first_name=data['parent_first_name'].strip(),
             last_name=data['parent_last_name'].strip(),
             phone=data['parent_phone'].strip(),
+            email=parent_email,
             is_primary=True,
         )
+    else:
+        updates = {}
+        phone = data['parent_phone'].strip()
+        if phone and family.phone != phone:
+            family.phone = phone
+            updates['phone'] = phone
+        if parent_email and family.email != parent_email:
+            family.email = parent_email
+            updates['email'] = parent_email
+        if updates:
+            family.save(update_fields=list(updates.keys()) + ['updated_at'])
+        primary = family.parents.filter(is_primary=True).first()
+        if primary:
+            parent_updates = {}
+            if phone and primary.phone != phone:
+                primary.phone = phone
+                parent_updates['phone'] = phone
+            if parent_email and primary.email != parent_email:
+                primary.email = parent_email
+                parent_updates['email'] = parent_email
+            if parent_updates:
+                primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
 
     # ── 2. Resolve child ──────────────────────────────────────
     child = None
@@ -536,6 +561,7 @@ class WidgetChargeView(APIView):
 
     def _charge_one(self, payment_id, card_details):
         from apps.core.payment_service import (
+            _compute_prorate,
             payment_full_monthly_amount,
             payment_prorated_lesson_amount,
             subscription_tranzila_items,
@@ -676,6 +702,11 @@ class WidgetChargeView(APIView):
                             course=lesson.course,
                             lesson=lesson,
                         )
+                    try:
+                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+                        send_subscription_invoice_email(invoice)
+                    except Exception:
+                        logger.exception('Trial invoice email failed (non-fatal)')
 
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
                 else:
@@ -691,6 +722,9 @@ class WidgetChargeView(APIView):
                             }
                             for s in payment.discount_snapshots.all()
                         ]
+                        enrollment_date = date.today()
+                        lesson_dow = lesson.day_of_week if lesson else 1
+                        _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
                         RecurringPayment.objects.create(
                             child=child,
                             initial_payment=payment,
@@ -702,9 +736,9 @@ class WidgetChargeView(APIView):
                             discount_amount=payment.discount_amount,
                             amount=payment_full_monthly_amount(payment),
                             discount_details=discount_details,
-                            billing_day=date.today().day,
-                            start_date=date.today(),
-                            next_billing_date=date.today() + timedelta(days=30),
+                            billing_day=1,
+                            start_date=enrollment_date,
+                            next_billing_date=next_billing_date,
                         )
 
                     invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
@@ -731,10 +765,16 @@ class WidgetChargeView(APIView):
                             course=lesson.course,
                             lesson=lesson,
                         )
+                    try:
+                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+                        send_subscription_invoice_email(invoice)
+                    except Exception:
+                        logger.exception('Subscription invoice email failed (non-fatal)')
 
                     child.status = 'active'
                     child.subscription_start_date = date.today()
-                    child.paid_until_date = date.today() + timedelta(days=30)
+                    _, _, _, next_bill = _compute_prorate(date.today(), lesson.day_of_week)
+                    child.paid_until_date = next_bill - timedelta(days=1)
                     child.save()
 
                     if lesson:
