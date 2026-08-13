@@ -956,36 +956,22 @@ class WidgetCourseTypesView(APIView):
         if not branch_id:
             return Response({'error': 'branch_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
-        courses = (
+        rows = (
             Course.objects
-            .filter(branch_id=branch_id, is_active=True)
-            .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
-            .select_related('course_type')
-            .prefetch_related(
-                Prefetch('lessons', queryset=_widget_lesson_queryset()),
-                Prefetch(
-                    'lesson_bundles',
-                    queryset=_widget_bundles_queryset().prefetch_related('lessons'),
-                ),
-            )
+            .filter(branch_id=branch_id, is_active=True, course_type_id__isnull=False)
+            .filter(Q(course_type__is_active=True))
+            .values('course_type_id', 'course_type__name')
+            .distinct()
             .order_by('course_type__name')
         )
-
         seen = {}
-        for course in courses:
-            if not course.course_type_id:
-                continue
-            if not _widget_bundles_for_course(course) and (
-                course.must_attend_all_lessons or not list(course.lessons.all())
-            ):
-                continue
-            type_id = str(course.course_type_id)
+        for row in rows:
+            type_id = str(row['course_type_id'])
             if type_id not in seen:
-                seen[type_id] = course.course_type.name
-
+                seen[type_id] = row['course_type__name']
         return Response([
             {'id': type_id, 'name': name}
-            for type_id, name in sorted(seen.items(), key=lambda item: item[1])
+            for type_id, name in seen.items()
         ])
 
 
@@ -1017,6 +1003,28 @@ class WidgetBranchesView(APIView):
             .values('id', 'name', 'city_id', 'is_external', 'external_link')
             .order_by('name')
         )
+
+        type_rows = (
+            Course.objects
+            .filter(is_active=True, course_type_id__isnull=False, course_type__is_active=True)
+            .values('branch_id', 'course_type_id', 'course_type__name')
+            .distinct()
+        )
+        types_by_branch: dict[str, list[dict[str, str]]] = {}
+        seen_pairs: set[tuple[str, str]] = set()
+        for row in type_rows:
+            branch_id = str(row['branch_id'])
+            type_id = str(row['course_type_id'])
+            pair = (branch_id, type_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            types_by_branch.setdefault(branch_id, []).append({
+                'id': type_id,
+                'name': row['course_type__name'],
+            })
+        for type_list in types_by_branch.values():
+            type_list.sort(key=lambda item: item['name'])
         return Response([
             {
                 'id': b['id'],
@@ -1024,6 +1032,7 @@ class WidgetBranchesView(APIView):
                 'city': city_aliases.get(str(b['city_id']), b['city_id']),
                 'is_external': b['is_external'],
                 'external_link': b['external_link'],
+                'course_types': types_by_branch.get(str(b['id']), []),
             }
             for b in branches
         ])
