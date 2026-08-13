@@ -16,6 +16,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
 from apps.store.models import StoreInvoice
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
@@ -251,6 +252,7 @@ def _summary_block(invoice: StoreInvoice, styles: dict[str, ParagraphStyle]) -> 
         invoice.total_amount if invoice.payment_status == 'completed' else Decimal('0.00')
     )
     open_balance = max(Decimal('0'), Decimal(str(invoice.total_amount)) - Decimal(str(paid)))
+    before_vat, vat_amount, gross = split_vat_inclusive(invoice.total_amount)
 
     summary_rows = [
         [_rtl('אמצעי תשלום'), _rtl(PAYMENT_METHOD_LABELS.get(invoice.payment_method, invoice.payment_method))],
@@ -273,22 +275,27 @@ def _summary_block(invoice: StoreInvoice, styles: dict[str, ParagraphStyle]) -> 
         ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
     ]))
 
-    total_box = Table(
-        [[Paragraph(_rtl('סה"כ לתשלום'), styles['label'])],
-         [Paragraph(_rtl(_money(invoice.total_amount)), styles['total'])]],
-        colWidths=[5.5 * cm],
-        hAlign='LEFT',
-    )
+    total_rows = [
+        [Paragraph(_rtl('סה"כ לפני מע"מ'), styles['label']),
+         Paragraph(_rtl(_money(before_vat)), styles['value'])],
+        [Paragraph(_rtl('מע"מ 18%'), styles['label']),
+         Paragraph(_rtl(_money(vat_amount)), styles['value'])],
+        [Paragraph(_rtl('סה"כ כולל מע"מ'), styles['label']),
+         Paragraph(_rtl(_money(gross)), styles['total'])],
+    ]
+    total_box = Table(total_rows, colWidths=[3.6 * cm, 2.4 * cm], hAlign='LEFT')
     total_box.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), PANEL_BG),
         ('BOX', (0, 0), (-1, -1), 1, BRAND_PURPLE),
-        ('TOPPADDING', (0, 0), (-1, -1), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
-        ('LEFTPADDING', (0, 0), (-1, -1), 12),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (1, 0), (1, -1), 'LEFT'),
     ]))
 
-    row = Table([[summary, total_box]], colWidths=[6.5 * cm, 6.0 * cm], hAlign='RIGHT')
+    row = Table([[summary, total_box]], colWidths=[6.5 * cm, 6.5 * cm], hAlign='RIGHT')
     row.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
@@ -319,8 +326,9 @@ def generate_store_invoice_pdf(invoice: StoreInvoice) -> bytes:
     )
 
     story = [
-        Paragraph(_rtl('חשבונית'), styles['title']),
+        Paragraph(_rtl(DOCUMENT_TITLE), styles['title']),
         Paragraph(_rtl('קוגומלו — חנות מוצרים'), styles['subtitle']),
+        Paragraph(_rtl('המחירים כוללים מע"מ'), styles['subtitle']),
         Spacer(1, 0.35 * cm),
         _meta_panel(invoice, styles),
         Spacer(1, 0.45 * cm),

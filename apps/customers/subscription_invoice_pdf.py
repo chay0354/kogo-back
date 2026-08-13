@@ -14,6 +14,7 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from apps.customers.financial_models import Invoice
+from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
 from apps.store.invoice_pdf import (
     BORDER,
     BRAND_NAVY,
@@ -71,9 +72,12 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
     phone = (invoice.payer_phone or invoice.family.phone or '').strip()
 
     story = [
-        Paragraph(_rtl('חשבונית'), title_style),
+        Paragraph(_rtl(DOCUMENT_TITLE), title_style),
         Paragraph(_rtl('קוגומלו — מנוי לחוג'), ParagraphStyle(
             'Sub', fontName='Heebo', fontSize=11, textColor=BRAND_NAVY, alignment=TA_CENTER,
+        )),
+        Paragraph(_rtl('המחירים כוללים מע"מ'), ParagraphStyle(
+            'SubVat', fontName='Heebo', fontSize=10, textColor=BRAND_NAVY, alignment=TA_CENTER,
         )),
         Spacer(1, 0.35 * cm),
     ]
@@ -166,21 +170,29 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
     ]))
     story.extend([Paragraph(_rtl('פירוט'), label_style), Spacer(1, 0.12 * cm), table, Spacer(1, 0.35 * cm)])
 
+    before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
     total_box = Table(
-        [[Paragraph(_rtl('סה"כ ששולם'), label_style)],
-         [Paragraph(_rtl(_money(invoice.amount)), ParagraphStyle(
-             'Tot', fontName='Heebo-Bold', fontSize=14, textColor=BRAND_PURPLE, alignment=TA_RIGHT,
-         ))]],
-        colWidths=[6 * cm],
+        [
+            [Paragraph(_rtl('סה"כ לפני מע"מ'), label_style),
+             Paragraph(_rtl(_money(before_vat)), value_style)],
+            [Paragraph(_rtl('מע"מ 18%'), label_style),
+             Paragraph(_rtl(_money(vat_amount)), value_style)],
+            [Paragraph(_rtl('סה"כ כולל מע"מ'), label_style),
+             Paragraph(_rtl(_money(gross)), ParagraphStyle(
+                 'Tot', fontName='Heebo-Bold', fontSize=14, textColor=BRAND_PURPLE, alignment=TA_RIGHT,
+             ))],
+        ],
+        colWidths=[4.2 * cm, 2.8 * cm],
         hAlign='RIGHT',
     )
     total_box.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), PANEL_BG),
         ('BOX', (0, 0), (-1, -1), 1, BRAND_PURPLE),
-        ('TOPPADDING', (0, 0), (-1, -1), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ('LEFTPADDING', (0, 0), (-1, -1), 12),
         ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(total_box)
 

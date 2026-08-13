@@ -18,8 +18,80 @@ from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
 
+def _batch_paying_enrollment_counts(lesson_ids):
+    """lesson_id -> paying enrollment count (widget capacity)."""
+    if not lesson_ids:
+        return {}
+    from django.db.models import Count
+    from apps.enrollments.models import LessonEnrollment
+    from apps.enrollments.enrollment_counts import paying_enrollments
+
+    rows = (
+        paying_enrollments(LessonEnrollment.objects.filter(lesson_id__in=lesson_ids))
+        .values('lesson_id')
+        .annotate(c=Count('id'))
+    )
+    return {row['lesson_id']: row['c'] for row in rows}
+
+
+def _resolve_lesson_capacity(lesson, course):
+    caps = []
+    if course.capacity:
+        caps.append(int(course.capacity))
+    room = getattr(lesson, 'room', None)
+    if room and room.capacity:
+        caps.append(int(room.capacity))
+    return min(caps) if caps else None
+
+
+def _lesson_widget_capacity(lesson, course, enrolled_counts):
+    enrolled = enrolled_counts.get(lesson.id, 0)
+    capacity = _resolve_lesson_capacity(lesson, course)
+    if capacity is None:
+        return {
+            'enrolled_count': enrolled,
+            'capacity': None,
+            'available_spots': None,
+            'is_full': False,
+        }
+    available = max(0, capacity - enrolled)
+    return {
+        'enrolled_count': enrolled,
+        'capacity': capacity,
+        'available_spots': available,
+        'is_full': available <= 0,
+    }
+
+
+def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
+    bundle_lessons = list(bundle.lessons.all())
+    lesson_payloads = []
+    bundle_full = False
+    for bl in bundle_lessons:
+        cap = _lesson_widget_capacity(bl, course, enrolled_counts)
+        if cap['is_full']:
+            bundle_full = True
+        lesson_payloads.append({
+            'id': str(bl.id),
+            'day_of_week': bl.day_of_week,
+            'start_time': str(bl.start_time)[:5],
+            'end_time': str(bl.end_time)[:5],
+        })
+    return {
+        'id': str(bundle.id),
+        'name': bundle.name,
+        'combined_price': str(bundle.combined_price),
+        'lessons': lesson_payloads,
+        'is_full': bundle_full,
+    }
+
+
+def _widget_lesson_queryset():
+    return Lesson.objects.select_related('instructor', 'room').order_by('day_of_week', 'start_time')
+
+
 def _widget_bundles_queryset():
-    return LessonBundle.objects.prefetch_related('lessons').order_by('-is_active', 'name')
+    return LessonBundle.objects.order_by('-is_active', 'name')
 
 
 def _widget_bundles_for_course(course):
@@ -55,24 +127,6 @@ def _resolve_widget_bundle(*, course, bundle_id: str):
         if not has_active:
             return bundle
     return None
-
-
-def _serialize_widget_bundle(bundle):
-    bundle_lessons = list(bundle.lessons.all())
-    return {
-        'id': str(bundle.id),
-        'name': bundle.name,
-        'combined_price': str(bundle.combined_price),
-        'lessons': [
-            {
-                'id': str(bl.id),
-                'day_of_week': bl.day_of_week,
-                'start_time': str(bl.start_time)[:5],
-                'end_time': str(bl.end_time)[:5],
-            }
-            for bl in bundle_lessons
-        ],
-    }
 
 
 def _resolve_family_and_child(data, branch):
@@ -234,11 +288,11 @@ class WidgetRegisterView(APIView):
 
     Required fields:
       parent_id_number, parent_first_name, parent_last_name, parent_phone
-      child_first_name, child_last_name, child_birth_date, child_gender
+      child_first_name, child_last_name, child_id_number, child_birth_date, child_gender
       course_id
 
     Optional:
-      child_id_number, child_phone
+      child_phone
       discount_confirmed  (bool) — parent confirmed the discount question
       existing_child_id   (str)  — returned by lookup when child is already active
       success_url, error_url, callback_url
@@ -257,7 +311,7 @@ class WidgetRegisterView(APIView):
 
         required = [
             'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
-            'child_first_name', 'child_last_name', 'child_birth_date', 'child_gender',
+            'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
             'course_id',
         ]
         missing = [f for f in required if not data.get(f)]
@@ -349,12 +403,12 @@ class WidgetTrialRegisterView(APIView):
 
     Required fields:
       parent_id_number, parent_first_name, parent_last_name, parent_phone
-      child_first_name, child_last_name, child_birth_date, child_gender
+      child_first_name, child_last_name, child_id_number, child_birth_date, child_gender
       course_id
 
     Optional:
       lesson_id (str) — specific Lesson of the course; defaults to the course's first lesson.
-      child_id_number, child_phone
+      child_phone
       discount_confirmed  (bool) — parent confirmed the discount question
       existing_child_id   (str)  — returned by lookup when child is already active
     """
@@ -366,7 +420,7 @@ class WidgetTrialRegisterView(APIView):
 
         required = [
             'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
-            'child_first_name', 'child_last_name', 'child_birth_date', 'child_gender',
+            'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
             'course_id',
         ]
         missing = [f for f in required if not data.get(f)]
@@ -819,7 +873,7 @@ class WidgetCoursesView(APIView):
         if not branch_id:
             return Response({'error': 'branch_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
-        courses = (
+        courses = list(
             Course.objects
             .filter(
                 branch_id=branch_id,
@@ -828,20 +882,30 @@ class WidgetCoursesView(APIView):
             .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
             .select_related('course_type', 'branch')
             .prefetch_related(
-                Prefetch('lessons', queryset=Lesson.objects.select_related('instructor').order_by('day_of_week', 'start_time')),
+                Prefetch('lessons', queryset=_widget_lesson_queryset()),
                 Prefetch(
                     'lesson_bundles',
-                    queryset=_widget_bundles_queryset(),
+                    queryset=_widget_bundles_queryset().prefetch_related(
+                        Prefetch('lessons', queryset=_widget_lesson_queryset()),
+                    ),
                 ),
             )
             .order_by('course_type__name', 'name')
         )
+
+        all_lesson_ids = []
+        for course in courses:
+            all_lesson_ids.extend(lesson.id for lesson in course.lessons.all())
+            for bundle in course.lesson_bundles.all():
+                all_lesson_ids.extend(bl.id for bl in bundle.lessons.all())
+        enrolled_counts = _batch_paying_enrollment_counts(all_lesson_ids)
 
         result = []
         for course in courses:
             lessons = []
             if not course.must_attend_all_lessons:
                 for lesson in course.lessons.all():
+                    cap = _lesson_widget_capacity(lesson, course, enrolled_counts)
                     lessons.append({
                         'id': str(lesson.id),
                         'day_of_week': lesson.day_of_week,
@@ -851,9 +915,13 @@ class WidgetCoursesView(APIView):
                         'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
                         'lesson_date': lesson.lesson_date.isoformat() if lesson.lesson_date else None,
                         'is_recurring': lesson.is_recurring,
+                        **cap,
                     })
 
-            bundles = [_serialize_widget_bundle(bundle) for bundle in _widget_bundles_for_course(course)]
+            bundles = [
+                _serialize_widget_bundle(bundle, enrolled_counts=enrolled_counts, course=course)
+                for bundle in _widget_bundles_for_course(course)
+            ]
 
             result.append({
                 'id': str(course.id),
@@ -884,8 +952,10 @@ class WidgetCitiesView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        cities = City.objects.all().values('id', 'name').order_by('name')
-        return Response(list(cities))
+        from apps.core.city_utils import dedupe_cities_by_name
+
+        cities = list(City.objects.all().values('id', 'name').order_by('name'))
+        return Response(dedupe_cities_by_name(cities))
 
 
 class WidgetBranchesView(APIView):
@@ -894,13 +964,24 @@ class WidgetBranchesView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from apps.core.city_utils import build_city_id_alias_map
+
+        cities = list(City.objects.all().values('id', 'name'))
+        city_aliases = build_city_id_alias_map(cities)
+
         branches = (
             Branch.objects.filter(is_active=True)
             .values('id', 'name', 'city_id', 'is_external', 'external_link')
             .order_by('name')
         )
         return Response([
-            {'id': b['id'], 'name': b['name'], 'city': b['city_id'], 'is_external': b['is_external'], 'external_link': b['external_link']}
+            {
+                'id': b['id'],
+                'name': b['name'],
+                'city': city_aliases.get(str(b['city_id']), b['city_id']),
+                'is_external': b['is_external'],
+                'external_link': b['external_link'],
+            }
             for b in branches
         ])
 
@@ -968,3 +1049,15 @@ class WidgetLessonOccurrencesView(APIView):
             }
             for d in dates
         ])
+
+
+class WidgetTermsView(APIView):
+    """Public endpoint — registration terms HTML for the widget modal."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from apps.core.registration_terms_service import get_registration_terms
+
+        terms = get_registration_terms()
+        return Response({'content': terms.content})

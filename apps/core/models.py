@@ -255,3 +255,23 @@ class BranchMonthlySnapshot(models.Model):
     def __str__(self):
         return f"{self.branch.name} - {self.month}"
 
+
+class RegistrationTerms(models.Model):
+    """תקנון הרישום לווידג'ט — רשומה יחידה (pk=1)."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    content = models.TextField(verbose_name="תוכן HTML")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן בתאריך")
+
+    class Meta:
+        db_table = 'registration_terms'
+        verbose_name = "תקנון רישום"
+        verbose_name_plural = "תקנון רישום"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return "תקנון רישום"
+
