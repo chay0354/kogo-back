@@ -946,6 +946,49 @@ class WidgetCoursesView(APIView):
         return Response(result)
 
 
+class WidgetCourseTypesView(APIView):
+    """Public endpoint — distinct course types for a branch (fast; no lesson/enrollment payload)."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        branch_id = request.query_params.get('branch_id')
+        if not branch_id:
+            return Response({'error': 'branch_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+
+        courses = (
+            Course.objects
+            .filter(branch_id=branch_id, is_active=True)
+            .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
+            .select_related('course_type')
+            .prefetch_related(
+                Prefetch('lessons', queryset=_widget_lesson_queryset()),
+                Prefetch(
+                    'lesson_bundles',
+                    queryset=_widget_bundles_queryset().prefetch_related('lessons'),
+                ),
+            )
+            .order_by('course_type__name')
+        )
+
+        seen = {}
+        for course in courses:
+            if not course.course_type_id:
+                continue
+            if not _widget_bundles_for_course(course) and (
+                course.must_attend_all_lessons or not list(course.lessons.all())
+            ):
+                continue
+            type_id = str(course.course_type_id)
+            if type_id not in seen:
+                seen[type_id] = course.course_type.name
+
+        return Response([
+            {'id': type_id, 'name': name}
+            for type_id, name in sorted(seen.items(), key=lambda item: item[1])
+        ])
+
+
 class WidgetCitiesView(APIView):
     """Public endpoint — returns all cities for the widget city selector."""
     authentication_classes = []
