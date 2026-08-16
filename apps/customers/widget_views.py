@@ -76,6 +76,7 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
             'day_of_week': bl.day_of_week,
             'start_time': str(bl.start_time)[:5],
             'end_time': str(bl.end_time)[:5],
+            'instructor_name': bl.instructor.full_name if bl.instructor else None,
         })
     return {
         'id': str(bundle.id),
