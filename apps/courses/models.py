@@ -92,9 +92,16 @@ class Course(models.Model):
     def __str__(self):
         return f"{self.course_type.name} - {self.name}"
 
-    def sync_instructor_to_lessons(self):
-        """Propagate team instructor to all lessons. Monthly pay stays on the course."""
-        self.lessons.update(
+    def sync_instructor_to_lessons(self, previous_instructor=None):
+        """Propagate team instructor to lessons that still follow the previous one.
+
+        Lessons with a different instructor (for example a combined-track
+        override) are left alone. Monthly pay stays on the course.
+        """
+        qs = self.lessons.all()
+        if previous_instructor is not None:
+            qs = qs.filter(instructor=previous_instructor)
+        qs.update(
             instructor=self.instructor,
             instructor_salary_override=None,
         )

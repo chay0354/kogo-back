@@ -2,6 +2,7 @@ from decimal import Decimal, InvalidOperation
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson, LessonBundle
 from apps.enrollments.models import LessonEnrollment
@@ -364,8 +365,10 @@ class CourseSerializer(serializers.ModelSerializer):
         return course
 
     def update(self, instance, validated_data):
+        previous_instructor = instance.instructor
         course = super().update(instance, validated_data)
-        course.sync_instructor_to_lessons()
+        if 'instructor' in validated_data and previous_instructor != course.instructor:
+            course.sync_instructor_to_lessons(previous_instructor=previous_instructor)
         return course
 
 
@@ -373,6 +376,11 @@ class LessonSerializer(serializers.ModelSerializer):
     """Basic Lesson serializer for CRUD operations"""
     course_name = serializers.CharField(source='course.name', read_only=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
+    instructor = serializers.PrimaryKeyRelatedField(
+        queryset=Instructor.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True, allow_null=True)
     day_name = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
@@ -386,21 +394,14 @@ class LessonSerializer(serializers.ModelSerializer):
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
                   'status', 'notes', 'enrolled_students_count', 'room_capacity',
                   'created_at', 'updated_at']
-        read_only_fields = ['id', 'instructor', 'instructor_salary_override', 'created_at', 'updated_at']
-
-    def _apply_course_instructor(self, validated_data):
-        course = validated_data.get('course') or getattr(self.instance, 'course', None)
-        if course is not None:
-            validated_data['instructor'] = course.instructor
-        return validated_data
+        read_only_fields = ['id', 'instructor_salary_override', 'created_at', 'updated_at']
 
     def create(self, validated_data):
-        validated_data = self._apply_course_instructor(validated_data)
+        if validated_data.get('instructor') is None:
+            course = validated_data.get('course')
+            if course is not None:
+                validated_data['instructor'] = course.instructor
         return super().create(validated_data)
-
-    def update(self, instance, validated_data):
-        validated_data = self._apply_course_instructor(validated_data)
-        return super().update(instance, validated_data)
 
     def validate_additional_course_prices(self, value):
         return _normalize_additional_course_prices(value)
@@ -431,7 +432,12 @@ class LessonSerializer(serializers.ModelSerializer):
         course = data.get('course') or (self.instance.course if self.instance else None)
         branch = course.branch if course else None
         room = data.get('room') or (self.instance.room if self.instance else None)
-        instructor = course.instructor if course else None
+        if 'instructor' in data:
+            instructor = data.get('instructor')
+        elif self.instance:
+            instructor = self.instance.instructor
+        else:
+            instructor = course.instructor if course else None
         day_of_week = data.get('day_of_week', self.instance.day_of_week if self.instance else None)
         start_time = data.get('start_time', self.instance.start_time if self.instance else None)
         end_time = data.get('end_time', self.instance.end_time if self.instance else None)
@@ -494,12 +500,17 @@ class LessonSerializer(serializers.ModelSerializer):
 
 
 class LessonBundleLessonSerializer(serializers.ModelSerializer):
-    """Minimal lesson info nested inside a bundle (day/time display only)."""
+    """Minimal lesson info nested inside a bundle (schedule + instructor)."""
     day_name = serializers.SerializerMethodField()
+    instructor_id = serializers.UUIDField(read_only=True, allow_null=True)
+    instructor_name = serializers.CharField(source='instructor.full_name', read_only=True, allow_null=True)
 
     class Meta:
         model = Lesson
-        fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time']
+        fields = [
+            'id', 'day_of_week', 'day_name', 'start_time', 'end_time',
+            'instructor_id', 'instructor_name',
+        ]
 
     def get_day_name(self, obj):
         days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
@@ -510,13 +521,18 @@ class LessonBundleSerializer(serializers.ModelSerializer):
     """CRUD serializer for LessonBundle — combined-price packages of a course's own lessons."""
     lessons_detail = LessonBundleLessonSerializer(source='lessons', many=True, read_only=True)
     price_per_lesson = serializers.SerializerMethodField()
+    lesson_instructors = serializers.DictField(
+        child=serializers.UUIDField(allow_null=True),
+        required=False,
+        write_only=True,
+    )
 
     class Meta:
         model = LessonBundle
         fields = [
             'id', 'course', 'name', 'lessons', 'lessons_detail',
             'combined_price', 'price_per_lesson', 'is_active',
-            'created_at', 'updated_at',
+            'lesson_instructors', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -540,7 +556,75 @@ class LessonBundleSerializer(serializers.ModelSerializer):
         if combined_price is not None and combined_price < 0:
             raise serializers.ValidationError({'combined_price': 'המחיר לא יכול להיות שלילי'})
 
+        mapping = data.get('lesson_instructors')
+        if mapping:
+            selected = lessons or []
+            lesson_ids = {str(l.id) for l in selected}
+            unknown = [key for key in mapping if key not in lesson_ids]
+            if unknown:
+                raise serializers.ValidationError({
+                    'lesson_instructors': 'ניתן לשנות מדריך רק לשיעורים שבמסלול',
+                })
+            for lesson_id, instructor_id in mapping.items():
+                if not instructor_id:
+                    continue
+                instructor = Instructor.objects.filter(pk=instructor_id, is_active=True).first()
+                if instructor is None:
+                    raise serializers.ValidationError({
+                        'lesson_instructors': 'המדריך שנבחר אינו קיים',
+                    })
+                lesson = next((l for l in selected if str(l.id) == str(lesson_id)), None)
+                if lesson is None:
+                    continue
+                conflict_message = self._instructor_busy_message(lesson, instructor)
+                if conflict_message:
+                    raise serializers.ValidationError({'lesson_instructors': conflict_message})
+
         return data
+
+    def create(self, validated_data):
+        mapping = validated_data.pop('lesson_instructors', None)
+        with transaction.atomic():
+            bundle = super().create(validated_data)
+            self._apply_lesson_instructors(bundle, mapping)
+            return bundle
+
+    def update(self, instance, validated_data):
+        mapping = validated_data.pop('lesson_instructors', None)
+        with transaction.atomic():
+            bundle = super().update(instance, validated_data)
+            self._apply_lesson_instructors(bundle, mapping)
+            return bundle
+
+    def _apply_lesson_instructors(self, bundle, mapping):
+        if not mapping:
+            return
+        for lesson_id, instructor_id in mapping.items():
+            lesson = Lesson.objects.filter(pk=lesson_id, course_id=bundle.course_id).first()
+            if lesson is None:
+                continue
+            lesson.instructor_id = instructor_id
+            lesson.save(update_fields=['instructor'])
+
+    @staticmethod
+    def _instructor_busy_message(lesson, instructor):
+        overlap = Q(
+            day_of_week=lesson.day_of_week,
+            status='scheduled',
+        ) & ~(Q(end_time__lte=lesson.start_time) | Q(start_time__gte=lesson.end_time))
+        conflict = (
+            Lesson.objects.filter(overlap, instructor=instructor)
+            .exclude(pk=lesson.pk)
+            .first()
+        )
+        if not conflict:
+            return None
+        days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+        day_name = days[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
+        return (
+            f'המדריך תפוס ביום {day_name} בין השעות '
+            f'{conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
+        )
 
 
 # Legacy serializers for backward compatibility

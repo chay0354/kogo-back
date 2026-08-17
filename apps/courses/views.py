@@ -388,7 +388,9 @@ class LessonBundleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def get_queryset(self):
-        queryset = LessonBundle.objects.select_related('course').prefetch_related('lessons')
+        queryset = LessonBundle.objects.select_related('course').prefetch_related(
+            'lessons', 'lessons__instructor'
+        )
         queryset = scope_courses(queryset, self.request.user, 'course')
 
         course_id = self.request.query_params.get('course', None)

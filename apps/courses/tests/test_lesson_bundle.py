@@ -116,3 +116,94 @@ class LessonEnrollmentBundleValidationTest(TestCase):
         })
         self.assertFalse(serializer.is_valid())
         self.assertIn('bundle', serializer.errors)
+
+
+class LessonInstructorOverrideTest(TestCase):
+    """Per-lesson instructor can differ from the course default (combined tracks)."""
+
+    def setUp(self):
+        self.instructor_a = TestDataFactory.create_instructor(first_name='Ava', last_name='Alpha')
+        self.instructor_b = TestDataFactory.create_instructor(first_name='Ben', last_name='Beta')
+        self.instructor_c = TestDataFactory.create_instructor(first_name='Cara', last_name='Cohen')
+        self.course = TestDataFactory.create_course(instructor=self.instructor_a)
+        self.lesson_a = TestDataFactory.create_lesson(
+            course=self.course, instructor=self.instructor_a, day_of_week=0,
+        )
+        self.lesson_b = TestDataFactory.create_lesson(
+            course=self.course, instructor=self.instructor_a, day_of_week=3,
+        )
+
+    def test_lesson_serializer_updates_instructor(self):
+        from apps.courses.serializers import LessonSerializer
+
+        serializer = LessonSerializer(
+            self.lesson_b,
+            data={'instructor': str(self.instructor_b.id)},
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        self.lesson_b.refresh_from_db()
+        self.assertEqual(self.lesson_b.instructor_id, self.instructor_b.id)
+
+    def test_changing_course_instructor_keeps_overridden_lessons(self):
+        from apps.courses.serializers import CourseSerializer
+
+        self.lesson_b.instructor = self.instructor_b
+        self.lesson_b.save(update_fields=['instructor'])
+
+        serializer = CourseSerializer(
+            self.course,
+            data={'instructor': str(self.instructor_c.id)},
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        self.lesson_a.refresh_from_db()
+        self.lesson_b.refresh_from_db()
+        self.assertEqual(self.lesson_a.instructor_id, self.instructor_c.id)
+        self.assertEqual(self.lesson_b.instructor_id, self.instructor_b.id)
+
+    def test_bundle_save_assigns_per_lesson_instructors(self):
+        serializer = LessonBundleSerializer(data={
+            'course': str(self.course.id),
+            'name': 'פעמיים בשבוע',
+            'lessons': [str(self.lesson_a.id), str(self.lesson_b.id)],
+            'combined_price': '300.00',
+            'lesson_instructors': {
+                str(self.lesson_a.id): str(self.instructor_a.id),
+                str(self.lesson_b.id): str(self.instructor_b.id),
+            },
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        bundle = serializer.save()
+
+        self.lesson_a.refresh_from_db()
+        self.lesson_b.refresh_from_db()
+        self.assertEqual(self.lesson_a.instructor_id, self.instructor_a.id)
+        self.assertEqual(self.lesson_b.instructor_id, self.instructor_b.id)
+
+        detail = {str(row['id']): row for row in LessonBundleSerializer(bundle).data['lessons_detail']}
+        self.assertEqual(detail[str(self.lesson_b.id)]['instructor_name'], self.instructor_b.full_name)
+
+    def test_bundle_rejects_busy_instructor(self):
+        other_course = TestDataFactory.create_course(name='קבוצה אחרת')
+        TestDataFactory.create_lesson(
+            course=other_course,
+            instructor=self.instructor_b,
+            day_of_week=3,
+            start_time=self.lesson_b.start_time,
+            end_time=self.lesson_b.end_time,
+        )
+
+        serializer = LessonBundleSerializer(data={
+            'course': str(self.course.id),
+            'lessons': [str(self.lesson_a.id), str(self.lesson_b.id)],
+            'combined_price': '300.00',
+            'lesson_instructors': {
+                str(self.lesson_b.id): str(self.instructor_b.id),
+            },
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('lesson_instructors', serializer.errors)
