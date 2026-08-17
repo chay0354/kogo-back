@@ -541,8 +541,7 @@ class TranzilaService:
             'card_number': token,
             'items': items
         }
-        payload['pan_entry_mode'] = 52  # online, per Tranzila Transactions API
-        
+
         self._apply_duplicate_guard(payload, duplicate_guard_key)
 
         self._log_api_call("CHARGE_TOKEN", amount=amount, token=token)
@@ -619,10 +618,11 @@ class TranzilaService:
             'expire_month': expiry_month,
             'expire_year': expiry_year,
             'cvv': cvv,
-            'card_holder_id': card_holder_id,
             'items': items,
-            'pan_entry_mode': 52,  # online, per Tranzila Transactions API
         }
+        # Schema requires exactly 9 digits; an empty string is a 20004 mismatch.
+        if card_holder_id and len(str(card_holder_id)) == 9:
+            payload['card_holder_id'] = str(card_holder_id)
 
         if installments and installments > 1:
             payload['payment_plan'] = 8
@@ -657,8 +657,9 @@ class TranzilaService:
             else:
                 error_msg = response.get('message', 'Unknown error')
                 logger.error(
-                    "Card charge declined: error_code=%s message=%s last4=%s",
+                    "Card charge declined: error_code=%s message=%s last4=%s details=%s",
                     error_code, error_msg, str(card_number)[-4:],
+                    {k: response.get(k) for k in ('errors', 'error', 'validation', 'message') if k in response},
                 )
                 return self._build_error_response(
                     error_msg,

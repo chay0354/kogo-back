@@ -105,8 +105,8 @@ class TranzilaServicePaymentRequestTest(TestCase):
         self.assertIn('sum=470.0', url)
     
     @patch.object(TranzilaService, '_make_api_request')
-    def test_charge_with_card_sends_ils_and_online_entry_mode(self, mock_api):
-        """REST debit must send ILS, pan_entry_mode=52, and keep the returned token."""
+    def test_charge_with_card_sends_ils_and_keeps_token(self, mock_api):
+        """REST debit must send ILS and keep the returned token, without extra schema fields."""
         mock_api.return_value = {
             'error_code': 0,
             'message': 'ok',
@@ -129,7 +129,8 @@ class TranzilaServicePaymentRequestTest(TestCase):
         self.assertEqual(result['token'], 'saved-card-token')
         payload = mock_api.call_args.kwargs['params']
         self.assertEqual(payload['txn_currency_code'], 'ILS')
-        self.assertEqual(payload['pan_entry_mode'], 52)
+        self.assertNotIn('pan_entry_mode', payload)
+        self.assertEqual(payload['card_holder_id'], '123456782')
         self.assertEqual(payload['txn_type'], 'debit')
         self.assertNotIn('DCdisable', payload)
 
