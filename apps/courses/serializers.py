@@ -7,7 +7,7 @@ from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson, LessonBundle
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments, is_paying_enrollment
-from apps.core.models import Branch, UserProfile
+from apps.core.models import Branch, Room, UserProfile
 from apps.core.scoping import scope_courses
 from apps.instructors.models import Instructor
 from apps.scheduling.studio_conflict import timed_event_conflicts_lesson
@@ -500,16 +500,18 @@ class LessonSerializer(serializers.ModelSerializer):
 
 
 class LessonBundleLessonSerializer(serializers.ModelSerializer):
-    """Minimal lesson info nested inside a bundle (schedule + instructor)."""
+    """Minimal lesson info nested inside a bundle (schedule, instructor, studio)."""
     day_name = serializers.SerializerMethodField()
     instructor_id = serializers.UUIDField(read_only=True, allow_null=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True, allow_null=True)
+    room_id = serializers.UUIDField(read_only=True, allow_null=True)
+    room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
 
     class Meta:
         model = Lesson
         fields = [
             'id', 'day_of_week', 'day_name', 'start_time', 'end_time',
-            'instructor_id', 'instructor_name',
+            'instructor_id', 'instructor_name', 'room_id', 'room_name',
         ]
 
     def get_day_name(self, obj):
@@ -526,13 +528,18 @@ class LessonBundleSerializer(serializers.ModelSerializer):
         required=False,
         write_only=True,
     )
+    lesson_rooms = serializers.DictField(
+        child=serializers.UUIDField(allow_null=True),
+        required=False,
+        write_only=True,
+    )
 
     class Meta:
         model = LessonBundle
         fields = [
             'id', 'course', 'name', 'lessons', 'lessons_detail',
             'combined_price', 'price_per_lesson', 'is_active',
-            'lesson_instructors', 'created_at', 'updated_at',
+            'lesson_instructors', 'lesson_rooms', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -556,44 +563,91 @@ class LessonBundleSerializer(serializers.ModelSerializer):
         if combined_price is not None and combined_price < 0:
             raise serializers.ValidationError({'combined_price': 'המחיר לא יכול להיות שלילי'})
 
-        mapping = data.get('lesson_instructors')
-        if mapping:
-            selected = lessons or []
-            lesson_ids = {str(l.id) for l in selected}
-            unknown = [key for key in mapping if key not in lesson_ids]
-            if unknown:
-                raise serializers.ValidationError({
-                    'lesson_instructors': 'ניתן לשנות מדריך רק לשיעורים שבמסלול',
-                })
-            for lesson_id, instructor_id in mapping.items():
-                if not instructor_id:
-                    continue
-                instructor = Instructor.objects.filter(pk=instructor_id, is_active=True).first()
-                if instructor is None:
-                    raise serializers.ValidationError({
-                        'lesson_instructors': 'המדריך שנבחר אינו קיים',
-                    })
-                lesson = next((l for l in selected if str(l.id) == str(lesson_id)), None)
-                if lesson is None:
-                    continue
-                conflict_message = self._instructor_busy_message(lesson, instructor)
-                if conflict_message:
-                    raise serializers.ValidationError({'lesson_instructors': conflict_message})
+        selected = lessons or []
+        self._validate_instructor_mapping(data.get('lesson_instructors'), selected)
+        self._validate_room_mapping(data.get('lesson_rooms'), selected, course)
 
         return data
 
+    def _validate_instructor_mapping(self, mapping, selected):
+        if not mapping:
+            return
+        lesson_ids = {str(l.id) for l in selected}
+        if any(key not in lesson_ids for key in mapping):
+            raise serializers.ValidationError({
+                'lesson_instructors': 'ניתן לשנות מדריך רק לשיעורים שבמסלול',
+            })
+        for lesson_id, instructor_id in mapping.items():
+            if not instructor_id:
+                continue
+            instructor = Instructor.objects.filter(pk=instructor_id, is_active=True).first()
+            if instructor is None:
+                raise serializers.ValidationError({
+                    'lesson_instructors': 'המדריך שנבחר אינו קיים',
+                })
+            lesson = next((l for l in selected if str(l.id) == str(lesson_id)), None)
+            if lesson is None:
+                continue
+            conflict_message = self._instructor_busy_message(lesson, instructor)
+            if conflict_message:
+                raise serializers.ValidationError({'lesson_instructors': conflict_message})
+
+    def _validate_room_mapping(self, mapping, selected, course):
+        if not mapping:
+            return
+        lesson_ids = {str(l.id) for l in selected}
+        if any(key not in lesson_ids for key in mapping):
+            raise serializers.ValidationError({
+                'lesson_rooms': 'ניתן לשנות סטודיו רק לשיעורים שבמסלול',
+            })
+        branch = course.branch if course else None
+        for lesson_id, room_id in mapping.items():
+            if not room_id:
+                continue
+            room = Room.objects.filter(pk=room_id, is_active=True).first()
+            if room is None:
+                raise serializers.ValidationError({
+                    'lesson_rooms': 'הסטודיו שנבחר אינו קיים',
+                })
+            if branch and room.branch_id != branch.id:
+                raise serializers.ValidationError({
+                    'lesson_rooms': 'הסטודיו חייב להיות בסניף של החוג',
+                })
+            lesson = next((l for l in selected if str(l.id) == str(lesson_id)), None)
+            if lesson is None:
+                continue
+            conflict_message = self._room_busy_message(lesson, room)
+            if conflict_message:
+                raise serializers.ValidationError({'lesson_rooms': conflict_message})
+            if timed_event_conflicts_lesson(
+                branch,
+                room,
+                lesson.day_of_week,
+                lesson.start_time,
+                lesson.end_time,
+                lesson_is_recurring=lesson.is_recurring,
+                lesson_date=lesson.lesson_date,
+            ):
+                raise serializers.ValidationError({
+                    'lesson_rooms': 'החדר תפוס באותה שעה (אירוע או שכירות בלוח)',
+                })
+
     def create(self, validated_data):
-        mapping = validated_data.pop('lesson_instructors', None)
+        instructor_mapping = validated_data.pop('lesson_instructors', None)
+        room_mapping = validated_data.pop('lesson_rooms', None)
         with transaction.atomic():
             bundle = super().create(validated_data)
-            self._apply_lesson_instructors(bundle, mapping)
+            self._apply_lesson_instructors(bundle, instructor_mapping)
+            self._apply_lesson_rooms(bundle, room_mapping)
             return bundle
 
     def update(self, instance, validated_data):
-        mapping = validated_data.pop('lesson_instructors', None)
+        instructor_mapping = validated_data.pop('lesson_instructors', None)
+        room_mapping = validated_data.pop('lesson_rooms', None)
         with transaction.atomic():
             bundle = super().update(instance, validated_data)
-            self._apply_lesson_instructors(bundle, mapping)
+            self._apply_lesson_instructors(bundle, instructor_mapping)
+            self._apply_lesson_rooms(bundle, room_mapping)
             return bundle
 
     def _apply_lesson_instructors(self, bundle, mapping):
@@ -606,23 +660,51 @@ class LessonBundleSerializer(serializers.ModelSerializer):
             lesson.instructor_id = instructor_id
             lesson.save(update_fields=['instructor'])
 
+    def _apply_lesson_rooms(self, bundle, mapping):
+        if not mapping:
+            return
+        for lesson_id, room_id in mapping.items():
+            lesson = Lesson.objects.filter(pk=lesson_id, course_id=bundle.course_id).first()
+            if lesson is None:
+                continue
+            lesson.room_id = room_id
+            lesson.save(update_fields=['room'])
+
     @staticmethod
-    def _instructor_busy_message(lesson, instructor):
-        overlap = Q(
+    def _overlap_query(lesson):
+        return Q(
             day_of_week=lesson.day_of_week,
             status='scheduled',
         ) & ~(Q(end_time__lte=lesson.start_time) | Q(start_time__gte=lesson.end_time))
+
+    @classmethod
+    def _instructor_busy_message(cls, lesson, instructor):
         conflict = (
-            Lesson.objects.filter(overlap, instructor=instructor)
+            Lesson.objects.filter(cls._overlap_query(lesson), instructor=instructor)
             .exclude(pk=lesson.pk)
             .first()
         )
         if not conflict:
             return None
+        return cls._busy_slot_message('המדריך', lesson, conflict)
+
+    @classmethod
+    def _room_busy_message(cls, lesson, room):
+        conflict = (
+            Lesson.objects.filter(cls._overlap_query(lesson), room=room)
+            .exclude(pk=lesson.pk)
+            .first()
+        )
+        if not conflict:
+            return None
+        return cls._busy_slot_message('החדר', lesson, conflict)
+
+    @staticmethod
+    def _busy_slot_message(subject, lesson, conflict):
         days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
         day_name = days[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
         return (
-            f'המדריך תפוס ביום {day_name} בין השעות '
+            f'{subject} תפוס ביום {day_name} בין השעות '
             f'{conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
         )
 

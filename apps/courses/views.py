@@ -389,7 +389,7 @@ class LessonBundleViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = LessonBundle.objects.select_related('course').prefetch_related(
-            'lessons', 'lessons__instructor'
+            'lessons', 'lessons__instructor', 'lessons__room'
         )
         queryset = scope_courses(queryset, self.request.user, 'course')
 

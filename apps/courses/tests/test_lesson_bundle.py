@@ -207,3 +207,58 @@ class LessonInstructorOverrideTest(TestCase):
         })
         self.assertFalse(serializer.is_valid())
         self.assertIn('lesson_instructors', serializer.errors)
+
+    def test_bundle_save_assigns_per_lesson_rooms(self):
+        room_b = TestDataFactory.create_room(branch=self.course.branch, name='סטודיו ב')
+        serializer = LessonBundleSerializer(data={
+            'course': str(self.course.id),
+            'name': 'פעמיים בשבוע',
+            'lessons': [str(self.lesson_a.id), str(self.lesson_b.id)],
+            'combined_price': '300.00',
+            'lesson_rooms': {
+                str(self.lesson_a.id): str(self.lesson_a.room_id),
+                str(self.lesson_b.id): str(room_b.id),
+            },
+        })
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        bundle = serializer.save()
+
+        self.lesson_b.refresh_from_db()
+        self.assertEqual(self.lesson_b.room_id, room_b.id)
+        detail = {str(row['id']): row for row in LessonBundleSerializer(bundle).data['lessons_detail']}
+        self.assertEqual(detail[str(self.lesson_b.id)]['room_name'], room_b.name)
+
+    def test_bundle_rejects_busy_room(self):
+        busy_room = TestDataFactory.create_room(branch=self.course.branch, name='תפוס')
+        other_course = TestDataFactory.create_course(branch=self.course.branch, name='קבוצה אחרת')
+        TestDataFactory.create_lesson(
+            course=other_course,
+            room=busy_room,
+            day_of_week=3,
+            start_time=self.lesson_b.start_time,
+            end_time=self.lesson_b.end_time,
+        )
+
+        serializer = LessonBundleSerializer(data={
+            'course': str(self.course.id),
+            'lessons': [str(self.lesson_a.id), str(self.lesson_b.id)],
+            'combined_price': '300.00',
+            'lesson_rooms': {
+                str(self.lesson_b.id): str(busy_room.id),
+            },
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('lesson_rooms', serializer.errors)
+
+    def test_bundle_rejects_room_from_another_branch(self):
+        other_room = TestDataFactory.create_room(name='סניף אחר')
+        serializer = LessonBundleSerializer(data={
+            'course': str(self.course.id),
+            'lessons': [str(self.lesson_a.id), str(self.lesson_b.id)],
+            'combined_price': '300.00',
+            'lesson_rooms': {
+                str(self.lesson_b.id): str(other_room.id),
+            },
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('lesson_rooms', serializer.errors)
