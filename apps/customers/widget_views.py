@@ -601,7 +601,17 @@ class WidgetChargeView(APIView):
 
         payment_ids = request.data.get('payment_ids')
         if payment_ids:
-            results = [self._charge_one(str(pid), card_details) for pid in payment_ids]
+            results = []
+            sent_subscription_whatsapp = False
+            for pid in payment_ids:
+                result = self._charge_one(
+                    str(pid),
+                    card_details,
+                    send_subscription_whatsapp=not sent_subscription_whatsapp,
+                )
+                results.append(result)
+                if result.get('success'):
+                    sent_subscription_whatsapp = True
             all_success = all(r.get('success') for r in results)
             status_code = status.HTTP_200_OK if all_success else status.HTTP_400_BAD_REQUEST
             return Response({'success': all_success, 'results': results}, status=status_code)
@@ -610,11 +620,11 @@ class WidgetChargeView(APIView):
         if not payment_id:
             return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
-        result = self._charge_one(payment_id, card_details)
+        result = self._charge_one(payment_id, card_details, send_subscription_whatsapp=True)
         status_code = status.HTTP_200_OK if result.get('success') else status.HTTP_400_BAD_REQUEST
         return Response(result, status=status_code)
 
-    def _charge_one(self, payment_id, card_details):
+    def _charge_one(self, payment_id, card_details, send_subscription_whatsapp=True):
         from apps.core.payment_service import (
             _compute_prorate,
             payment_full_monthly_amount,
@@ -852,6 +862,12 @@ class WidgetChargeView(APIView):
                     stamp_and_notify_trial_enrollment(enrollment_id_for_whatsapp)
                 except Exception:
                     logger.exception("Trial WhatsApp notification failed after paid trial charge (non-fatal)")
+            elif send_subscription_whatsapp:
+                try:
+                    from apps.core.payment_service import PaymentService
+                    PaymentService()._send_registration_whatsapp(payment)
+                except Exception:
+                    logger.exception("Registration WhatsApp failed after widget charge (non-fatal)")
 
             return {'success': True, 'payment_id': str(payment.id)}
 

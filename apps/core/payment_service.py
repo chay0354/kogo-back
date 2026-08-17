@@ -820,6 +820,11 @@ class PaymentService:
 
             log_payment_operation("SUBSCRIPTION_CHARGED", child=child.full_name, payment_id=payment.id, amount=payment.final_amount)
 
+            try:
+                self._send_registration_whatsapp(payment)
+            except Exception:
+                logger.exception("Registration WhatsApp failed after card charge (non-fatal)")
+
             return {
                 'success': True,
                 'payment_id': str(payment.id),
