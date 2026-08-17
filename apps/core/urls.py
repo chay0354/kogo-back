@@ -6,6 +6,7 @@ from . import dashboard_views
 from . import partner_views
 from .manychat_views import WhatsAppViewSet
 from .registration_terms_views import RegistrationTermsView
+from .credit_card_charge_views import CreditCardChargeView
 
 router = DefaultRouter()
 router.register(r'cities', views.CityViewSet, basename='city')
@@ -21,5 +22,6 @@ urlpatterns = [
     path('', include(router.urls)),
     path('auth/', include('apps.core.auth_urls')),
     path('registration-terms/', RegistrationTermsView.as_view(), name='registration-terms'),
+    path('credit-cards/charge/', CreditCardChargeView.as_view(), name='credit-card-charge'),
 ]
 
