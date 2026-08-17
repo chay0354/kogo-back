@@ -123,13 +123,30 @@ class TranzilaService:
     - Response parsing
     """
     
-    def __init__(self):
-        """Initialize Tranzila service with configuration from Django settings."""
-        self.terminal = getattr(settings, 'TRANZILA_TERMINAL', '')
-        self.token_terminal = getattr(settings, 'TRANZILA_TOKEN_TERMINAL', self.terminal)
-        self.supplier = getattr(settings, 'TRANZILA_SUPPLIER', '')
-        self.public_key = getattr(settings, 'TRANZILA_PUBLIC_KEY', '')
-        self.secret_key = getattr(settings, 'TRANZILA_SECRET_KEY', '')
+    def __init__(
+        self,
+        terminal: Optional[str] = None,
+        token_terminal: Optional[str] = None,
+        supplier: Optional[str] = None,
+        public_key: Optional[str] = None,
+        secret_key: Optional[str] = None,
+    ):
+        """
+        Initialize Tranzila service with configuration from Django settings.
+
+        Any credential can be overridden per-instance (e.g. to use a different
+        terminal/credential set than the default settings-based one) by passing
+        it explicitly; omitted kwargs fall back to the existing settings-based
+        defaults, so existing `TranzilaService()` callers are unaffected.
+        """
+        self.terminal = terminal if terminal is not None else getattr(settings, 'TRANZILA_TERMINAL', '')
+        self.token_terminal = (
+            token_terminal if token_terminal is not None
+            else getattr(settings, 'TRANZILA_TOKEN_TERMINAL', self.terminal)
+        )
+        self.supplier = supplier if supplier is not None else getattr(settings, 'TRANZILA_SUPPLIER', '')
+        self.public_key = public_key if public_key is not None else getattr(settings, 'TRANZILA_PUBLIC_KEY', '')
+        self.secret_key = secret_key if secret_key is not None else getattr(settings, 'TRANZILA_SECRET_KEY', '')
         self.webhook_secret = getattr(settings, 'TRANZILA_WEBHOOK_SECRET', '')
         
         # API endpoints
