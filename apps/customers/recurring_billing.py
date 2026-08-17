@@ -38,7 +38,7 @@ def process_due_recurring_charges(*, dry_run: bool = False) -> dict:
     apply_due_pending_recurring_amounts()
     today = timezone.localdate()
     service = PaymentService()
-    tranzila = TranzilaService()
+    tranzila = TranzilaService.production()
 
     due = (
         RecurringPayment.objects

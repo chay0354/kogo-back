@@ -751,7 +751,7 @@ class WidgetChargeView(APIView):
         cvv = card['cvv']
         card_holder_id = card['card_holder_id']
 
-        tranzila = TranzilaService()
+        tranzila = TranzilaService.production()
         is_trial_payment = payment.trial_lesson_date is not None
         item_label = (
             f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"

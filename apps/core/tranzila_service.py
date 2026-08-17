@@ -137,7 +137,8 @@ class TranzilaService:
         Any credential can be overridden per-instance (e.g. to use a different
         terminal/credential set than the default settings-based one) by passing
         it explicitly; omitted kwargs fall back to the existing settings-based
-        defaults, so existing `TranzilaService()` callers are unaffected.
+        defaults. Use `TranzilaService.production()` to charge against the
+        production terminal.
         """
         self.terminal = terminal if terminal is not None else getattr(settings, 'TRANZILA_TERMINAL', '')
         self.token_terminal = (
@@ -160,7 +161,18 @@ class TranzilaService:
             logger.warning("TRANZILA_PUBLIC_KEY not configured - REST API calls will fail")
         if not self.secret_key:
             logger.warning("TRANZILA_SECRET_KEY not configured - REST API calls will fail")
-    
+
+    @classmethod
+    def production(cls) -> 'TranzilaService':
+        """TranzilaService instance wired to the production Tranzila terminal."""
+        return cls(
+            terminal=settings.TRANZILA_PROD_TERMINAL,
+            token_terminal=settings.TRANZILA_PROD_TOKEN_TERMINAL,
+            supplier=settings.TRANZILA_PROD_SUPPLIER,
+            public_key=settings.TRANZILA_PROD_PUBLIC_KEY,
+            secret_key=settings.TRANZILA_PROD_SECRET_KEY,
+        )
+
     # ============================================================================
     # Logging Utilities
     # ============================================================================

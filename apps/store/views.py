@@ -770,7 +770,7 @@ def charge_card(request):
             charged_with_token=use_token,
         )
 
-        tranzila = TranzilaService()
+        tranzila = TranzilaService.production()
 
         if use_token:
             # Charge using stored Tranzila token

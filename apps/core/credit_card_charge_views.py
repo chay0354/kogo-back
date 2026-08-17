@@ -1,7 +1,6 @@
 import logging
 from decimal import Decimal, InvalidOperation
 
-from django.conf import settings
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -70,13 +69,7 @@ class CreditCardChargeView(APIView):
             amount,
         )
 
-        tranzila = TranzilaService(
-            terminal=settings.TRANZILA_PROD_TERMINAL,
-            token_terminal=settings.TRANZILA_PROD_TOKEN_TERMINAL,
-            supplier=settings.TRANZILA_PROD_SUPPLIER,
-            public_key=settings.TRANZILA_PROD_PUBLIC_KEY,
-            secret_key=settings.TRANZILA_PROD_SECRET_KEY,
-        )
+        tranzila = TranzilaService.production()
 
         result = tranzila.charge_with_card(
             card_number=card_number,
