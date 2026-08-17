@@ -8,4 +8,5 @@ class CoreConfig(AppConfig):
     def ready(self):
         # Ensure signals are registered
         from . import signals  # noqa: F401
+        from . import payment_checks  # noqa: F401
 

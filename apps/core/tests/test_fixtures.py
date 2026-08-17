@@ -29,7 +29,8 @@ class TestDataFactory:
     @staticmethod
     def create_city(name="תל אביב"):
         """Create a test city"""
-        return City.objects.create(name=name)
+        city, _ = City.objects.get_or_create(name=name)
+        return city
     
     @staticmethod
     def create_branch(name="סניף מרכז", city=None, **kwargs):

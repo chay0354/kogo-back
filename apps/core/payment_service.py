@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
@@ -28,7 +29,8 @@ from apps.customers.models import (
 )
 from apps.customers.financial_models import Invoice, InvoiceChild, Discount
 from apps.customers.discount_service import DiscountService
-from apps.core.tranzila_service import TranzilaService
+from apps.core.card_validation import validate_card_details
+from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc
 from apps.courses.models import Lesson, LessonBundle
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import paying_enrollments
@@ -230,6 +232,7 @@ class PaymentService:
         error_url: str = '',
         callback_url: str = '',
         bundle_id: Optional[str] = None,
+        include_registration_fee: bool = True,
     ) -> Dict:
         """
         Initiate a recurring subscription payment for a child's lesson enrollment.
@@ -252,6 +255,8 @@ class PaymentService:
             bundle_id: when set, bill at bundle.combined_price / lesson_count instead
                 of the regular/tiered course price (see resolve_billing_price). Caller
                 is responsible for calling this once per member lesson of the bundle.
+            include_registration_fee: pass False for every member lesson of a bundle
+                after the first, so the one-time דמי רישום is charged once per bundle.
 
         Returns:
             Dict with payment_id, tranzila_url, amount, discounts_applied
@@ -300,7 +305,7 @@ class PaymentService:
             Decimal('1.00'),
             (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
         )
-        registration_fee = registration_fee_amount()
+        registration_fee = registration_fee_amount() if include_registration_fee else Decimal('0.00')
         prorated_final = prorated_lesson + registration_fee
 
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
@@ -371,6 +376,10 @@ class PaymentService:
             error_url=error_url,
             callback_url=callback_url,
             transaction_id=str(payment.id),
+            # The initial charge is pro-rated and carries דמי רישום; the standing order
+            # itself must run at the plain monthly price from the next billing date.
+            recur_sum=full_monthly_amount,
+            recur_start_date=next_billing_date.isoformat(),
         )
         
         log_payment_operation(
@@ -449,13 +458,30 @@ class PaymentService:
         # Parse webhook response
         parsed_response = self.tranzila_service.parse_webhook_response(webhook_payload)
         
-        # Check idempotency
-        idempotency_key = f"tranzila_{parsed_response['transaction_id']}_{parsed_response['timestamp'].isoformat()}"
-        
+        # Find associated Payment record (we sent payment.id as pdesc)
+        payment_id = invoice_id_from_pdesc(webhook_payload.get('pdesc', ''))
+
+        try:
+            payment = Payment.objects.select_for_update(of=('self',)).select_related(
+                'child', 'family', 'lesson', 'lesson__course', 'lesson__course__branch',
+            ).get(id=payment_id)
+        except (Payment.DoesNotExist, ValidationError, ValueError):
+            logger.error(f"Payment not found for webhook: {payment_id}")
+            return {'success': False, 'error': 'Payment not found'}
+
+        # Tranzila retries the notify callback, so the key must be stable across
+        # deliveries — anything time-based would let a retry create a second
+        # subscription, invoice and WhatsApp message.
+        idempotency_key = f"tranzila_{payment.id}_{parsed_response['transaction_id']}"
+
         if TranzilaTransaction.objects.filter(idempotency_key=idempotency_key).exists():
             logger.warning(f"Duplicate webhook received: {idempotency_key}")
             return {'success': True, 'message': 'Already processed'}
-        
+
+        if payment.status == 'completed':
+            logger.warning(f"Webhook for already completed payment {payment.id}; ignoring")
+            return {'success': True, 'message': 'Already processed'}
+
         # Create TranzilaTransaction record
         tranzila_transaction = TranzilaTransaction.objects.create(
             transaction_id=parsed_response['transaction_id'],
@@ -469,17 +495,6 @@ class PaymentService:
             is_successful=parsed_response['is_successful'],
             response_timestamp=parsed_response['timestamp']
         )
-        
-        # Find associated Payment record (using transaction_id which should be payment.id)
-        payment_id = webhook_payload.get('pdesc', '')  # We sent payment.id as pdesc
-        
-        try:
-            payment = Payment.objects.select_related(
-                'child', 'family', 'lesson', 'lesson__course', 'lesson__course__branch',
-            ).get(id=payment_id)
-        except Payment.DoesNotExist:
-            logger.error(f"Payment not found for webhook: {payment_id}")
-            return {'success': False, 'error': 'Payment not found'}
         
         # Link transaction to payment
         payment.tranzila_transaction = tranzila_transaction
@@ -631,6 +646,7 @@ class PaymentService:
         card_holder_id: str = '',
         payment_date: Optional[date] = None,
         bundle_id: Optional[str] = None,
+        include_registration_fee: bool = True,
     ) -> Dict:
         """
         Charge a subscription payment directly with card details (synchronous, no iframe/webhook).
@@ -638,9 +654,24 @@ class PaymentService:
         post-success logic as process_webhook_callback.
 
         bundle_id: when set, bill at bundle.combined_price / lesson_count (see resolve_billing_price).
+        include_registration_fee: pass False for bundle member lessons after the first, so the
+            one-time דמי רישום is charged once per bundle rather than per lesson.
         """
         if payment_date is None:
             payment_date = date.today()
+
+        card = validate_card_details({
+            'card_number': card_number,
+            'expiry_month': expiry_month,
+            'expiry_year': expiry_year,
+            'cvv': cvv,
+            'card_holder_id': card_holder_id,
+        })
+        card_number = card['card_number']
+        expiry_month = card['expiry_month']
+        expiry_year = card['expiry_year']
+        cvv = card['cvv']
+        card_holder_id = card['card_holder_id']
 
         try:
             child = Child.objects.select_related('family').get(id=child_id)
@@ -689,7 +720,7 @@ class PaymentService:
             Decimal('1.00'),
             (full_monthly_amount_c * prorate_factor_c).quantize(Decimal('0.01'))
         )
-        registration_fee_c = registration_fee_amount()
+        registration_fee_c = registration_fee_amount() if include_registration_fee else Decimal('0.00')
         prorated_final_c = prorated_lesson_c + registration_fee_c
 
         # Create Payment (pending)
@@ -743,6 +774,7 @@ class PaymentService:
             amount=prorated_final_c,
             description=payment.description,
             items=items,
+            duplicate_guard_key=f'payment-{payment.id}',
         )
 
         if result['success']:
@@ -759,7 +791,9 @@ class PaymentService:
                 response_message='',
                 request_data={},
                 response_data=result.get('raw_response', {}),
-                idempotency_key=f"card_{result.get('transaction_id', payment.id)}",
+                # Keyed on the payment so the unique constraint itself prevents a
+                # second completed charge for it.
+                idempotency_key=f"card_{payment.id}",
                 is_successful=True,
                 response_timestamp=timezone.now(),
             )
@@ -768,6 +802,14 @@ class PaymentService:
 
             # RecurringPayment (store token for future charges)
             token = result.get('token', '')
+            if not token:
+                # Charge succeeded but no saved card came back, so nothing will bill
+                # this subscription next month.
+                logger.error(
+                    "Tranzila returned no card token for payment %s (child=%s) — "
+                    "monthly billing will not run until a token is stored",
+                    payment.id, child.full_name,
+                )
             if token:
                 discount_details = [
                     {

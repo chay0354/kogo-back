@@ -111,6 +111,8 @@ def process_due_recurring_charges(*, dry_run: bool = False) -> dict:
             items=items,
             expire_month=recurring.card_expire_month,
             expire_year=recurring.card_expire_year,
+            # Scoped to the billing month so a re-run of the cron cannot bill twice.
+            duplicate_guard_key=f'recurring-{recurring.id}-{today:%Y-%m}',
         )
 
         if not result.get('success'):

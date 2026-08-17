@@ -49,7 +49,8 @@ class TranzilaServicePaymentRequestTest(TestCase):
         self.assertIn('iframenew.php', url)
         self.assertIn('sum=350', url)
         self.assertIn('currency=1', url)  # ILS code
-        self.assertIn('pdesc=test_txn_123', url)
+        # pdesc must be alphanumeric, so the underscores are stripped.
+        self.assertIn('pdesc=testtxn123', url)
 
     def test_create_payment_request_uuid_pdesc_is_hex(self):
         """UUID invoice ids must be sent without hyphens (Tranzila pdesc restriction)."""
@@ -71,20 +72,67 @@ class TranzilaServicePaymentRequestTest(TestCase):
         self.assertIn('sum=1.98', url)
     
     def test_create_recurring_payment_request(self):
-        """Test recurring payment request URL generation"""
+        """Charges the initial sum and tokenizes the card for later monthly charges."""
         url = self.service.create_recurring_payment_request(
-            amount=Decimal('350.00'),
+            amount=Decimal('470.00'),
             currency='ILS',
             description='Monthly subscription',
             customer_name='Jane Doe',
-            transaction_id='recur_123'
+            transaction_id='recur_123',
+            recur_sum=Decimal('350.00'),
         )
-        
-        # Verify recurring parameters
+
         self.assertIn('https://direct.tranzila.test', url)
-        self.assertIn('recur_transaction=4_approved', url)  # Recurring indicator
-        self.assertIsInstance(url, str)
+        self.assertIn('sum=470.0', url)
+        self.assertIn('tranmode=AK', url)
+        # CRM-side billing is the default, so Tranzila must not also hold a schedule.
+        self.assertNotIn('recur_transaction', url)
+        self.assertNotIn('recur_sum', url)
+
+    @override_settings(TRANZILA_GATEWAY_STANDING_ORDER=True)
+    def test_recurring_request_recurs_at_monthly_price_not_initial_sum(self):
+        """The setup fee is in `sum` only; the הוראות קבע repeats `recur_sum`."""
+        url = self.service.create_recurring_payment_request(
+            amount=Decimal('470.00'),
+            recur_sum=Decimal('350.00'),
+            recur_start_date='2026-09-01',
+            transaction_id='recur_123',
+        )
+
+        self.assertIn('recur_transaction=4_approved', url)
+        self.assertIn('recur_sum=350.0', url)
+        self.assertIn('recur_start_date=2026-09-01', url)
+        self.assertIn('sum=470.0', url)
     
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_charge_with_card_sends_ils_and_online_entry_mode(self, mock_api):
+        """REST debit must send ILS, pan_entry_mode=52, and keep the returned token."""
+        mock_api.return_value = {
+            'error_code': 0,
+            'message': 'ok',
+            'transaction_result': {
+                'transaction_id': 99,
+                'processor_response_code': '000',
+                'token': 'saved-card-token',
+            },
+        }
+        result = self.service.charge_with_card(
+            card_number='4580458045804580',
+            expiry_month=12,
+            expiry_year=2027,
+            cvv='123',
+            card_holder_id='123456782',
+            amount=Decimal('470.00'),
+            duplicate_guard_key='payment-abc',
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['token'], 'saved-card-token')
+        payload = mock_api.call_args.kwargs['params']
+        self.assertEqual(payload['txn_currency_code'], 'ILS')
+        self.assertEqual(payload['pan_entry_mode'], 52)
+        self.assertEqual(payload['txn_type'], 'debit')
+        self.assertNotIn('DCdisable', payload)
+
     def test_currency_code_conversion(self):
         """Test currency code conversion (ILS=1)"""
         url = self.service.create_payment_request(

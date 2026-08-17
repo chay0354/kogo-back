@@ -283,6 +283,28 @@ class PaymentServiceLessonBundleTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_bundle_member_can_skip_registration_fee(self, mock_discount, mock_tranzila):
+        mock_discount.side_effect = self.passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        first = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_a.id),
+            bundle_id=str(self.bundle.id),
+            include_registration_fee=True,
+        )
+        second = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_b.id),
+            bundle_id=str(self.bundle.id),
+            include_registration_fee=False,
+        )
+        self.assertEqual(first['registration_fee'], 120.00)
+        self.assertEqual(second['registration_fee'], 0.00)
+        self.assertGreater(first['final_amount'], second['final_amount'])
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
     def test_bundle_registration_rejected_when_a_member_lesson_is_full(self, mock_discount, mock_tranzila):
         mock_discount.side_effect = self.passthrough_discount
         mock_tranzila.return_value = "https://tranzila.test/payment"
@@ -339,9 +361,10 @@ class PaymentServiceWebhookTest(TestCase):
             'pdesc': str(self.payment.id),
         }
     
+    @patch('apps.core.manychat_service.ManyChatService')
     @patch('apps.core.payment_service.TranzilaService.parse_webhook_response')
     @patch('apps.core.payment_service.TranzilaService.verify_webhook_signature')
-    def test_successful_webhook_processing(self, mock_verify, mock_parse):
+    def test_successful_webhook_processing(self, mock_verify, mock_parse, mock_manychat_cls):
         """Test successful webhook processing"""
         mock_verify.return_value = True
         mock_parse.return_value = {
@@ -355,6 +378,7 @@ class PaymentServiceWebhookTest(TestCase):
             'timestamp': timezone.now(),
             'raw_payload': self.success_webhook_payload
         }
+        mock_manychat_cls.return_value.notify_registration.return_value = {'sent': True}
         
         result = self.service.process_webhook_callback(
             webhook_payload=self.success_webhook_payload,
@@ -379,6 +403,11 @@ class PaymentServiceWebhookTest(TestCase):
         transaction = TranzilaTransaction.objects.filter(transaction_id='TRX123').first()
         self.assertIsNotNone(transaction)
         self.assertTrue(transaction.is_successful)
+
+        from apps.core.manychat_service import ManyChatService
+        mock_manychat_cls.return_value.notify_registration.assert_called()
+        call_kwargs = mock_manychat_cls.return_value.notify_registration.call_args.kwargs
+        self.assertEqual(call_kwargs['kind'], ManyChatService.REGISTRATION_KIND_SUBSCRIPTION)
     
     @patch('apps.core.manychat_service.ManyChatService')
     @patch('apps.core.payment_service.TranzilaService.parse_webhook_response')

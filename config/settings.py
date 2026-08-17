@@ -229,10 +229,26 @@ TRANZILA_ENVIRONMENT = config('TRANZILA_ENVIRONMENT', default='development')
 # When True (default), calls POST /v2/handshake/create and passes thtk to iframe (required on most terminals).
 TRANZILA_HANDSHAKE_ENABLED = config('TRANZILA_HANDSHAKE_ENABLED', default=True, cast=bool)
 
+# Who runs the monthly הוראות קבע charge.
+#   False (default) — apps.customers.recurring_billing charges the saved token via cron,
+#                     which keeps discounts and amount changes under CRM control.
+#   True            — Tranzila owns the schedule (recur_transaction on the iframe).
+# Never enable both: the parent would be billed twice each month.
+TRANZILA_GATEWAY_STANDING_ORDER = config('TRANZILA_GATEWAY_STANDING_ORDER', default=False, cast=bool)
+
+# Ask Tranzila to block duplicate charges gateway-side, keyed on the payment id.
+# Requires defining field 20 as the DCdisable field in my.tranzila → Terminal Settings
+# → Additional Fields for Transaction; leave False until that is configured.
+TRANZILA_DCDISABLE_ENABLED = config('TRANZILA_DCDISABLE_ENABLED', default=False, cast=bool)
+
 # Tranzila billing / document API (billing5.tranzila.com)
 # Leave TRANZILA_BILLING_TERMINAL empty until activated by Tranzila — document issuance will be skipped.
 TRANZILA_BILLING_TERMINAL = config('TRANZILA_BILLING_TERMINAL', default='')
 TRANZILA_BILLING_BASE_URL = config('TRANZILA_BILLING_BASE_URL', default='https://billing5.tranzila.com')
+
+# Public base URL of this API. Used to build the Tranzila notify_url_address, without
+# which iframe payments are never confirmed. Verify with `manage.py check_tranzila`.
+CRM_API_BASE_URL = (config('CRM_API_BASE_URL', default='') or '').strip().rstrip('/')
 
 # Supabase (URL + publishable key for client-style access; service role only via env/secrets, never in frontend)
 SUPABASE_URL = config('SUPABASE_URL', default='')

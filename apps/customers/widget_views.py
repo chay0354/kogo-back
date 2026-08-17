@@ -359,6 +359,8 @@ class WidgetRegisterView(APIView):
         # ── 3. Initiate payment (pricing + pending Payment record) ───────
         try:
             if bundle:
+                # A bundle is one subscription sold as "twice a week", so דמי רישום is
+                # charged once for it — not once per member lesson.
                 payments = [
                     PaymentService().initiate_subscription_payment(
                         child_id=str(child.id),
@@ -367,8 +369,9 @@ class WidgetRegisterView(APIView):
                         error_url=data.get('error_url', ''),
                         callback_url=data.get('callback_url', ''),
                         bundle_id=str(bundle.id),
+                        include_registration_fee=(index == 0),
                     )
-                    for member_lesson in bundle.lessons.all()
+                    for index, member_lesson in enumerate(bundle.lessons.all())
                 ]
                 return Response({
                     'is_bundle': True,
@@ -595,36 +598,110 @@ class WidgetChargeView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        card_details = request.data.get('card_details') or {}
-        if not card_details.get('card_number'):
-            return Response({'error': 'פרטי כרטיס נדרשים'}, status=status.HTTP_400_BAD_REQUEST)
+        import logging
 
-        payment_ids = request.data.get('payment_ids')
+        from apps.core.card_validation import CardValidationError, validate_card_details
+        from apps.core.tranzila_service import TranzilaService
+
+        logger = logging.getLogger(__name__)
+
+        # Validate locally first: a live acquirer penalises merchants for feeding it
+        # cards that could never have been approved.
+        try:
+            card = validate_card_details(request.data.get('card_details') or {})
+        except CardValidationError as exc:
+            return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        credential_error = TranzilaService().credential_error()
+        if credential_error:
+            logger.error("Widget charge refused before contacting Tranzila: %s", credential_error)
+            return Response(
+                {'success': False, 'error': 'הסליקה אינה מוגדרת כראוי. אנא פנו למשרד.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        payment_ids = [str(pid).strip() for pid in (request.data.get('payment_ids') or []) if str(pid).strip()]
         if payment_ids:
+            precheck_error = self._precheck_bundle(payment_ids)
+            if precheck_error:
+                return Response({'success': False, 'error': precheck_error}, status=status.HTTP_400_BAD_REQUEST)
+
             results = []
-            sent_subscription_whatsapp = False
-            for pid in payment_ids:
+            succeeded_any = False
+            for index, pid in enumerate(payment_ids):
                 result = self._charge_one(
-                    str(pid),
-                    card_details,
-                    send_subscription_whatsapp=not sent_subscription_whatsapp,
+                    pid,
+                    card,
+                    send_subscription_whatsapp=not succeeded_any,
+                    allow_child_status_downgrade=not succeeded_any,
                 )
                 results.append(result)
                 if result.get('success'):
-                    sent_subscription_whatsapp = True
+                    succeeded_any = True
+                    continue
+
+                # Abort the rest of the bundle: continuing after a decline only grows
+                # the amount the office would have to refund by hand.
+                for skipped in payment_ids[index + 1:]:
+                    results.append({
+                        'success': False,
+                        'payment_id': skipped,
+                        'skipped': True,
+                        'error': 'לא חויב בעקבות כשל בתשלום קודם',
+                    })
+                break
+
             all_success = all(r.get('success') for r in results)
+            payload = {'success': all_success, 'results': results}
+            if succeeded_any and not all_success:
+                payload['partial'] = True
+                payload['error'] = 'חלק מהתשלומים בוצעו וחלק נכשלו. אנא פנו למשרד להשלמת ההרשמה.'
+                logger.error(
+                    "Bundle charge partially completed, manual reconciliation required: %s",
+                    [{'payment_id': r.get('payment_id'), 'success': r.get('success')} for r in results],
+                )
             status_code = status.HTTP_200_OK if all_success else status.HTTP_400_BAD_REQUEST
-            return Response({'success': all_success, 'results': results}, status=status_code)
+            return Response(payload, status=status_code)
 
         payment_id = (request.data.get('payment_id') or '').strip()
         if not payment_id:
             return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
-        result = self._charge_one(payment_id, card_details, send_subscription_whatsapp=True)
+        result = self._charge_one(payment_id, card, send_subscription_whatsapp=True)
         status_code = status.HTTP_200_OK if result.get('success') else status.HTTP_400_BAD_REQUEST
         return Response(result, status=status_code)
 
-    def _charge_one(self, payment_id, card_details, send_subscription_whatsapp=True):
+    def _precheck_bundle(self, payment_ids):
+        """
+        Hebrew error when the bundle cannot be charged as a whole, else None.
+
+        Capacity is re-checked here because registration and payment are separate
+        requests, and a seat can be taken in between.
+        """
+        from apps.core.payment_service import validate_bundle_capacity
+        from apps.customers.models import Payment
+
+        payments = list(
+            Payment.objects.select_related('bundle').filter(id__in=payment_ids, status='pending')
+        )
+        if len(payments) != len(payment_ids):
+            return 'אחד התשלומים אינו זמין לחיוב. אנא התחילו את ההרשמה מחדש.'
+
+        bundles = {p.bundle for p in payments if p.bundle_id}
+        for bundle in bundles:
+            try:
+                validate_bundle_capacity(bundle)
+            except ValueError as exc:
+                return str(exc) or 'אין מקום פנוי באחד השיעורים במסלול'
+        return None
+
+    def _charge_one(
+        self,
+        payment_id,
+        card,
+        send_subscription_whatsapp=True,
+        allow_child_status_downgrade=True,
+    ):
         from apps.core.payment_service import (
             _compute_prorate,
             payment_full_monthly_amount,
@@ -642,24 +719,37 @@ class WidgetChargeView(APIView):
 
         logger = logging.getLogger(__name__)
 
+        # Claim the payment under a row lock before any money moves. A payment left
+        # in 'processing' means the gateway call never reported back and needs manual
+        # reconciliation — deliberately preferred over risking a second charge.
         try:
-            payment = Payment.objects.select_related('child', 'family', 'lesson__course__branch', 'bundle').get(
-                id=payment_id, status='pending'
-            )
+            with transaction.atomic():
+                payment = (
+                    Payment.objects
+                    .select_for_update(of=('self',))
+                    .select_related('child', 'family', 'lesson__course__branch', 'bundle')
+                    .get(id=payment_id)
+                )
+                if payment.status != 'pending':
+                    return {
+                        'success': False,
+                        'payment_id': payment_id,
+                        'error': 'התשלום כבר עובד. אנא רעננו את הדף או פנו למשרד.',
+                        'payment_status': payment.status,
+                    }
+                payment.status = 'processing'
+                payment.save(update_fields=['status'])
         except Payment.DoesNotExist:
-            return {'success': False, 'payment_id': payment_id, 'error': 'תשלום לא נמצא או כבר עובד'}
+            return {'success': False, 'payment_id': payment_id, 'error': 'תשלום לא נמצא'}
 
         child = payment.child
         lesson = payment.lesson
 
-        try:
-            card_number = str(card_details['card_number']).replace(' ', '')
-            expiry_month = int(card_details['expiry_month'])
-            expiry_year = int(card_details['expiry_year'])
-            cvv = str(card_details['cvv'])
-            card_holder_id = str(card_details.get('card_holder_id', ''))
-        except (KeyError, ValueError, TypeError) as e:
-            return {'success': False, 'payment_id': payment_id, 'error': f'פרטי כרטיס שגויים: {e}'}
+        card_number = card['card_number']
+        expiry_month = card['expiry_month']
+        expiry_year = card['expiry_year']
+        cvv = card['cvv']
+        card_holder_id = card['card_holder_id']
 
         tranzila = TranzilaService()
         is_trial_payment = payment.trial_lesson_date is not None
@@ -698,6 +788,7 @@ class WidgetChargeView(APIView):
                 f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
             ),
             items=items,
+            duplicate_guard_key=f'payment-{payment.id}',
         )
 
         if result['success']:
@@ -715,7 +806,9 @@ class WidgetChargeView(APIView):
                     response_message='',
                     request_data={},
                     response_data=result.get('raw_response', {}),
-                    idempotency_key=f"widget_{result.get('transaction_id', payment_id)}",
+                    # Keyed on the payment, not the gateway transaction, so the unique
+                    # constraint itself blocks a second completed charge for it.
+                    idempotency_key=f"widget_{payment.id}",
                     is_successful=True,
                     response_timestamp=timezone.now(),
                 )
@@ -776,6 +869,14 @@ class WidgetChargeView(APIView):
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
                 else:
                     token = result.get('token', '')
+                    if not token:
+                        # The charge went through but no saved card came back, so the
+                        # monthly subscription cannot be billed automatically.
+                        logger.error(
+                            "Tranzila returned no card token for payment %s (child=%s) — "
+                            "monthly billing will not run until a token is stored",
+                            payment.id, child.full_name if child else '',
+                        )
                     if token:
                         discount_details = [
                             {
@@ -869,14 +970,21 @@ class WidgetChargeView(APIView):
                 except Exception:
                     logger.exception("Registration WhatsApp failed after widget charge (non-fatal)")
 
-            return {'success': True, 'payment_id': str(payment.id)}
+            return {
+                'success': True,
+                'payment_id': str(payment.id),
+                'recurring_active': bool(is_trial_payment or result.get('token')),
+            }
 
         else:
             payment.status = 'failed'
             payment.failure_reason = result.get('error', 'Unknown')
-            payment.save()
-            child.status = 'payment_problem'
-            child.save()
+            payment.failure_code = str(result.get('response_code', ''))[:50]
+            payment.save(update_fields=['status', 'failure_reason', 'failure_code'])
+            # An earlier lesson in the same bundle may already be paid and active;
+            # flagging the child as a payment problem then would be wrong.
+            if allow_child_status_downgrade and child:
+                Child.objects.filter(pk=child.pk).update(status='payment_problem')
             return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
 
 

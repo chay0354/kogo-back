@@ -70,6 +70,47 @@ def invoice_id_from_pdesc(pdesc: str) -> str:
         return raw
 
 
+# Placeholder values shipped in .env.example / local demos. A live terminal must never
+# see these, so charge paths refuse them instead of producing a gateway error.
+MOCK_CREDENTIAL_VALUES = {
+    'mock-terminal', 'mock_terminal',
+    'mock-supplier', 'mock_supplier', 'your-tranzila-terminal',
+    'your-tranzila-public-key', 'your-tranzila-secret-key', 'mock-key', 'changeme',
+}
+
+# Tranzila has spelled the saved-card field differently across API versions.
+TOKEN_RESPONSE_KEYS = ('token', 'card_token', 'TranzilaTK', 'tranzila_token', 'ccno_token')
+
+
+def is_mock_credential(value: str) -> bool:
+    return (value or '').strip().lower() in MOCK_CREDENTIAL_VALUES
+
+
+def extract_card_token(*sources: Optional[Dict]) -> str:
+    """First non-empty saved-card token found across Tranzila response dicts."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in TOKEN_RESPONSE_KEYS:
+            token = str(source.get(key) or '').strip()
+            if token:
+                return token
+    return ''
+
+
+def default_notify_url() -> str:
+    """
+    Webhook URL handed to Tranzila when a caller does not supply one.
+
+    Without it Tranzila never calls back, so iframe payments would stay pending
+    forever. Empty when CRM_API_BASE_URL is unset (local dev).
+    """
+    base = (getattr(settings, 'CRM_API_BASE_URL', '') or '').strip().rstrip('/')
+    if not base or 'localhost' in base or '127.0.0.1' in base:
+        return ''
+    return f"{base}/api/v1/customers/payments/webhook/"
+
+
 class TranzilaService:
     """
     Service for interacting with Tranzila payment gateway.
@@ -131,6 +172,106 @@ class TranzilaService:
         response = {'success': True}
         response.update(kwargs)
         return response
+
+    # ============================================================================
+    # Configuration Guards
+    # ============================================================================
+
+    def credential_error(self) -> Optional[str]:
+        """
+        Reason this instance cannot charge, or None when it can.
+
+        Called before every money movement so a half-configured deploy fails
+        with an actionable message instead of an opaque gateway rejection.
+        """
+        if not self.terminal:
+            return 'TRANZILA_TERMINAL not configured'
+        if not self.public_key or not self.secret_key:
+            return 'REST API credentials not configured'
+        for name, value in (
+            ('TRANZILA_TERMINAL', self.terminal),
+            ('TRANZILA_PUBLIC_KEY', self.public_key),
+            ('TRANZILA_SECRET_KEY', self.secret_key),
+        ):
+            if is_mock_credential(value):
+                return f'{name} still holds a placeholder value'
+        return None
+
+    def _apply_duplicate_guard(self, payload: Dict, key: str) -> None:
+        """
+        Add DCdisable so Tranzila rejects a repeat of the same charge for 24h.
+
+        Only sent when the terminal has field 20 configured for it, otherwise the
+        value would land in an unrelated user-defined field.
+        https://docs.tranzila.com/docs/payments-and-billing/tranzila-transactions-api-1/create-a-credit-card-transaction
+        """
+        if not key:
+            return
+        if not getattr(settings, 'TRANZILA_DCDISABLE_ENABLED', False):
+            return
+        payload['DCdisable'] = str(key)[:254]
+
+    def live_readiness(self) -> Dict:
+        """
+        Structured report of everything that must be true before live keys work.
+
+        Consumed by the `check_tranzila` management command; performs one
+        handshake call so terminal-side configuration is verified too.
+        """
+        checks: list[Dict] = []
+
+        def add(name: str, ok: bool, detail: str, blocking: bool = True):
+            checks.append({'name': name, 'ok': ok, 'detail': detail, 'blocking': blocking})
+
+        credential_error = self.credential_error()
+        add('credentials', credential_error is None, credential_error or 'terminal + API keys present')
+        add(
+            'token_terminal',
+            bool(self.token_terminal),
+            self.token_terminal or 'TRANZILA_TOKEN_TERMINAL missing — monthly billing cannot charge saved cards',
+        )
+        add(
+            'webhook_secret',
+            bool(self.webhook_secret),
+            'configured' if self.webhook_secret else 'TRANZILA_WEBHOOK_SECRET missing — webhook callbacks are unverified',
+        )
+        notify_url = default_notify_url()
+        add(
+            'notify_url',
+            bool(notify_url),
+            notify_url or 'CRM_API_BASE_URL missing — iframe payments would never be confirmed',
+        )
+        add(
+            'environment',
+            self.environment == 'production',
+            f"TRANZILA_ENVIRONMENT={self.environment}",
+            blocking=False,
+        )
+        add(
+            'billing_terminal',
+            bool(getattr(settings, 'TRANZILA_BILLING_TERMINAL', '')),
+            'configured' if getattr(settings, 'TRANZILA_BILLING_TERMINAL', '')
+            else 'TRANZILA_BILLING_TERMINAL empty — tax documents are skipped',
+            blocking=False,
+        )
+
+        if credential_error:
+            add('handshake', False, 'skipped — credentials incomplete')
+        else:
+            try:
+                thtk = self.create_handshake_token(Decimal('1.00'))
+                add('handshake', bool(thtk), 'terminal accepted handshake' if thtk else 'handshake rejected by Tranzila')
+            except Exception as exc:
+                add('handshake', False, f'handshake raised: {exc}')
+
+        blocking_failures = [c['name'] for c in checks if c['blocking'] and not c['ok']]
+        return {
+            'ready': not blocking_failures,
+            'terminal': self.terminal,
+            'environment': self.environment,
+            'blocking_failures': blocking_failures,
+            'checks': checks,
+        }
     
     # ============================================================================
     # Iframe Payment Methods
@@ -178,8 +319,14 @@ class TranzilaService:
             params['success_url_address'] = success_url
         if error_url and 'localhost' not in error_url:
             params['fail_url_address'] = error_url
-        if callback_url:
-            params['notify_url_address'] = callback_url
+        notify_url = callback_url or default_notify_url()
+        if notify_url and 'localhost' not in notify_url and '127.0.0.1' not in notify_url:
+            params['notify_url_address'] = notify_url
+        elif not notify_url:
+            logger.warning(
+                "Tranzila iframe built without notify_url_address; set CRM_API_BASE_URL "
+                "so payments are confirmed by webhook"
+            )
         if transaction_id:
             params['cred_type'] = '1'
             params['pdesc'] = pdesc_for_tranzila(transaction_id)
@@ -272,13 +419,28 @@ class TranzilaService:
         callback_url: str = '',
         transaction_id: str = '',
         recurring_frequency: str = 'monthly',
+        recur_sum: Optional[Decimal] = None,
         recur_payments: Optional[int] = None,
         recur_start_date: Optional[str] = None,
         customer_choice: bool = True,
         z_field: Optional[str] = None,
         **extra_params
-    ) -> Tuple[str, Dict]:
-        """Create iframe payment URL for recurring payment setup."""
+    ) -> str:
+        """
+        Iframe URL that charges the first payment and opens a הוראות קבע.
+
+        `amount` is the initial charge, which normally includes דמי רישום;
+        `recur_sum` is the ongoing monthly amount. They differ, so recur_sum must be
+        sent — otherwise Tranzila would repeat the setup fee every month.
+
+        tranmode 'AK' means "standard transaction + create token", so the notify
+        callback carries a TranzilaTK the CRM can charge later.
+        https://docs.tranzila.com/docs/payments-and-billing/iframe-integration
+
+        Who performs the monthly charge depends on TRANZILA_GATEWAY_STANDING_ORDER:
+        recur_* parameters are only sent when Tranzila owns the schedule. Sending them
+        while apps.customers.recurring_billing also runs would bill the parent twice.
+        """
         params = self._build_payment_params(
             amount=amount,
             currency=currency,
@@ -291,31 +453,47 @@ class TranzilaService:
             callback_url=callback_url,
             transaction_id=transaction_id,
         )
-        
-        recurring_params = {'recur_transaction': '4_approved'}
-        
-        if recur_payments is not None:
-            recurring_params['recur_payments'] = str(recur_payments)
-        if recur_start_date:
-            recurring_params['recur_start_date'] = recur_start_date
-        if z_field:
-            if not z_field.isdigit() or len(z_field) > 8:
-                logger.warning(f"Invalid Z_field value: {z_field}. Must be numeric and max 8 digits.")
-            else:
-                recurring_params['Z_field'] = z_field
-        
-        params.update(recurring_params)
+        params['tranmode'] = 'AK'
+
+        gateway_managed = getattr(settings, 'TRANZILA_GATEWAY_STANDING_ORDER', False)
+        if gateway_managed:
+            recurring_params = {'recur_transaction': '4_approved'}
+            if recur_sum is not None:
+                recurring_params['recur_sum'] = self._format_iframe_sum(Decimal(str(recur_sum)))
+            if recur_payments is not None:
+                recurring_params['recur_payments'] = str(recur_payments)
+            if recur_start_date:
+                recurring_params['recur_start_date'] = recur_start_date
+            if z_field:
+                if not z_field.isdigit() or len(z_field) > 8:
+                    logger.warning(f"Invalid Z_field value: {z_field}. Must be numeric and max 8 digits.")
+                else:
+                    recurring_params['Z_field'] = z_field
+            params.update(recurring_params)
+
         params.update(extra_params)
-        
         params['supplier'] = self.token_terminal
+
+        # The handshake is bound to a terminal + sum. This URL bills through the token
+        # terminal, so it needs its own thtk or Tranzila answers "Illegal Operation".
+        if getattr(settings, 'TRANZILA_HANDSHAKE_ENABLED', True) and self.public_key and self.secret_key:
+            thtk = self.create_handshake_token(amount, terminal_name=self.token_terminal)
+            if not thtk:
+                raise RuntimeError(
+                    'Tranzila handshake failed for the token terminal. Check '
+                    'TRANZILA_TOKEN_TERMINAL and that Handshake is enabled on it.'
+                )
+            params['thtk'] = thtk
 
         query_string = urlencode(params)
         full_url = f"{self.iframe_base_url.rstrip('/')}/{self.token_terminal}/iframenew.php?{query_string}"
-        
+
         self._log_api_call(
             "CREATE_RECURRING",
             amount=amount,
+            recur_sum=recur_sum,
             frequency=recurring_frequency,
+            gateway_managed=gateway_managed,
             payments=recur_payments or 'unlimited'
         )
         
@@ -333,16 +511,18 @@ class TranzilaService:
         transaction_id: str = '',
         items: list = None,
         expire_month: int = None,
-        expire_year: int = None
+        expire_year: int = None,
+        duplicate_guard_key: str = ''
     ) -> Dict:
         """Charge a stored token using REST API v1."""
         if not token:
             logger.error("Cannot charge: No token provided")
             return self._build_error_response('No Tranzila token available')
         
-        if not self.public_key or not self.secret_key:
-            logger.error("REST API credentials not configured")
-            return self._build_error_response('REST API credentials not configured')
+        credential_error = self.credential_error()
+        if credential_error:
+            logger.error("Cannot charge token: %s", credential_error)
+            return self._build_error_response(credential_error)
         
         if not items:
             items = [{
@@ -355,12 +535,16 @@ class TranzilaService:
         payload = {
             'terminal_name': self.token_terminal,
             'txn_type': 'debit',
+            'txn_currency_code': 'ILS',
             'expire_month': expire_month,
             'expire_year': expire_year,
             'card_number': token,
             'items': items
         }
+        payload['pan_entry_mode'] = 52  # online, per Tranzila Transactions API
         
+        self._apply_duplicate_guard(payload, duplicate_guard_key)
+
         self._log_api_call("CHARGE_TOKEN", amount=amount, token=token)
         
         try:
@@ -404,11 +588,20 @@ class TranzilaService:
         amount: Decimal,
         description: str = '',
         items: list = None,
-        installments: int = 1
+        installments: int = 1,
+        duplicate_guard_key: str = ''
     ) -> Dict:
-        """Charge a credit card directly using card details."""
-        if not self.public_key or not self.secret_key:
-            return self._build_error_response('REST API credentials not configured')
+        """
+        Charge a credit card directly using card details.
+
+        Sending a full card number is only permitted for PCI DSS certified
+        integrations; everything else must tokenize through the iframe or hosted
+        fields first and charge via charge_with_token.
+        https://docs.tranzila.com/docs/payments-and-billing/tranzila-transactions-api-1/create-a-credit-card-transaction
+        """
+        credential_error = self.credential_error()
+        if credential_error:
+            return self._build_error_response(credential_error)
 
         if not items:
             items = [{
@@ -421,12 +614,14 @@ class TranzilaService:
         payload = {
             'terminal_name': self.terminal,
             'txn_type': 'debit',
+            'txn_currency_code': 'ILS',
             'card_number': card_number,
             'expire_month': expiry_month,
             'expire_year': expiry_year,
             'cvv': cvv,
             'card_holder_id': card_holder_id,
             'items': items,
+            'pan_entry_mode': 52,  # online, per Tranzila Transactions API
         }
 
         if installments and installments > 1:
@@ -436,7 +631,9 @@ class TranzilaService:
         if description:
             payload['remarks'] = description
 
-        self._log_api_call("CHARGE_CARD", amount=amount)
+        self._apply_duplicate_guard(payload, duplicate_guard_key)
+
+        self._log_api_call("CHARGE_CARD", amount=amount, last4=str(card_number)[-4:])
 
         try:
             response = self._make_api_request(
@@ -451,7 +648,7 @@ class TranzilaService:
                 return self._build_success_response(
                     transaction_id=str(transaction_result.get('transaction_id', '')),
                     confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
-                    token=transaction_result.get('token', ''),
+                    token=extract_card_token(transaction_result, response),
                     amount=float(amount),
                     response_code=transaction_result.get('processor_response_code', '000'),
                     message=response.get('message', 'Charge successful'),
@@ -459,7 +656,10 @@ class TranzilaService:
                 )
             else:
                 error_msg = response.get('message', 'Unknown error')
-                logger.error(f"Card charge failed: {error_code} - {error_msg}")
+                logger.error(
+                    "Card charge declined: error_code=%s message=%s last4=%s",
+                    error_code, error_msg, str(card_number)[-4:],
+                )
                 return self._build_error_response(
                     error_msg,
                     str(error_code) if error_code is not None else 'N/A',

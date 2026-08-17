@@ -937,6 +937,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 error_url=serializer.validated_data.get('error_url', ''),
                 callback_url=serializer.validated_data.get('callback_url', ''),
                 bundle_id=str(bundle_id) if bundle_id else None,
+                include_registration_fee=bool(request.data.get('include_registration_fee', True)),
             )
             # Don't re-validate response with a serializer (Decimals/floats can trip it and cause 500).
             return Response(result, status=status.HTTP_201_CREATED)
@@ -1031,20 +1032,23 @@ class PaymentViewSet(viewsets.ModelViewSet):
 
         if not child_id or not lesson_id:
             return Response({'error': 'child_id and lesson_id are required'}, status=status.HTTP_400_BAD_REQUEST)
-        if not card_details.get('card_number'):
+        if not isinstance(card_details, dict) or not card_details.get('card_number'):
             return Response({'error': 'card_details are required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # Field-level checks live in charge_subscription_with_card, which raises
+            # ValueError with a Hebrew message handled below.
             payment_service = PaymentService()
             result = payment_service.charge_subscription_with_card(
                 child_id=str(child_id),
                 lesson_id=str(lesson_id),
-                card_number=str(card_details['card_number']).replace(' ', ''),
-                expiry_month=int(card_details['expiry_month']),
-                expiry_year=int(card_details['expiry_year']),
-                cvv=str(card_details['cvv']),
-                card_holder_id=str(card_details.get('card_holder_id', '')),
+                card_number=card_details.get('card_number'),
+                expiry_month=card_details.get('expiry_month'),
+                expiry_year=card_details.get('expiry_year'),
+                cvv=card_details.get('cvv'),
+                card_holder_id=card_details.get('card_holder_id', ''),
                 bundle_id=str(bundle_id) if bundle_id else None,
+                include_registration_fee=bool(request.data.get('include_registration_fee', True)),
             )
             if result['success']:
                 return Response(result, status=status.HTTP_200_OK)
