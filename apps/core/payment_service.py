@@ -219,7 +219,7 @@ class PaymentService:
     
     def __init__(self):
         self.discount_service = DiscountService()
-        self.tranzila_service = TranzilaService()
+        self.tranzila_service = TranzilaService.production()
     
     def initiate_subscription_payment(
         self,
@@ -988,7 +988,7 @@ class PaymentService:
 
         tranzila_result = {'success': True}
         if recurring_payment.tranzila_token:
-            tranzila_service = TranzilaService()
+            tranzila_service = TranzilaService.production()
             tranzila_result = tranzila_service.cancel_recurring_payment(
                 token=recurring_payment.tranzila_token
             )

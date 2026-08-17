@@ -661,7 +661,7 @@ class WidgetChargeView(APIView):
         except (KeyError, ValueError, TypeError) as e:
             return {'success': False, 'payment_id': payment_id, 'error': f'פרטי כרטיס שגויים: {e}'}
 
-        tranzila = TranzilaService()
+        tranzila = TranzilaService.production()
         is_trial_payment = payment.trial_lesson_date is not None
         item_label = (
             f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"
