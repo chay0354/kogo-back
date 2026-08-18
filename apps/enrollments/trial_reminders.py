@@ -28,6 +28,21 @@ logger = logging.getLogger(__name__)
 TRIAL_LESSON_OCCURRENCE_LIMIT = 3
 
 
+def trial_lesson_min_date(*, now: Optional[datetime] = None) -> date:
+    """
+    Earliest calendar date offered in the trial-lesson date picker.
+
+    While SUBSCRIPTION_FIRST_CHARGE_DATE is still in the future, trial signups
+    cannot be scheduled before that date (aligned with deferred monthly billing).
+    """
+    now = now or timezone.localtime()
+    today = now.date()
+    from apps.core.payment_service import deferred_first_charge_date
+
+    deferred = deferred_first_charge_date(today)
+    return deferred if deferred else today
+
+
 def lesson_weekday_to_python(day_of_week: int) -> int:
     return (day_of_week - 1) % 7
 
@@ -68,9 +83,10 @@ def iter_upcoming_lesson_occurrences(
 
     now = now or timezone.localtime()
     count = max(1, min(int(count or 8), 16))
+    min_date = trial_lesson_min_date(now=now)
 
     if not lesson.is_recurring:
-        if lesson.lesson_date and lesson.lesson_date >= now.date():
+        if lesson.lesson_date and lesson.lesson_date >= min_date:
             if not LessonCancellation.objects.filter(lesson=lesson, occurrence_date=lesson.lesson_date).exists():
                 return [lesson.lesson_date]
         return []
@@ -83,6 +99,12 @@ def iter_upcoming_lesson_occurrences(
     cursor_now = now
     while len(results) < count:
         candidate = next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=cursor_now)
+        if candidate < min_date:
+            cursor_now = timezone.make_aware(
+                datetime.combine(min_date, time.min),
+                timezone.get_current_timezone(),
+            )
+            continue
         if candidate not in cancelled and candidate not in results:
             results.append(candidate)
 

@@ -80,6 +80,16 @@ class TrialReminderTimingTest(TestCase):
         dates = [occurrence for _, occurrence in merged]
         self.assertEqual(dates, sorted(dates))
 
+    @override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE='2026-09-01', TIME_ZONE='Asia/Jerusalem')
+    def test_trial_dates_do_not_start_before_subscription_first_charge_date(self):
+        lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
+        now = timezone.make_aware(datetime(2026, 8, 18, 10, 0), ZoneInfo('Asia/Jerusalem'))
+        dates = iter_upcoming_lesson_occurrences(lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now)
+        self.assertEqual(len(dates), TRIAL_LESSON_OCCURRENCE_LIMIT)
+        self.assertTrue(all(d >= date(2026, 9, 1) for d in dates))
+        with self.assertRaises(ValueError):
+            validate_trial_lesson_date(lesson, date(2026, 8, 23), now=now)
+
 
 class RemoveExpiredTrialEnrollmentTest(TestCase):
     def setUp(self):
