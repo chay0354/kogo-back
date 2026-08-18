@@ -700,6 +700,102 @@ class TranzilaService:
             logger.error(f"Exception during card charge: {str(e)}", exc_info=True)
             return self._build_error_response(str(e), message='Charge failed - exception')
 
+    def verify_card(
+        self,
+        card_number: str,
+        expiry_month: int,
+        expiry_year: int,
+        cvv: str,
+        card_holder_id: str = '',
+        amount: Decimal = Decimal('1.00'),
+        description: str = '',
+        duplicate_guard_key: str = ''
+    ) -> Dict:
+        """
+        Validate a card and return a reusable token WITHOUT taking any money (J2).
+
+        txn_type 'verify' with verfiy_mode 2 only checks the card against the issuer,
+        so this is how a registration can save the card in one month and charge it in
+        the next. The amount is only what the issuer checks against, never captured.
+        https://docs.tranzila.com/docs/payments-and-billing/tranzila-transactions-api-1/create-a-credit-card-transaction
+        """
+        credential_error = self.credential_error()
+        if credential_error:
+            return self._build_error_response(credential_error)
+
+        payload = {
+            'terminal_name': self.terminal,
+            'txn_type': 'verify',
+            # Tranzila's own schema misspells this parameter; it must be sent as-is.
+            'verfiy_mode': 2,
+            'txn_currency_code': 'ILS',
+            'card_number': card_number,
+            'expire_month': expiry_month,
+            'expire_year': expiry_year,
+            'cvv': cvv,
+            'items': [{
+                'name': description or 'אימות כרטיס',
+                'type': 'I',
+                'unit_price': float(amount),
+                'units_number': 1,
+                'unit_type': 1,
+                'price_type': 'G',
+                'currency_code': 'ILS',
+            }],
+        }
+        # Schema requires exactly 9 digits; an empty string is a 20004 mismatch.
+        if card_holder_id and len(str(card_holder_id)) == 9:
+            payload['card_holder_id'] = str(card_holder_id)
+
+        if description:
+            payload['remarks'] = description
+
+        self._apply_duplicate_guard(payload, duplicate_guard_key)
+
+        self._log_api_call("VERIFY_CARD", amount=amount, last4=str(card_number)[-4:])
+
+        try:
+            response = self._make_api_request(
+                params=payload,
+                endpoint='/v1/transaction/credit_card/create'
+            )
+
+            error_code = response.get('error_code')
+
+            if error_code == 0:
+                transaction_result = response.get('transaction_result', {})
+                token = extract_card_token(transaction_result, response)
+                if not token:
+                    logger.error(
+                        "Card verification succeeded but returned no token (last4=%s) — "
+                        "terminal %s may not have token creation enabled for verify transactions",
+                        str(card_number)[-4:], self.terminal,
+                    )
+                return self._build_success_response(
+                    transaction_id=str(transaction_result.get('transaction_id', '')),
+                    confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
+                    token=token,
+                    amount=0.0,
+                    response_code=transaction_result.get('processor_response_code', '000'),
+                    message=response.get('message', 'Card verified'),
+                    raw_response=response
+                )
+
+            error_msg = response.get('message', 'Unknown error')
+            logger.error(
+                "Card verification declined: error_code=%s message=%s last4=%s",
+                error_code, error_msg, str(card_number)[-4:],
+            )
+            return self._build_error_response(
+                error_msg,
+                str(error_code) if error_code is not None else 'N/A',
+                f'Card verification failed: {error_msg}'
+            )
+
+        except Exception as e:
+            logger.error(f"Exception during card verification: {str(e)}", exc_info=True)
+            return self._build_error_response(str(e), message='Card verification failed - exception')
+
     def refund_transaction(
         self,
         transaction_id: str,

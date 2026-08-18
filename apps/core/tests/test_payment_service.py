@@ -20,7 +20,7 @@ from apps.courses.models import LessonBundle
 from apps.enrollments.models import LessonEnrollment
 
 
-@override_settings(REGISTRATION_FEE_ILS=120)
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class PaymentServiceInitiateSubscriptionTest(TestCase):
     """Test PaymentService.initiate_subscription_payment"""
     
@@ -241,6 +241,7 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         self.assertEqual(third_result['base_amount'], 200.00)
 
 
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class PaymentServiceLessonBundleTest(TestCase):
     """Bundle-aware pricing and capacity guard (see resolve_billing_price)."""
 
@@ -546,6 +547,212 @@ class PaymentServiceWebhookTest(TestCase):
         self.assertIn('Payment not found', result['error'])
 
 
+@override_settings(REGISTRATION_FEE_ILS=120)
+class DeferredSubscriptionStartTest(TestCase):
+    """
+    Registrations taken before the season starts charge דמי רישום only, and the monthly
+    subscription is first billed on SUBSCRIPTION_FIRST_CHARGE_DATE.
+    """
+
+    def setUp(self):
+        self.service = PaymentService()
+        self.child = TestDataFactory.create_child()
+        self.lesson = TestDataFactory.create_lesson()
+        # Relative to today so the suite keeps testing deferral after the real date passes.
+        today = date.today()
+        self.start_date = (
+            date(today.year + 1, 1, 1) if today.month == 12
+            else date(today.year, today.month + 1, 1)
+        )
+        self.discount_calculation = DiscountCalculation(
+            applicable_discounts=[],
+            total_discount_amount=Decimal('0.00'),
+            final_price=Decimal('260.00'),
+            base_price=Decimal('260.00'),
+        )
+
+    def test_setting_stops_applying_once_the_date_arrives(self):
+        from apps.core.payment_service import deferred_first_charge_date
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE='2026-09-01'):
+            self.assertEqual(
+                deferred_first_charge_date(date(2026, 8, 18)),
+                date(2026, 9, 1),
+            )
+            self.assertIsNone(deferred_first_charge_date(date(2026, 9, 1)))
+            self.assertIsNone(deferred_first_charge_date(date(2026, 9, 2)))
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE=''):
+            self.assertIsNone(deferred_first_charge_date(date(2026, 8, 18)))
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_signup_charges_registration_fee_only(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.discount_calculation
+        mock_tranzila.return_value = 'https://tranzila.test/payment'
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE=self.start_date.isoformat()):
+            result = self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+            )
+
+        self.assertEqual(result['prorated_amount'], 0.00)
+        self.assertEqual(result['registration_fee'], 120.00)
+        self.assertEqual(result['final_amount'], 120.00)
+        self.assertEqual(result['monthly_amount'], 260.00)
+        self.assertEqual(result['next_billing_date'], self.start_date.isoformat())
+        self.assertEqual(result['subscription_start_date'], self.start_date.isoformat())
+
+        payment = Payment.objects.get(id=result['payment_id'])
+        self.assertEqual(payment.final_amount, Decimal('120.00'))
+        self.assertEqual(payment.registration_fee, Decimal('120.00'))
+        self.assertEqual(payment.base_amount, Decimal('260.00'))
+        self.assertTrue(payment.description.startswith('דמי רישום'))
+
+    @patch('apps.core.payment_service.TranzilaService.charge_with_card')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_card_charge_bills_fee_now_and_starts_monthly_on_the_date(self, mock_discount, mock_charge):
+        mock_discount.return_value = self.discount_calculation
+        mock_charge.return_value = {
+            'success': True,
+            'transaction_id': 'TRX_FEE',
+            'confirmation_code': 'CONF1',
+            'token': 'card_token_1',
+            'response_code': '000',
+            'raw_response': {},
+        }
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE=self.start_date.isoformat()):
+            result = self.service.charge_subscription_with_card(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+                card_number='4580458045804580',
+                expiry_month=12,
+                expiry_year=2030,
+                cvv='123',
+                card_holder_id='123456782',
+            )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(mock_charge.call_args.kwargs['amount'], Decimal('120.00'))
+
+        payment = Payment.objects.get(id=result['payment_id'])
+        self.assertEqual(payment.status, 'completed')
+        self.assertEqual(payment.final_amount, Decimal('120.00'))
+
+        recurring = RecurringPayment.objects.get(child=self.child)
+        self.assertEqual(recurring.amount, Decimal('260.00'))
+        self.assertEqual(recurring.next_billing_date, self.start_date)
+
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'active')
+        self.assertEqual(self.child.subscription_start_date, self.start_date)
+        self.assertIsNone(self.child.paid_until_date)
+        self.assertTrue(
+            LessonEnrollment.objects.filter(
+                child=self.child, lesson=self.lesson, status='active'
+            ).exists()
+        )
+
+    @patch('apps.core.payment_service.TranzilaService.verify_card')
+    @patch('apps.core.payment_service.TranzilaService.charge_with_card')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_bundle_member_without_fee_only_verifies_the_card(self, mock_discount, mock_charge, mock_verify):
+        mock_discount.return_value = self.discount_calculation
+        mock_verify.return_value = {
+            'success': True,
+            'transaction_id': 'TRX_VERIFY',
+            'confirmation_code': 'CONF2',
+            'token': 'card_token_2',
+            'response_code': '000',
+            'raw_response': {},
+        }
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE=self.start_date.isoformat()):
+            result = self.service.charge_subscription_with_card(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+                card_number='4580458045804580',
+                expiry_month=12,
+                expiry_year=2030,
+                cvv='123',
+                card_holder_id='123456782',
+                include_registration_fee=False,
+            )
+
+        self.assertTrue(result['success'])
+        mock_charge.assert_not_called()
+        mock_verify.assert_called_once()
+        self.assertIsNone(result['invoice_number'])
+
+        payment = Payment.objects.get(id=result['payment_id'])
+        self.assertEqual(payment.final_amount, Decimal('0.00'))
+        self.assertFalse(payment.invoices.exists())
+
+        recurring = RecurringPayment.objects.get(child=self.child)
+        self.assertEqual(recurring.amount, Decimal('260.00'))
+        self.assertEqual(recurring.next_billing_date, self.start_date)
+
+    def test_first_monthly_charge_bills_the_full_month(self):
+        """On the start date the recurring cron charges the plain monthly price."""
+        from apps.customers.recurring_billing import process_due_recurring_charges
+
+        payment = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            branch=self.lesson.course.branch,
+            lesson=self.lesson,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('260.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('120.00'),
+            registration_fee=Decimal('120.00'),
+            description='דמי רישום',
+        )
+        today = date.today()
+        recurring = RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=payment,
+            tranzila_token='card_token_1',
+            card_expire_month=12,
+            card_expire_year=2030,
+            status='active',
+            base_amount=Decimal('260.00'),
+            discount_amount=Decimal('0.00'),
+            amount=Decimal('260.00'),
+            billing_day=1,
+            start_date=today,
+            next_billing_date=today,
+        )
+
+        with patch('apps.customers.recurring_billing.TranzilaService.charge_with_token') as mock_token_charge, \
+                patch('apps.core.payment_service.PaymentService._create_invoice_from_payment'):
+            mock_token_charge.return_value = {
+                'success': True,
+                'transaction_id': 'TRX_MONTH',
+                'confirmation_code': 'CONF3',
+                'response_code': '000',
+                'raw_response': {},
+            }
+            summary = process_due_recurring_charges()
+
+        self.assertEqual(summary['charged'], 1)
+        self.assertEqual(mock_token_charge.call_args.kwargs['amount'], Decimal('260.00'))
+
+        monthly = Payment.objects.filter(child=self.child, payment_type='recurring_subscription').exclude(id=payment.id).get()
+        self.assertEqual(monthly.final_amount, Decimal('260.00'))
+        self.assertEqual(monthly.registration_fee, Decimal('0.00'))
+
+        recurring.refresh_from_db()
+        self.assertGreater(recurring.next_billing_date, today)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'active')
+        self.assertIsNotNone(self.child.paid_until_date)
+
+
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class PaymentServiceIntegrationTest(TestCase):
     """Integration tests for PaymentService end-to-end flows"""
     

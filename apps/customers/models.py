@@ -166,6 +166,11 @@ class Child(models.Model):
         if self.subscription_end_date and today > self.subscription_end_date:
             return 'expired'
         
+        # A subscription starting in the future was registered with a deferred first
+        # charge, so nothing is owed yet and it must not read as a payment problem.
+        if self.subscription_start_date and self.subscription_start_date > today:
+            return 'active'
+
         # Priority 2: Has subscription but no paid_until_date or overdue (red)
         if self.subscription_start_date:
             if not self.paid_until_date or today > self.paid_until_date:
@@ -266,6 +271,15 @@ class Payment(models.Model):
         related_name='payments',
         verbose_name="מסלול משולב",
         help_text="Set when this payment was billed as one lesson of a combined bundle registration.",
+    )
+    price_option = models.ForeignKey(
+        'courses.LessonPriceOption',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+        verbose_name="מחיר נוסף",
+        help_text="Set when the parent chose an extra catalog price for this lesson in the widget.",
     )
     product = models.ForeignKey(
         'store.StoreProduct',

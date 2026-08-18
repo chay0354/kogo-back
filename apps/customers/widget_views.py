@@ -13,7 +13,7 @@ from django.db import transaction
 from django.db.models import Prefetch, Q
 
 from apps.customers.models import Family, Parent, Child
-from apps.courses.models import Lesson, Course, LessonBundle
+from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
@@ -88,7 +88,17 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
 
 
 def _widget_lesson_queryset():
-    return Lesson.objects.select_related('instructor', 'room').order_by('day_of_week', 'start_time')
+    return (
+        Lesson.objects
+        .select_related('instructor', 'room')
+        .prefetch_related(
+            Prefetch(
+                'price_options',
+                queryset=LessonPriceOption.objects.filter(is_active=True).order_by('sort_order', 'display_title'),
+            ),
+        )
+        .order_by('day_of_week', 'start_time')
+    )
 
 
 def _widget_bundles_queryset():
@@ -303,6 +313,8 @@ class WidgetRegisterView(APIView):
         `is_bundle: True` and a `payments` list instead of a single payment_id.
       lesson_id (str) — register for this specific Lesson of the course instead of
         the course's first lesson. Ignored if bundle_id is also provided.
+      price_option_id (str) — register at an extra catalog price for the lesson.
+        Ignored if bundle_id is provided.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -347,6 +359,22 @@ class WidgetRegisterView(APIView):
             if bundle is None:
                 return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
+        price_option_id = (data.get('price_option_id') or '').strip()
+        if price_option_id and bundle:
+            return Response(
+                {'error': 'לא ניתן לשלב מסלול משולב עם מחיר נוסף'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if price_option_id:
+            try:
+                LessonPriceOption.objects.get(
+                    id=price_option_id,
+                    lesson=lesson,
+                    is_active=True,
+                )
+            except LessonPriceOption.DoesNotExist:
+                return Response({'error': 'מחיר נוסף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
         try:
             with transaction.atomic():
                 family, child = _resolve_family_and_child(data, lesson.course.branch)
@@ -382,6 +410,9 @@ class WidgetRegisterView(APIView):
                     'prorated_amount': sum(p['prorated_amount'] for p in payments),
                     'registration_fee': sum(p['registration_fee'] for p in payments),
                     'final_amount': sum(p['final_amount'] for p in payments),
+                    'monthly_amount': sum(p['monthly_amount'] for p in payments),
+                    'next_billing_date': payments[0]['next_billing_date'],
+                    'subscription_start_date': payments[0]['subscription_start_date'],
                 }, status=status.HTTP_201_CREATED)
 
             result = PaymentService().initiate_subscription_payment(
@@ -390,6 +421,7 @@ class WidgetRegisterView(APIView):
                 success_url=data.get('success_url', ''),
                 error_url=data.get('error_url', ''),
                 callback_url=data.get('callback_url', ''),
+                price_option_id=price_option_id or None,
             )
             return Response(result, status=status.HTTP_201_CREATED)
         except ValueError as exc:
@@ -704,6 +736,7 @@ class WidgetChargeView(APIView):
     ):
         from apps.core.payment_service import (
             _compute_prorate,
+            deferred_first_charge_date,
             payment_full_monthly_amount,
             payment_prorated_lesson_amount,
             subscription_tranzila_items,
@@ -753,6 +786,7 @@ class WidgetChargeView(APIView):
 
         tranzila = TranzilaService.production()
         is_trial_payment = payment.trial_lesson_date is not None
+        deferred_start = None if is_trial_payment else deferred_first_charge_date()
         item_label = (
             f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"
             if is_trial_payment and lesson
@@ -775,21 +809,37 @@ class WidgetChargeView(APIView):
                 label=item_label,
                 prorated_lesson=prorated_lesson,
                 registration_fee=registration_fee,
+                prorated=prorated_lesson > 0,
             )
 
-        result = tranzila.charge_with_card(
-            card_number=card_number,
-            expiry_month=expiry_month,
-            expiry_year=expiry_year,
-            cvv=cvv,
-            card_holder_id=card_holder_id,
-            amount=payment.final_amount,
-            description=payment.description or (
-                f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
-            ),
-            items=items,
-            duplicate_guard_key=f'payment-{payment.id}',
+        charge_description = payment.description or (
+            f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
         )
+        if payment.final_amount > 0:
+            result = tranzila.charge_with_card(
+                card_number=card_number,
+                expiry_month=expiry_month,
+                expiry_year=expiry_year,
+                cvv=cvv,
+                card_holder_id=card_holder_id,
+                amount=payment.final_amount,
+                description=charge_description,
+                items=items,
+                duplicate_guard_key=f'payment-{payment.id}',
+            )
+        else:
+            # Nothing is due today (bundle member lesson with no דמי רישום), so the card
+            # is only verified to obtain the token the monthly billing will need.
+            result = tranzila.verify_card(
+                card_number=card_number,
+                expiry_month=expiry_month,
+                expiry_year=expiry_year,
+                cvv=cvv,
+                card_holder_id=card_holder_id,
+                amount=payment_full_monthly_amount(payment),
+                description=charge_description,
+                duplicate_guard_key=f'verify-{payment.id}',
+            )
 
         if result['success']:
             enrollment_id_for_whatsapp = None
@@ -891,6 +941,9 @@ class WidgetChargeView(APIView):
                         enrollment_date = date.today()
                         lesson_dow = lesson.day_of_week if lesson else 1
                         _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
+                        # Registrations taken before the season starts are billed monthly
+                        # only from that date, so the signup month is never charged.
+                        next_billing_date = deferred_start or next_billing_date
                         RecurringPayment.objects.create(
                             child=child,
                             initial_payment=payment,
@@ -907,40 +960,48 @@ class WidgetChargeView(APIView):
                             next_billing_date=next_billing_date,
                         )
 
-                    invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-                    invoice = Invoice.objects.create(
-                        invoice_number=invoice_number,
-                        family=payment.family,
-                        parent=payment.parent,
-                        branch=payment.branch,
-                        payment=payment,
-                        amount=payment.final_amount,
-                        status='paid',
-                        payment_method='credit_card',
-                        payment_type='recurring',
-                        payer_name=payment.family.name,
-                        payer_email=payment.family.email if payment.family.email else '',
-                        payer_phone=payment.family.phone,
-                        tranzila_transaction_id=tranzila_txn.transaction_id,
-                        invoice_date=timezone.now(),
-                    )
-                    if child and lesson:
-                        InvoiceChild.objects.create(
-                            invoice=invoice,
-                            child=child,
-                            course=lesson.course,
-                            lesson=lesson,
+                    # A card that was only verified has nothing to invoice.
+                    if payment.final_amount > 0:
+                        invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
+                        invoice = Invoice.objects.create(
+                            invoice_number=invoice_number,
+                            family=payment.family,
+                            parent=payment.parent,
+                            branch=payment.branch,
+                            payment=payment,
+                            amount=payment.final_amount,
+                            status='paid',
+                            payment_method='credit_card',
+                            payment_type='recurring',
+                            payer_name=payment.family.name,
+                            payer_email=payment.family.email if payment.family.email else '',
+                            payer_phone=payment.family.phone,
+                            tranzila_transaction_id=tranzila_txn.transaction_id,
+                            invoice_date=timezone.now(),
                         )
-                    try:
-                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                        send_subscription_invoice_email(invoice)
-                    except Exception:
-                        logger.exception('Subscription invoice email failed (non-fatal)')
+                        if child and lesson:
+                            InvoiceChild.objects.create(
+                                invoice=invoice,
+                                child=child,
+                                course=lesson.course,
+                                lesson=lesson,
+                            )
+                        try:
+                            from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+                            send_subscription_invoice_email(invoice)
+                        except Exception:
+                            logger.exception('Subscription invoice email failed (non-fatal)')
 
                     child.status = 'active'
-                    child.subscription_start_date = date.today()
-                    _, _, _, next_bill = _compute_prorate(date.today(), lesson.day_of_week)
-                    child.paid_until_date = next_bill - timedelta(days=1)
+                    if deferred_start:
+                        # No month is paid for yet — the charge on that date fills
+                        # paid_until_date in.
+                        child.subscription_start_date = deferred_start
+                        child.paid_until_date = None
+                    else:
+                        child.subscription_start_date = date.today()
+                        _, _, _, next_bill = _compute_prorate(date.today(), lesson.day_of_week)
+                        child.paid_until_date = next_bill - timedelta(days=1)
                     child.save()
 
                     if lesson:
@@ -1036,10 +1097,18 @@ class WidgetCoursesView(APIView):
                         'day_of_week': lesson.day_of_week,
                         'start_time': str(lesson.start_time)[:5],
                         'end_time': str(lesson.end_time)[:5],
-                        'price': str(lesson.lesson_price_override or course.price),
+                        'price': str(course.price),
                         'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
                         'lesson_date': lesson.lesson_date.isoformat() if lesson.lesson_date else None,
                         'is_recurring': lesson.is_recurring,
+                        'price_options': [
+                            {
+                                'id': str(option.id),
+                                'display_title': option.display_title,
+                                'monthly_price': str(option.monthly_price),
+                            }
+                            for option in lesson.price_options.all()
+                        ],
                         **cap,
                     })
 

@@ -31,7 +31,7 @@ from apps.customers.financial_models import Invoice, InvoiceChild, Discount
 from apps.customers.discount_service import DiscountService
 from apps.core.card_validation import validate_card_details
 from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc
-from apps.courses.models import Lesson, LessonBundle
+from apps.courses.models import Lesson, LessonBundle, LessonPriceOption
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import paying_enrollments
 from apps.instructors.utils import get_lesson_price_for_course_index
@@ -56,6 +56,48 @@ def registration_fee_amount() -> Decimal:
     return max(Decimal('0.00'), fee.quantize(Decimal('0.01')))
 
 
+def deferred_first_charge_date(today: Optional[date] = None) -> Optional[date]:
+    """
+    Date the monthly subscription starts, or None to bill the first month on signup.
+
+    While this date is in the future a registration only charges דמי רישום, and the
+    monthly price is first billed by the recurring cron on that date. Once the date
+    arrives the setting stops applying by itself, so registrations go back to being
+    billed for the signup month without a code change.
+    """
+    raw = getattr(settings, 'SUBSCRIPTION_FIRST_CHARGE_DATE', '') or ''
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    try:
+        charge_date = date.fromisoformat(raw)
+    except ValueError:
+        logger.error("Invalid SUBSCRIPTION_FIRST_CHARGE_DATE=%r — ignoring", raw)
+        return None
+    if today is None:
+        today = timezone.now().astimezone(JERUSALEM_TZ).date()
+    return charge_date if charge_date > today else None
+
+
+def subscription_payment_description(
+    *,
+    child: Child,
+    lesson: Lesson,
+    bundle=None,
+    price_option=None,
+    fee_only: bool = False,
+) -> str:
+    """Parent-facing description of a first subscription charge."""
+    if price_option:
+        subject = price_option.display_title
+    elif bundle:
+        subject = f"{lesson.course.name} ({bundle.name or 'מסלול משולב'})"
+    else:
+        subject = lesson.course.name
+    prefix = 'דמי רישום' if fee_only else 'מנוי חודשי'
+    return f"{prefix} - {subject} - {child.full_name}"
+
+
 def payment_full_monthly_amount(payment: Payment) -> Decimal:
     """Full recurring monthly lesson price (excludes proration and registration fee)."""
     return (payment.base_amount - payment.discount_amount).quantize(Decimal('0.01'))
@@ -67,22 +109,40 @@ def payment_prorated_lesson_amount(payment: Payment) -> Decimal:
     return (payment.final_amount - fee).quantize(Decimal('0.01'))
 
 
+def payment_is_fee_only(payment: Payment) -> bool:
+    """
+    True when a signup charge covers no lesson month, only דמי רישום (or nothing).
+
+    Such a registration has its monthly billing start on a later date, so the signup
+    month must not be treated as paid for.
+    """
+    return payment_prorated_lesson_amount(payment) <= 0
+
+
 def subscription_tranzila_items(
     *,
     label: str,
     prorated_lesson: Decimal,
     registration_fee: Decimal,
+    prorated: bool = True,
 ) -> list[dict]:
-    """Tranzila line items for a first subscription charge."""
-    items = [{
-        'name': f'מנוי חודשי (יחסי) - {label}',
-        'type': 'I',
-        'unit_price': float(prorated_lesson),
-        'units_number': 1,
-        'unit_type': 1,
-        'price_type': 'G',
-        'currency_code': 'ILS',
-    }]
+    """
+    Tranzila line items for a first subscription charge.
+
+    The lesson line is dropped when there is nothing to bill for it, which is how a
+    registration whose monthly billing only starts later charges דמי רישום alone.
+    """
+    items = []
+    if prorated_lesson > 0:
+        items.append({
+            'name': f'מנוי חודשי (יחסי) - {label}' if prorated else f'מנוי חודשי - {label}',
+            'type': 'I',
+            'unit_price': float(prorated_lesson),
+            'units_number': 1,
+            'unit_type': 1,
+            'price_type': 'G',
+            'currency_code': 'ILS',
+        })
     if registration_fee > 0:
         items.append({
             'name': 'דמי רישום',
@@ -171,7 +231,12 @@ def validate_bundle_capacity(bundle: 'LessonBundle') -> None:
             raise ValueError(f"השיעור {lesson} מלא - קיבולת מקסימלית: {lesson.room.capacity} תלמידים")
 
 
-def resolve_billing_price(child: Child, lesson: Lesson, bundle_id: Optional[str] = None) -> Tuple[Decimal, bool, int, Optional['LessonBundle']]:
+def resolve_billing_price(
+    child: Child,
+    lesson: Lesson,
+    bundle_id: Optional[str] = None,
+    price_option_id: Optional[str] = None,
+) -> Tuple[Decimal, bool, int, Optional['LessonBundle'], Optional['LessonPriceOption']]:
     """
     Resolve the monthly base price to bill for a lesson, and whether the
     generic "additional lesson" discount should be skipped because a
@@ -184,9 +249,23 @@ def resolve_billing_price(child: Child, lesson: Lesson, bundle_id: Optional[str]
     charge_subscription_with_card), each at this split price, so per-lesson
     revenue/instructor-salary reporting stays accurate.
 
-    Returns: (base_price, used_lesson_tier, course_index, bundle)
+    When price_option_id is given, bill the catalog monthly_price chosen in
+    the widget (same physical lesson, different marketing title/price).
+
+    Returns: (base_price, used_lesson_tier, course_index, bundle, price_option)
     """
     course_index = get_child_lesson_index_for_billing(child, lesson)
+
+    if price_option_id:
+        try:
+            price_option = LessonPriceOption.objects.get(
+                id=price_option_id,
+                lesson=lesson,
+                is_active=True,
+            )
+        except LessonPriceOption.DoesNotExist:
+            raise ValueError("מחיר נוסף לא נמצא או לא פעיל")
+        return price_option.monthly_price, True, course_index, None, price_option
 
     if bundle_id:
         try:
@@ -196,7 +275,7 @@ def resolve_billing_price(child: Child, lesson: Lesson, bundle_id: Optional[str]
         if not bundle.lessons.filter(pk=lesson.pk).exists():
             raise ValueError("Lesson is not a member of the given bundle")
         validate_bundle_capacity(bundle)
-        return bundle.price_per_lesson(), True, course_index, bundle
+        return bundle.price_per_lesson(), True, course_index, bundle, None
 
     tier_price = get_lesson_price_for_course_index(lesson, course_index)
     regular_price = lesson.course.price
@@ -206,7 +285,7 @@ def resolve_billing_price(child: Child, lesson: Lesson, bundle_id: Optional[str]
         and tier_price is not None
         and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
     )
-    return base_price, used_lesson_tier, course_index, None
+    return base_price, used_lesson_tier, course_index, None, None
 
 
 class PaymentService:
@@ -232,6 +311,7 @@ class PaymentService:
         error_url: str = '',
         callback_url: str = '',
         bundle_id: Optional[str] = None,
+        price_option_id: Optional[str] = None,
         include_registration_fee: bool = True,
     ) -> Dict:
         """
@@ -255,6 +335,7 @@ class PaymentService:
             bundle_id: when set, bill at bundle.combined_price / lesson_count instead
                 of the regular/tiered course price (see resolve_billing_price). Caller
                 is responsible for calling this once per member lesson of the bundle.
+            price_option_id: when set, bill the widget catalog price for this lesson.
             include_registration_fee: pass False for every member lesson of a bundle
                 after the first, so the one-time דמי רישום is charged once per bundle.
 
@@ -271,7 +352,9 @@ class PaymentService:
             logger.error(f"Child or Lesson not found: {e}")
             raise ValueError("Child or Lesson not found")
 
-        base_price, used_lesson_tier, course_index, bundle = resolve_billing_price(child, lesson, bundle_id)
+        base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
+            child, lesson, bundle_id, price_option_id
+        )
         if not base_price:
             raise ValueError("Lesson/Course price not configured")
 
@@ -301,11 +384,21 @@ class PaymentService:
             today_local, lesson.day_of_week
         )
         full_monthly_amount = discount_calculation.final_price
-        prorated_lesson = max(
-            Decimal('1.00'),
-            (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
-        )
         registration_fee = registration_fee_amount() if include_registration_fee else Decimal('0.00')
+
+        # When monthly billing only starts later, signup charges דמי רישום alone and the
+        # full monthly price is first billed by the recurring cron on that date.
+        deferred_charge_date = deferred_first_charge_date(today_local)
+        if deferred_charge_date:
+            prorate_factor = Decimal('0')
+            prorate_lessons_remaining = 0
+            next_billing_date = deferred_charge_date
+            prorated_lesson = Decimal('0.00')
+        else:
+            prorated_lesson = max(
+                Decimal('1.00'),
+                (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
+            )
         prorated_final = prorated_lesson + registration_fee
 
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
@@ -321,17 +414,20 @@ class PaymentService:
                         branch=lesson.course.branch,
                         lesson=lesson,
                         bundle=bundle,
+                        price_option=price_option,
                         payment_type='recurring_subscription',
                         status='pending',
                         base_amount=discount_calculation.base_price,
                         discount_amount=discount_calculation.total_discount_amount,
                         final_amount=prorated_final,
                         registration_fee=registration_fee,
-                        description=(
-                            f"מנוי חודשי - {lesson.course.name} ({bundle.name or 'מסלול משולב'}) - {child.full_name}"
-                            if bundle else
-                            f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
-                        )
+                        description=subscription_payment_description(
+                            child=child,
+                            lesson=lesson,
+                            bundle=bundle,
+                            price_option=price_option,
+                            fee_only=bool(deferred_charge_date),
+                        ),
                     )
 
                     # Create discount snapshots
@@ -376,8 +472,9 @@ class PaymentService:
             error_url=error_url,
             callback_url=callback_url,
             transaction_id=str(payment.id),
-            # The initial charge is pro-rated and carries דמי רישום; the standing order
-            # itself must run at the plain monthly price from the next billing date.
+            # The initial charge carries דמי רישום (plus the pro-rated month unless
+            # monthly billing starts later); the standing order itself must run at the
+            # plain monthly price from the next billing date.
             recur_sum=full_monthly_amount,
             recur_start_date=next_billing_date.isoformat(),
         )
@@ -403,6 +500,8 @@ class PaymentService:
             'prorate_lessons_remaining': prorate_lessons_remaining,
             'total_lessons_this_month': total_lessons_this_month,
             'next_billing_date': next_billing_date.isoformat(),
+            'monthly_amount': float(full_monthly_amount),
+            'subscription_start_date': deferred_charge_date.isoformat() if deferred_charge_date else None,
             'discounts_applied': [
                 {
                     'name': d.name,
@@ -521,6 +620,10 @@ class PaymentService:
                 enrollment_date = payment.created_at.astimezone(JERUSALEM_TZ).date()
                 lesson_dow = payment.lesson.day_of_week if payment.lesson else 1
                 _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
+                if payment_is_fee_only(payment):
+                    # Signup covered דמי רישום only, so monthly billing starts on the
+                    # configured season date rather than the month after signup.
+                    next_billing_date = deferred_first_charge_date(enrollment_date) or next_billing_date
                 full_monthly_amount = payment_full_monthly_amount(payment)
 
                 recurring_payment = RecurringPayment.objects.create(
@@ -557,8 +660,18 @@ class PaymentService:
             lesson_dow_child = payment.lesson.day_of_week if payment.lesson else 1
             _, _, _, next_billing_date_child = _compute_prorate(enrollment_date_child, lesson_dow_child)
             child.status = 'active'
-            child.subscription_start_date = enrollment_date_child
-            child.paid_until_date = next_billing_date_child - timedelta(days=1)
+            deferred_start_child = (
+                deferred_first_charge_date(enrollment_date_child)
+                if payment.payment_type == 'recurring_subscription' and payment_is_fee_only(payment)
+                else None
+            )
+            if deferred_start_child:
+                # No lesson month is paid for yet; the charge on that date sets it.
+                child.subscription_start_date = deferred_start_child
+                child.paid_until_date = None
+            else:
+                child.subscription_start_date = enrollment_date_child
+                child.paid_until_date = next_billing_date_child - timedelta(days=1)
             child.save()
             
             # Create LessonEnrollment if payment has an associated lesson
@@ -646,6 +759,7 @@ class PaymentService:
         card_holder_id: str = '',
         payment_date: Optional[date] = None,
         bundle_id: Optional[str] = None,
+        price_option_id: Optional[str] = None,
         include_registration_fee: bool = True,
     ) -> Dict:
         """
@@ -654,6 +768,7 @@ class PaymentService:
         post-success logic as process_webhook_callback.
 
         bundle_id: when set, bill at bundle.combined_price / lesson_count (see resolve_billing_price).
+        price_option_id: when set, bill the widget catalog price for this lesson.
         include_registration_fee: pass False for bundle member lessons after the first, so the
             one-time דמי רישום is charged once per bundle rather than per lesson.
         """
@@ -679,20 +794,10 @@ class PaymentService:
         except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
             raise ValueError("Child or Lesson not found")
 
-        # Pricing (identical to initiate_subscription_payment, plus bundle override)
-        if bundle_id:
-            base_price, used_lesson_tier, course_index, bundle = resolve_billing_price(child, lesson, bundle_id)
-        else:
-            course_index = get_child_lesson_index_for_billing(child, lesson)
-            tier_price = get_lesson_price_for_course_index(lesson, course_index)
-            regular_price = lesson.price or lesson.course.price
-            base_price = tier_price if tier_price and tier_price > 0 else regular_price
-            used_lesson_tier = (
-                course_index >= 2
-                and tier_price is not None
-                and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
-            )
-            bundle = None
+        # Pricing (identical to initiate_subscription_payment)
+        base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
+            child, lesson, bundle_id, price_option_id
+        )
         if not base_price:
             raise ValueError("Lesson/Course price not configured")
 
@@ -716,11 +821,18 @@ class PaymentService:
         # Pro-rate the first payment to the remaining lessons of the current month.
         prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date, lesson.day_of_week)
         full_monthly_amount_c = discount_calculation.final_price
-        prorated_lesson_c = max(
-            Decimal('1.00'),
-            (full_monthly_amount_c * prorate_factor_c).quantize(Decimal('0.01'))
-        )
         registration_fee_c = registration_fee_amount() if include_registration_fee else Decimal('0.00')
+
+        # When monthly billing only starts later, signup charges דמי רישום alone.
+        deferred_charge_date_c = deferred_first_charge_date(payment_date)
+        if deferred_charge_date_c:
+            next_billing_date_c = deferred_charge_date_c
+            prorated_lesson_c = Decimal('0.00')
+        else:
+            prorated_lesson_c = max(
+                Decimal('1.00'),
+                (full_monthly_amount_c * prorate_factor_c).quantize(Decimal('0.01'))
+            )
         prorated_final_c = prorated_lesson_c + registration_fee_c
 
         # Create Payment (pending)
@@ -731,17 +843,20 @@ class PaymentService:
             branch=lesson.course.branch,
             lesson=lesson,
             bundle=bundle,
+            price_option=price_option,
             payment_type='recurring_subscription',
             status='pending',
             base_amount=discount_calculation.base_price,
             discount_amount=discount_calculation.total_discount_amount,
             final_amount=prorated_final_c,
             registration_fee=registration_fee_c,
-            description=(
-                f"מנוי חודשי - {lesson.course.name} ({bundle.name or 'מסלול משולב'}) - {child.full_name}"
-                if bundle else
-                f"מנוי חודשי - {lesson.course.name} - {child.full_name}"
-            )
+            description=subscription_payment_description(
+                child=child,
+                lesson=lesson,
+                bundle=bundle,
+                price_option=price_option,
+                fee_only=bool(deferred_charge_date_c),
+            ),
         )
 
         for applied_discount in discount_calculation.applicable_discounts:
@@ -763,19 +878,34 @@ class PaymentService:
             label=label,
             prorated_lesson=prorated_lesson_c,
             registration_fee=registration_fee_c,
+            prorated=not deferred_charge_date_c,
         )
 
-        result = self.tranzila_service.charge_with_card(
-            card_number=card_number,
-            expiry_month=expiry_month,
-            expiry_year=expiry_year,
-            cvv=cvv,
-            card_holder_id=card_holder_id,
-            amount=prorated_final_c,
-            description=payment.description,
-            items=items,
-            duplicate_guard_key=f'payment-{payment.id}',
-        )
+        if prorated_final_c > 0:
+            result = self.tranzila_service.charge_with_card(
+                card_number=card_number,
+                expiry_month=expiry_month,
+                expiry_year=expiry_year,
+                cvv=cvv,
+                card_holder_id=card_holder_id,
+                amount=prorated_final_c,
+                description=payment.description,
+                items=items,
+                duplicate_guard_key=f'payment-{payment.id}',
+            )
+        else:
+            # Nothing is due today (bundle member lesson with no דמי רישום), so the card
+            # is only verified to obtain the token the monthly billing will need.
+            result = self.tranzila_service.verify_card(
+                card_number=card_number,
+                expiry_month=expiry_month,
+                expiry_year=expiry_year,
+                cvv=cvv,
+                card_holder_id=card_holder_id,
+                amount=full_monthly_amount_c,
+                description=payment.description,
+                duplicate_guard_key=f'verify-{payment.id}',
+            )
 
         if result['success']:
             payment.status = 'completed'
@@ -837,13 +967,22 @@ class PaymentService:
                     next_billing_date=next_billing_date_c,
                 )
 
-            # Invoice
-            invoice = self._create_invoice_from_payment(payment, tranzila_transaction)
+            # Invoice (nothing to invoice when the card was only verified)
+            invoice = (
+                self._create_invoice_from_payment(payment, tranzila_transaction)
+                if payment.final_amount > 0 else None
+            )
 
             # Child status
             child.status = 'active'
-            child.subscription_start_date = payment_date
-            child.paid_until_date = next_billing_date_c - timedelta(days=1)
+            if deferred_charge_date_c:
+                # The subscription itself has not started and no month is paid for yet;
+                # the recurring charge on that date fills paid_until_date in.
+                child.subscription_start_date = deferred_charge_date_c
+                child.paid_until_date = None
+            else:
+                child.subscription_start_date = payment_date
+                child.paid_until_date = next_billing_date_c - timedelta(days=1)
             child.save()
 
             # LessonEnrollment
@@ -870,12 +1009,16 @@ class PaymentService:
             return {
                 'success': True,
                 'payment_id': str(payment.id),
-                'invoice_number': invoice.invoice_number,
+                'invoice_number': invoice.invoice_number if invoice else None,
                 'token_saved': bool(token),
                 'bundle_id': str(bundle.id) if bundle else None,
                 'base_amount': float(payment.base_amount),
                 'discount_amount': float(payment.discount_amount),
                 'final_amount': float(payment.final_amount),
+                'monthly_amount': float(full_monthly_amount_c),
+                'subscription_start_date': (
+                    deferred_charge_date_c.isoformat() if deferred_charge_date_c else None
+                ),
                 'discounts_applied': [
                     {'name': d.name, 'type': d.discount_type, 'value': float(d.value), 'reason': d.reason}
                     for d in discount_calculation.applicable_discounts

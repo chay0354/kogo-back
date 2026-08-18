@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Prefetch, Count, Q
-from apps.courses.models import CourseType, Course, Lesson, LessonBundle
+from apps.courses.models import CourseType, Course, Lesson, LessonBundle, LessonPriceOption
 from apps.courses.serializers import (
     CourseTypeSerializer,
     CourseTypeWithStatsSerializer,
@@ -15,6 +15,7 @@ from apps.courses.serializers import (
     CourseWithLessonsSerializer,
     LessonSerializer,
     LessonBundleSerializer,
+    LessonPriceOptionSerializer,
     CourseListSerializer,
     LessonListSerializer
 )
@@ -405,6 +406,35 @@ class LessonBundleViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """Soft delete: set is_active to False instead of deleting, to preserve billing history."""
+        instance = self.get_object()
+        instance.is_active = False
+        instance.save(update_fields=['is_active'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LessonPriceOptionViewSet(viewsets.ModelViewSet):
+    """
+    Extra catalog prices for a single lesson — same slot, different widget title/price.
+    """
+    serializer_class = LessonPriceOptionSerializer
+    pagination_class = None
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+
+    def get_queryset(self):
+        queryset = LessonPriceOption.objects.select_related('lesson', 'lesson__course')
+        queryset = scope_courses(queryset, self.request.user, 'lesson__course')
+
+        lesson_id = self.request.query_params.get('lesson')
+        if lesson_id:
+            queryset = queryset.filter(lesson_id=lesson_id)
+
+        if self.request.query_params.get('is_active') is not None:
+            is_active = self.request.query_params['is_active'].lower() == 'true'
+            queryset = queryset.filter(is_active=is_active)
+
+        return queryset.order_by('sort_order', 'display_title')
+
+    def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         instance.is_active = False
         instance.save(update_fields=['is_active'])

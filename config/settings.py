@@ -272,6 +272,11 @@ MANYCHAT_PHONE_FIELD_ID = config('MANYCHAT_PHONE_FIELD_ID', default='')
 # One-time fee (ILS) added to each new lesson subscription's first charge.
 REGISTRATION_FEE_ILS = config('REGISTRATION_FEE_ILS', default=120, cast=int)
 
+# Registrations made before this date pay only דמי רישום on signup; the monthly
+# subscription itself starts on this date at the full monthly price (no proration for
+# the signup month). Set empty to charge the first month on signup as usual.
+SUBSCRIPTION_FIRST_CHARGE_DATE = config('SUBSCRIPTION_FIRST_CHARGE_DATE', default='2026-09-01')
+
 MANYCHAT_REGISTRATION_FLOW_NS = config('MANYCHAT_REGISTRATION_FLOW_NS', default='')
 # Same as above, but for trial-lesson confirmations (הרשם לניסיון).
 MANYCHAT_TRIAL_FLOW_NS = config('MANYCHAT_TRIAL_FLOW_NS', default='')

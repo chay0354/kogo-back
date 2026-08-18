@@ -4,7 +4,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Count, Q
-from apps.courses.models import CourseType, Course, Lesson, LessonBundle
+from apps.courses.models import CourseType, Course, Lesson, LessonBundle, LessonPriceOption
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments, is_paying_enrollment
 from apps.core.models import Branch, Room, UserProfile
@@ -707,6 +707,40 @@ class LessonBundleSerializer(serializers.ModelSerializer):
             f'{subject} תפוס ביום {day_name} בין השעות '
             f'{conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
         )
+
+
+class LessonPriceOptionSerializer(serializers.ModelSerializer):
+    lesson_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LessonPriceOption
+        fields = [
+            'id', 'lesson', 'lesson_display', 'display_title', 'monthly_price',
+            'sort_order', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_lesson_display(self, obj):
+        return str(obj.lesson)
+
+    def validate(self, data):
+        lesson = data.get('lesson') or (self.instance.lesson if self.instance else None)
+        monthly_price = data.get(
+            'monthly_price',
+            getattr(self.instance, 'monthly_price', None),
+        )
+        if monthly_price is not None and monthly_price < 0:
+            raise serializers.ValidationError({'monthly_price': 'המחיר לא יכול להיות שלילי'})
+        display_title = (data.get('display_title') or getattr(self.instance, 'display_title', '') or '').strip()
+        if not display_title:
+            raise serializers.ValidationError({'display_title': 'יש להזין כותרת'})
+        data['display_title'] = display_title
+        if lesson and not scope_courses(
+            Course.objects.filter(pk=lesson.course_id),
+            self.context['request'].user,
+        ).exists():
+            raise serializers.ValidationError({'lesson': 'אין הרשאה לשיעור זה'})
+        return data
 
 
 # Legacy serializers for backward compatibility

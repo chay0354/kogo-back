@@ -209,3 +209,35 @@ class LessonBundle(models.Model):
         return (self.combined_price / count).quantize(Decimal('0.01'))
 
 
+class LessonPriceOption(models.Model):
+    """
+    מחיר נוסף לשיעור — an extra catalog entry for the same Lesson slot.
+
+    The widget lists the default lesson row (course name + course price) plus
+    one row per active price option (display_title + monthly_price). Two parents
+    can register for the same lesson at different prices.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lesson = models.ForeignKey(
+        Lesson,
+        on_delete=models.CASCADE,
+        related_name='price_options',
+        verbose_name="שיעור",
+    )
+    display_title = models.CharField(max_length=200, verbose_name="כותרת בווידג'ט")
+    monthly_price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="מחיר חודשי")
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="סדר תצוגה")
+    is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'lesson_price_options'
+        verbose_name = "מחיר נוסף לשיעור"
+        verbose_name_plural = "מחירים נוספים לשיעור"
+        ordering = ['sort_order', 'display_title']
+
+    def __str__(self):
+        return f"{self.display_title} — ₪{self.monthly_price}"
+
+
