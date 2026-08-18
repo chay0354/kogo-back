@@ -226,6 +226,18 @@ class LessonPriceOption(models.Model):
     )
     display_title = models.CharField(max_length=200, verbose_name="כותרת בווידג'ט")
     monthly_price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="מחיר חודשי")
+    min_age = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="גיל מינימום בווידג'ט",
+        help_text="ריק = אותה קבוצת גיל כמו החוג. כשמוגדר, השורה תופיע גם כשבוחרים גיל זה בווידג'ט.",
+    )
+    max_age = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="גיל מקסימום בווידג'ט",
+        help_text="ריק = אותה קבוצת גיל כמו החוג.",
+    )
     sort_order = models.PositiveIntegerField(default=0, verbose_name="סדר תצוגה")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")

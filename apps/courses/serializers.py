@@ -716,7 +716,7 @@ class LessonPriceOptionSerializer(serializers.ModelSerializer):
         model = LessonPriceOption
         fields = [
             'id', 'lesson', 'lesson_display', 'display_title', 'monthly_price',
-            'sort_order', 'is_active', 'created_at', 'updated_at',
+            'min_age', 'max_age', 'sort_order', 'is_active', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -735,6 +735,10 @@ class LessonPriceOptionSerializer(serializers.ModelSerializer):
         if not display_title:
             raise serializers.ValidationError({'display_title': 'יש להזין כותרת'})
         data['display_title'] = display_title
+        min_age = data.get('min_age', getattr(self.instance, 'min_age', None) if self.instance else None)
+        max_age = data.get('max_age', getattr(self.instance, 'max_age', None) if self.instance else None)
+        if min_age is not None and max_age is not None and max_age < min_age:
+            raise serializers.ValidationError({'max_age': 'גיל מקסימום חייב להיות גדול או שווה לגיל מינימום'})
         if lesson and not scope_courses(
             Course.objects.filter(pk=lesson.course_id),
             self.context['request'].user,

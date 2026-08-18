@@ -1106,6 +1106,8 @@ class WidgetCoursesView(APIView):
                                 'id': str(option.id),
                                 'display_title': option.display_title,
                                 'monthly_price': str(option.monthly_price),
+                                'min_age': option.min_age,
+                                'max_age': option.max_age,
                             }
                             for option in lesson.price_options.all()
                         ],
