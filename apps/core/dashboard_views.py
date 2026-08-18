@@ -124,33 +124,22 @@ class DashboardViewSet(viewsets.ViewSet):
         if scoped:
             snapshots = snapshots.filter(branch_id__in=scoped_branch_ids)
 
-        from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
-        from apps.store.store_finance import aggregate_store_revenue
+        from apps.core.revenue_service import aggregate_lesson_registration_revenue
 
-        rental_agg = aggregate_studio_rental_revenue(
-            date_from,
-            date_to,
-            branch_id if branch_id and branch_id != 'all' else None,
-            None,
-            branch_ids=scoped_branch_ids if scoped else None,
-        )
-        store_agg = aggregate_store_revenue(
+        lesson_revenue = aggregate_lesson_registration_revenue(
             date_from,
             date_to,
             branch_id if branch_id and branch_id != 'all' else None,
             branch_ids=scoped_branch_ids if scoped else None,
         )
-        rental_total = rental_agg['total'] or Decimal('0.00')
-        store_total = store_agg['total'] or Decimal('0.00')
+        total_revenue = lesson_revenue['total'] or Decimal('0.00')
 
         kpi_agg = snapshots.aggregate(
-            total_revenue=Sum('total_revenue'),
             total_expenses=Sum('instructor_costs'),
             instructor_salaries=Sum('instructor_salaries'),
             instructor_bonuses=Sum('instructor_bonuses'),
             operational_costs=Sum('operational_costs'),
         )
-        total_revenue = (kpi_agg['total_revenue'] or Decimal('0.00')) + rental_total + store_total
         total_expenses = kpi_agg['total_expenses'] or Decimal('0.00')
         net_profit = total_revenue - total_expenses
 
@@ -168,76 +157,50 @@ class DashboardViewSet(viewsets.ViewSet):
         total_operational_costs = kpi_agg['operational_costs'] or Decimal('0.00')
 
         revenue_by_branch = []
-        branch_data = snapshots.values('branch__name', 'branch_id').annotate(
-            revenue=Sum('total_revenue'),
-            expenses=Sum('instructor_costs'),
-            profit=Sum('profit')
-        ).order_by('-revenue')
-
-        for item in branch_data:
-            bid = str(item['branch_id'])
-            extra = float(rental_agg['by_branch_id'].get(bid, 0) or 0)
-            extra += float(store_agg['by_branch_id'].get(bid, 0) or 0)
-            revenue_by_branch.append({
-                'branch_name': item['branch__name'],
-                'branch_id': bid,
-                'revenue': float(item['revenue'] or 0) + extra,
-                'expenses': float(item['expenses'] or 0),
-                'profit': float(item['profit'] or 0) + extra
-            })
-
-        known_ids = {r['branch_id'] for r in revenue_by_branch}
-        missing_branch_ids = [
-            bid for bid in set(rental_agg['by_branch_id']) | set(store_agg['by_branch_id'])
-            if bid not in known_ids and bid != '__online__'
-        ]
-        extra_branches = {
-            str(branch.id): branch
-            for branch in Branch.objects.filter(pk__in=missing_branch_ids).only('id', 'name')
-        }
-        for bid in missing_branch_ids:
-            branch = extra_branches.get(bid)
-            if not branch:
-                continue
-            extra = float(rental_agg['by_branch_id'].get(bid, 0) or 0)
-            extra += float(store_agg['by_branch_id'].get(bid, 0) or 0)
-            revenue_by_branch.append({
-                'branch_name': branch.name,
-                'branch_id': bid,
-                'revenue': extra,
-                'expenses': 0.0,
-                'profit': extra,
-            })
-
-        online_store = float(store_agg['by_branch_id'].get('__online__', 0) or 0)
-        if online_store and (not branch_id or branch_id == 'all'):
-            revenue_by_branch.append({
-                'branch_name': 'חנות באתר (משלוח)',
-                'branch_id': '__online__',
-                'revenue': online_store,
-                'expenses': 0.0,
-                'profit': online_store,
-            })
-
-        monthly_by_month = {
-            row['month']: row
-            for row in snapshots.values('month').annotate(
-                revenue=Sum('total_revenue'),
+        branch_expenses = {
+            str(item['branch_id']): item['expenses'] or Decimal('0.00')
+            for item in snapshots.values('branch_id').annotate(
                 expenses=Sum('instructor_costs'),
             )
         }
+        branch_names = {
+            str(b.id): b.name
+            for b in Branch.objects.filter(
+                pk__in=set(branch_expenses) | set(lesson_revenue['by_branch_id'])
+            ).only('id', 'name')
+        }
+
+        all_branch_ids = set(branch_expenses) | set(lesson_revenue['by_branch_id'])
+        for bid in sorted(
+            all_branch_ids,
+            key=lambda x: float(lesson_revenue['by_branch_id'].get(x, Decimal('0'))),
+            reverse=True,
+        ):
+            revenue = lesson_revenue['by_branch_id'].get(bid, Decimal('0.00'))
+            expenses = branch_expenses.get(bid, Decimal('0.00'))
+            revenue_by_branch.append({
+                'branch_name': branch_names.get(bid, bid),
+                'branch_id': bid,
+                'revenue': float(revenue),
+                'expenses': float(expenses),
+                'profit': float(revenue - expenses),
+            })
+
+        monthly_expenses = {
+            row['month']: row['expenses'] or Decimal('0.00')
+            for row in snapshots.values('month').annotate(expenses=Sum('instructor_costs'))
+        }
         monthly_trends = []
         for month in sorted(months):
-            row = monthly_by_month.get(month, {})
-            extra_month = float(rental_agg['by_month'].get(month, 0) or 0)
-            extra_month += float(store_agg['by_month'].get(month, 0) or 0)
+            revenue = lesson_revenue['by_month'].get(month, Decimal('0.00'))
+            expenses = monthly_expenses.get(month, Decimal('0.00'))
             monthly_trends.append({
                 'month': month,
-                'revenue': float(row.get('revenue') or 0) + extra_month,
-                'expenses': float(row.get('expenses') or 0)
+                'revenue': float(revenue),
+                'expenses': float(expenses),
             })
         
-        # Revenue by instructor (top 8)
+        # Instructor revenue from actual lesson payments; salary from snapshots.
         instructor_snapshots = InstructorMonthlySnapshot.objects.filter(month__in=months)
         if branch_id and branch_id != 'all':
             instructor_snapshots = instructor_snapshots.filter(
@@ -247,32 +210,47 @@ class DashboardViewSet(viewsets.ViewSet):
             instructor_snapshots = instructor_snapshots.filter(
                 instructor_id__in=scoped_instr_ids
             )
-        
-        instructor_data = instructor_snapshots.values(
+
+        instructor_salaries = {
+            str(item['instructor_id']): item['salary'] or Decimal('0.00')
+            for item in instructor_snapshots.values('instructor_id').annotate(
+                salary=Sum('total_salary'),
+            )
+        }
+        instructor_name_map = dict(lesson_revenue['by_instructor_name'])
+        for item in instructor_snapshots.values(
+            'instructor_id',
             'instructor__first_name',
             'instructor__last_name',
-            'instructor_id'
-        ).annotate(
-            revenue=Sum('total_revenue'),
-            salary=Sum('total_salary'),
-            profit=Sum('profit')
-        ).order_by('-profit')[:8]
-        
-        revenue_by_instructor = []
-        for item in instructor_data:
-            revenue_by_instructor.append({
-                'instructor_name': f"{item['instructor__first_name']} {item['instructor__last_name']}",
-                'instructor_id': str(item['instructor_id']),
-                'revenue': float(item['revenue'] or 0),
-                'salary': float(item['salary'] or 0),
-                'profit': float(item['profit'] or 0)
+        ).distinct():
+            iid = str(item['instructor_id'])
+            instructor_name_map.setdefault(
+                iid,
+                f"{item['instructor__first_name']} {item['instructor__last_name']}",
+            )
+
+        instructor_rows = []
+        all_instructor_ids = set(instructor_salaries) | set(lesson_revenue['by_instructor_id'])
+        for iid in all_instructor_ids:
+            revenue = lesson_revenue['by_instructor_id'].get(iid, Decimal('0.00'))
+            salary = instructor_salaries.get(iid, Decimal('0.00'))
+            if revenue <= 0 and salary <= 0:
+                continue
+            instructor_rows.append({
+                'instructor_id': iid,
+                'instructor_name': instructor_name_map.get(iid, iid),
+                'revenue': float(revenue),
+                'salary': float(salary),
+                'profit': float(revenue - salary),
             })
+        revenue_by_instructor = sorted(instructor_rows, key=lambda x: x['profit'], reverse=True)[:8]
         
         return Response({
             'kpis': {
                 'total_revenue': float(total_revenue),
                 'total_expenses': float(total_expenses),
-                'net_profit': float(net_profit)
+                'net_profit': float(net_profit),
+                'registration_fees_collected': float(lesson_revenue['registration_fees'] or 0),
             },
             'expense_breakdown': {
                 'instructor_salaries': float(total_instructor_salaries),

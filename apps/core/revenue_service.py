@@ -11,6 +11,7 @@ Usage:
     discounts = service.get_branch_discounts(branch_id, start_date, end_date)
 """
 import logging
+from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -22,6 +23,88 @@ from apps.customers.financial_models import BranchDiscountMetrics
 from apps.core.models import Branch
 
 logger = logging.getLogger(__name__)
+
+LESSON_REGISTRATION_PAYMENT_TYPES = ('recurring_subscription', 'one_time')
+
+
+def aggregate_lesson_registration_revenue(
+    date_from: date,
+    date_to: date,
+    branch_id: Optional[str] = None,
+    branch_ids: Optional[list] = None,
+) -> Dict:
+    """
+    Sum completed lesson-registration payments in a date range.
+
+    Income on the financial dashboard comes from real charges tied to a lesson
+    (first subscription, monthly recurring, paid trial, registration fee, etc.),
+    not from theoretical enrollment counts or store sales.
+    """
+    qs = Payment.objects.filter(
+        status='completed',
+        lesson__isnull=False,
+        payment_type__in=LESSON_REGISTRATION_PAYMENT_TYPES,
+        payment_date__date__gte=date_from,
+        payment_date__date__lte=date_to,
+    )
+
+    if branch_id and branch_id != 'all':
+        qs = qs.filter(branch_id=branch_id)
+    elif branch_ids is not None:
+        if not branch_ids:
+            return {
+                'total': Decimal('0.00'),
+                'registration_fees': Decimal('0.00'),
+                'by_branch_id': {},
+                'by_month': {},
+                'by_instructor_id': {},
+                'by_instructor_name': {},
+            }
+        qs = qs.filter(branch_id__in=branch_ids)
+
+    totals = qs.aggregate(
+        total=Sum('final_amount'),
+        registration_fees=Sum('registration_fee'),
+    )
+    total = totals['total'] or Decimal('0.00')
+    registration_fees = totals['registration_fees'] or Decimal('0.00')
+
+    by_branch_id: dict[str, Decimal] = defaultdict(lambda: Decimal('0.00'))
+    for row in qs.values('branch_id').annotate(amount=Sum('final_amount')):
+        if row['branch_id']:
+            by_branch_id[str(row['branch_id'])] += row['amount'] or Decimal('0.00')
+
+    by_month: dict[str, Decimal] = defaultdict(lambda: Decimal('0.00'))
+    for row in qs.annotate(month=TruncMonth('payment_date')).values('month').annotate(
+        amount=Sum('final_amount'),
+    ):
+        if row['month']:
+            by_month[row['month'].strftime('%Y-%m')] += row['amount'] or Decimal('0.00')
+
+    by_instructor_id: dict[str, Decimal] = defaultdict(lambda: Decimal('0.00'))
+    by_instructor_name: dict[str, str] = {}
+    for row in qs.values(
+        'lesson__instructor_id',
+        'lesson__instructor__first_name',
+        'lesson__instructor__last_name',
+    ).annotate(amount=Sum('final_amount')):
+        iid = row['lesson__instructor_id']
+        if not iid:
+            continue
+        key = str(iid)
+        by_instructor_id[key] += row['amount'] or Decimal('0.00')
+        by_instructor_name[key] = (
+            f"{row['lesson__instructor__first_name']} {row['lesson__instructor__last_name']}"
+        )
+
+    return {
+        'total': total,
+        'registration_fees': registration_fees,
+        'by_branch_id': dict(by_branch_id),
+        'by_month': dict(by_month),
+        'by_instructor_id': dict(by_instructor_id),
+        'by_instructor_name': by_instructor_name,
+    }
 
 
 class RevenueService:
