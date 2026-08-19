@@ -16,6 +16,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
+from apps.store.inventory_ops import InventoryError, adjust_product_stock, transfer_product_stock
 from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale, InventoryAdjustment
 from apps.store.serializers import (
     StoreProductSerializer, StoreInvoiceSerializer,
@@ -190,58 +191,18 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             return Response({'error': 'quantity_delta must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
 
-        reason = request.data.get('reason', '')
-        valid_reasons = {r[0] for r in InventoryAdjustment.REASON_CHOICES}
-        if reason not in valid_reasons:
-            return Response(
-                {'error': f'Invalid reason. Must be one of: {", ".join(valid_reasons)}'},
-                status=status.HTTP_400_BAD_REQUEST,
+        try:
+            product = adjust_product_stock(
+                product,
+                quantity_delta=quantity_delta,
+                reason=request.data.get('reason', ''),
+                note=request.data.get('note', '') or '',
+                size_stock_id=(request.data.get('size_stock_id') or '').strip() or None,
+                user=request.user,
             )
+        except InventoryError as exc:
+            return Response({'error': exc.message}, status=exc.status)
 
-        note = request.data.get('note', '')
-        size_stock_id = (request.data.get('size_stock_id') or '').strip()
-
-        with db_transaction.atomic():
-            size_row = None
-            if size_stock_id and product.has_per_size_stock():
-                size_row = (
-                    StoreProductSize.objects
-                    .select_for_update()
-                    .filter(product=product, pk=size_stock_id)
-                    .first()
-                )
-                if size_row is None:
-                    return Response(
-                        {'error': 'Size stock row not found for this product'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-
-            if size_row is not None:
-                new_qty = max(0, size_row.stock_quantity + quantity_delta)
-                actual_delta = new_qty - size_row.stock_quantity
-                size_row.stock_quantity = new_qty
-                size_row.save(update_fields=['stock_quantity', 'updated_at'])
-                product.recalculate_total_stock()
-            else:
-                new_qty = max(0, product.stock_quantity + quantity_delta)
-                actual_delta = new_qty - product.stock_quantity
-                product.stock_quantity = new_qty
-                product.save(update_fields=['stock_quantity', 'updated_at'])
-
-            InventoryAdjustment.objects.create(
-                product=product,
-                size_stock=size_row,
-                quantity_delta=actual_delta,
-                reason=reason,
-                note=note,
-                adjusted_by=request.user if request.user.is_authenticated else None,
-            )
-
-        logger.info(
-            "Inventory adjustment for %s: delta=%s, reason=%s, size_stock=%s",
-            product.name, actual_delta, reason, size_stock_id or '-',
-        )
-        product.refresh_from_db()
         serializer = self.get_serializer(product)
         return Response(serializer.data)
 
@@ -264,53 +225,16 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             return Response({'error': 'quantity must be a positive integer'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if quantity <= 0:
-            return Response({'error': 'quantity must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
-
-        from_id = (request.data.get('from_size_stock_id') or '').strip()
-        to_id = (request.data.get('to_size_stock_id') or '').strip()
-
-        if not from_id or not to_id:
-            return Response(
-                {'error': 'from_size_stock_id and to_size_stock_id are required'},
-                status=status.HTTP_400_BAD_REQUEST,
+        try:
+            product = transfer_product_stock(
+                product,
+                quantity=quantity,
+                from_size_stock_id=request.data.get('from_size_stock_id') or '',
+                to_size_stock_id=request.data.get('to_size_stock_id') or '',
             )
-        if from_id == to_id:
-            return Response({'error': 'Source and destination cannot be the same row'}, status=status.HTTP_400_BAD_REQUEST)
+        except InventoryError as exc:
+            return Response({'error': exc.message}, status=exc.status)
 
-        with db_transaction.atomic():
-            rows = (
-                StoreProductSize.objects
-                .select_for_update()
-                .filter(product=product, pk__in=[from_id, to_id])
-            )
-            row_map = {str(r.pk): r for r in rows}
-
-            if from_id not in row_map:
-                return Response({'error': 'Source size stock row not found'}, status=status.HTTP_400_BAD_REQUEST)
-            if to_id not in row_map:
-                return Response({'error': 'Destination size stock row not found'}, status=status.HTTP_400_BAD_REQUEST)
-
-            from_row = row_map[from_id]
-            to_row = row_map[to_id]
-
-            if from_row.stock_quantity < quantity:
-                return Response(
-                    {'error': f'מלאי לא מספיק במקור (נוכחי: {from_row.stock_quantity}, מבוקש: {quantity})'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            from_row.stock_quantity -= quantity
-            to_row.stock_quantity += quantity
-            from_row.save(update_fields=['stock_quantity', 'updated_at'])
-            to_row.save(update_fields=['stock_quantity', 'updated_at'])
-            product.recalculate_total_stock()
-
-        logger.info(
-            "Stock transfer for %s: quantity=%s, from=%s, to=%s",
-            product.name, quantity, from_id, to_id,
-        )
-        product.refresh_from_db()
         serializer = self.get_serializer(product)
         return Response(serializer.data)
 
@@ -720,6 +644,7 @@ def charge_card(request):
     """
     from apps.store.models import StoreProduct, StoreInvoice, StoreSale
     from apps.core.tranzila_service import TranzilaService
+    from apps.store.pricing import line_charge_amount, sale_unit_and_total, tranzila_items_for_cart_line
     from apps.store.stock_utils import decrement_product_stock as _decrement_product_stock
     from apps.store.stock_utils import store_line_item_branch_id as _store_line_item_branch_id
     from apps.customers.models import Child, RecurringPayment
@@ -747,17 +672,20 @@ def charge_card(request):
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
             unit_price = Decimal(str(item['price_override'])) if item.get('price_override') else product.sale_price
-            total_amount += unit_price * item['quantity']
-
-            tranzila_items.append({
-                'name': f"{product.name} {item.get('size', '')}".strip(),
-                'type': 'I',
-                'unit_price': float(unit_price),
-                'units_number': item['quantity'],
-                'unit_type': 1,
-                'price_type': 'G',
-                'currency_code': 'ILS'
-            })
+            if item.get('price_override'):
+                total_amount += unit_price * item['quantity']
+                tranzila_items.append({
+                    'name': f"{product.name} {item.get('size', '')}".strip(),
+                    'type': 'I',
+                    'unit_price': float(unit_price),
+                    'units_number': item['quantity'],
+                    'unit_type': 1,
+                    'price_type': 'G',
+                    'currency_code': 'ILS'
+                })
+            else:
+                total_amount += line_charge_amount(product, item['quantity'], item)
+                tranzila_items.extend(tranzila_items_for_cart_line(product, item))
 
         # Create invoice
         invoice = StoreInvoice.objects.create(
@@ -811,13 +739,17 @@ def charge_card(request):
                 for item in product_items:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
 
+                    unit, total = sale_unit_and_total(product, item)
+                    if item.get('price_override'):
+                        unit = Decimal(str(item['price_override']))
+                        total = unit * item['quantity']
                     StoreSale.objects.create(
                         invoice=invoice,
                         product=product,
                         child=invoice.child,
                         quantity=item['quantity'],
-                        unit_price=product.sale_price,
-                        total_price=product.sale_price * item['quantity'],
+                        unit_price=unit,
+                        total_price=total,
                         size=item.get('size', ''),
                         payment_method='credit_card',
                         branch_id=_store_line_item_branch_id(item, product),

@@ -58,6 +58,14 @@ class StoreProduct(models.Model):
         verbose_name="מחיר מכירה",
         help_text="Sale price to customer"
     )
+    delivery_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="מחיר משלוח",
+        help_text="Per-unit shipping fee charged on delivery/online sales (0 = none)",
+    )
     
     # Location
     branch = models.ForeignKey(
@@ -159,7 +167,15 @@ class StoreProduct(models.Model):
         rows so callers (analytics, list views, store dashboard) keep working
         without changes. If a product has no size rows, the existing
         stock_quantity value is left untouched.
+
+        Prefetch caches are dropped first: adjust/transfer update a locked
+        size row, then ask the parent to retotal — a stale `size_stocks`
+        prefetch would keep the old sum.
         """
+        prefetch = getattr(self, '_prefetched_objects_cache', None)
+        if prefetch is not None:
+            prefetch.pop('size_stocks', None)
+
         if not self.has_per_size_stock():
             return self.stock_quantity
         total = sum(int(s.stock_quantity) for s in self.size_stocks.all())

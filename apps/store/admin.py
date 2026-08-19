@@ -8,7 +8,7 @@ from apps.store.models import StoreProduct, StoreInvoice, StoreSale
 @admin.register(StoreProduct)
 class StoreProductAdmin(admin.ModelAdmin):
     list_display = [
-        'name', 'category', 'sale_price', 'cost_price',
+        'name', 'category', 'sale_price', 'delivery_price', 'cost_price',
         'stock_quantity', 'min_stock_alert', 'is_low_stock',
         'branch', 'is_active'
     ]
@@ -20,7 +20,7 @@ class StoreProductAdmin(admin.ModelAdmin):
             'fields': ('name', 'category', 'size')
         }),
         ('תמחור', {
-            'fields': ('cost_price', 'sale_price')
+            'fields': ('cost_price', 'sale_price', 'delivery_price')
         }),
         ('מלאי', {
             'fields': ('stock_quantity', 'min_stock_alert', 'branch')

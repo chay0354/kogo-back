@@ -59,6 +59,7 @@ def push_products_batch_to_website(products: list[StoreProduct]) -> int:
             'legacy_id': int(legacy_id),
             'in_stock': product_in_stock(product),
             'price': float(product.sale_price or Decimal('0')),
+            'delivery_price': float(product.delivery_price or Decimal('0')),
             'purchasable': not product.branch_only,
         })
     if not items:

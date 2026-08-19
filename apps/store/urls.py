@@ -19,6 +19,22 @@ urlpatterns = [
 
     # B2C website integration (shared secret, not staff auth)
     path('integration/products/', widget_views.IntegrationProductsView.as_view(), name='store-integration-products'),
+    path(
+        'integration/products/<uuid:product_id>/inventory/',
+        widget_views.IntegrationProductInventoryView.as_view(),
+        name='store-integration-product-inventory',
+    ),
+    path(
+        'integration/products/<uuid:product_id>/adjust_stock/',
+        widget_views.IntegrationAdjustStockView.as_view(),
+        name='store-integration-adjust-stock',
+    ),
+    path(
+        'integration/products/<uuid:product_id>/transfer_stock/',
+        widget_views.IntegrationTransferStockView.as_view(),
+        name='store-integration-transfer-stock',
+    ),
+    path('integration/branches/', widget_views.IntegrationBranchesView.as_view(), name='store-integration-branches'),
     path('integration/link/', widget_views.IntegrationLinkView.as_view(), name='store-integration-link'),
     path('integration/update/', widget_views.IntegrationProductUpdateView.as_view(), name='store-integration-update'),
     path('widget/stock-check/', widget_views.WidgetStoreStockCheckView.as_view(), name='store-widget-stock-check'),

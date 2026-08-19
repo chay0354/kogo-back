@@ -14,12 +14,22 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.models import Branch
+from apps.store.inventory_ops import (
+    InventoryError,
+    adjust_product_stock,
+    save_product_inventory,
+    serialize_integration_product,
+    transfer_product_stock,
+)
 from apps.store.models import StoreProduct, StoreInvoice, StoreSale
+from apps.store.pricing import line_charge_amount, sale_unit_and_total
 from apps.store.stock_utils import decrement_product_stock, store_line_item_branch_id
 from apps.store.website_integration import (
     link_product_to_website,
@@ -49,26 +59,20 @@ def _integration_denied():
 
 
 def _serialize_integration_product(p: StoreProduct) -> dict:
-    sizes = []
-    for row in p.size_stocks.all():
-        sizes.append({
-            'size_stock_id': str(row.id),
-            'size': row.size,
-            'in_stock': row.stock_quantity > 0,
-        })
-    return {
-        'id': str(p.id),
-        'name': p.name,
-        'category': p.category,
-        'sale_price': str(p.sale_price),
-        'image_url': p.image_url or '',
-        'stock_quantity': int(p.stock_quantity or 0),
-        'in_stock': product_in_stock(p),
-        'website_legacy_id': p.website_legacy_id,
-        'branch_only': p.branch_only,
-        'branch': str(p.branch_id) if p.branch_id else None,
-        'sizes': sizes,
-    }
+    return serialize_integration_product(p)
+
+
+def _get_product(product_id: str) -> StoreProduct:
+    """Inventory admin must reach linked products even if is_active is False."""
+    try:
+        return (
+            StoreProduct.objects
+            .select_related('branch')
+            .prefetch_related('size_stocks__branch')
+            .get(pk=product_id)
+        )
+    except (StoreProduct.DoesNotExist, ValidationError, ValueError):
+        raise InventoryError('product not found', status=404)
 
 
 class IntegrationProductsView(APIView):
@@ -83,8 +87,10 @@ class IntegrationProductsView(APIView):
         if not _check_integration_key(request):
             return _integration_denied()
         qs = (
-            StoreProduct.objects.filter(is_active=True)
-            .prefetch_related('size_stocks')
+            StoreProduct.objects.filter(Q(is_active=True) | Q(website_legacy_id__isnull=False))
+            .select_related('branch')
+            .prefetch_related('size_stocks__branch')
+            .distinct()
             .order_by('name')
         )
         branch = request.query_params.get('branch')
@@ -194,6 +200,109 @@ class IntegrationProductUpdateView(APIView):
         return Response({'ok': True, 'product': _serialize_integration_product(product)})
 
 
+class IntegrationBranchesView(APIView):
+    """
+    GET /api/v1/store/integration/branches/
+    Active CRM branches for the B2C inventory location picker.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        if not _check_integration_key(request):
+            return _integration_denied()
+        qs = Branch.objects.filter(is_active=True).order_by('name')
+        return Response([{'id': str(b.id), 'name': b.name} for b in qs])
+
+
+class IntegrationProductInventoryView(APIView):
+    """
+    GET   /api/v1/store/integration/products/<uuid>/inventory/
+    PATCH /api/v1/store/integration/products/<uuid>/inventory/
+
+    Read / replace size-location stock rows and the min-stock alert — same
+    fields the CRM product editor saves, without exposing sale price.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request, product_id=None):
+        if not _check_integration_key(request):
+            return _integration_denied()
+        try:
+            product = _get_product(product_id)
+        except InventoryError as exc:
+            return Response({'error': exc.message}, status=exc.status)
+        return Response(_serialize_integration_product(product))
+
+    def patch(self, request, product_id=None):
+        if not _check_integration_key(request):
+            return _integration_denied()
+        try:
+            product = _get_product(product_id)
+            product = save_product_inventory(product, request.data if isinstance(request.data, dict) else {})
+        except InventoryError as exc:
+            return Response({'error': exc.message}, status=exc.status)
+        return Response({'ok': True, 'product': _serialize_integration_product(product)})
+
+
+class IntegrationAdjustStockView(APIView):
+    """
+    POST /api/v1/store/integration/products/<uuid>/adjust_stock/
+    Same audited adjust as the CRM staff action (receipt / theft / damage / recount / other).
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, product_id=None):
+        if not _check_integration_key(request):
+            return _integration_denied()
+        try:
+            quantity_delta = int(request.data.get('quantity_delta', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'quantity_delta must be an integer'}, status=400)
+        try:
+            product = _get_product(product_id)
+            product = adjust_product_stock(
+                product,
+                quantity_delta=quantity_delta,
+                reason=request.data.get('reason', ''),
+                note=request.data.get('note', '') or '',
+                size_stock_id=(request.data.get('size_stock_id') or '').strip() or None,
+            )
+        except InventoryError as exc:
+            return Response({'error': exc.message}, status=exc.status)
+        return Response({'ok': True, 'product': _serialize_integration_product(product)})
+
+
+class IntegrationTransferStockView(APIView):
+    """
+    POST /api/v1/store/integration/products/<uuid>/transfer_stock/
+    Move units between two size/location rows of the same product.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, product_id=None):
+        if not _check_integration_key(request):
+            return _integration_denied()
+        try:
+            quantity = int(request.data.get('quantity', 0))
+        except (TypeError, ValueError):
+            return Response({'error': 'quantity must be a positive integer'}, status=400)
+        try:
+            product = _get_product(product_id)
+            product = transfer_product_stock(
+                product,
+                quantity=quantity,
+                from_size_stock_id=request.data.get('from_size_stock_id') or '',
+                to_size_stock_id=request.data.get('to_size_stock_id') or '',
+            )
+        except InventoryError as exc:
+            return Response({'error': exc.message}, status=exc.status)
+        return Response({'ok': True, 'product': _serialize_integration_product(product)})
+
+
 class WidgetStoreStockCheckView(APIView):
     """
     POST /api/v1/store/widget/stock-check/
@@ -283,7 +392,7 @@ def _resolve_website_cart_items(items):
             raise ValueError(f'מוצר {legacy_id} לא מקושר ל-CRM')
         if int(product.stock_quantity or 0) < qty:
             raise ValueError(f'אין מספיק מלאי עבור {product.name}')
-        line_total = product.sale_price * qty
+        line_total = line_charge_amount(product, qty, {'branch': 'delivery', 'quantity': qty})
         total += line_total
         resolved.append({
             'product': product,
@@ -511,13 +620,14 @@ class WidgetStoreWebsiteOrderView(APIView):
                     if int(product.stock_quantity or 0) < line['quantity']:
                         raise ValueError(f'אין מספיק מלאי עבור {product.name}')
 
+                    unit, total = sale_unit_and_total(product, item)
                     StoreSale.objects.create(
                         invoice=invoice,
                         product=product,
                         child=None,
                         quantity=line['quantity'],
-                        unit_price=line['unit_price'],
-                        total_price=line['line_total'],
+                        unit_price=unit,
+                        total_price=total,
                         size=line['size'],
                         payment_method='credit_card',
                         branch_id=store_line_item_branch_id(item, product),

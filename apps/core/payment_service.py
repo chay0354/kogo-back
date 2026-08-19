@@ -40,6 +40,7 @@ from apps.store.stock_utils import (
     restore_stock_for_sale as _restore_stock_for_sale,
     store_line_item_branch_id as _store_line_item_branch_id,
 )
+from apps.store.pricing import line_charge_amount, sale_unit_and_total, tranzila_items_for_cart_line
 
 logger = logging.getLogger(__name__)
 
@@ -1275,7 +1276,7 @@ class PaymentService:
         total_amount = Decimal('0.00')
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
-            total_amount += product.sale_price * item['quantity']
+            total_amount += line_charge_amount(product, item['quantity'], item)
         
         # Check for stored token if child is registered
         if child_id:
@@ -1402,12 +1403,7 @@ class PaymentService:
         tranzila_items = []
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
-            tranzila_items.append({
-                'name': f"{product.name} {item.get('size', '')}".strip(),
-                'type': 'I',  # Item/Product
-                'unit_price': float(product.sale_price),
-                'units_number': item['quantity']
-            })
+            tranzila_items.extend(tranzila_items_for_cart_line(product, item))
         
         # Charge the token using new REST API
         result = self.tranzila_service.charge_with_token(
@@ -1464,13 +1460,14 @@ class PaymentService:
                         }
                     
                     # Create sale record
+                    unit, total = sale_unit_and_total(product, item)
                     StoreSale.objects.create(
                         invoice=invoice,
                         product=product,
                         child=invoice.child,
                         quantity=item['quantity'],
-                        unit_price=product.sale_price,
-                        total_price=product.sale_price * item['quantity'],
+                        unit_price=unit,
+                        total_price=total,
                         size=item.get('size', ''),
                         payment_method='credit_card',
                         branch_id=_store_line_item_branch_id(item, product),
@@ -1549,13 +1546,14 @@ class PaymentService:
                 for item in product_items:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
                     
+                    unit, total = sale_unit_and_total(product, item)
                     StoreSale.objects.create(
                         invoice=invoice,
                         product=product,
                         child=invoice.child,
                         quantity=item['quantity'],
-                        unit_price=product.sale_price,
-                        total_price=product.sale_price * item['quantity'],
+                        unit_price=unit,
+                        total_price=total,
                         size=item.get('size', ''),
                         payment_method='credit_card',
                         branch_id=_store_line_item_branch_id(item, product),
@@ -1646,7 +1644,7 @@ class PaymentService:
         total_amount = Decimal('0.00')
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
-            total_amount += product.sale_price * item['quantity']
+            total_amount += line_charge_amount(product, item['quantity'], item)
         
         # Create completed invoice
         invoice = StoreInvoice.objects.create(
@@ -1666,13 +1664,14 @@ class PaymentService:
                 if product.stock_quantity < item['quantity']:
                     raise ValueError(f'אין מספיק מלאי עבור {product.name}')
                 
+                unit, total = sale_unit_and_total(product, item)
                 StoreSale.objects.create(
                     invoice=invoice,
                     product=product,
                     child=child,
                     quantity=item['quantity'],
-                    unit_price=product.sale_price,
-                    total_price=product.sale_price * item['quantity'],
+                    unit_price=unit,
+                    total_price=total,
                     size=item.get('size', ''),
                     payment_method=payment_method,
                     branch_id=_store_line_item_branch_id(item, product),

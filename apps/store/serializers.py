@@ -138,7 +138,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
         model = StoreProduct
         fields = [
             'id', 'name', 'category', 'size',
-            'cost_price', 'sale_price',
+            'cost_price', 'sale_price', 'delivery_price',
             'branch', 'branch_name',
             'stock_quantity', 'min_stock_alert', 'is_low_stock',
             'image_url', 'notes', 'is_active',
