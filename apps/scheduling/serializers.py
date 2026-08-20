@@ -7,6 +7,7 @@ from apps.enrollments.models import LessonAttendance
 class LessonListSerializer(serializers.ModelSerializer):
     """Serializer for calendar view"""
     course_name = serializers.CharField(source='course.name', read_only=True)
+    course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
     course_type_name = serializers.CharField(source='course.course_type.name', read_only=True)
     instructor_id = serializers.UUIDField(source='instructor.id', read_only=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True)
@@ -22,7 +23,7 @@ class LessonListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Lesson
         fields = [
-            'id', 'course_name', 'course_type_name',
+            'id', 'course_name', 'course_display_id', 'course_type_name',
             'instructor_id', 'instructor_name',
             'branch_id', 'branch_name', 'city_id', 'city_name',
             'room_name', 'room_capacity', 'day_of_week', 'day_of_week_display',
@@ -43,6 +44,7 @@ class LessonListSerializer(serializers.ModelSerializer):
 class LessonDetailSerializer(serializers.ModelSerializer):
     """Detailed lesson with enrollments and attendance"""
     course_name = serializers.CharField(source='course.name', read_only=True)
+    course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
     course_type_name = serializers.CharField(source='course.course_type.name', read_only=True)
     instructor_id = serializers.UUIDField(source='instructor.id', read_only=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True)
@@ -60,7 +62,7 @@ class LessonDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Lesson
         fields = [
-            'id', 'course_name', 'course_type_name',
+            'id', 'course_name', 'course_display_id', 'course_type_name',
             'instructor_id', 'instructor_name', 'instructor_email',
             'branch_id', 'branch_name', 'city_id', 'city_name', 'room_name', 'room_capacity',
             'day_of_week', 'start_time', 'end_time',

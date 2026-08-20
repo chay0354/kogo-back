@@ -1098,6 +1098,7 @@ class WidgetCoursesView(APIView):
             result.append({
                 'id': str(course.id),
                 'name': course.name,
+                'display_id': course.display_id,
                 'course_type': str(course.course_type_id) if course.course_type_id else None,
                 'course_type_name': course.course_type.name if course.course_type else None,
                 'course_type_description': course.course_type.description if course.course_type else None,

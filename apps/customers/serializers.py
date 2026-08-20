@@ -197,6 +197,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                     'enrollment_id': str(enrollment.id),
                     'course_name': course.name,
                     'course_id': str(course.id),
+                    'course_display_id': course.display_id,
                     'branch_name': course.branch.name if course.branch else None,
                     'instructor_name': None,  # Instructor is now lesson-specific
                     'day_of_week': None,
@@ -219,6 +220,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                     'enrollment_id': str(enrollment.id),
                     'course_name': lesson.course.name,
                     'course_id': course_id,
+                    'course_display_id': lesson.course.display_id,
                     'day_of_week': lesson.day_of_week,
                     'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else None,
                     'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
@@ -500,26 +502,32 @@ class PaymentSerializer(serializers.ModelSerializer):
     family_name = serializers.CharField(source='family.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
     lesson_name = serializers.SerializerMethodField()
+    lesson_course_display_id = serializers.SerializerMethodField()
     discount_snapshots = PaymentDiscountSnapshotSerializer(many=True, read_only=True)
     tranzila_transaction = TranzilaTransactionSerializer(read_only=True)
-    
+
     def get_lesson_name(self, obj):
         if obj.lesson and obj.lesson.course:
             return obj.lesson.course.name
         return None
-    
+
+    def get_lesson_course_display_id(self, obj):
+        if obj.lesson and obj.lesson.course:
+            return obj.lesson.course.display_id
+        return None
+
     class Meta:
         model = Payment
         fields = [
             'id', 'child', 'child_name', 'parent', 'family', 'family_name',
-            'branch', 'branch_name', 'lesson', 'lesson_name',
+            'branch', 'branch_name', 'lesson', 'lesson_name', 'lesson_course_display_id',
             'payment_type', 'status', 'base_amount', 'discount_amount',
             'final_amount', 'description', 'payment_date', 'failure_reason',
             'failure_code', 'discount_snapshots', 'tranzila_transaction',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'child_name', 'family_name', 'branch_name', 'lesson_name',
+            'id', 'child_name', 'family_name', 'branch_name', 'lesson_name', 'lesson_course_display_id',
             'discount_snapshots', 'tranzila_transaction', 'created_at', 'updated_at'
         ]
 

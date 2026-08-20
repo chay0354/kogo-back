@@ -293,12 +293,13 @@ class LessonMonthlySnapshotSerializer(serializers.ModelSerializer):
     """Serializer for lesson monthly snapshots"""
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
+    course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
-    
+
     class Meta:
         model = LessonMonthlySnapshot
         fields = [
-            'id', 'lesson', 'instructor', 'instructor_name', 'course', 'course_name',
+            'id', 'lesson', 'instructor', 'instructor_name', 'course', 'course_name', 'course_display_id',
             'branch', 'branch_name', 'month', 'enrolled_students', 'revenue',
             'instructor_salary', 'profit', 'created_at', 'updated_at'
         ]
