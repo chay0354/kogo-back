@@ -139,7 +139,7 @@ class ChildViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """
         USAGE: Applies filters and annotations for child listing
-        Filters: branch, course, instructor, age range, status
+        Filters: branch, course, course_type, instructor, age range, status
         Adds annotations for attendance_total and attendance_present
         """
         queryset = super().get_queryset()
@@ -176,6 +176,14 @@ class ChildViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 lesson_enrollments__lesson__course_id=course_id,
                 lesson_enrollments__status='active'
+            ).distinct()
+
+        # Filter by course type / תחום
+        course_type_id = self.request.query_params.get('course_type')
+        if course_type_id and course_type_id != 'all':
+            queryset = queryset.filter(
+                lesson_enrollments__lesson__course__course_type_id=course_type_id,
+                lesson_enrollments__status='active',
             ).distinct()
         
         # Filter by instructor

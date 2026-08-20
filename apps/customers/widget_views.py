@@ -13,6 +13,7 @@ from django.db import transaction
 from django.db.models import Prefetch, Q
 
 from apps.customers.models import Family, Parent, Child
+from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.core.models import City, Branch
@@ -1140,10 +1141,10 @@ class WidgetCourseTypesView(APIView):
             type_id = str(row['course_type_id'])
             if type_id not in seen:
                 seen[type_id] = row['course_type__name']
-        return Response([
+        return Response(sort_widget_course_types([
             {'id': type_id, 'name': name}
             for type_id, name in seen.items()
-        ])
+        ]))
 
 
 class WidgetCitiesView(APIView):
@@ -1195,7 +1196,7 @@ class WidgetBranchesView(APIView):
                 'name': row['course_type__name'],
             })
         for type_list in types_by_branch.values():
-            type_list.sort(key=lambda item: item['name'])
+            type_list[:] = sort_widget_course_types(type_list)
         return Response([
             {
                 'id': b['id'],

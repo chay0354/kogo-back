@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from apps.enrollments.enrollment_counts import count_capacity_enrollments
-from apps.enrollments.trial_reminders import compute_trial_lesson_date
+from apps.enrollments.trial_reminders import compute_trial_lesson_date, iter_upcoming_lesson_occurrences
 from apps.enrollments.models import Enrollment, LessonEnrollment, ChildAbsence
 
 
@@ -30,7 +30,8 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         model = LessonEnrollment
         fields = [
             'id', 'lesson', 'lesson_info', 'child', 'child_name', 'status',
-            'bundle', 'start_date', 'end_date', 'notes', 'trial_registration', 'created_at',
+            'bundle', 'start_date', 'end_date', 'notes', 'trial_lesson_date',
+            'trial_registration', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
     
@@ -49,9 +50,10 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         """Validate that lesson has capacity for new enrollment"""
-        lesson = data.get('lesson')
-        child = data.get('child')
+        lesson = data.get('lesson') or getattr(self.instance, 'lesson', None)
         bundle = data.get('bundle')
+        if bundle is None and self.instance:
+            bundle = self.instance.bundle
 
         if not lesson:
             return data
@@ -61,6 +63,21 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
                 'bundle': 'השיעור אינו חלק מהמסלול המשולב שנבחר'
             })
 
+        trial_registration = data.get('trial_registration', False)
+        occurrence_date = None
+        if trial_registration:
+            occurrence_date = data.get('trial_lesson_date') or compute_trial_lesson_date(lesson)
+
+        trial_date = data.get('trial_lesson_date')
+        if trial_date:
+            allowed = set(iter_upcoming_lesson_occurrences(lesson, count=8))
+            if self.instance and self.instance.trial_lesson_date:
+                allowed.add(self.instance.trial_lesson_date)
+            if trial_date not in allowed:
+                raise serializers.ValidationError({
+                    'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין',
+                })
+
         # Skip capacity check if updating existing enrollment
         if self.instance:
             return data
@@ -69,11 +86,6 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'
             })
-
-        trial_registration = data.get('trial_registration', False)
-        occurrence_date = None
-        if trial_registration:
-            occurrence_date = data.get('trial_lesson_date') or compute_trial_lesson_date(lesson)
 
         capacity = lesson.course.capacity or lesson.room.capacity
         current = count_capacity_enrollments(
@@ -93,6 +105,13 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         validated_data.pop('trial_registration', None)
+        new_date = validated_data.get('trial_lesson_date', serializers.empty)
+        if new_date is not serializers.empty and new_date != instance.trial_lesson_date:
+            if 'start_date' not in validated_data:
+                validated_data['start_date'] = new_date
+            instance.trial_10am_reminder_sent_at = None
+            instance.trial_followup_reminder_sent_at = None
+            instance.trial_evening_reminder_sent_at = None
         return super().update(instance, validated_data)
 
 

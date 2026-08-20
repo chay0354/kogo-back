@@ -76,3 +76,44 @@ class TrialLessonEnrollmentTest(TestCase):
         self.assertTrue(LessonEnrollment.objects.filter(lesson=self.lesson, child=self.child).exists())
         self.assertEqual(res.data.get('whatsapp'), {'sent': True, 'method': 'flow'})
         mock_notify.assert_called_once()
+
+    def test_staff_can_reschedule_trial_lesson_date(self):
+        from datetime import time as dt_time
+
+        from apps.enrollments.trial_reminders import iter_upcoming_lesson_occurrences
+
+        enrollment = LessonEnrollment.objects.create(
+            lesson=self.lesson,
+            child=self.child,
+            status='active',
+            trial_lesson_date=date(2026, 1, 1),
+        )
+        self.child.status = 'trial_signed'
+        self.child.save(update_fields=['status'])
+        self.lesson.start_time = dt_time(16, 0)
+        self.lesson.end_time = dt_time(17, 0)
+        self.lesson.save(update_fields=['start_time', 'end_time'])
+
+        dates_res = self.client.get(f'/api/v1/enrollments/lesson-enrollments/{enrollment.id}/trial-dates/')
+        self.assertEqual(dates_res.status_code, 200, dates_res.data)
+        upcoming = [row['date'] for row in dates_res.data['dates']]
+        self.assertTrue(upcoming)
+        next_date = next((d for d in upcoming if d != '2026-01-01'), upcoming[0])
+
+        patch_res = self.client.patch(
+            f'/api/v1/enrollments/lesson-enrollments/{enrollment.id}/',
+            {'trial_lesson_date': next_date},
+            format='json',
+        )
+        self.assertEqual(patch_res.status_code, 200, patch_res.data)
+        enrollment.refresh_from_db()
+        self.assertEqual(enrollment.trial_lesson_date.isoformat(), next_date)
+
+        bad = self.client.patch(
+            f'/api/v1/enrollments/lesson-enrollments/{enrollment.id}/',
+            {'trial_lesson_date': '2010-01-01'},
+            format='json',
+        )
+        self.assertEqual(bad.status_code, 400)
+        allowed = iter_upcoming_lesson_occurrences(self.lesson, count=8)
+        self.assertNotIn(date(2010, 1, 1), allowed)

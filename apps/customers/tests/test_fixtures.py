@@ -10,7 +10,8 @@ from apps.instructors.models import Instructor
 
 def create_test_city(name="Test City"):
     """Create a test city"""
-    return City.objects.create(name=name)
+    city, _ = City.objects.get_or_create(name=name)
+    return city
 
 
 def create_test_branch(name="Test Branch", city=None):

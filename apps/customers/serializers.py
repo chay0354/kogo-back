@@ -45,6 +45,7 @@ class EnrollmentDetailSerializer(serializers.Serializer):
     branch_name = serializers.CharField()
     instructor_name = serializers.CharField()
     status = serializers.CharField()
+    trial_lesson_date = serializers.DateField(allow_null=True, required=False)
 
 
 class ChildSerializer(serializers.ModelSerializer):
@@ -90,6 +91,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     
     # Enrollment info
     enrollments = serializers.SerializerMethodField()
+    trial_enrollment = serializers.SerializerMethodField()
     
     # Attendance (computed from annotated counts to avoid N+1)
     attendance_rate = serializers.SerializerMethodField()
@@ -108,7 +110,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'absent_irregularly', 'is_ghost_visible',
             # Subscription dates (kept for reference)
             'subscription_start_date', 'subscription_end_date',
-            'enrollments', 'attendance_rate',
+            'enrollments', 'trial_enrollment', 'attendance_rate',
             'created_at'
         ]
 
@@ -222,10 +224,40 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                     'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
                     'branch_name': lesson.course.branch.name if lesson.course and lesson.course.branch_id else None,
                     'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
-                    'status': enrollment.status
+                    'status': enrollment.status,
+                    'trial_lesson_date': (
+                        enrollment.trial_lesson_date.isoformat()
+                        if enrollment.trial_lesson_date else None
+                    ),
                 })
         
         return result
+
+    def get_trial_enrollment(self, obj):
+        """Active trial lesson the child signed up for (date + enrollment id)."""
+        chosen = None
+        fallback = None
+        for enrollment in obj.lesson_enrollments.all():
+            if enrollment.status != 'active':
+                continue
+            if fallback is None:
+                fallback = enrollment
+            if enrollment.trial_lesson_date:
+                chosen = enrollment
+                break
+        if chosen is None and obj.status == 'trial_signed':
+            chosen = fallback
+        if chosen is None:
+            return None
+        lesson = chosen.lesson
+        return {
+            'enrollment_id': str(chosen.id),
+            'lesson_id': str(lesson.id),
+            'course_name': lesson.course.name,
+            'trial_lesson_date': (
+                chosen.trial_lesson_date.isoformat() if chosen.trial_lesson_date else None
+            ),
+        }
     
     def get_attendance_rate(self, obj):
         """

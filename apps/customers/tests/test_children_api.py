@@ -15,7 +15,8 @@ from .test_fixtures import (
     create_test_child,
     create_test_family,
     create_test_branch,
-    create_test_course
+    create_test_course,
+    create_test_course_type,
 )
 from apps.enrollments.models import Enrollment
 
@@ -189,6 +190,40 @@ class ChildrenListAPITests(TestCase):
         
         # Should return 2 children from branch1 (who have enrollments in branch1 lessons)
         self.assertEqual(len(children), 2)
+
+    def test_children_filter_by_course_type(self):
+        from datetime import time
+
+        from apps.courses.models import Lesson
+        from apps.enrollments.models import LessonEnrollment
+
+        capoeira = create_test_course(name='קפוארה', branch=self.branch1)
+        dance_type = create_test_course_type(name='מחול')
+        dance = create_test_course(name='היפ הופ', branch=self.branch1, course_type=dance_type)
+
+        capoeira_lesson = Lesson.objects.create(
+            course=capoeira,
+            day_of_week=0,
+            start_time=time(16, 0),
+            end_time=time(17, 0),
+            status='scheduled',
+        )
+        dance_lesson = Lesson.objects.create(
+            course=dance,
+            day_of_week=1,
+            start_time=time(16, 0),
+            end_time=time(17, 0),
+            status='scheduled',
+        )
+        LessonEnrollment.objects.create(lesson=capoeira_lesson, child=self.child_active, status='active')
+        LessonEnrollment.objects.create(lesson=dance_lesson, child=self.child_trial, status='active')
+
+        url = f'/api/v1/customers/children/?course_type={dance.course_type_id}'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        children = response.data['results'] if 'results' in response.data else response.data
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0]['first_name'], 'Trial')
     
     def test_children_filter_by_age(self):
         """

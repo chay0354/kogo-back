@@ -2,12 +2,13 @@ import logging
 
 from django.conf import settings
 from rest_framework import viewsets, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from apps.enrollments.models import Enrollment, LessonEnrollment
 from apps.enrollments.serializers import EnrollmentSerializer, LessonEnrollmentSerializer
 from apps.enrollments.trial_reminders import (
+    iter_upcoming_lesson_occurrences,
     send_due_trial_reminders,
     stamp_and_notify_trial_enrollment,
 )
@@ -125,6 +126,37 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
         headers = self.get_success_headers(data)
         return Response(data, status=status_code, headers=headers)
+
+    @action(detail=True, methods=['get'], url_path='trial-dates')
+    def trial_dates(self, request, pk=None):
+        """Upcoming lesson dates staff can move a trial signup to."""
+        enrollment = self.get_object()
+        lesson = enrollment.lesson
+        day_names = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+        dates = iter_upcoming_lesson_occurrences(lesson, count=8)
+        current = enrollment.trial_lesson_date
+        if current and current not in dates:
+            dates = [current] + dates
+        day_name = day_names[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
+        start_time = lesson.start_time.strftime('%H:%M') if lesson.start_time else ''
+        end_time = lesson.end_time.strftime('%H:%M') if lesson.end_time else ''
+        return Response({
+            'enrollment_id': str(enrollment.id),
+            'lesson_id': str(lesson.id),
+            'course_name': lesson.course.name,
+            'day_name': day_name,
+            'start_time': start_time,
+            'end_time': end_time,
+            'current_date': current.isoformat() if current else None,
+            'dates': [
+                {
+                    'date': d.isoformat(),
+                    'label': d.strftime('%d/%m/%Y'),
+                    'is_current': bool(current and d == current),
+                }
+                for d in dates
+            ],
+        })
 
 
 @api_view(['GET', 'POST'])
