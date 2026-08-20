@@ -14,6 +14,7 @@ from django.db.models import Prefetch, Q
 
 from apps.customers.models import Family, Parent, Child
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
+from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
 
@@ -106,38 +107,12 @@ def _widget_bundles_queryset():
 
 
 def _widget_bundles_for_course(course):
-    """
-    Bundles exposed in the public widget catalog.
-
-    For must_attend_all_lessons courses, include an inactive bundle when it is
-    the only bundle with lessons (common after accidental soft-delete).
-    """
-    candidates = [b for b in course.lesson_bundles.all() if b.lessons.exists()]
-    active = [b for b in candidates if b.is_active]
-    if active:
-        return active
-    if course.must_attend_all_lessons and candidates:
-        return candidates
-    return []
+    return catalog_bundles_for_course(course)
 
 
 def _resolve_widget_bundle(*, course, bundle_id: str):
     """Resolve a bundle for widget registration (allows inactive must-attend fallback)."""
-    try:
-        bundle = LessonBundle.objects.prefetch_related('lessons').get(id=bundle_id, course=course)
-    except LessonBundle.DoesNotExist:
-        return None
-    if bundle.is_active and bundle.lessons.exists():
-        return bundle
-    if course.must_attend_all_lessons and bundle.lessons.exists():
-        has_active = LessonBundle.objects.filter(
-            course=course,
-            is_active=True,
-            lessons__isnull=False,
-        ).exists()
-        if not has_active:
-            return bundle
-    return None
+    return resolve_registration_bundle(course=course, bundle_id=bundle_id)
 
 
 def _resolve_family_and_child(data, branch):

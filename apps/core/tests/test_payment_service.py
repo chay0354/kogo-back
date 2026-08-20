@@ -324,6 +324,36 @@ class PaymentServiceLessonBundleTest(TestCase):
         self.assertIn('מלא', str(ctx.exception))
         self.assertFalse(Payment.objects.filter(child=self.child).exists())
 
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_inactive_must_attend_bundle_still_bills(self, mock_discount, mock_tranzila):
+        mock_discount.side_effect = self.passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+        self.course.must_attend_all_lessons = True
+        self.course.save(update_fields=['must_attend_all_lessons'])
+        self.bundle.is_active = False
+        self.bundle.save(update_fields=['is_active'])
+
+        result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_a.id),
+            bundle_id=str(self.bundle.id),
+        )
+        self.assertEqual(result['base_amount'], 150.00)
+        self.assertEqual(result['bundle_id'], str(self.bundle.id))
+
+    def test_inactive_bundle_rejected_when_course_is_not_must_attend(self):
+        self.bundle.is_active = False
+        self.bundle.save(update_fields=['is_active'])
+
+        with self.assertRaises(ValueError) as ctx:
+            self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson_a.id),
+                bundle_id=str(self.bundle.id),
+            )
+        self.assertIn('מסלול משולב', str(ctx.exception))
+
 
 class PaymentServiceWebhookTest(TestCase):
     """Test PaymentService.process_webhook_callback"""

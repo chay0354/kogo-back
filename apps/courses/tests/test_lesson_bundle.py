@@ -8,6 +8,7 @@ from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 
 from apps.core.tests.test_fixtures import TestDataFactory
+from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.courses.models import LessonBundle
 from apps.courses.serializers import LessonBundleSerializer
 from apps.enrollments.models import LessonEnrollment
@@ -32,6 +33,36 @@ class LessonBundleModelTest(TestCase):
     def test_str_falls_back_to_course_name(self):
         bundle = LessonBundle.objects.create(course=self.course, combined_price=Decimal('300.00'))
         self.assertIn(self.course.name, str(bundle))
+
+    def test_inactive_must_attend_bundle_is_in_catalog_and_resolvable(self):
+        self.course.must_attend_all_lessons = True
+        self.course.save(update_fields=['must_attend_all_lessons'])
+        bundle = LessonBundle.objects.create(
+            course=self.course,
+            combined_price=Decimal('300.00'),
+            is_active=False,
+        )
+        bundle.lessons.set([self.lesson_a, self.lesson_b])
+
+        catalog = catalog_bundles_for_course(self.course)
+        self.assertEqual(catalog, [bundle])
+        self.assertEqual(
+            resolve_registration_bundle(course=self.course, bundle_id=str(bundle.id)),
+            bundle,
+        )
+
+    def test_inactive_bundle_hidden_when_course_is_not_must_attend(self):
+        bundle = LessonBundle.objects.create(
+            course=self.course,
+            combined_price=Decimal('300.00'),
+            is_active=False,
+        )
+        bundle.lessons.set([self.lesson_a, self.lesson_b])
+
+        self.assertEqual(catalog_bundles_for_course(self.course), [])
+        self.assertIsNone(
+            resolve_registration_bundle(course=self.course, bundle_id=str(bundle.id)),
+        )
 
 
 class LessonBundleSerializerTest(TestCase):

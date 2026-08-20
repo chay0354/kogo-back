@@ -269,12 +269,13 @@ def resolve_billing_price(
         return price_option.monthly_price, True, course_index, None, price_option
 
     if bundle_id:
-        try:
-            bundle = LessonBundle.objects.prefetch_related('lessons').get(id=bundle_id, is_active=True)
-        except LessonBundle.DoesNotExist:
-            raise ValueError("Lesson bundle not found or inactive")
+        from apps.courses.bundles import resolve_registration_bundle
+
+        bundle = resolve_registration_bundle(course=lesson.course, bundle_id=str(bundle_id))
+        if bundle is None:
+            raise ValueError("מסלול משולב לא נמצא או לא פעיל")
         if not bundle.lessons.filter(pk=lesson.pk).exists():
-            raise ValueError("Lesson is not a member of the given bundle")
+            raise ValueError("השיעור אינו חלק מהמסלול המשולב")
         validate_bundle_capacity(bundle)
         return bundle.price_per_lesson(), True, course_index, bundle, None
 
