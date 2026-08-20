@@ -41,6 +41,7 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         if obj.lesson:
             return {
                 'course_name': obj.lesson.course.name,
+                'course_display_id': obj.lesson.course.display_id,
                 'day_of_week': obj.lesson.day_of_week,
                 'start_time': obj.lesson.start_time.strftime('%H:%M'),
                 'end_time': obj.lesson.end_time.strftime('%H:%M'),
@@ -100,10 +101,11 @@ class AbsenceHistorySerializer(serializers.ModelSerializer):
     """Serializer for Child Absence History"""
     lesson_name = serializers.SerializerMethodField()
     course_name = serializers.CharField(source='course.name', read_only=True)
-    
+    course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
+
     class Meta:
         model = ChildAbsence
-        fields = ['id', 'lesson_name', 'course_name', 'occurrence_date', 'created_at']
+        fields = ['id', 'lesson_name', 'course_name', 'course_display_id', 'occurrence_date', 'created_at']
         read_only_fields = ['id', 'created_at']
     
     def get_lesson_name(self, obj):

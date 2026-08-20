@@ -1,9 +1,20 @@
 import uuid
 from decimal import Decimal
 from django.conf import settings
-from django.db import models
+from django.db import connection, models
 from apps.core.models import Branch, Room
 from apps.instructors.models import Instructor
+
+
+def _next_course_display_id():
+    """Atomically pull the next value from the DB-side course_display_id_seq sequence.
+
+    Course.id is a UUID primary key, so this real Postgres sequence backs a short,
+    human-friendly, race-safe display number shown next to the group's name in the UI.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT nextval('course_display_id_seq')")
+        return cursor.fetchone()[0]
 
 
 class CourseType(models.Model):
@@ -28,6 +39,13 @@ class CourseType(models.Model):
 class Course(models.Model):
     """חוגים - Specific courses within a course type (e.g., Beginners, Advanced)"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    display_id = models.PositiveIntegerField(
+        unique=True,
+        editable=False,
+        default=_next_course_display_id,
+        verbose_name="מספר קבוצה",
+        help_text="מספר סידורי קצר לזיהוי הקבוצה (לא מפתח ראשי), מוצג לצד שם הקבוצה בממשק.",
+    )
     course_type = models.ForeignKey(CourseType, on_delete=models.CASCADE, related_name='courses', null=True, blank=True, verbose_name="תחום")
     name = models.CharField(max_length=200, verbose_name="שם החוג")
     description = models.TextField(blank=True, verbose_name="תיאור")

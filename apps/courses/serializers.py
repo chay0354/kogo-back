@@ -233,7 +233,7 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Course
-        fields = ['id', 'name', 'description', 'price', 'capacity',
+        fields = ['id', 'display_id', 'name', 'description', 'price', 'capacity',
                   'min_age', 'max_age', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',
                   'branch', 'branch_name', 'instructor', 'instructor_salary_override',
@@ -291,14 +291,14 @@ class CourseSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Course
-        fields = ['id', 'course_type', 'course_type_name', 'name', 'description',
+        fields = ['id', 'display_id', 'course_type', 'course_type_name', 'name', 'description',
                   'price', 'capacity', 'branch', 'branch_name',
                   'min_age', 'max_age', 'is_active', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',
                   'external_link', 'lessons_count', 'enrolled_students_count',
                   'lessons', 'managers', 'managers_detail', 'instructor', 'instructor_detail',
                   'instructor_salary_override', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'display_id', 'created_at', 'updated_at']
 
     def validate(self, attrs):
         instance = getattr(self, 'instance', None)
@@ -375,6 +375,7 @@ class CourseSerializer(serializers.ModelSerializer):
 class LessonSerializer(serializers.ModelSerializer):
     """Basic Lesson serializer for CRUD operations"""
     course_name = serializers.CharField(source='course.name', read_only=True)
+    course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
     instructor = serializers.PrimaryKeyRelatedField(
         queryset=Instructor.objects.filter(is_active=True),
@@ -388,7 +389,7 @@ class LessonSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lesson
-        fields = ['id', 'course', 'course_name', 'room', 'room_name',
+        fields = ['id', 'course', 'course_name', 'course_display_id', 'room', 'room_name',
                   'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
@@ -752,20 +753,21 @@ class CourseListSerializer(serializers.ModelSerializer):
     """Simple course list for dropdowns"""
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     course_type_name = serializers.CharField(source='course_type.name', read_only=True, allow_null=True)
-    
+
     class Meta:
         model = Course
-        fields = ['id', 'name', 'course_type_name', 'branch_name', 'price']
+        fields = ['id', 'display_id', 'name', 'course_type_name', 'branch_name', 'price']
 
 
 class LessonListSerializer(serializers.ModelSerializer):
     """Simple lesson list"""
     course_name = serializers.CharField(source='course.name', read_only=True)
+    course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
     day_name = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = Lesson
-        fields = ['id', 'course_name', 'day_of_week', 'day_name', 'start_time', 'end_time']
+        fields = ['id', 'course_name', 'course_display_id', 'day_of_week', 'day_name', 'start_time', 'end_time']
     
     def get_day_name(self, obj):
         """Convert day number to Hebrew name"""

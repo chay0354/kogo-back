@@ -815,6 +815,7 @@ class DashboardViewSet(viewsets.ViewSet):
         course_rows = snapshots.values(
             'course_id',
             'course__name',
+            'course__display_id',
             'branch__name',
         ).annotate(
             revenue_total=Sum('revenue'),
@@ -829,6 +830,7 @@ class DashboardViewSet(viewsets.ViewSet):
             profit = float(row['profit_total'] or 0)
             lessons_count = row['snapshot_rows'] or 0
             course_name = row['course__name']
+            course_display_id = row['course__display_id']
             branch_name = row['branch__name']
 
             capacity = 20
@@ -841,6 +843,7 @@ class DashboardViewSet(viewsets.ViewSet):
                 low_occupancy_courses.append({
                     'course_id': str(cid),
                     'name': course_name,
+                    'display_id': course_display_id,
                     'branch': branch_name,
                     'occupancy': round(occupancy, 1)
                 })
@@ -848,6 +851,7 @@ class DashboardViewSet(viewsets.ViewSet):
             course_list.append({
                 'course_id': str(cid),
                 'name': course_name,
+                'display_id': course_display_id,
                 'branch': branch_name,
                 'lessons': lessons_count,
                 'students': students,

@@ -393,6 +393,7 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
                 if lesson.course and str(lesson.course.id) not in unique_courses:
                     unique_courses[str(lesson.course.id)] = {
                         'id': str(lesson.course.id),
+                        'display_id': lesson.course.display_id,
                         'name': lesson.course.name,
                         'course_type': lesson.course.course_type.name if lesson.course.course_type else None,
                     }

@@ -273,6 +273,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             enrollments_qs.values(
                 'lesson__course_id',
                 'lesson__course__name',
+                'lesson__course__display_id',
                 'lesson__course__branch__name',
             )
             .annotate(students_count=Count('child_id', distinct=True))
@@ -287,6 +288,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             result_by_course_id[course_id] = {
                 'course_id': course_id,
                 'course_name': row.get('lesson__course__name'),
+                'course_display_id': row.get('lesson__course__display_id'),
                 'branch_name': row.get('lesson__course__branch__name'),
                 'instructor_name': None,  # Instructors are now lesson-specific, not course-specific
                 'students_count': row.get('students_count', 0),
