@@ -3,7 +3,8 @@ Tests for Courses Catalog API endpoints.
 
 Primary flow:
 /api/v1/courses/types/ -> list course types with aggregated stats
-/api/v1/courses/types/<id>/details/ -> course type details with nested courses/lessons
+/api/v1/courses/types/<id>/details/ -> course type details with course-level summaries (no nested lessons)
+/api/v1/courses/courses/<id>/lessons_detail/ -> lessons (with instructor/enrollment detail) for one course
 """
 
 from datetime import date, time
@@ -193,19 +194,39 @@ class CourseCatalogAPITests(TestCase):
         branch_names = sorted([b["name"] for b in ct["branches"]])
         self.assertEqual(branch_names, ["Branch A", "Branch B"])
 
-    def test_course_type_details_returns_nested_courses_and_lessons(self):
+    def test_course_type_details_returns_course_level_summary_without_lessons(self):
+        """
+        /details/ returns course-level aggregates only — lessons are fetched
+        lazily per course via CourseViewSet.lessons_detail (see the tests below),
+        not nested here. Keeping this response lesson-free is what makes it fast
+        for a course type with many courses.
+        """
         resp = self.client.get(f"/api/v1/courses/types/{self.course_type.id}/details/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["id"], str(self.course_type.id))
         self.assertIn("courses", resp.data)
         self.assertEqual(len(resp.data["courses"]), 2)
 
-        # Flatten lessons
-        lessons = []
         for course in resp.data["courses"]:
-            lessons.extend(course.get("lessons", []))
+            self.assertNotIn("lessons", course)
+            self.assertIn("lessons_count", course)
+            self.assertIn("course_enrollment_count", course)
+            self.assertIn("monthly_revenue", course)
+            self.assertIn("monthly_salary", course)
+            self.assertIn("monthly_profit", course)
 
-        self.assertEqual(len(lessons), 2)
+        course_with_lessons = next(
+            c for c in resp.data["courses"] if c["id"] == str(self.lesson_recurring.course_id)
+        )
+        self.assertEqual(course_with_lessons["lessons_count"], 1)
+
+    def _lessons_detail(self, course_id):
+        resp = self.client.get(f"/api/v1/courses/courses/{course_id}/lessons_detail/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.data
+
+    def test_lessons_detail_returns_instructor_and_enrolled_count(self):
+        lessons = self._lessons_detail(self.lesson_recurring.course_id)
 
         # Ensure lesson includes instructor and enrolled_count
         recurring = next(l for l in lessons if l["id"] == str(self.lesson_recurring.id))
@@ -217,7 +238,8 @@ class CourseCatalogAPITests(TestCase):
         self.assertIn("instructor_salary_override", recurring)
         self.assertIsNone(recurring["instructor_salary_override"])
 
-        tiered = next(l for l in lessons if l["id"] == str(self.lesson_non_recurring.id))
+        tiered_lessons = self._lessons_detail(self.lesson_non_recurring.course_id)
+        tiered = next(l for l in tiered_lessons if l["id"] == str(self.lesson_non_recurring.id))
         self.assertEqual(tiered["instructor"]["salary_model_type"], "tiered_by_students")
         # salary tiers should be included for tiered instructors
         self.assertIn("salary_tiers", tiered["instructor"])
@@ -271,13 +293,7 @@ class CourseCatalogAPITests(TestCase):
             child=child_inactive,
             status="inactive",
         )
-        resp = self.client.get(f"/api/v1/courses/types/{self.course_type.id}/details/")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-
-        lessons = []
-        for course in resp.data["courses"]:
-            lessons.extend(course.get("lessons", []))
-
+        lessons = self._lessons_detail(self.lesson_recurring.course_id)
         recurring = next(l for l in lessons if l["id"] == str(self.lesson_recurring.id))
         self.assertEqual(recurring["enrolled_count"], 1)
 
@@ -285,13 +301,7 @@ class CourseCatalogAPITests(TestCase):
         self.lesson_recurring.instructor_salary_override = 333
         self.lesson_recurring.save(update_fields=["instructor_salary_override"])
 
-        resp = self.client.get(f"/api/v1/courses/types/{self.course_type.id}/details/")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-
-        lessons = []
-        for course in resp.data["courses"]:
-            lessons.extend(course.get("lessons", []))
-
+        lessons = self._lessons_detail(self.lesson_recurring.course_id)
         recurring = next(l for l in lessons if l["id"] == str(self.lesson_recurring.id))
         self.assertIsNotNone(recurring["instructor_salary_override"])
         # DRF DecimalField serializes as string by default

@@ -5,7 +5,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.db.models import Prefetch, Count, Q
+from django.db.models import Prefetch, Count, Q, Sum
 from apps.courses.models import CourseType, Course, Lesson, LessonBundle, LessonPriceOption
 from apps.courses.serializers import (
     CourseTypeSerializer,
@@ -13,6 +13,7 @@ from apps.courses.serializers import (
     CourseTypeDetailsSerializer,
     CourseSerializer,
     CourseWithLessonsSerializer,
+    LessonWithEnrollmentsSerializer,
     LessonSerializer,
     LessonBundleSerializer,
     LessonPriceOptionSerializer,
@@ -20,7 +21,7 @@ from apps.courses.serializers import (
     LessonListSerializer
 )
 from apps.instructors.models import Instructor
-from apps.enrollments.enrollment_counts import is_paying_enrollment
+from apps.core.models import LessonMonthlySnapshot
 from apps.enrollments.models import LessonEnrollment
 from apps.core.permissions import IsManager, IsManagerOrPartner, StaffAccessMixin
 from apps.core.scoping import (
@@ -120,25 +121,12 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
                 Prefetch('courses', queryset=visible_courses),
             )
         elif self.action == 'details':
-            # Prefetch all related data for details view
+            # Course-level fields only — lessons are fetched lazily per course via
+            # CourseViewSet.lessons_detail, not nested here (see that action's
+            # docstring for why: this used to prefetch every lesson + every active
+            # enrollment for every course in the type in one request).
             queryset = queryset.prefetch_related(
-                Prefetch(
-                    'courses',
-                    queryset=nested_courses.prefetch_related(
-                        Prefetch(
-                            'lessons',
-                            queryset=Lesson.objects.select_related(
-                                'room', 'instructor'
-                            ).prefetch_related(
-                                'instructor__salary_tiers',
-                                Prefetch(
-                                    'enrollments',
-                                    queryset=LessonEnrollment.objects.filter(status='active')
-                                )
-                            )
-                        )
-                    )
-                )
+                Prefetch('courses', queryset=nested_courses)
             )
         
         return queryset
@@ -153,34 +141,56 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def details(self, request, pk=None):
         """
-        Get detailed view of course type with all courses and lessons
-        Includes instructor salary tiers for financial calculations
+        Get detailed, course-level (not lesson-level) view of a course type.
+
+        Lessons are NOT nested here — fetch them per course, on demand, via
+        CourseViewSet.lessons_detail. This used to prefetch every lesson and every
+        active enrollment for every course in the type and tally them in a Python
+        loop; for a type with 100+ courses that was O(all enrollments in the type)
+        done twice (DB fetch + Python aggregation), which is what made this
+        endpoint take 30+ seconds. Course-level counts/financials below are each a
+        single batched query instead, following the same pattern already used in
+        CourseViewSet.list().
         """
         course_type = self.get_object()
-        paying_enrollment_counts = {}
-        total_enrollment_counts = {}
-        course_enrollment_counts = {}
-        for course in course_type.courses.all():
-            course_child_ids = set()
-            for lesson in course.lessons.all():
-                enrollments = list(lesson.enrollments.all())
-                paying_enrollment_counts[lesson.id] = sum(
-                    1 for e in enrollments if is_paying_enrollment(e)
-                )
-                total_enrollment_counts[lesson.id] = sum(
-                    1 for e in enrollments if e.status == 'active'
-                )
-                for e in enrollments:
-                    if e.status == 'active':
-                        course_child_ids.add(e.child_id)
-            course_enrollment_counts[course.id] = len(course_child_ids)
+        course_ids = [c.id for c in course_type.courses.all()]
+
+        course_enrollment_counts = dict(
+            LessonEnrollment.objects.filter(
+                status='active', lesson__course_id__in=course_ids,
+            )
+            .values_list('lesson__course_id')
+            .annotate(c=Count('child_id', distinct=True))
+            .values_list('lesson__course_id', 'c')
+        )
+        lessons_counts = dict(
+            Lesson.objects.filter(course_id__in=course_ids)
+            .values_list('course_id')
+            .annotate(c=Count('id'))
+            .values_list('course_id', 'c')
+        )
+
+        current_month = timezone.now().strftime('%Y-%m')
+        course_financials = {
+            row['course_id']: row
+            for row in LessonMonthlySnapshot.objects.filter(
+                course_id__in=course_ids, month=current_month,
+            )
+            .values('course_id')
+            .annotate(
+                monthly_revenue=Sum('revenue'),
+                monthly_salary=Sum('instructor_salary'),
+                monthly_profit=Sum('profit'),
+            )
+        }
+
         serializer = self.get_serializer(
             course_type,
             context={
                 **self.get_serializer_context(),
-                'paying_enrollment_counts': paying_enrollment_counts,
-                'total_enrollment_counts': total_enrollment_counts,
                 'course_enrollment_counts': course_enrollment_counts,
+                'lessons_counts': lessons_counts,
+                'course_financials': course_financials,
             },
         )
         return Response(serializer.data)
@@ -260,6 +270,25 @@ class CourseViewSet(viewsets.ModelViewSet):
         instance.is_active = False
         instance.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get'])
+    def lessons_detail(self, request, pk=None):
+        """
+        Lessons (with room/instructor/enrollment detail) for a single course.
+
+        Lazy-load counterpart to CourseTypeViewSet.details(), which no longer
+        nests this data for every course in a type — the frontend fetches it
+        here only when a specific course's row is expanded (or an edit/add-lesson/
+        bundles dialog for that course is opened).
+        """
+        course = self.get_object()
+        lessons = course.lessons.select_related('room', 'instructor').prefetch_related(
+            'instructor__salary_tiers',
+            Prefetch('enrollments', queryset=LessonEnrollment.objects.filter(status='active')),
+        )
+        serializer = LessonWithEnrollmentsSerializer(lessons, many=True, context=self.get_serializer_context())
+        return Response(serializer.data)
+
 
 class LessonViewSet(viewsets.ModelViewSet):
     """
