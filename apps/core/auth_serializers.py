@@ -57,7 +57,7 @@ class CurrentUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'is_active', 'role', 'branch_ids']
+        fields = ['id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'role', 'branch_ids']
 
     def get_role(self, obj):
         try:

@@ -3,6 +3,16 @@ from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthentic
 from apps.core.models import UserProfile
 
 
+class IsSuperUser(BasePermission):
+    """Django superusers only — for devops-level operations (e.g. DB backups)."""
+
+    message = 'אין הרשאה. פעולה זו מוגבלת למנהלי מערכת.'
+
+    def has_permission(self, request, view):
+        user = getattr(request, 'user', None)
+        return bool(user and user.is_authenticated and user.is_superuser)
+
+
 class IsManager(BasePermission):
     """
     Allows access only to authenticated users with role=manager.
