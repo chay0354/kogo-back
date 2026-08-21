@@ -36,3 +36,4 @@ staticfiles/
 mediafiles/
 logs/*.log
 
+.vercel
