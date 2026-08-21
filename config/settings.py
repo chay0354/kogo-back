@@ -97,6 +97,14 @@ if not DATABASE_URL:
     )
 
 _default_db = dj_database_url.parse(DATABASE_URL, conn_max_age=600)
+# Supabase's connection-string host is PgBouncer in transaction-pooling mode
+# (port 6543). Server-side (named) cursors — used by QuerySet.iterator(),
+# management commands like dumpdata, and anything else that streams a large
+# queryset — don't survive that pooling mode reliably (statements can land on
+# a different underlying server connection mid-cursor). This is Django's own
+# documented fix for exactly this setup:
+# https://docs.djangoproject.com/en/4.2/ref/databases/#transaction-pooling-mode
+_default_db['DISABLE_SERVER_SIDE_CURSORS'] = True
 if _default_db['ENGINE'] == 'django.db.backends.sqlite3':
     raise ImproperlyConfigured(
         'SQLite is not supported. Set DATABASE_URL to a PostgreSQL (Supabase) connection string.'
