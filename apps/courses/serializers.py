@@ -225,39 +225,50 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
 
 
 class CourseWithLessonsSerializer(serializers.ModelSerializer):
-    """Course with nested lessons for details view"""
+    """
+    Course-level summary for the course-type details view.
+
+    Despite the name (kept for backwards compatibility with callers), this no
+    longer nests full lesson objects — fetch those on demand via
+    CourseViewSet.lessons_detail. `lessons_count` and the `monthly_*` financial
+    fields are course-level aggregates computed once per request (see
+    CourseTypeViewSet.details), not derived from nested lesson data.
+    """
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     instructor = InstructorMinimalSerializer(read_only=True)
-    lessons = LessonWithEnrollmentsSerializer(many=True, read_only=True)
+    lessons_count = serializers.SerializerMethodField()
     course_enrollment_count = serializers.SerializerMethodField()
-    
+    monthly_revenue = serializers.SerializerMethodField()
+    monthly_salary = serializers.SerializerMethodField()
+    monthly_profit = serializers.SerializerMethodField()
+
     class Meta:
         model = Course
         fields = ['id', 'display_id', 'name', 'description', 'price', 'capacity',
                   'min_age', 'max_age', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',
                   'branch', 'branch_name', 'instructor', 'instructor_salary_override',
-                  'external_link', 'lessons', 'course_enrollment_count', 'is_active']
+                  'external_link', 'lessons_count', 'course_enrollment_count',
+                  'monthly_revenue', 'monthly_salary', 'monthly_profit', 'is_active']
+
+    def get_lessons_count(self, obj):
+        return self.context.get('lessons_counts', {}).get(obj.id, 0)
 
     def get_course_enrollment_count(self, obj):
-        """
-        Distinct active students in this course (paying + trial), across all lessons.
-        Used so every lesson row and the course header show the same enrollment figure.
-        """
-        counts = self.context.get('course_enrollment_counts')
-        if counts is not None:
-            return counts.get(obj.id, 0)
-        child_ids = set()
-        for lesson in obj.lessons.all():
-            enrollments = (
-                lesson.enrollments.all()
-                if hasattr(lesson, '_prefetched_objects_cache') and 'enrollments' in lesson._prefetched_objects_cache
-                else lesson.enrollments.filter(status='active')
-            )
-            for enrollment in enrollments:
-                if enrollment.status == 'active':
-                    child_ids.add(enrollment.child_id)
-        return len(child_ids)
+        """Distinct active students in this course (paying + trial), across all lessons."""
+        return self.context.get('course_enrollment_counts', {}).get(obj.id, 0)
+
+    def _financials(self, obj):
+        return self.context.get('course_financials', {}).get(obj.id) or {}
+
+    def get_monthly_revenue(self, obj):
+        return self._financials(obj).get('monthly_revenue') or 0
+
+    def get_monthly_salary(self, obj):
+        return self._financials(obj).get('monthly_salary') or 0
+
+    def get_monthly_profit(self, obj):
+        return self._financials(obj).get('monthly_profit') or 0
 
 
 class CourseTypeDetailsSerializer(serializers.ModelSerializer):
