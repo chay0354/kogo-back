@@ -187,52 +187,52 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         """
         result = []
         seen_courses = set()
-        
-        # Course-level enrollments (prefetched on ChildViewSet queryset)
-        for enrollment in obj.enrollments.all():
-            course = enrollment.course
-            if str(course.id) not in seen_courses:
-                seen_courses.add(str(course.id))
-                result.append({
-                    'enrollment_id': str(enrollment.id),
-                    'course_name': course.name,
-                    'course_id': str(course.id),
-                    'course_display_id': course.display_id,
-                    'branch_name': course.branch.name if course.branch else None,
-                    'instructor_name': None,  # Instructor is now lesson-specific
-                    'day_of_week': None,
-                    'start_time': None,
-                    'end_time': None,
-                    'lesson_id': None,
-                    'status': 'active'
-                })
-        
-        # Lesson-level enrollments (prefetched; filter active in Python)
+
+        # One row per active lesson enrollment so staff can move each slot.
         for enrollment in obj.lesson_enrollments.all():
             if enrollment.status != 'active':
                 continue
             lesson = enrollment.lesson
             course_id = str(lesson.course.id)
-            if course_id not in seen_courses:
-                seen_courses.add(course_id)
-                result.append({
-                    'lesson_id': str(lesson.id),
-                    'enrollment_id': str(enrollment.id),
-                    'course_name': lesson.course.name,
-                    'course_id': course_id,
-                    'course_display_id': lesson.course.display_id,
-                    'day_of_week': lesson.day_of_week,
-                    'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else None,
-                    'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
-                    'branch_name': lesson.course.branch.name if lesson.course and lesson.course.branch_id else None,
-                    'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
-                    'status': enrollment.status,
-                    'trial_lesson_date': (
-                        enrollment.trial_lesson_date.isoformat()
-                        if enrollment.trial_lesson_date else None
-                    ),
-                })
-        
+            seen_courses.add(course_id)
+            result.append({
+                'lesson_id': str(lesson.id),
+                'enrollment_id': str(enrollment.id),
+                'course_name': lesson.course.name,
+                'course_id': course_id,
+                'course_display_id': lesson.course.display_id,
+                'day_of_week': lesson.day_of_week,
+                'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else None,
+                'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
+                'branch_name': lesson.course.branch.name if lesson.course and lesson.course.branch_id else None,
+                'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
+                'status': enrollment.status,
+                'trial_lesson_date': (
+                    enrollment.trial_lesson_date.isoformat()
+                    if enrollment.trial_lesson_date else None
+                ),
+            })
+
+        # Legacy course-level enrollments only when that course has no lesson rows.
+        for enrollment in obj.enrollments.all():
+            course = enrollment.course
+            if str(course.id) in seen_courses:
+                continue
+            seen_courses.add(str(course.id))
+            result.append({
+                'enrollment_id': str(enrollment.id),
+                'course_name': course.name,
+                'course_id': str(course.id),
+                'course_display_id': course.display_id,
+                'branch_name': course.branch.name if course.branch else None,
+                'instructor_name': None,
+                'day_of_week': None,
+                'start_time': None,
+                'end_time': None,
+                'lesson_id': None,
+                'status': 'active'
+            })
+
         return result
 
     def get_trial_enrollment(self, obj):
