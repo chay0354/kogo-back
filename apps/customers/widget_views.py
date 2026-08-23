@@ -174,12 +174,25 @@ def _resolve_family_and_child(data, branch):
     # ── 2. Resolve child ──────────────────────────────────────
     child = None
 
+    submitted_id_number = (data.get('child_id_number') or '').strip()
+
     # If lookup returned an existing active child and parent confirmed
     if existing_child_id and discount_confirmed:
         try:
             child = Child.objects.get(id=existing_child_id, family=family)
         except Child.DoesNotExist:
             pass
+
+    # Extra lesson in the same checkout: reuse the child just created
+    if child is None and existing_child_id:
+        try:
+            candidate = Child.objects.get(id=existing_child_id, family=family)
+        except Child.DoesNotExist:
+            candidate = None
+        if candidate is not None and (
+            not submitted_id_number or candidate.id_number == submitted_id_number
+        ):
+            child = candidate
 
     # Fallback: look for active name match (handles re-submission edge cases)
     if child is None and discount_confirmed:
@@ -188,6 +201,10 @@ def _resolve_family_and_child(data, branch):
             last_name__iexact=child_last,
             status='active',
         ).first()
+
+    # Same ת.ז. on this family — extra lessons must not create a duplicate child
+    if child is None and submitted_id_number:
+        child = family.children.filter(id_number=submitted_id_number).first()
 
     # Otherwise create a new child
     if child is None:
@@ -379,6 +396,7 @@ class WidgetRegisterView(APIView):
                 ]
                 return Response({
                     'is_bundle': True,
+                    'child_id': str(child.id),
                     'bundle_id': str(bundle.id),
                     'payments': payments,
                     'base_amount': sum(p['base_amount'] for p in payments),
@@ -399,6 +417,7 @@ class WidgetRegisterView(APIView):
                 callback_url=data.get('callback_url', ''),
                 price_option_id=price_option_id or None,
             )
+            result['child_id'] = str(child.id)
             return Response(result, status=status.HTTP_201_CREATED)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
