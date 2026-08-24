@@ -46,13 +46,22 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
 class FormalDocumentListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list/dropdown views."""
     document_type_display = serializers.CharField(source='get_document_type_display', read_only=True)
+    customer_name = serializers.SerializerMethodField()
 
     class Meta:
         model = FormalDocument
         fields = [
             'id', 'document_number', 'document_type', 'document_type_display',
             'document_date', 'total_amount', 'currency', 'tranzila_issued', 'pdf_url',
+            'customer_name', 'tranzila_doc_id',
         ]
+
+    def get_customer_name(self, obj):
+        if obj.child_id:
+            return obj.child.full_name
+        if obj.business_customer_id:
+            return obj.business_customer.full_name
+        return ''
 
 
 # ── Write serializers ────────────────────────────────────────────────────────

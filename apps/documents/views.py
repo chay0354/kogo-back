@@ -53,6 +53,28 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             return FormalDocumentListSerializer
         return FormalDocumentSerializer
 
+    @action(detail=False, methods=['get'], url_path='tranzila')
+    def tranzila(self, request):
+        """
+        All Tranzila tax documents (plus local invoices issued from those charges).
+
+        GET /api/v1/documents/documents/tranzila/?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+        """
+        from apps.core.tranzila_ledger import list_ledger_documents
+        from datetime import date as date_cls
+
+        def parse_day(raw):
+            try:
+                return date_cls.fromisoformat(raw) if raw else None
+            except ValueError:
+                return None
+
+        result = list_ledger_documents(
+            start_date=parse_day(request.query_params.get('start_date')),
+            end_date=parse_day(request.query_params.get('end_date')),
+        )
+        return Response(result)
+
     @action(detail=False, methods=['post'], url_path='create-document')
     def create_document(self, request):
         """

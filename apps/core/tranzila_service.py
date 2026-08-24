@@ -16,6 +16,7 @@ import requests
 import secrets
 import time
 import uuid
+from datetime import date
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlencode
 from decimal import Decimal
@@ -41,6 +42,13 @@ TRANZILA_RESPONSE_MESSAGES: dict[str, str] = {
     '955': 'שגיאת סטטוס תשלום',
     '959': 'התשלום לא הושלם בהצלחה',
 }
+
+TRANZILA_APPROVED_CODES = frozenset({'000', '0'})
+
+
+def is_tranzila_approved(code) -> bool:
+    """True when Tranzila reports the card transaction as approved."""
+    return str(code or '').strip() in TRANZILA_APPROVED_CODES
 
 
 def pdesc_for_tranzila(transaction_id: str) -> str:
@@ -1061,6 +1069,113 @@ class TranzilaService:
         ).hexdigest()
         
         return signature
+
+    def billing_terminal_name(self) -> str:
+        """Terminal used for tax documents; falls back to the payment terminal."""
+        explicit = (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
+        return explicit or (self.terminal or '')
+
+    def list_transactions(
+        self,
+        start_date: date,
+        end_date: Optional[date] = None,
+        page: Optional[int] = None,
+    ) -> Dict:
+        """
+        Past transactions for this terminal in a date range.
+
+        https://docs.tranzila.com/docs/reports/track-transaction-data/get-transaction-information
+        """
+        payload = {
+            'terminal_name': self.terminal,
+            'transaction_start_date': start_date.isoformat(),
+            'transaction_end_date': (end_date or start_date).isoformat(),
+        }
+        if page:
+            payload['page'] = page
+        return self._make_api_request(params=payload, endpoint='/v1/transactions')
+
+    @staticmethod
+    def extract_list_rows(response: Dict, *keys: str) -> list:
+        """First array on a Tranzila list payload (transactions, documents, data)."""
+        if not isinstance(response, dict):
+            return []
+        search = keys or ('transactions', 'documents', 'data', 'result', 'rows')
+        for key in search:
+            value = response.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+        return []
+
+    def list_all_transactions(
+        self,
+        start_date: date,
+        end_date: Optional[date] = None,
+        max_pages: int = 20,
+    ) -> Dict:
+        """Every transaction in the date range, paging 1000 rows at a time."""
+        if self.credential_error():
+            return {'success': False, 'error': self.credential_error(), 'transactions': []}
+
+        end = end_date or start_date
+        collected: list = []
+        page = None
+        for page_num in range(1, max_pages + 1):
+            response = self.list_transactions(start_date, end, page=page)
+            if not isinstance(response, dict) or response.get('success') is False:
+                error = (
+                    (response or {}).get('error')
+                    if isinstance(response, dict)
+                    else 'Tranzila transaction list failed'
+                )
+                if collected:
+                    logger.error("Tranzila list_transactions page %s failed after partial fetch: %s", page_num, error)
+                    break
+                return {'success': False, 'error': error, 'transactions': []}
+            rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
+            collected.extend(rows)
+            total = response.get('total')
+            try:
+                total_n = int(total) if total is not None else None
+            except (TypeError, ValueError):
+                total_n = None
+            if len(rows) < 1000:
+                break
+            if total_n is not None and len(collected) >= total_n:
+                break
+            page = page_num + 1
+        return {'success': True, 'transactions': collected}
+
+    def list_documents(self, start_date: date, end_date: date) -> Dict:
+        """
+        Formal tax documents (invoices / receipts) for the billing terminal.
+
+        https://docs.tranzila.com/docs/payments-and-billing
+        """
+        if self.credential_error():
+            return {'success': False, 'error': self.credential_error(), 'documents': []}
+        terminal = self.billing_terminal_name()
+        if not terminal:
+            return {'success': False, 'error': 'No billing terminal configured', 'documents': []}
+
+        payload = {
+            'terminal_names': [terminal],
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+        }
+        response = self._make_billing_request(payload, '/api/documents_db/get_documents')
+        if not isinstance(response, dict):
+            return {'success': False, 'error': 'Invalid documents response', 'documents': []}
+
+        status_code = response.get('status_code')
+        if status_code not in (0, '0', None) and not response.get('success'):
+            return {
+                'success': False,
+                'error': response.get('status_msg') or response.get('error') or response,
+                'documents': [],
+            }
+        documents = self.extract_list_rows(response, 'documents', 'data', 'result')
+        return {'success': True, 'documents': documents, 'raw': response}
     
     def _make_api_request(self, params: Dict, endpoint: str = '/v1/transactions') -> Dict:
         """Make an actual HTTP POST request to Tranzila RESTful API."""

@@ -901,6 +901,27 @@ class PaymentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(child_id=child_id)
         
         return queryset
+
+    @action(detail=False, methods=['get'], url_path='tranzila-transactions')
+    def tranzila_transactions(self, request):
+        """
+        All card transactions from the Tranzila terminal.
+
+        GET /api/v1/customers/payments/tranzila-transactions/?start_date=&end_date=
+        """
+        from apps.core.tranzila_ledger import list_ledger_payments
+
+        def parse_day(raw):
+            try:
+                return date.fromisoformat(raw) if raw else None
+            except ValueError:
+                return None
+
+        result = list_ledger_payments(
+            start_date=parse_day(request.query_params.get('start_date')),
+            end_date=parse_day(request.query_params.get('end_date')),
+        )
+        return Response(result)
     
     @action(detail=False, methods=['post'])
     def initiate_subscription(self, request):
