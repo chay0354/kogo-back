@@ -19,7 +19,6 @@ from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, counts_towa
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
 from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range, occurrence_time_for_date
-from apps.scheduling.rental_agreement.generator import generate_rental_agreement_pdf
 from .serializers import (
     LessonListSerializer,
     LessonDetailSerializer,  # kept for other uses
@@ -33,6 +32,33 @@ from .event_serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def enrollment_visible_on_date(enrollment, occ_date):
+    """Same roster rules as lesson detail / attendance list."""
+    if enrollment.trial_lesson_date:
+        if not occ_date or enrollment.trial_lesson_date != occ_date:
+            return False
+    elif enrollment.child.status == 'trial_signed':
+        return False
+
+    if enrollment.child.status == 'ghost' and occ_date:
+        days_since_creation = (occ_date - enrollment.child.created_at.date()).days
+        if days_since_creation > 30:
+            return False
+    return True
+
+
+def child_contact_phone(child):
+    phone = (getattr(child, 'phone_number', None) or '').strip()
+    if phone:
+        return phone
+    family = getattr(child, 'family', None)
+    if family:
+        family_phone = (getattr(family, 'phone', None) or '').strip()
+        if family_phone:
+            return family_phone
+    return ''
 
 
 class LessonViewSet(viewsets.ModelViewSet):
@@ -125,7 +151,7 @@ class LessonViewSet(viewsets.ModelViewSet):
         else:
             attendance_qs = attendance_qs.filter(occurrence_date__isnull=True)
 
-        enrollments = lesson.enrollments.filter(status='active').select_related('child')
+        enrollments = lesson.enrollments.filter(status='active').select_related('child', 'child__family')
 
         data = LessonDetailSerializer(lesson).data
         if occ_date:
@@ -146,20 +172,8 @@ class LessonViewSet(viewsets.ModelViewSet):
         
         visible_enrollments = []
         for e in enrollments:
-            # Trial / test-lesson enrollments: only on the specific date the parent chose
-            if e.trial_lesson_date:
-                if not occ_date or e.trial_lesson_date != occ_date:
-                    continue
-            elif e.child.status == 'trial_signed':
-                # Legacy trial rows without a stored date — hide from attendance roster
+            if not enrollment_visible_on_date(e, occ_date):
                 continue
-
-            # Check if ghost child is visible (within 30 days of creation from the lesson date)
-            if e.child.status == 'ghost' and occ_date:
-                # Calculate days between lesson date and ghost child creation
-                days_since_creation = (occ_date - e.child.created_at.date()).days
-                if days_since_creation > 30:
-                    continue  # Skip invisible ghost children (older than 30 days from lesson date)
 
             is_trial = bool(
                 e.trial_lesson_date
@@ -172,6 +186,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'child_id': str(e.child.id),
                 'child_name': e.child.full_name,
                 'child_status': e.child.status,
+                'child_phone': child_contact_phone(e.child),
                 'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
                 'is_trial': is_trial,
             })
@@ -251,14 +266,36 @@ class LessonViewSet(viewsets.ModelViewSet):
             for enr in LessonEnrollment.objects.filter(
                 lesson_id__in=[lesson.id for lesson in lessons_list],
                 status='active',
-            ).select_related('child'):
+            ).select_related('child', 'child__family'):
                 enrollments_by_lesson[enr.lesson_id].append(enr)
+
+            marked_map = defaultdict(set)
+            for rec in LessonAttendance.objects.filter(
+                lesson_id__in=[lesson.id for lesson in lessons_list],
+                occurrence_date__gte=start,
+                occurrence_date__lte=end,
+                status__in=['present', 'absent'],
+            ).values_list('lesson_id', 'occurrence_date', 'child_id'):
+                marked_map[(str(rec[0]), rec[1])].add(str(rec[2]))
 
             def capacity_count(lesson_id, occurrence_date):
                 return sum(
                     1 for enr in enrollments_by_lesson.get(lesson_id, [])
                     if counts_toward_capacity(enr, occurrence_date=occurrence_date)
                 )
+
+            def attendance_complete(lesson_id, occurrence_date, cancelled=False):
+                if cancelled or not occurrence_date:
+                    return False
+                child_ids = [
+                    str(enr.child_id)
+                    for enr in enrollments_by_lesson.get(lesson_id, [])
+                    if enrollment_visible_on_date(enr, occurrence_date)
+                ]
+                if not child_ids:
+                    return False
+                marked = marked_map.get((str(lesson_id), occurrence_date), set())
+                return all(cid in marked for cid in child_ids)
 
             expanded = []
             for lesson in lessons_list:
@@ -267,6 +304,9 @@ class LessonViewSet(viewsets.ModelViewSet):
                     occ = lesson.lesson_date or start
                     if occ:
                         data['enrollment_count'] = capacity_count(lesson.id, occ)
+                    data['attendance_complete'] = attendance_complete(
+                        lesson.id, occ, cancelled=data.get('status') == 'cancelled'
+                    )
                     expanded.append(data)
                     continue
 
@@ -293,6 +333,9 @@ class LessonViewSet(viewsets.ModelViewSet):
                         data['status'] = 'scheduled'
                         data['cancellation_reason'] = None
                         data['cancelled_at'] = None
+                    data['attendance_complete'] = attendance_complete(
+                        lesson.id, occ, cancelled=bool(c)
+                    )
                     expanded.append(data)
                     occ = occ + timedelta(days=7)
 
@@ -713,7 +756,13 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
                 {'error': 'האירוע אינו שכירות סטודיו'}, status=status.HTTP_400_BAD_REQUEST
             )
         try:
+            from apps.scheduling.rental_agreement.generator import generate_rental_agreement_pdf
             pdf_bytes = generate_rental_agreement_pdf(event)
+        except ImportError:
+            return Response(
+                {'error': 'יצירת הסכם השכירות אינה זמינה בסביבה זו'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 

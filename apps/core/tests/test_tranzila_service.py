@@ -221,6 +221,12 @@ class TranzilaServiceWebhookTest(TestCase):
         self.assertEqual(result['response_code'], '033')
         # Token should be empty string or None
         self.assertIn(result.get('token'), ['', None])
+
+    def test_parse_webhook_response_zero_is_approved(self):
+        """Tranzila notify docs treat Response 0 the same as 000."""
+        result = self.service.parse_webhook_response({'Response': '0', 'sum': '5.00'})
+        self.assertTrue(result['is_successful'])
+        self.assertEqual(result['response_code'], '0')
     
     def test_parse_webhook_extracts_transaction_id(self):
         """Test webhook parsing extracts transaction ID from index or TranzilaTK"""

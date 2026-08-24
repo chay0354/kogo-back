@@ -11,7 +11,6 @@ from django.utils import timezone
 from apps.core.resend_email import resend_configured, send_resend_email
 from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
 from apps.customers.financial_models import Invoice
-from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +77,7 @@ def send_subscription_invoice_email(invoice: Invoice) -> bool:
         return False
 
     subject, text, html = build_subscription_invoice_email(invoice)
+    from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
     pdf_bytes = generate_subscription_invoice_pdf(invoice)
     filename = f'{invoice.invoice_number}.pdf'
 

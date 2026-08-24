@@ -387,6 +387,10 @@ class LessonSerializer(serializers.ModelSerializer):
     """Basic Lesson serializer for CRUD operations"""
     course_name = serializers.CharField(source='course.name', read_only=True)
     course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
+    branch_id = serializers.UUIDField(source='course.branch_id', read_only=True, allow_null=True)
+    branch_name = serializers.CharField(source='course.branch.name', read_only=True, allow_null=True)
+    course_type = serializers.UUIDField(source='course.course_type_id', read_only=True, allow_null=True)
+    course_type_name = serializers.CharField(source='course.course_type.name', read_only=True, allow_null=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
     instructor = serializers.PrimaryKeyRelatedField(
         queryset=Instructor.objects.filter(is_active=True),
@@ -400,7 +404,9 @@ class LessonSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lesson
-        fields = ['id', 'course', 'course_name', 'course_display_id', 'room', 'room_name',
+        fields = ['id', 'course', 'course_name', 'course_display_id',
+                  'branch_id', 'branch_name', 'course_type', 'course_type_name',
+                  'room', 'room_name',
                   'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',

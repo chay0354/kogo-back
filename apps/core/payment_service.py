@@ -57,6 +57,31 @@ def registration_fee_amount() -> Decimal:
     return max(Decimal('0.00'), fee.quantize(Decimal('0.01')))
 
 
+def flag_child_payment_problem(child) -> bool:
+    """Mark a child as payment_problem only when they were never successfully paid.
+
+    A later declined retry, timeout, or notify must not overwrite an already
+    enrolled student whose card was charged.
+    Returns True when the status was changed.
+    """
+    if child is None:
+        return False
+    if Payment.objects.filter(child=child, status='completed').exists():
+        logger.info(
+            "Skipping payment_problem flag for child %s — a completed payment already exists",
+            child.id,
+        )
+        return False
+    if LessonEnrollment.objects.filter(child=child, status='active').exists():
+        logger.info(
+            "Skipping payment_problem flag for child %s — an active enrollment already exists",
+            child.id,
+        )
+        return False
+    Child.objects.filter(pk=child.pk).update(status='payment_problem')
+    return True
+
+
 def deferred_first_charge_date(today: Optional[date] = None) -> Optional[date]:
     """
     Date the monthly subscription starts, or None to bill the first month on signup.
@@ -717,24 +742,37 @@ class PaymentService:
             }
         
         else:
-            # FAILURE FLOW
+            # FAILURE FLOW — do not un-enroll a student whose payment already went through
+            # on another attempt or via the REST charge completing first.
+            if payment.status == 'completed':
+                logger.warning(
+                    "Ignoring failure notify for already completed payment %s",
+                    payment.id,
+                )
+                return {'success': True, 'message': 'Already processed'}
+
             payment.status = 'failed'
             payment.failure_reason = parsed_response.get('error_message', 'Unknown error')
             payment.failure_code = parsed_response['response_code']
             payment.save()
-            
-            # Update child status to 'payment_problem' (בעיות באשראי)
+
             child = payment.child
-            child.status = 'payment_problem'
-            child.save()
-            
-            logger.warning(
-                "Payment failed: %s, code=%s, reason=%s. Child %s → payment_problem",
-                payment.id,
-                payment.failure_code,
-                payment.failure_reason,
-                child.id,
-            )
+            if flag_child_payment_problem(child):
+                logger.warning(
+                    "Payment failed: %s, code=%s, reason=%s. Child %s → payment_problem",
+                    payment.id,
+                    payment.failure_code,
+                    payment.failure_reason,
+                    child.id,
+                )
+            else:
+                logger.warning(
+                    "Payment failed: %s, code=%s, reason=%s. Child %s left unchanged (already paid/enrolled)",
+                    payment.id,
+                    payment.failure_code,
+                    payment.failure_reason,
+                    child.id,
+                )
 
             # WhatsApp when Tranzila notify reports failure (Response != 000) on subscription enrollment.
             if payment.payment_type == 'recurring_subscription' and payment.lesson_id:
@@ -883,6 +921,7 @@ class PaymentService:
             prorated=not deferred_charge_date_c,
         )
 
+        guard_key = f'payment-{payment.id}' if prorated_final_c > 0 else f'verify-{payment.id}'
         if prorated_final_c > 0:
             result = self.tranzila_service.charge_with_card(
                 card_number=card_number,
@@ -893,7 +932,7 @@ class PaymentService:
                 amount=prorated_final_c,
                 description=payment.description,
                 items=items,
-                duplicate_guard_key=f'payment-{payment.id}',
+                duplicate_guard_key=guard_key,
             )
         else:
             # Nothing is due today (bundle member lesson with no דמי רישום), so the card
@@ -906,8 +945,12 @@ class PaymentService:
                 card_holder_id=card_holder_id,
                 amount=full_monthly_amount_c,
                 description=payment.description,
-                duplicate_guard_key=f'verify-{payment.id}',
+                duplicate_guard_key=guard_key,
             )
+        if not result.get('success') and result.get('indeterminate'):
+            recovered = self.tranzila_service.find_successful_transaction(guard_key=guard_key)
+            if recovered:
+                result = recovered
 
         if result['success']:
             payment.status = 'completed'
@@ -1027,11 +1070,42 @@ class PaymentService:
                 ],
             }
         else:
+            payment.refresh_from_db()
+            if payment.status == 'completed':
+                return {
+                    'success': True,
+                    'payment_id': str(payment.id),
+                    'already_completed': True,
+                }
+            if result.get('indeterminate'):
+                # Timeout / dropped connection — money may have moved. Do not fail
+                # the payment or mark the child as declined until Tranzila confirms.
+                payment.status = 'processing'
+                payment.failure_reason = result.get('error', 'No verdict from gateway')
+                payment.failure_code = str(result.get('response_code', ''))[:50]
+                payment.save(update_fields=['status', 'failure_reason', 'failure_code'])
+                logger.error(
+                    "PAYMENT NEEDS RECONCILIATION: payment=%s child=%s amount=%s left in "
+                    "'processing' — the gateway never returned a verdict (%s)",
+                    payment.id,
+                    child.full_name,
+                    payment.final_amount,
+                    result.get('error'),
+                )
+                return {
+                    'success': False,
+                    'pending': True,
+                    'indeterminate': True,
+                    'payment_id': str(payment.id),
+                    'error': (
+                        'לא התקבלה תשובה סופית מחברת האשראי. אין לשלם שוב — '
+                        'אנחנו מאמתים את התשלום וניצור איתכם קשר.'
+                    ),
+                }
             payment.status = 'failed'
             payment.failure_reason = result.get('error', 'Unknown error')
             payment.save()
-            child.status = 'payment_problem'
-            child.save()
+            flag_child_payment_problem(child)
             return {'success': False, 'error': result.get('error', 'התשלום נכשל')}
 
     @staticmethod

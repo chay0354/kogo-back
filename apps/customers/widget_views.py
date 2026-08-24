@@ -639,7 +639,10 @@ class WidgetChargeView(APIView):
         except CardValidationError as exc:
             return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        credential_error = TranzilaService().credential_error()
+        # Charge uses production() (TRANZILA_PROD_*), not the default iframe terminal.
+        # Gating on TranzilaService() would 503 whenever TRANZILA_TERMINAL is still
+        # the local mock placeholder even though live keys are configured.
+        credential_error = TranzilaService.production().credential_error()
         if credential_error:
             logger.error("Widget charge refused before contacting Tranzila: %s", credential_error)
             return Response(
@@ -653,41 +656,13 @@ class WidgetChargeView(APIView):
             if precheck_error:
                 return Response({'success': False, 'error': precheck_error}, status=status.HTTP_400_BAD_REQUEST)
 
-            results = []
-            succeeded_any = False
-            for index, pid in enumerate(payment_ids):
-                result = self._charge_one(
-                    pid,
-                    card,
-                    send_subscription_whatsapp=not succeeded_any,
-                    allow_child_status_downgrade=not succeeded_any,
-                )
-                results.append(result)
-                if result.get('success'):
-                    succeeded_any = True
-                    continue
-
-                # Abort the rest of the bundle: continuing after a decline only grows
-                # the amount the office would have to refund by hand.
-                for skipped in payment_ids[index + 1:]:
-                    results.append({
-                        'success': False,
-                        'payment_id': skipped,
-                        'skipped': True,
-                        'error': 'לא חויב בעקבות כשל בתשלום קודם',
-                    })
-                break
-
-            all_success = all(r.get('success') for r in results)
-            payload = {'success': all_success, 'results': results}
-            if succeeded_any and not all_success:
-                payload['partial'] = True
-                payload['error'] = 'חלק מהתשלומים בוצעו וחלק נכשלו. אנא פנו למשרד להשלמת ההרשמה.'
-                logger.error(
-                    "Bundle charge partially completed, manual reconciliation required: %s",
-                    [{'payment_id': r.get('payment_id'), 'success': r.get('success')} for r in results],
-                )
-            status_code = status.HTTP_200_OK if all_success else status.HTTP_400_BAD_REQUEST
+            payload = self._charge_batch(payment_ids, card)
+            results = payload.get('results') or []
+            status_code = status.HTTP_200_OK if payload.get('success') else (
+                status.HTTP_202_ACCEPTED
+                if any(r.get('pending') for r in results)
+                else status.HTTP_400_BAD_REQUEST
+            )
             return Response(payload, status=status_code)
 
         payment_id = (request.data.get('payment_id') or '').strip()
@@ -695,7 +670,12 @@ class WidgetChargeView(APIView):
             return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
         result = self._charge_one(payment_id, card, send_subscription_whatsapp=True)
-        status_code = status.HTTP_200_OK if result.get('success') else status.HTTP_400_BAD_REQUEST
+        if result.get('success'):
+            status_code = status.HTTP_200_OK
+        elif result.get('pending'):
+            status_code = status.HTTP_202_ACCEPTED
+        else:
+            status_code = status.HTTP_400_BAD_REQUEST
         return Response(result, status=status_code)
 
     def _precheck_bundle(self, payment_ids):
@@ -708,10 +688,21 @@ class WidgetChargeView(APIView):
         from apps.core.payment_service import validate_bundle_capacity
         from apps.customers.models import Payment
 
+        # pending = first attempt, failed = declined and retryable, completed =
+        # already charged (idempotent). Anything else (processing) must not be
+        # billed again. Requiring pending-only used to block "נסה שנית" after a
+        # sibling declined or a ₪0 verify failed mid-checkout.
         payments = list(
-            Payment.objects.select_related('bundle').filter(id__in=payment_ids, status='pending')
+            Payment.objects.select_related('bundle').filter(id__in=payment_ids)
         )
-        if len(payments) != len(payment_ids):
+        if len(payments) != len(set(payment_ids)):
+            return 'אחד התשלומים אינו זמין לחיוב. אנא התחילו את ההרשמה מחדש.'
+        if any(p.status == 'processing' for p in payments):
+            return (
+                'אחד התשלומים עדיין בבדיקה מול חברת האשראי. אין לשלם שוב — '
+                'ניצור איתכם קשר לאישור ההרשמה.'
+            )
+        if any(p.status not in ('pending', 'failed', 'completed') for p in payments):
             return 'אחד התשלומים אינו זמין לחיוב. אנא התחילו את ההרשמה מחדש.'
 
         bundles = {p.bundle for p in payments if p.bundle_id}
@@ -722,16 +713,102 @@ class WidgetChargeView(APIView):
                 return str(exc) or 'אין מקום פנוי באחד השיעורים במסלול'
         return None
 
+    @staticmethod
+    def _payment_amounts(payment_ids):
+        from apps.customers.models import Payment
+        rows = Payment.objects.filter(id__in=payment_ids).values_list('id', 'final_amount')
+        return {str(pid): amount for pid, amount in rows}
+
+    @staticmethod
+    def _charge_order(payment_ids):
+        """Bill amounts due today first, then ₪0 bundle-member token/enroll rows."""
+        from apps.customers.models import Payment
+        amounts = {
+            str(pid): amount
+            for pid, amount in Payment.objects.filter(id__in=payment_ids).values_list('id', 'final_amount')
+        }
+        due = [pid for pid in payment_ids if amounts.get(pid, 0) > 0]
+        free = [pid for pid in payment_ids if pid not in due]
+        return due + free
+
+    def _charge_batch(self, payment_ids, card):
+        """Charge every payment_id in one checkout. Never abort on a ₪0 verify."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        results = []
+        succeeded_any = False
+        saved_token = None
+        # Charge every דמי רישום first, then ₪0 bundle-member rows. A failed
+        # verify on a ₪0 row used to abort the rest of a 3-kid checkout.
+        ordered_ids = self._charge_order(payment_ids)
+        amounts = self._payment_amounts(ordered_ids)
+        for index, pid in enumerate(ordered_ids):
+            due = amounts.get(pid)
+            result = self._charge_one(
+                pid,
+                card,
+                send_subscription_whatsapp=not succeeded_any,
+                allow_child_status_downgrade=True,
+                reuse_card_token=saved_token,
+            )
+            results.append(result)
+            if result.get('success'):
+                succeeded_any = True
+                saved_token = result.get('token') or saved_token
+                continue
+
+            if result.get('pending') or result.get('indeterminate'):
+                for skipped in ordered_ids[index + 1:]:
+                    results.append({
+                        'success': False,
+                        'payment_id': skipped,
+                        'skipped': True,
+                        'error': 'לא חויב בעקבות תשלום קודם שעדיין בבדיקה',
+                    })
+                break
+
+            # A declined card on the first real charge: do not keep billing.
+            # A ₪0 verify failure, or a later sibling after money already moved,
+            # must not skip the rest of the family.
+            first_real_decline = (
+                not succeeded_any
+                and due is not None
+                and due > 0
+            )
+            if first_real_decline:
+                for skipped in ordered_ids[index + 1:]:
+                    results.append({
+                        'success': False,
+                        'payment_id': skipped,
+                        'skipped': True,
+                        'error': 'לא חויב בעקבות כשל בתשלום קודם',
+                    })
+                break
+
+        all_success = all(r.get('success') for r in results)
+        payload = {'success': all_success, 'results': results}
+        if succeeded_any and not all_success:
+            payload['partial'] = True
+            payload['error'] = 'חלק מהתשלומים בוצעו וחלק נכשלו. אנא פנו למשרד להשלמת ההרשמה.'
+            logger.error(
+                "Bundle charge partially completed, manual reconciliation required: %s",
+                [{'payment_id': r.get('payment_id'), 'success': r.get('success')} for r in results],
+            )
+        return payload
+
     def _charge_one(
         self,
         payment_id,
         card,
         send_subscription_whatsapp=True,
         allow_child_status_downgrade=True,
+        reuse_card_token=None,
     ):
         from apps.core.payment_service import (
             _compute_prorate,
             deferred_first_charge_date,
+            flag_child_payment_problem,
             payment_full_monthly_amount,
             payment_prorated_lesson_amount,
             subscription_tranzila_items,
@@ -758,13 +835,40 @@ class WidgetChargeView(APIView):
                     .select_related('child', 'family', 'lesson__course__branch', 'bundle')
                     .get(id=payment_id)
                 )
-                if payment.status != 'pending':
+                if payment.status == 'completed':
+                    # The first attempt did go through and only the answer was lost
+                    # (client timeout, closed tab, double submit). Report the truth
+                    # instead of charging again or claiming a decline.
+                    existing = RecurringPayment.objects.filter(initial_payment=payment).first()
+                    return {
+                        'success': True,
+                        'payment_id': str(payment.id),
+                        'already_completed': True,
+                        'token': (existing.tranzila_token if existing else '') or '',
+                        'recurring_active': bool(
+                            payment.trial_lesson_date or existing
+                        ),
+                    }
+                if payment.status == 'processing':
                     return {
                         'success': False,
-                        'payment_id': payment_id,
-                        'error': 'התשלום כבר עובד. אנא רעננו את הדף או פנו למשרד.',
+                        'pending': True,
+                        'payment_id': str(payment.id),
                         'payment_status': payment.status,
+                        'error': (
+                            'התשלום נמצא בבדיקה מול חברת האשראי. אין לשלם שוב — '
+                            'ניצור איתכם קשר לאישור ההרשמה.'
+                        ),
                     }
+                if payment.status not in ('pending', 'failed'):
+                    return {
+                        'success': False,
+                        'payment_id': str(payment.id),
+                        'payment_status': payment.status,
+                        'error': 'לא ניתן לחייב את התשלום הזה. אנא פנו למשרד.',
+                    }
+                # 'failed' is re-chargeable: a declined card must be retryable with
+                # another one without restarting the whole registration.
                 payment.status = 'processing'
                 payment.save(update_fields=['status'])
         except Payment.DoesNotExist:
@@ -810,6 +914,7 @@ class WidgetChargeView(APIView):
         charge_description = payment.description or (
             f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
         )
+        guard_key = f'payment-{payment.id}'
         if payment.final_amount > 0:
             result = tranzila.charge_with_card(
                 card_number=card_number,
@@ -820,24 +925,59 @@ class WidgetChargeView(APIView):
                 amount=payment.final_amount,
                 description=charge_description,
                 items=items,
-                duplicate_guard_key=f'payment-{payment.id}',
+                duplicate_guard_key=guard_key,
             )
+            if not result.get('success') and result.get('indeterminate'):
+                # The verdict never came back. Ask Tranzila what actually happened
+                # before deciding, so a customer whose card was charged is never
+                # told the payment failed.
+                recovered = tranzila.find_successful_transaction(guard_key=guard_key)
+                if recovered:
+                    result = recovered
         else:
-            # Nothing is due today (bundle member lesson with no דמי רישום), so the card
-            # is only verified to obtain the token the monthly billing will need.
-            result = tranzila.verify_card(
-                card_number=card_number,
-                expiry_month=expiry_month,
-                expiry_year=expiry_year,
-                cvv=cvv,
-                card_holder_id=card_holder_id,
-                amount=payment_full_monthly_amount(payment),
-                description=charge_description,
-                duplicate_guard_key=f'verify-{payment.id}',
-            )
+            # Nothing is due today (bundle member lesson with no דמי רישום). Reuse the
+            # token from a successful charge in this same checkout — a second verify
+            # used to 20004 and abort the rest of a multi-child registration.
+            existing_token = (reuse_card_token or '').strip()
+            if not existing_token:
+                token_qs = (
+                    RecurringPayment.objects
+                    .filter(status='active')
+                    .exclude(tranzila_token='')
+                    .order_by('-created_at')
+                )
+                existing_rp = (
+                    token_qs.filter(child=child).first()
+                    or token_qs.filter(child__family_id=payment.family_id).first()
+                )
+                existing_token = (existing_rp.tranzila_token if existing_rp else '') or ''
+            if existing_token:
+                result = {
+                    'success': True,
+                    'token': existing_token,
+                    'transaction_id': '',
+                    'confirmation_code': '',
+                    'response_code': '000',
+                    'raw_response': {'token_reused': True},
+                }
+            else:
+                verify_amount = payment_full_monthly_amount(payment)
+                if verify_amount <= 0:
+                    verify_amount = Decimal('1.00')
+                result = tranzila.verify_card(
+                    card_number=card_number,
+                    expiry_month=expiry_month,
+                    expiry_year=expiry_year,
+                    cvv=cvv,
+                    card_holder_id=card_holder_id,
+                    amount=verify_amount,
+                    description='',
+                    duplicate_guard_key=f'verify-{payment.id}',
+                )
 
         if result['success']:
             enrollment_id_for_whatsapp = None
+            invoice_to_email = None
             with transaction.atomic():
                 payment.status = 'completed'
                 payment.payment_date = timezone.now()
@@ -905,11 +1045,7 @@ class WidgetChargeView(APIView):
                             course=lesson.course,
                             lesson=lesson,
                         )
-                    try:
-                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                        send_subscription_invoice_email(invoice)
-                    except Exception:
-                        logger.exception('Trial invoice email failed (non-fatal)')
+                    invoice_to_email = invoice
 
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
                 else:
@@ -981,11 +1117,7 @@ class WidgetChargeView(APIView):
                                 course=lesson.course,
                                 lesson=lesson,
                             )
-                        try:
-                            from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                            send_subscription_invoice_email(invoice)
-                        except Exception:
-                            logger.exception('Subscription invoice email failed (non-fatal)')
+                        invoice_to_email = invoice
 
                     child.status = 'active'
                     if deferred_start:
@@ -1013,6 +1145,13 @@ class WidgetChargeView(APIView):
                                 enrollment.bundle = payment.bundle
                             enrollment.save()
 
+            if invoice_to_email is not None:
+                try:
+                    from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+                    send_subscription_invoice_email(invoice_to_email)
+                except Exception:
+                    logger.exception('Invoice email failed after widget charge (non-fatal)')
+
             if enrollment_id_for_whatsapp:
                 try:
                     from apps.enrollments.trial_reminders import stamp_and_notify_trial_enrollment
@@ -1029,19 +1168,60 @@ class WidgetChargeView(APIView):
             return {
                 'success': True,
                 'payment_id': str(payment.id),
+                'token': result.get('token') or '',
                 'recurring_active': bool(is_trial_payment or result.get('token')),
             }
 
-        else:
-            payment.status = 'failed'
-            payment.failure_reason = result.get('error', 'Unknown')
+        payment.refresh_from_db()
+        if payment.status == 'completed':
+            # REST charge timed out here, but the notify (or a recovered lookup)
+            # already enrolled the student. Tell the truth instead of a decline.
+            return {
+                'success': True,
+                'payment_id': str(payment.id),
+                'already_completed': True,
+                'recurring_active': bool(
+                    payment.trial_lesson_date
+                    or RecurringPayment.objects.filter(initial_payment=payment).exists()
+                ),
+            }
+
+        if result.get('indeterminate'):
+            # Nobody knows whether the money moved. The payment stays 'processing' so
+            # no second charge can be attempted, the child keeps its current status,
+            # and no enrollment is created until the outcome is confirmed.
+            payment.failure_reason = result.get('error', 'No verdict from gateway')
             payment.failure_code = str(result.get('response_code', ''))[:50]
-            payment.save(update_fields=['status', 'failure_reason', 'failure_code'])
-            # An earlier lesson in the same bundle may already be paid and active;
-            # flagging the child as a payment problem then would be wrong.
-            if allow_child_status_downgrade and child:
-                Child.objects.filter(pk=child.pk).update(status='payment_problem')
-            return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
+            payment.save(update_fields=['failure_reason', 'failure_code'])
+            logger.error(
+                "PAYMENT NEEDS RECONCILIATION: payment=%s child=%s amount=%s left in "
+                "'processing' — the gateway never returned a verdict (%s)",
+                payment.id,
+                child.full_name if child else '',
+                payment.final_amount,
+                result.get('error'),
+            )
+            return {
+                'success': False,
+                'pending': True,
+                'indeterminate': True,
+                'payment_id': str(payment.id),
+                'payment_status': 'processing',
+                'error': (
+                    'לא התקבלה תשובה סופית מחברת האשראי. אין לשלם שוב — '
+                    'אנחנו מאמתים את התשלום וניצור איתכם קשר.'
+                ),
+            }
+
+        payment.status = 'failed'
+        payment.failure_reason = result.get('error', 'Unknown')
+        payment.failure_code = str(result.get('response_code', ''))[:50]
+        payment.save(update_fields=['status', 'failure_reason', 'failure_code'])
+        # An earlier lesson in the same bundle may already be paid and active;
+        # flagging the child as a payment problem then would be wrong.
+        if allow_child_status_downgrade:
+            flag_child_payment_problem(child)
+        return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
 
 
 class WidgetCoursesView(APIView):

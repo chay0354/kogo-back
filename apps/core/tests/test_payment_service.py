@@ -504,6 +504,59 @@ class PaymentServiceWebhookTest(TestCase):
         # Verify child status updated to payment_problem
         self.child.refresh_from_db()
         self.assertEqual(self.child.status, 'payment_problem')
+
+    @patch('apps.core.payment_service.TranzilaService.parse_webhook_response')
+    @patch('apps.core.payment_service.TranzilaService.verify_webhook_signature')
+    def test_later_failed_notify_does_not_downgrade_paid_child(self, mock_verify, mock_parse):
+        """A declined retry must not mark an already-paid enrolled child as payment_problem."""
+        mock_verify.return_value = True
+        self.payment.status = 'completed'
+        self.payment.save(update_fields=['status'])
+        self.child.status = 'active'
+        self.child.save(update_fields=['status'])
+        LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=self.lesson,
+            status='active',
+            start_date=date.today(),
+        )
+        retry_payment = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            parent=self.parent,
+            lesson=self.lesson,
+            branch=self.lesson.course.branch,
+            payment_type='recurring_subscription',
+            status='pending',
+            base_amount=Decimal('5.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('5.00'),
+        )
+        mock_parse.return_value = {
+            'transaction_id': 'TRX-DECLINE',
+            'confirmation_code': '',
+            'response_code': '033',
+            'is_successful': False,
+            'error_message': 'Card declined',
+            'timestamp': timezone.now(),
+            'raw_payload': {},
+        }
+
+        result = self.service.process_webhook_callback(
+            webhook_payload={'pdesc': str(retry_payment.id), 'Response': '033'},
+            signature='test_signature',
+        )
+
+        self.assertFalse(result['success'])
+        retry_payment.refresh_from_db()
+        self.assertEqual(retry_payment.status, 'failed')
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.status, 'completed')
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'active')
+        self.assertTrue(
+            LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson, status='active').exists()
+        )
     
     @patch('apps.core.payment_service.TranzilaService.verify_webhook_signature')
     def test_invalid_signature_rejected(self, mock_verify):

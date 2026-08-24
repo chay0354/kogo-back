@@ -16,6 +16,7 @@ import requests
 import secrets
 import time
 import uuid
+from datetime import date
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlencode
 from decimal import Decimal
@@ -25,10 +26,14 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-# Tranzila notify/callback: success only when Response == "000".
-# https://docs.tranzila.com — webhook POST includes Response, sum, pdesc, TranzilaTK, etc.
+# Tranzila notify/callback: success only when Response is "000" or "0".
+# https://docs.tranzila.com/docs/vibe-coding/closing-an-order-in-base44-using-notify-page
+# REST charges: error_code == 0 AND processor_response_code in this set.
+# https://docs.tranzila.com/docs/payments-and-billing/tranzila-transactions-api-1/create-a-credit-card-transaction
+TRANZILA_APPROVED_CODES = frozenset({'000', '0'})
 TRANZILA_RESPONSE_MESSAGES: dict[str, str] = {
     '000': 'אושר',
+    '0': 'אושר',
     '033': 'הכרטיס נדחה',
     '036': 'פג תוקף',
     '039': 'מספר כרטיס שגוי',
@@ -41,6 +46,20 @@ TRANZILA_RESPONSE_MESSAGES: dict[str, str] = {
     '955': 'שגיאת סטטוס תשלום',
     '959': 'התשלום לא הושלם בהצלחה',
 }
+
+
+def is_tranzila_approved(code) -> bool:
+    """True when Tranzila reports the card transaction as approved."""
+    return str(code or '').strip() in TRANZILA_APPROVED_CODES
+
+
+def tranzila_api_accepted(response: dict) -> bool:
+    """True when the REST create-transaction call itself succeeded (error_code 0)."""
+    if not isinstance(response, dict):
+        return False
+    if response.get('success') is False:
+        return False
+    return response.get('error_code') in (0, '0')
 
 
 def pdesc_for_tranzila(transaction_id: str) -> str:
@@ -187,13 +206,27 @@ class TranzilaService:
             log_parts.append(f"{key}={value}")
         logger.info(" ".join(log_parts))
     
-    def _build_error_response(self, error: str, code: str = '999', message: str = None) -> Dict:
-        """Build standardized error response."""
+    def _build_error_response(
+        self,
+        error: str,
+        code: str = '999',
+        message: str = None,
+        indeterminate: bool = False,
+    ) -> Dict:
+        """
+        Build standardized error response.
+
+        `indeterminate` marks the cases where the request left this process but no
+        verdict came back (timeout, dropped connection, gateway 5xx). The money may
+        or may not have moved, so callers must not treat it as a decline: doing so
+        both charges the customer and tells them they were refused.
+        """
         return {
             'success': False,
             'error': error,
             'response_code': code,
-            'message': message or f'Operation failed: {error}'
+            'message': message or f'Operation failed: {error}',
+            'indeterminate': indeterminate,
         }
     
     def _build_success_response(self, **kwargs) -> Dict:
@@ -230,15 +263,17 @@ class TranzilaService:
         """
         Add DCdisable so Tranzila rejects a repeat of the same charge for 24h.
 
-        Only sent when the terminal has field 20 configured for it, otherwise the
-        value would land in an unrelated user-defined field.
+        The REST API takes it as a named entry in `user_defined_fields`, and only
+        when the terminal has field 20 configured for it — otherwise the value
+        lands in an unrelated user-defined field.
         https://docs.tranzila.com/docs/payments-and-billing/tranzila-transactions-api-1/create-a-credit-card-transaction
         """
         if not key:
             return
         if not getattr(settings, 'TRANZILA_DCDISABLE_ENABLED', False):
             return
-        payload['DCdisable'] = str(key)[:254]
+        fields = payload.setdefault('user_defined_fields', [])
+        fields.append({'name': 'DCdisable', 'value': str(key)[:254]})
 
     def live_readiness(self) -> Dict:
         """
@@ -583,13 +618,27 @@ class TranzilaService:
             
             error_code = response.get('error_code')
             
-            if error_code == 0:
-                transaction_result = response.get('transaction_result', {})
+            if tranzila_api_accepted(response):
+                transaction_result = response.get('transaction_result') or {}
+                processor_code = str(transaction_result.get('processor_response_code') or '000').strip()
+                if not is_tranzila_approved(processor_code):
+                    error_msg = (
+                        response.get('message')
+                        or TRANZILA_RESPONSE_MESSAGES.get(processor_code)
+                        or f'קוד שגיאה {processor_code}'
+                    )
+                    logger.error(
+                        "Token charge declined by processor: code=%s message=%s",
+                        processor_code, error_msg,
+                    )
+                    return self._build_error_response(
+                        error_msg, processor_code, f'Charge declined: {error_msg}',
+                    )
                 return self._build_success_response(
                     transaction_id=str(transaction_result.get('transaction_id', '')),
                     confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
                     amount=float(amount),
-                    response_code=transaction_result.get('processor_response_code', '000'),
+                    response_code=processor_code,
                     message=response.get('message', 'Charge successful'),
                     raw_response=response
                 )
@@ -599,12 +648,15 @@ class TranzilaService:
                 return self._build_error_response(
                     error_msg,
                     str(error_code) if error_code is not None else 'N/A',
-                    f'Charge failed: {error_msg}'
+                    f'Charge failed: {error_msg}',
+                    indeterminate=bool(response.get('indeterminate')),
                 )
                 
         except Exception as e:
             logger.error(f"Exception during token charge: {str(e)}", exc_info=True)
-            return self._build_error_response(str(e), message='Charge failed - exception')
+            return self._build_error_response(
+                str(e), message='Charge failed - exception', indeterminate=True,
+            )
     
     def charge_with_card(
         self,
@@ -672,14 +724,28 @@ class TranzilaService:
 
             error_code = response.get('error_code')
 
-            if error_code == 0:
-                transaction_result = response.get('transaction_result', {})
+            if tranzila_api_accepted(response):
+                transaction_result = response.get('transaction_result') or {}
+                processor_code = str(transaction_result.get('processor_response_code') or '000').strip()
+                if not is_tranzila_approved(processor_code):
+                    error_msg = (
+                        response.get('message')
+                        or TRANZILA_RESPONSE_MESSAGES.get(processor_code)
+                        or f'קוד שגיאה {processor_code}'
+                    )
+                    logger.error(
+                        "Card charge declined by processor: code=%s message=%s last4=%s",
+                        processor_code, error_msg, str(card_number)[-4:],
+                    )
+                    return self._build_error_response(
+                        error_msg, processor_code, f'Charge declined: {error_msg}',
+                    )
                 return self._build_success_response(
                     transaction_id=str(transaction_result.get('transaction_id', '')),
                     confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
                     token=extract_card_token(transaction_result, response),
                     amount=float(amount),
-                    response_code=transaction_result.get('processor_response_code', '000'),
+                    response_code=processor_code,
                     message=response.get('message', 'Charge successful'),
                     raw_response=response
                 )
@@ -693,12 +759,16 @@ class TranzilaService:
                 return self._build_error_response(
                     error_msg,
                     str(error_code) if error_code is not None else 'N/A',
-                    f'Charge failed: {error_msg}'
+                    f'Charge failed: {error_msg}',
+                    indeterminate=bool(response.get('indeterminate')),
                 )
 
         except Exception as e:
             logger.error(f"Exception during card charge: {str(e)}", exc_info=True)
-            return self._build_error_response(str(e), message='Charge failed - exception')
+            # The card details were already on the wire, so the outcome is unknown.
+            return self._build_error_response(
+                str(e), message='Charge failed - exception', indeterminate=True,
+            )
 
     def verify_card(
         self,
@@ -723,6 +793,10 @@ class TranzilaService:
         if credential_error:
             return self._build_error_response(credential_error)
 
+        verify_amount = Decimal(str(amount or 0))
+        if verify_amount <= 0:
+            verify_amount = Decimal('1.00')
+
         payload = {
             'terminal_name': self.terminal,
             'txn_type': 'verify',
@@ -734,9 +808,9 @@ class TranzilaService:
             'expire_year': expiry_year,
             'cvv': cvv,
             'items': [{
-                'name': description or 'אימות כרטיס',
+                'name': 'card-verify',
                 'type': 'I',
-                'unit_price': float(amount),
+                'unit_price': float(verify_amount),
                 'units_number': 1,
                 'unit_type': 1,
                 'price_type': 'G',
@@ -746,9 +820,8 @@ class TranzilaService:
         # Schema requires exactly 9 digits; an empty string is a 20004 mismatch.
         if card_holder_id and len(str(card_holder_id)) == 9:
             payload['card_holder_id'] = str(card_holder_id)
-
-        if description:
-            payload['remarks'] = description
+        # Do not send Hebrew remarks on verify — that payload 20004's and used to
+        # abort the rest of a multi-child widget checkout.
 
         self._apply_duplicate_guard(payload, duplicate_guard_key)
 
@@ -762,8 +835,22 @@ class TranzilaService:
 
             error_code = response.get('error_code')
 
-            if error_code == 0:
-                transaction_result = response.get('transaction_result', {})
+            if tranzila_api_accepted(response):
+                transaction_result = response.get('transaction_result') or {}
+                processor_code = str(transaction_result.get('processor_response_code') or '000').strip()
+                if not is_tranzila_approved(processor_code):
+                    error_msg = (
+                        response.get('message')
+                        or TRANZILA_RESPONSE_MESSAGES.get(processor_code)
+                        or f'קוד שגיאה {processor_code}'
+                    )
+                    logger.error(
+                        "Card verification declined by processor: code=%s message=%s last4=%s",
+                        processor_code, error_msg, str(card_number)[-4:],
+                    )
+                    return self._build_error_response(
+                        error_msg, processor_code, f'Card verification declined: {error_msg}',
+                    )
                 token = extract_card_token(transaction_result, response)
                 if not token:
                     logger.error(
@@ -776,7 +863,7 @@ class TranzilaService:
                     confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
                     token=token,
                     amount=0.0,
-                    response_code=transaction_result.get('processor_response_code', '000'),
+                    response_code=processor_code,
                     message=response.get('message', 'Card verified'),
                     raw_response=response
                 )
@@ -789,12 +876,184 @@ class TranzilaService:
             return self._build_error_response(
                 error_msg,
                 str(error_code) if error_code is not None else 'N/A',
-                f'Card verification failed: {error_msg}'
+                f'Card verification failed: {error_msg}',
+                indeterminate=bool(response.get('indeterminate')),
             )
 
         except Exception as e:
             logger.error(f"Exception during card verification: {str(e)}", exc_info=True)
-            return self._build_error_response(str(e), message='Card verification failed - exception')
+            return self._build_error_response(
+                str(e), message='Card verification failed - exception', indeterminate=True,
+            )
+
+    def billing_terminal_name(self) -> str:
+        """Terminal used for tax documents; falls back to the payment terminal."""
+        explicit = (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
+        return explicit or (self.terminal or '')
+
+    def list_transactions(
+        self,
+        start_date: date,
+        end_date: Optional[date] = None,
+        page: Optional[int] = None,
+    ) -> Dict:
+        """
+        Past transactions for this terminal in a date range.
+
+        https://docs.tranzila.com/docs/reports/track-transaction-data/get-transaction-information
+        """
+        payload = {
+            'terminal_name': self.terminal,
+            'transaction_start_date': start_date.isoformat(),
+            'transaction_end_date': (end_date or start_date).isoformat(),
+        }
+        if page:
+            payload['page'] = page
+        return self._make_api_request(params=payload, endpoint='/v1/transactions')
+
+    @staticmethod
+    def extract_list_rows(response: Dict, *keys: str) -> list:
+        """First array on a Tranzila list payload (transactions, documents, …)."""
+        if not isinstance(response, dict):
+            return []
+        search = keys or ('transactions', 'documents', 'data', 'result', 'rows')
+        for key in search:
+            value = response.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+        return []
+
+    def list_all_transactions(
+        self,
+        start_date: date,
+        end_date: Optional[date] = None,
+        max_pages: int = 20,
+    ) -> Dict:
+        """Every transaction in the date range, paging 1000 rows at a time."""
+        if self.credential_error():
+            return {'success': False, 'error': self.credential_error(), 'transactions': []}
+
+        end = end_date or start_date
+        collected: list = []
+        page = None
+        for page_num in range(1, max_pages + 1):
+            response = self.list_transactions(start_date, end, page=page)
+            if not isinstance(response, dict) or response.get('success') is False:
+                error = (
+                    (response or {}).get('error')
+                    if isinstance(response, dict)
+                    else 'Tranzila transaction list failed'
+                )
+                if collected:
+                    logger.error("Tranzila list_transactions page %s failed after partial fetch: %s", page_num, error)
+                    break
+                return {'success': False, 'error': error, 'transactions': []}
+            rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
+            collected.extend(rows)
+            total = response.get('total')
+            try:
+                total_n = int(total) if total is not None else None
+            except (TypeError, ValueError):
+                total_n = None
+            if len(rows) < 1000:
+                break
+            if total_n is not None and len(collected) >= total_n:
+                break
+            page = page_num + 1
+        return {'success': True, 'transactions': collected}
+
+    def list_documents(self, start_date: date, end_date: date) -> Dict:
+        """
+        Formal tax documents (invoices / receipts) for the billing terminal.
+
+        https://docs.tranzila.com/docs/payments-and-billing — POST /api/documents_db/get_documents
+        """
+        if self.credential_error():
+            return {'success': False, 'error': self.credential_error(), 'documents': []}
+        terminal = self.billing_terminal_name()
+        if not terminal:
+            return {'success': False, 'error': 'No billing terminal configured', 'documents': []}
+
+        payload = {
+            'terminal_names': [terminal],
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+        }
+        response = self._make_billing_request(payload, '/api/documents_db/get_documents')
+        if not isinstance(response, dict):
+            return {'success': False, 'error': 'Invalid documents response', 'documents': []}
+
+        status_code = response.get('status_code')
+        if status_code not in (0, '0', None) and not response.get('success'):
+            return {
+                'success': False,
+                'error': response.get('status_msg') or response.get('error') or response,
+                'documents': [],
+            }
+        documents = self.extract_list_rows(response, 'documents', 'data', 'result')
+        return {'success': True, 'documents': documents, 'raw': response}
+
+    def find_successful_transaction(self, guard_key: str, on_date: Optional[date] = None) -> Optional[Dict]:
+        """
+        The approved transaction carrying `guard_key`, or None.
+
+        Used to settle a charge whose verdict never came back, so a customer whose
+        card was actually charged is never charged a second time. The key travels in
+        the DCdisable user-defined field, so this can only match when
+        TRANZILA_DCDISABLE_ENABLED is on and field 20 is mapped on the terminal.
+        """
+        if not guard_key:
+            return None
+        if self.credential_error():
+            return None
+
+        day = on_date or timezone.localdate()
+        response = self.list_transactions(start_date=day)
+        if not isinstance(response, dict) or response.get('success') is False:
+            logger.error("Tranzila transaction lookup failed for %s: %s", guard_key, response)
+            return None
+
+        rows = None
+        for key in ('transactions', 'data', 'result', 'rows'):
+            value = response.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+        if rows is None:
+            logger.error("Tranzila transaction lookup returned no recognizable rows for %s", guard_key)
+            return None
+
+        needle = str(guard_key)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not is_tranzila_approved(row.get('response_code') or row.get('processor_response_code')):
+                continue
+            carries_key = any(
+                str(value).strip() == needle
+                for field, value in row.items()
+                if field.startswith('user_defined') and value
+            )
+            if not carries_key:
+                continue
+            logger.warning(
+                "Recovered an already-approved Tranzila transaction for %s — "
+                "settling it instead of charging again", guard_key,
+            )
+            return self._build_success_response(
+                transaction_id=str(
+                    row.get('transaction_index') or row.get('index') or row.get('transaction_id') or ''
+                ),
+                confirmation_code=str(
+                    row.get('authorization_number') or row.get('ConfirmationCode') or ''
+                ),
+                token=str(row.get('token') or row.get('TranzilaTK') or ''),
+                response_code='000',
+                message='Recovered from Tranzila transaction report',
+                raw_response=row,
+                recovered=True,
+            )
+        return None
 
     def refund_transaction(
         self,
@@ -851,7 +1110,7 @@ class TranzilaService:
             
             error_code = response.get('error_code')
             
-            if error_code == 0:
+            if tranzila_api_accepted(response):
                 transaction_result = response.get('transaction_result', {})
                 logger.info(f"Refund successful: txn_id={transaction_id}")
                 return self._build_success_response(
@@ -986,14 +1245,15 @@ class TranzilaService:
         """
         Parse and normalize a Tranzila notify/callback POST body.
 
-        Success: ``Response == '000'`` (documented across Tranzila iframe + notify callbacks).
+        Success: ``Response`` is ``000`` or ``0`` (Tranzila notify / iframe docs).
         Failure: any other ``Response`` code (e.g. 033 declined, 952 not completed, 954 failed).
         """
         response_code = str(payload.get('Response', '') or '').strip()
+        approved = is_tranzila_approved(response_code)
         raw_error = (payload.get('error') or payload.get('errormessage') or '').strip()
         mapped_error = TRANZILA_RESPONSE_MESSAGES.get(response_code, '')
         error_message = raw_error or mapped_error or (
-            f'קוד שגיאה {response_code}' if response_code and response_code != '000' else ''
+            f'קוד שגיאה {response_code}' if response_code and not approved else ''
         )
 
         return {
@@ -1007,7 +1267,7 @@ class TranzilaService:
             'token': payload.get('TranzilaTK', ''),
             'card_expire_month': int(payload.get('expmonth', 0)) if payload.get('expmonth') else None,
             'card_expire_year': int(payload.get('expyear', 0)) if payload.get('expyear') else None,
-            'is_successful': response_code == '000',
+            'is_successful': approved,
             'error_message': error_message,
             'timestamp': timezone.now(),
             'raw_payload': payload,
@@ -1093,19 +1353,25 @@ class TranzilaService:
                 
                 if response.status_code == 401:
                     logger.error("Authentication failed - check API keys")
-                
+
+                # A 5xx means the gateway accepted the request and then failed to
+                # answer, so the transaction state is unknown rather than refused.
+                unknown_outcome = response.status_code >= 500
+
                 try:
                     error_data = response.json()
                     return self._build_error_response(
                         error_data.get('message', f'HTTP {response.status_code}'),
                         str(error_data.get('code', '999')),
-                        error_data.get('message', 'API request failed')
+                        error_data.get('message', 'API request failed'),
+                        indeterminate=unknown_outcome,
                     )
-                except:
+                except ValueError:
                     return self._build_error_response(
                         f'HTTP {response.status_code}',
                         '999',
-                        'API request failed'
+                        'API request failed',
+                        indeterminate=unknown_outcome,
                     )
             
             # Parse JSON response
@@ -1113,20 +1379,27 @@ class TranzilaService:
                 response_data = response.json()
             except ValueError as e:
                 logger.error(f"Failed to parse JSON: {str(e)}")
-                return self._build_error_response('Invalid JSON response', '999', 'Invalid response format')
+                return self._build_error_response(
+                    'Invalid JSON response', '999', 'Invalid response format', indeterminate=True,
+                )
             
             # Return REST API v1 response as-is
             return response_data
             
         except requests.exceptions.Timeout:
             logger.error("Tranzila API request timed out")
-            return self._build_error_response('Request timed out', '999', 'Connection timeout')
+            return self._build_error_response(
+                'Request timed out', '999', 'Connection timeout', indeterminate=True,
+            )
         except requests.exceptions.ConnectionError as e:
             logger.error(f"Tranzila API connection error: {str(e)}")
-            return self._build_error_response(f'Connection error: {str(e)}', '999', 'Cannot connect to payment gateway')
+            return self._build_error_response(
+                f'Connection error: {str(e)}', '999', 'Cannot connect to payment gateway',
+                indeterminate=True,
+            )
         except Exception as e:
             logger.error(f"Unexpected error in Tranzila API request: {str(e)}", exc_info=True)
-            return self._build_error_response(str(e), '999', 'Unexpected error')
+            return self._build_error_response(str(e), '999', 'Unexpected error', indeterminate=True)
 
     def _make_billing_request(self, payload: dict, endpoint: str) -> dict:
         """POST to billing5.tranzila.com — same auth headers as the main API."""

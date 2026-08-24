@@ -902,6 +902,27 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         return queryset
     
+    @action(detail=False, methods=['get'], url_path='tranzila-transactions')
+    def tranzila_transactions(self, request):
+        """
+        All card transactions from the Tranzila terminal.
+
+        GET /api/v1/customers/payments/tranzila-transactions/?start_date=&end_date=
+        """
+        from apps.core.tranzila_ledger import list_ledger_payments
+
+        def parse_day(raw):
+            try:
+                return date.fromisoformat(raw) if raw else None
+            except ValueError:
+                return None
+
+        result = list_ledger_payments(
+            start_date=parse_day(request.query_params.get('start_date')),
+            end_date=parse_day(request.query_params.get('end_date')),
+        )
+        return Response(result)
+
     @action(detail=False, methods=['post'])
     def initiate_subscription(self, request):
         """
@@ -969,50 +990,54 @@ class PaymentViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @method_decorator(csrf_exempt, name='dispatch')
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    @action(detail=False, methods=['get', 'post'], permission_classes=[AllowAny])
     def webhook(self, request):
         """
-        Tranzila webhook callback endpoint.
-        
-        POST /api/v1/payments/webhook/
-        
-        This endpoint receives callbacks from Tranzila after payment processing.
-        It's public (no authentication) but validates webhook signature.
+        Tranzila notify / iframe callback.
+
+        POST (or GET) /api/v1/customers/payments/webhook/
+
+        Tranzila docs require HTTP 200 after the notify is recorded, including
+        declined cards — otherwise the gateway retries and can overwrite a later
+        successful charge. https://docs.tranzila.com/docs/payments-and-billing/iframe-integration
         """
-        # === ENHANCED LOGGING FOR MONITORING ===
+        payload = {}
+        payload.update(request.GET.dict())
+        if request.method == 'POST':
+            if request.POST:
+                payload.update(request.POST.dict())
+            elif isinstance(getattr(request, 'data', None), dict):
+                payload.update({k: v for k, v in request.data.items() if v not in (None, '')})
+
         logger.info("=" * 80)
-        logger.info("🔔 WEBHOOK RECEIVED FROM TRANZILA")
+        logger.info("WEBHOOK RECEIVED FROM TRANZILA")
         logger.info("=" * 80)
-        logger.info(f"Method: {request.method}")
-        logger.info(f"Path: {request.path}")
-        logger.info(f"Content-Type: {request.content_type}")
-        logger.info(f"Headers: {dict(request.headers)}")
-        logger.info(f"GET params: {dict(request.GET)}")
-        logger.info(f"POST data: {request.POST.dict()}")  # Use request.POST instead of request.body
+        logger.info("Method: %s Path: %s", request.method, request.path)
+        logger.info("Payload keys: %s", list(payload.keys()))
         logger.info("=" * 80)
-        
-        serializer = WebhookCallbackSerializer(data=request.data)
+
+        serializer = WebhookCallbackSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
-        
-        # Get signature from headers if provided
+
         signature = request.headers.get('X-Tranzila-Signature', '')
-        
+
         try:
             payment_service = PaymentService()
             result = payment_service.process_webhook_callback(
                 webhook_payload=serializer.validated_data,
                 signature=signature
             )
-            
-            if result['success']:
-                logger.info(f"✅ Webhook processed successfully: {result}")
-                return Response(result, status=status.HTTP_200_OK)
-            else:
-                logger.warning(f"⚠️  Webhook processing failed: {result}")
-                return Response(result, status=status.HTTP_400_BAD_REQUEST)
-                
+
+            if result.get('error') == 'Invalid signature':
+                logger.warning("Tranzila webhook signature rejected")
+                return Response(result, status=status.HTTP_403_FORBIDDEN)
+
+            # ACK every handled notify (approved or declined) so Tranzila does not retry.
+            logger.info("Webhook recorded: %s", result)
+            return Response({'ok': True, **result}, status=status.HTTP_200_OK)
+
         except Exception as e:
-            logger.exception(f"❌ Webhook processing error: {str(e)}")
+            logger.exception("Webhook processing error: %s", e)
             return Response({
                 'error': f'שגיאה בעיבוד webhook: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1060,8 +1085,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 bundle_id=str(bundle_id) if bundle_id else None,
                 include_registration_fee=bool(request.data.get('include_registration_fee', True)),
             )
-            if result['success']:
+            if result.get('success'):
                 return Response(result, status=status.HTTP_200_OK)
+            if result.get('pending'):
+                return Response(result, status=status.HTTP_202_ACCEPTED)
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

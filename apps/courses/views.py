@@ -303,7 +303,7 @@ class LessonViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Filter lessons, optionally by course, instructor, room"""
         queryset = Lesson.objects.select_related(
-            'course', 'course__branch', 'room', 'instructor'
+            'course', 'course__branch', 'course__course_type', 'room', 'instructor'
         )
         queryset = scope_courses(queryset, self.request.user, 'course')
 
