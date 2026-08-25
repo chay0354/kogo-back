@@ -8,6 +8,7 @@ Tests coverage:
 - verify_webhook_signature: signature verification
 - Error handling for malformed responses
 """
+from datetime import date
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
 from django.test import TestCase, override_settings
@@ -587,3 +588,72 @@ class TranzilaRestChargeParseTest(TestCase):
         )
         self.assertTrue(result['success'])
         self.assertEqual(result['token'], 'saved-card-token')
+
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_update_standing_order_amount_uses_v2_items_replace(self, mock_request):
+        mock_request.return_value = {'error_code': 0}
+        result = self.service.update_standing_order_amount(
+            sto_id=4411,
+            amount=Decimal('350.00'),
+            item_name='קפוארה',
+        )
+        self.assertTrue(result['success'])
+        mock_request.assert_called_once()
+        payload = mock_request.call_args.kwargs['params']
+        self.assertEqual(mock_request.call_args.kwargs['endpoint'], '/v2/sto/update')
+        self.assertEqual(payload['sto_id'], 4411)
+        self.assertEqual(payload['sto_status'], 'active')
+        self.assertEqual(payload['items'][0]['unit_price'], 350.0)
+        self.assertEqual(payload['items'][0]['type'], 'I')
+        self.assertEqual(payload['items'][0]['units_number'], 1)
+        self.assertEqual(payload['items'][0]['name'], 'קפוארה')
+
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_sync_updates_active_sto_and_inactivates_extras(self, mock_request):
+        mock_request.side_effect = [
+            {'error_code': 0, 'stos': [
+                {'sto_id': 4411, 'sto_status': 'active'},
+                {'sto_id': 4412, 'sto_status': 'active'},
+            ]},
+            {'error_code': 0},
+            {'error_code': 0},
+        ]
+        result = self.service.sync_standing_order_to_amount(
+            token='tok-1',
+            amount=Decimal('350.00'),
+            item_name='קפוארה',
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['sto_id'], 4411)
+        self.assertEqual(result['action'], 'updated')
+        self.assertEqual(result['inactivated'], [4412])
+        self.assertEqual(mock_request.call_args_list[0].kwargs['endpoint'], '/stos/get')
+        self.assertEqual(mock_request.call_args_list[1].kwargs['endpoint'], '/v2/sto/update')
+        self.assertEqual(mock_request.call_args_list[1].kwargs['params']['items'][0]['unit_price'], 350.0)
+        self.assertEqual(mock_request.call_args_list[2].kwargs['params']['sto_id'], 4412)
+        self.assertEqual(mock_request.call_args_list[2].kwargs['params']['sto_status'], 'inactive')
+
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_sync_creates_sto_when_lookup_is_empty(self, mock_request):
+        mock_request.side_effect = [
+            {'error_code': 0, 'stos': []},
+            {'error_code': 0, 'sto_id': 9901},
+        ]
+        result = self.service.sync_standing_order_to_amount(
+            token='tok-1',
+            amount=Decimal('350.00'),
+            item_name='קפוארה',
+            expire_month=12,
+            expire_year=2028,
+            first_charge_date=date(2026, 9, 1),
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['sto_id'], 9901)
+        self.assertEqual(result['action'], 'created')
+        self.assertEqual(mock_request.call_args_list[0].kwargs['endpoint'], '/stos/get')
+        self.assertEqual(mock_request.call_args_list[1].kwargs['endpoint'], '/v2/sto/create')
+        create_payload = mock_request.call_args_list[1].kwargs['params']
+        self.assertEqual(create_payload['card']['token'], 'tok-1')
+        self.assertEqual(create_payload['charge_frequency'], 'monthly')
+        self.assertEqual(create_payload['first_charge_date'], '2026-09-01')
+        self.assertEqual(create_payload['items'][0]['unit_price'], 350.0)

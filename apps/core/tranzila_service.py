@@ -1050,6 +1050,218 @@ class TranzilaService:
 
         logger.info(f"STO {sto_id} successfully set to inactive for token {token[:10]}...")
         return self._build_success_response(sto_id=sto_id, sto_status='inactive')
+
+    def _normalize_card_year(self, year: Optional[int]) -> Optional[int]:
+        if year is None:
+            return None
+        year = int(year)
+        if year < 100:
+            year += 2000
+        return year
+
+    def _sto_item(self, *, name: str, amount: Decimal) -> Dict:
+        return {
+            'name': (name or 'מנוי חודשי')[:80],
+            'unit_price': float(Decimal(str(amount)).quantize(Decimal('0.01'))),
+            'units_number': 1,
+            'type': 'I',
+            'currency_code': 'ILS',
+            'price_type': 'G',
+        }
+
+    def _split_il_phone(self, phone: str) -> tuple[str, str]:
+        digits = re.sub(r'\D', '', phone or '')
+        if digits.startswith('972'):
+            digits = digits[3:]
+        if digits.startswith('0') and len(digits) >= 9:
+            return digits[:3], digits[3:]
+        return '050', digits
+
+    def list_standing_orders(self, token: str) -> Dict:
+        """POST /stos/get — standing orders for this card token."""
+        if not token:
+            return self._build_error_response('No Tranzila token available')
+        response = self._make_api_request(
+            params={'terminal_name': self.token_terminal, 'token': token},
+            endpoint='/stos/get',
+        )
+        if is_tranzila_rest_ok(response.get('error_code')):
+            return self._build_success_response(stos=response.get('stos') or [], raw=response)
+        return self._build_error_response(
+            response.get('message') or response.get('error') or 'STO lookup failed',
+            str(response.get('error_code') or response.get('response_code') or '999'),
+            response.get('message') or 'לא נמצאו הוראות קבע בטרנזילה',
+        )
+
+    def update_standing_order_amount(self, *, sto_id: int, amount: Decimal, item_name: str) -> Dict:
+        """POST /v2/sto/update — replace items so Tranzila recalculates the monthly amount."""
+        self._log_api_call('STO_UPDATE_AMOUNT', sto_id=sto_id, amount=str(amount))
+        response = self._make_api_request(
+            params={
+                'terminal_name': self.token_terminal,
+                'sto_id': int(sto_id),
+                'sto_status': 'active',
+                'items': [self._sto_item(name=item_name, amount=amount)],
+                'updated_by_user': 'kogo-crm',
+                'response_language': 'hebrew',
+            },
+            endpoint='/v2/sto/update',
+        )
+        if is_tranzila_rest_ok(response.get('error_code')):
+            return self._build_success_response(sto_id=int(sto_id), amount=str(amount), raw=response)
+        return self._build_error_response(
+            response.get('message') or response.get('error') or 'STO update failed',
+            str(response.get('error_code') or '999'),
+        )
+
+    def inactivate_standing_order(self, sto_id: int) -> Dict:
+        self._log_api_call('STO_INACTIVATE', sto_id=sto_id)
+        response = self._make_api_request(
+            params={
+                'terminal_name': self.token_terminal,
+                'sto_id': int(sto_id),
+                'sto_status': 'inactive',
+                'updated_by_user': 'kogo-crm',
+            },
+            endpoint='/v2/sto/update',
+        )
+        if is_tranzila_rest_ok(response.get('error_code')):
+            return self._build_success_response(sto_id=int(sto_id), sto_status='inactive')
+        return self._build_error_response(
+            response.get('message') or response.get('error') or 'STO inactivate failed',
+            str(response.get('error_code') or '999'),
+        )
+
+    def create_standing_order(
+        self,
+        *,
+        amount: Decimal,
+        token: str,
+        expire_month: int,
+        expire_year: int,
+        charge_dom: int,
+        first_charge_date: date,
+        item_name: str,
+        client_name: str,
+        client_phone: str = '',
+    ) -> Dict:
+        """POST /v2/sto/create — new Tranzila standing order on a saved card token."""
+        area, number = self._split_il_phone(client_phone)
+        expire_year = self._normalize_card_year(expire_year)
+        self._log_api_call('STO_CREATE', amount=str(amount), charge_dom=charge_dom)
+        response = self._make_api_request(
+            params={
+                'terminal_name': self.token_terminal,
+                'sto_payments_number': 9999,
+                'charge_frequency': 'monthly',
+                'first_charge_date': first_charge_date.isoformat(),
+                'charge_dom': max(1, min(int(charge_dom or 1), 28)),
+                'currency_code': 'ILS',
+                'items': [self._sto_item(name=item_name, amount=amount)],
+                'card': {
+                    'token': token,
+                    'expire_month': int(expire_month),
+                    'expire_year': int(expire_year),
+                },
+                'client': {
+                    'name': (client_name or 'לקוח')[:80],
+                    'phone_country_code': '972',
+                    'phone_area_code': area,
+                    'phone_number': number,
+                },
+                'created_by_user': 'kogo-crm',
+                'response_language': 'hebrew',
+            },
+            endpoint='/v2/sto/create',
+        )
+        sto_id = response.get('sto_id')
+        if is_tranzila_rest_ok(response.get('error_code')) and sto_id:
+            return self._build_success_response(sto_id=int(sto_id), raw=response)
+        return self._build_error_response(
+            response.get('message') or response.get('error') or 'STO create failed',
+            str(response.get('error_code') or '999'),
+        )
+
+    def sync_standing_order_to_amount(
+        self,
+        *,
+        token: str,
+        amount: Decimal,
+        item_name: str,
+        expire_month: Optional[int] = None,
+        expire_year: Optional[int] = None,
+        charge_dom: int = 1,
+        first_charge_date: Optional[date] = None,
+        client_name: str = '',
+        client_phone: str = '',
+    ) -> Dict:
+        """
+        Make Tranzila charge `amount` monthly for this token.
+
+        Updates one existing active STO via V2 items replace; inactivates extras;
+        creates an STO if none exist.
+        """
+        if not token:
+            return self._build_error_response('אין טוקן כרטיס בטרנזילה')
+
+        lookup = self.list_standing_orders(token)
+        if not lookup.get('success'):
+            lookup['manual_cancellation_required'] = True
+            return lookup
+
+        active = [
+            sto for sto in (lookup.get('stos') or [])
+            if str(sto.get('sto_status') or '').lower() in ('', 'active')
+        ]
+        if not active:
+            active = [sto for sto in (lookup.get('stos') or []) if sto.get('sto_id')]
+
+        inactivated = []
+        if active:
+            keep = active[0]
+            sto_id = keep.get('sto_id')
+            updated = self.update_standing_order_amount(
+                sto_id=int(sto_id),
+                amount=amount,
+                item_name=item_name,
+            )
+            if not updated.get('success'):
+                return updated
+            for extra in active[1:]:
+                extra_id = extra.get('sto_id')
+                if not extra_id:
+                    continue
+                inactivated_res = self.inactivate_standing_order(int(extra_id))
+                if inactivated_res.get('success'):
+                    inactivated.append(int(extra_id))
+            return self._build_success_response(
+                sto_id=int(sto_id),
+                action='updated',
+                inactivated=inactivated,
+            )
+
+        if not expire_month or not expire_year or not first_charge_date:
+            return self._build_error_response(
+                'אין הוראת קבע בטרנזילה, וחסר תוקף כרטיס ליצירת הוראה חדשה',
+            )
+        created = self.create_standing_order(
+            amount=amount,
+            token=token,
+            expire_month=int(expire_month),
+            expire_year=int(expire_year),
+            charge_dom=charge_dom,
+            first_charge_date=first_charge_date,
+            item_name=item_name,
+            client_name=client_name,
+            client_phone=client_phone,
+        )
+        if not created.get('success'):
+            return created
+        return self._build_success_response(
+            sto_id=created['sto_id'],
+            action='created',
+            inactivated=[],
+        )
     
     # ============================================================================
     # Webhook & Response Processing

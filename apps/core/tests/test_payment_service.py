@@ -301,7 +301,7 @@ class PaymentServiceLessonBundleTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
-    def test_bundle_bills_each_lesson_at_half_combined_price(self, mock_discount, mock_tranzila):
+    def test_bundle_bills_full_combined_price_on_first_lesson_only(self, mock_discount, mock_tranzila):
         mock_discount.side_effect = self.passthrough_discount
         mock_tranzila.return_value = "https://tranzila.test/payment"
 
@@ -310,12 +310,24 @@ class PaymentServiceLessonBundleTest(TestCase):
             lesson_id=str(self.lesson_a.id),
             bundle_id=str(self.bundle.id),
         )
-        self.assertEqual(result_a['base_amount'], 150.00)
+        self.assertEqual(result_a['base_amount'], 300.00)
+        self.assertEqual(result_a['monthly_amount'], 300.00)
         self.assertEqual(result_a['bundle_id'], str(self.bundle.id))
 
         payment = Payment.objects.get(id=result_a['payment_id'])
         self.assertEqual(payment.bundle, self.bundle)
-        self.assertEqual(payment.base_amount, Decimal('150.00'))
+        self.assertEqual(payment.base_amount, Decimal('300.00'))
+
+        result_b = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_b.id),
+            bundle_id=str(self.bundle.id),
+            include_registration_fee=False,
+            include_monthly_amount=False,
+        )
+        self.assertEqual(result_b['base_amount'], 0.00)
+        self.assertEqual(result_b['monthly_amount'], 0.00)
+        self.assertEqual(result_b['registration_fee'], 0.00)
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
@@ -372,7 +384,7 @@ class PaymentServiceLessonBundleTest(TestCase):
             lesson_id=str(self.lesson_a.id),
             bundle_id=str(self.bundle.id),
         )
-        self.assertEqual(result['base_amount'], 150.00)
+        self.assertEqual(result['base_amount'], 300.00)
         self.assertEqual(result['bundle_id'], str(self.bundle.id))
 
     def test_inactive_bundle_rejected_when_course_is_not_must_attend(self):

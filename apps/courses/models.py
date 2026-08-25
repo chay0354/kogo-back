@@ -200,7 +200,8 @@ class LessonBundle(models.Model):
     same Course (e.g. "twice a week" — Sunday + Wednesday sold together at
     a discounted combined price). Registering for the bundle creates a
     separate LessonEnrollment per member lesson (see LessonEnrollment.bundle),
-    each billed at combined_price / lessons.count().
+    each billed at the widget combined_price on the first member lesson only
+    (one standing order for the full monthly amount). Extra days enroll at ₪0.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='lesson_bundles', verbose_name="חוג")

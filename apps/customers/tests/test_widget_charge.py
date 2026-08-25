@@ -171,6 +171,7 @@ class WidgetChargeIdempotencyTest(TestCase):
             self.child, lesson_b,
             final_amount=Decimal('0.00'),
             registration_fee=Decimal('0.00'),
+            base_amount=Decimal('0.00'),
         )
         res = self.client.post(
             '/api/v1/customers/widget/charge/',
@@ -185,5 +186,5 @@ class WidgetChargeIdempotencyTest(TestCase):
         second.refresh_from_db()
         self.assertEqual(first.status, 'completed')
         self.assertEqual(second.status, 'completed')
-        self.assertEqual(RecurringPayment.objects.filter(child=self.child, status='active').count(), 2)
+        self.assertEqual(RecurringPayment.objects.filter(child=self.child, status='active').count(), 1)
         self.assertTrue(LessonEnrollment.objects.filter(child=self.child, lesson=lesson_b, status='active').exists())

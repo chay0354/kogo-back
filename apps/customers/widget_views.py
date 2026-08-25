@@ -309,7 +309,8 @@ class WidgetRegisterView(APIView):
       success_url, error_url, callback_url
       bundle_id (str) — register for a combined "twice a week" LessonBundle of this
         course instead of the course's first lesson. Creates one Payment per member
-        lesson (each billed at combined_price / lesson_count); response has
+        lesson; the first is billed at combined_price (plus דמי רישום once) and the
+        rest at ₪0 so one standing order matches the widget price. Response has
         `is_bundle: True` and a `payments` list instead of a single payment_id.
       lesson_id (str) — register for this specific Lesson of the course instead of
         the course's first lesson. Ignored if bundle_id is also provided.
@@ -397,8 +398,9 @@ class WidgetRegisterView(APIView):
                         error_url=data.get('error_url', ''),
                         callback_url=data.get('callback_url', ''),
                         bundle_id=str(bundle.id),
-                        # One דמי רישום for the whole twice/thrice-a-week track.
+                        # One דמי רישום and one monthly standing order for the track.
                         include_registration_fee=(index == 0),
+                        include_monthly_amount=(index == 0),
                     )
                     for index, member_lesson in enumerate(bundle.lessons.all())
                 ]
@@ -768,6 +770,7 @@ class WidgetChargeView(APIView):
             payment_full_monthly_amount,
             payment_prorated_lesson_amount,
             saved_card_token_for_child,
+            should_create_recurring_for_payment,
             subscription_tranzila_items,
         )
         from apps.customers.models import Payment, TranzilaTransaction, RecurringPayment
@@ -1008,37 +1011,41 @@ class WidgetChargeView(APIView):
                             payment.id, child.full_name if child else '',
                         )
                     if token and not RecurringPayment.objects.filter(initial_payment=payment).exists():
-                        discount_details = [
-                            {
-                                'name': s.discount_name,
-                                'type': s.discount_type,
-                                'value': str(s.discount_value),
-                                'amount_deducted': str(s.amount_deducted),
-                                'reason': s.reason,
-                            }
-                            for s in payment.discount_snapshots.all()
-                        ]
-                        enrollment_date = date.today()
-                        lesson_dow = lesson.day_of_week if lesson else 1
-                        _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
-                        # Registrations taken before the season starts are billed monthly
-                        # only from that date, so the signup month is never charged.
-                        next_billing_date = deferred_start or next_billing_date
-                        RecurringPayment.objects.create(
+                        monthly_amount = payment_full_monthly_amount(payment)
+                        if should_create_recurring_for_payment(
                             child=child,
-                            initial_payment=payment,
-                            tranzila_token=token,
-                            card_expire_month=expiry_month,
-                            card_expire_year=expiry_year,
-                            status='active',
-                            base_amount=payment.base_amount,
-                            discount_amount=payment.discount_amount,
-                            amount=payment_full_monthly_amount(payment),
-                            discount_details=discount_details,
-                            billing_day=1,
-                            start_date=enrollment_date,
-                            next_billing_date=next_billing_date,
-                        )
+                            bundle=payment.bundle,
+                            monthly_amount=monthly_amount,
+                        ):
+                            discount_details = [
+                                {
+                                    'name': s.discount_name,
+                                    'type': s.discount_type,
+                                    'value': str(s.discount_value),
+                                    'amount_deducted': str(s.amount_deducted),
+                                    'reason': s.reason,
+                                }
+                                for s in payment.discount_snapshots.all()
+                            ]
+                            enrollment_date = date.today()
+                            lesson_dow = lesson.day_of_week if lesson else 1
+                            _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
+                            next_billing_date = deferred_start or next_billing_date
+                            RecurringPayment.objects.create(
+                                child=child,
+                                initial_payment=payment,
+                                tranzila_token=token,
+                                card_expire_month=expiry_month,
+                                card_expire_year=expiry_year,
+                                status='active',
+                                base_amount=payment.base_amount,
+                                discount_amount=payment.discount_amount,
+                                amount=monthly_amount,
+                                discount_details=discount_details,
+                                billing_day=1,
+                                start_date=enrollment_date,
+                                next_billing_date=next_billing_date,
+                            )
 
                     # A card that was only verified has nothing to invoice.
                     if payment.final_amount > 0:

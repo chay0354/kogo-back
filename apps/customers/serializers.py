@@ -606,6 +606,8 @@ class PaymentInitiationRequestSerializer(serializers.Serializer):
     success_url = serializers.URLField(required=False, allow_blank=True)
     error_url = serializers.URLField(required=False, allow_blank=True)
     callback_url = serializers.URLField(required=False, allow_blank=True)
+    include_registration_fee = serializers.BooleanField(required=False, default=True)
+    include_monthly_amount = serializers.BooleanField(required=False, default=True)
 
 
 class PaymentInitiationResponseSerializer(serializers.Serializer):

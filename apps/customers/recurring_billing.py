@@ -42,7 +42,7 @@ def process_due_recurring_charges(*, dry_run: bool = False) -> dict:
 
     due = (
         RecurringPayment.objects
-        .filter(status='active')
+        .filter(status='active', tranzila_recurring_index='')
         .exclude(tranzila_token='')
         .filter(next_billing_date__lte=today)
         .select_related(

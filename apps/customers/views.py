@@ -969,6 +969,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 callback_url=serializer.validated_data.get('callback_url', ''),
                 bundle_id=str(bundle_id) if bundle_id else None,
                 include_registration_fee=bool(request.data.get('include_registration_fee', True)),
+                include_monthly_amount=bool(
+                    serializer.validated_data.get('include_monthly_amount', True)
+                ),
             )
             # Don't re-validate response with a serializer (Decimals/floats can trip it and cause 500).
             return Response(result, status=status.HTTP_201_CREATED)
@@ -1080,6 +1083,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 card_holder_id=card_details.get('card_holder_id', ''),
                 bundle_id=str(bundle_id) if bundle_id else None,
                 include_registration_fee=bool(request.data.get('include_registration_fee', True)),
+                include_monthly_amount=bool(request.data.get('include_monthly_amount', True)),
             )
             if result['success']:
                 return Response(result, status=status.HTTP_200_OK)
@@ -1202,6 +1206,23 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             RecurringPaymentSerializer(updated).data,
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=['post'], url_path='sync-bundle-amounts')
+    def sync_bundle_amounts(self, request):
+        """
+        Fix the earliest split twice/thrice-a-week standing orders.
+
+        POST /api/v1/customers/recurring-payments/sync-bundle-amounts/
+        Body: { "limit": 5 }
+        """
+        from apps.customers.bundle_sto_sync import DEFAULT_LIMIT, apply_bundle_sto_fixes
+
+        try:
+            limit = int(request.data.get('limit', DEFAULT_LIMIT))
+        except (TypeError, ValueError):
+            limit = DEFAULT_LIMIT
+        limit = min(max(limit, 1), DEFAULT_LIMIT)
+        return Response(apply_bundle_sto_fixes(limit=limit), status=status.HTTP_200_OK)
     
     @action(detail=True, methods=['post'])
     def update_subscription(self, request, pk=None):

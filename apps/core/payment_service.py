@@ -125,6 +125,19 @@ def payment_prorated_lesson_amount(payment: Payment) -> Decimal:
     return (payment.final_amount - fee).quantize(Decimal('0.01'))
 
 
+def should_create_recurring_for_payment(*, child, bundle, monthly_amount: Decimal) -> bool:
+    """One standing order per twice/thrice-a-week bundle, at the full widget price."""
+    if monthly_amount <= 0:
+        return False
+    if bundle is None:
+        return True
+    return not RecurringPayment.objects.filter(
+        child=child,
+        status='active',
+        initial_payment__bundle=bundle,
+    ).exists()
+
+
 def saved_card_token_for_child(child) -> str:
     """
     Token already stored for this child from an earlier lesson in the same signup.
@@ -295,12 +308,10 @@ def resolve_billing_price(
     generic "additional lesson" discount should be skipped because a
     per-child/per-lesson discount already applied.
 
-    When bundle_id is given, the lesson is billed at
-    bundle.combined_price / bundle.lessons.count() instead of going through
-    the additional_course_prices tier resolution — a bundle registration
-    creates one Payment per member lesson (see initiate_subscription_payment/
-    charge_subscription_with_card), each at this split price, so per-lesson
-    revenue/instructor-salary reporting stays accurate.
+    When bundle_id is given, the monthly price is the widget combined_price
+    (not combined_price / lesson count). Extra days of the same bundle are
+    billed at ₪0 via include_monthly_amount=False so there is one standing
+    order for the amount the parent saw in the widget.
 
     When price_option_id is given, bill the catalog monthly_price chosen in
     the widget (same physical lesson, different marketing title/price).
@@ -329,7 +340,7 @@ def resolve_billing_price(
         if not bundle.lessons.filter(pk=lesson.pk).exists():
             raise ValueError("השיעור אינו חלק מהמסלול המשולב")
         validate_bundle_capacity(bundle)
-        return bundle.price_per_lesson(), True, course_index, bundle, None
+        return bundle.combined_price, True, course_index, bundle, None
 
     tier_price = get_lesson_price_for_course_index(lesson, course_index)
     regular_price = lesson.course.price
@@ -370,6 +381,7 @@ class PaymentService:
         bundle_id: Optional[str] = None,
         price_option_id: Optional[str] = None,
         include_registration_fee: bool = True,
+        include_monthly_amount: bool = True,
     ) -> Dict:
         """
         Initiate a recurring subscription payment for a child's lesson enrollment.
@@ -389,14 +401,16 @@ class PaymentService:
             success_url: URL to redirect on success
             error_url: URL to redirect on error
             callback_url: Webhook callback URL
-            bundle_id: when set, bill at bundle.combined_price / lesson_count instead
-                of the regular/tiered course price (see resolve_billing_price). Caller
-                is responsible for calling this once per member lesson of the bundle.
+            bundle_id: when set, bill the widget combined_price on the first member
+                lesson (see resolve_billing_price). Caller is responsible for calling
+                this once per member lesson of the bundle.
             price_option_id: when set, bill the widget catalog price for this lesson.
             include_registration_fee: pass False for extra days of a twice/thrice-a-week
                 bundle. Default is true — a standalone lesson still pays דמי רישום.
                 A combined bundle (פעמיים/שלוש בשבוע) pays the fee once, on the first
                 member lesson only.
+            include_monthly_amount: pass False for extra days of a twice/thrice-a-week
+                bundle so only one standing order is created at the full widget price.
 
         Returns:
             Dict with payment_id, tranzila_url, amount, discounts_applied
@@ -414,7 +428,9 @@ class PaymentService:
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
             child, lesson, bundle_id, price_option_id
         )
-        if not base_price:
+        if not include_monthly_amount:
+            base_price = Decimal('0.00')
+        elif not base_price:
             raise ValueError("Lesson/Course price not configured")
 
         # Calculate discounts. If a per-lesson tier (or bundle price) already kicked in for this
@@ -452,6 +468,8 @@ class PaymentService:
             prorate_factor = Decimal('0')
             prorate_lessons_remaining = 0
             next_billing_date = deferred_charge_date
+            prorated_lesson = Decimal('0.00')
+        elif full_monthly_amount <= 0:
             prorated_lesson = Decimal('0.00')
         else:
             prorated_lesson = max(
@@ -665,50 +683,52 @@ class PaymentService:
             
             # Create/update RecurringPayment if this is a subscription
             if payment.payment_type == 'recurring_subscription' and parsed_response.get('token'):
-                # Build discount details from payment discount snapshots
-                discount_details = []
-                for snapshot in payment.discount_snapshots.all():
-                    discount_details.append({
-                        'name': snapshot.discount_name,
-                        'type': snapshot.discount_type,
-                        'value': str(snapshot.discount_value),
-                        'amount_deducted': str(snapshot.amount_deducted),
-                        'reason': snapshot.reason
-                    })
-
-                enrollment_date = payment.created_at.astimezone(JERUSALEM_TZ).date()
-                lesson_dow = payment.lesson.day_of_week if payment.lesson else 1
-                _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
-                if payment_is_fee_only(payment):
-                    # Signup covered דמי רישום only, so monthly billing starts on the
-                    # configured season date rather than the month after signup.
-                    next_billing_date = deferred_first_charge_date(enrollment_date) or next_billing_date
                 full_monthly_amount = payment_full_monthly_amount(payment)
-
-                recurring_payment = RecurringPayment.objects.create(
+                if should_create_recurring_for_payment(
                     child=payment.child,
-                    initial_payment=payment,
-                    tranzila_token=parsed_response['token'],
-                    card_expire_month=parsed_response.get('card_expire_month'),
-                    card_expire_year=parsed_response.get('card_expire_year'),
-                    status='active',
-                    base_amount=payment.base_amount,
-                    discount_amount=payment.discount_amount,
-                    amount=full_monthly_amount,
-                    discount_details=discount_details,
-                    billing_day=1,
-                    start_date=enrollment_date,
-                    next_billing_date=next_billing_date,
-                )
+                    bundle=payment.bundle,
+                    monthly_amount=full_monthly_amount,
+                ):
+                    discount_details = []
+                    for snapshot in payment.discount_snapshots.all():
+                        discount_details.append({
+                            'name': snapshot.discount_name,
+                            'type': snapshot.discount_type,
+                            'value': str(snapshot.discount_value),
+                            'amount_deducted': str(snapshot.amount_deducted),
+                            'reason': snapshot.reason
+                        })
+
+                    enrollment_date = payment.created_at.astimezone(JERUSALEM_TZ).date()
+                    lesson_dow = payment.lesson.day_of_week if payment.lesson else 1
+                    _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
+                    if payment_is_fee_only(payment):
+                        next_billing_date = deferred_first_charge_date(enrollment_date) or next_billing_date
+
+                    recurring_payment = RecurringPayment.objects.create(
+                        child=payment.child,
+                        initial_payment=payment,
+                        tranzila_token=parsed_response['token'],
+                        card_expire_month=parsed_response.get('card_expire_month'),
+                        card_expire_year=parsed_response.get('card_expire_year'),
+                        status='active',
+                        base_amount=payment.base_amount,
+                        discount_amount=payment.discount_amount,
+                        amount=full_monthly_amount,
+                        discount_details=discount_details,
+                        billing_day=1,
+                        start_date=enrollment_date,
+                        next_billing_date=next_billing_date,
+                    )
                 
-                log_payment_operation(
-                    "RECURRING_CREATED",
-                    recurring_id=recurring_payment.id,
-                    child_id=payment.child.id,
-                    base_amount=payment.base_amount,
-                    discount_amount=payment.discount_amount,
-                    final_amount=payment.final_amount
-                )
+                    log_payment_operation(
+                        "RECURRING_CREATED",
+                        recurring_id=recurring_payment.id,
+                        child_id=payment.child.id,
+                        base_amount=payment.base_amount,
+                        discount_amount=payment.discount_amount,
+                        final_amount=payment.final_amount
+                    )
             
             # Create Invoice
             invoice = self._create_invoice_from_payment(payment, tranzila_transaction)
@@ -820,17 +840,20 @@ class PaymentService:
         bundle_id: Optional[str] = None,
         price_option_id: Optional[str] = None,
         include_registration_fee: bool = True,
+        include_monthly_amount: bool = True,
     ) -> Dict:
         """
         Charge a subscription payment directly with card details (synchronous, no iframe/webhook).
         Reuses the same pricing/discount logic as initiate_subscription_payment and the same
         post-success logic as process_webhook_callback.
 
-        bundle_id: when set, bill at bundle.combined_price / lesson_count (see resolve_billing_price).
+        bundle_id: when set, bill the widget combined_price on the first member lesson.
         price_option_id: when set, bill the widget catalog price for this lesson.
         include_registration_fee: pass False only when explicitly opting out (rare).
             Default is true — דמי רישום per standalone lesson. For a twice/thrice-a-week
             bundle, callers must pass False on every member after the first.
+        include_monthly_amount: pass False for extra bundle days so one standing order
+            is created at the full widget price.
         """
         if payment_date is None:
             payment_date = date.today()
@@ -858,7 +881,9 @@ class PaymentService:
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
             child, lesson, bundle_id, price_option_id
         )
-        if not base_price:
+        if not include_monthly_amount:
+            base_price = Decimal('0.00')
+        elif not base_price:
             raise ValueError("Lesson/Course price not configured")
 
         if used_lesson_tier:
@@ -887,6 +912,8 @@ class PaymentService:
         deferred_charge_date_c = deferred_first_charge_date(payment_date)
         if deferred_charge_date_c:
             next_billing_date_c = deferred_charge_date_c
+            prorated_lesson_c = Decimal('0.00')
+        elif full_monthly_amount_c <= 0:
             prorated_lesson_c = Decimal('0.00')
         else:
             prorated_lesson_c = max(
@@ -1020,21 +1047,26 @@ class PaymentService:
                     }
                     for s in payment.discount_snapshots.all()
                 ]
-                RecurringPayment.objects.create(
+                if should_create_recurring_for_payment(
                     child=child,
-                    initial_payment=payment,
-                    tranzila_token=token,
-                    card_expire_month=expiry_month,
-                    card_expire_year=expiry_year,
-                    status='active',
-                    base_amount=payment.base_amount,
-                    discount_amount=payment.discount_amount,
-                    amount=full_monthly_amount_c,
-                    discount_details=discount_details,
-                    billing_day=1,
-                    start_date=payment_date,
-                    next_billing_date=next_billing_date_c,
-                )
+                    bundle=bundle,
+                    monthly_amount=full_monthly_amount_c,
+                ):
+                    RecurringPayment.objects.create(
+                        child=child,
+                        initial_payment=payment,
+                        tranzila_token=token,
+                        card_expire_month=expiry_month,
+                        card_expire_year=expiry_year,
+                        status='active',
+                        base_amount=payment.base_amount,
+                        discount_amount=payment.discount_amount,
+                        amount=full_monthly_amount_c,
+                        discount_details=discount_details,
+                        billing_day=1,
+                        start_date=payment_date,
+                        next_billing_date=next_billing_date_c,
+                    )
 
             # Invoice (nothing to invoice when the card was only verified)
             invoice = (
