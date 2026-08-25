@@ -532,23 +532,61 @@ class PaymentSerializer(serializers.ModelSerializer):
         ]
 
 
+class RecurringPaymentInitialPaymentSlimSerializer(serializers.ModelSerializer):
+    """Lesson/branch labels for standing-order lists — avoids N+1 on nested payment graphs."""
+    lesson_name = serializers.SerializerMethodField()
+    lesson_course_display_id = serializers.SerializerMethodField()
+    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+
+    def get_lesson_name(self, obj):
+        if obj.lesson_id and obj.lesson and obj.lesson.course:
+            return obj.lesson.course.name
+        return None
+
+    def get_lesson_course_display_id(self, obj):
+        if obj.lesson_id and obj.lesson and obj.lesson.course:
+            return obj.lesson.course.display_id
+        return None
+
+    class Meta:
+        model = Payment
+        fields = ['id', 'description', 'lesson_name', 'lesson_course_display_id', 'branch_name']
+
+
 class RecurringPaymentSerializer(serializers.ModelSerializer):
     """מנוי חוזר - Recurring subscription details"""
     child_name = serializers.CharField(source='child.full_name', read_only=True)
-    initial_payment_details = PaymentSerializer(source='initial_payment', read_only=True)
-    
+    initial_payment_details = RecurringPaymentInitialPaymentSlimSerializer(
+        source='initial_payment', read_only=True, allow_null=True
+    )
+    course_name = serializers.SerializerMethodField()
+    branch_name = serializers.SerializerMethodField()
+
+    def get_course_name(self, obj):
+        payment = obj.initial_payment
+        if payment and payment.lesson_id and payment.lesson and payment.lesson.course:
+            return payment.lesson.course.name
+        return None
+
+    def get_branch_name(self, obj):
+        payment = obj.initial_payment
+        if payment and payment.branch_id and payment.branch:
+            return payment.branch.name
+        return None
+
     class Meta:
         model = RecurringPayment
         fields = [
             'id', 'child', 'child_name', 'initial_payment', 'initial_payment_details',
+            'course_name', 'branch_name',
             'status', 'amount', 'pending_amount', 'pending_amount_effective_date',
             'billing_day', 'start_date', 'end_date',
             'next_billing_date', 'last_charge_date', 'cancelled_at',
             'cancellation_reason', 'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'child_name', 'initial_payment_details', 'tranzila_token',
-            'tranzila_recurring_index', 'created_at', 'updated_at'
+            'id', 'child_name', 'initial_payment_details', 'course_name', 'branch_name',
+            'tranzila_token', 'tranzila_recurring_index', 'created_at', 'updated_at'
         ]
 
 

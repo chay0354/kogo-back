@@ -1147,6 +1147,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
     )
     serializer_class = RecurringPaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    pagination_class = None
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['child__first_name', 'child__last_name']
     ordering_fields = ['created_at', 'next_billing_date', 'amount']
@@ -1164,21 +1165,14 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             queryset, self.request.user, 'initial_payment__lesson__course'
         )
 
-        # Filter by child if provided
         child_id = self.request.query_params.get('child_id')
         if child_id:
             queryset = queryset.filter(child_id=child_id)
-        
-        # Filter by status if provided
+
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
-        
-        # Filter by child if provided
-        child_id = self.request.query_params.get('child_id')
-        if child_id:
-            queryset = queryset.filter(child_id=child_id)
-        
+
         return queryset
 
     @action(detail=True, methods=['post'], url_path='schedule-amount')
