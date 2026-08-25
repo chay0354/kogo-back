@@ -125,6 +125,25 @@ def payment_prorated_lesson_amount(payment: Payment) -> Decimal:
     return (payment.final_amount - fee).quantize(Decimal('0.01'))
 
 
+def saved_card_token_for_child(child) -> str:
+    """
+    Token already stored for this child from an earlier lesson in the same signup.
+
+    A twice-a-week bundle charges דמי רישום on the first day only; the other days
+    are ₪0 and must not call Tranzila verify (that path returned schema 20004).
+    """
+    if child is None:
+        return ''
+    rec = (
+        RecurringPayment.objects
+        .filter(child=child, status='active')
+        .exclude(tranzila_token='')
+        .order_by('-created_at')
+        .first()
+    )
+    return (rec.tranzila_token or '').strip() if rec else ''
+
+
 def payment_is_fee_only(payment: Payment) -> bool:
     """
     True when a signup charge covers no lesson month, only דמי רישום (or nothing).
@@ -935,18 +954,27 @@ class PaymentService:
                 duplicate_guard_key=f'payment-{payment.id}',
             )
         else:
-            # Nothing is due today (bundle member lesson with no דמי רישום), so the card
-            # is only verified to obtain the token the monthly billing will need.
-            result = self.tranzila_service.verify_card(
-                card_number=card_number,
-                expiry_month=expiry_month,
-                expiry_year=expiry_year,
-                cvv=cvv,
-                card_holder_id=card_holder_id,
-                amount=full_monthly_amount_c,
-                description=payment.description,
-                duplicate_guard_key=f'verify-{payment.id}',
-            )
+            reused = saved_card_token_for_child(child)
+            if reused:
+                result = {
+                    'success': True,
+                    'token': reused,
+                    'transaction_id': '',
+                    'confirmation_code': '',
+                    'response_code': '000',
+                    'raw_response': {'reused_saved_card': True},
+                }
+            else:
+                result = self.tranzila_service.verify_card(
+                    card_number=card_number,
+                    expiry_month=expiry_month,
+                    expiry_year=expiry_year,
+                    cvv=cvv,
+                    card_holder_id=card_holder_id,
+                    amount=full_monthly_amount_c,
+                    description=payment.description,
+                    duplicate_guard_key=f'verify-{payment.id}',
+                )
 
         if result['success']:
             payment.status = 'completed'
@@ -1791,14 +1819,15 @@ class PaymentService:
                 'error': 'לא נמצא קוד אישור לעסקה'
             }
         
-        # Get card expiration and token from active recurring payment
+        # Prefer the saved card from THIS payment's subscription. A child with two
+        # lessons can have two tokens; .first() on the child would refund the wrong one.
         card_expire_month = None
         card_expire_year = None
         token = None
         if payment.child:
             recurring = payment.child.recurring_payments.filter(
-                status='active'
-            ).first()
+                initial_payment=payment,
+            ).first() or payment.child.recurring_payments.filter(status='active').first()
             if recurring:
                 card_expire_month = recurring.card_expire_month
                 card_expire_year = recurring.card_expire_year

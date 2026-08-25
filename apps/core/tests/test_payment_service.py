@@ -757,6 +757,48 @@ class DeferredSubscriptionStartTest(TestCase):
         self.assertEqual(recurring.amount, Decimal('260.00'))
         self.assertEqual(recurring.next_billing_date, self.start_date)
 
+    @patch('apps.core.payment_service.TranzilaService.verify_card')
+    @patch('apps.core.payment_service.TranzilaService.charge_with_card')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_zero_amount_reuses_existing_token_without_verify(self, mock_discount, mock_charge, mock_verify):
+        """Second bundle day is ₪0; do not call Tranzila verify if a token already exists."""
+        mock_discount.return_value = self.discount_calculation
+        RecurringPayment.objects.create(
+            child=self.child,
+            tranzila_token='already-saved-token',
+            card_expire_month=12,
+            card_expire_year=2030,
+            status='active',
+            base_amount=Decimal('260.00'),
+            discount_amount=Decimal('0.00'),
+            amount=Decimal('260.00'),
+            billing_day=1,
+            start_date=date.today(),
+            next_billing_date=self.start_date,
+        )
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE=self.start_date.isoformat()):
+            result = self.service.charge_subscription_with_card(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+                card_number='4580458045804580',
+                expiry_month=12,
+                expiry_year=2030,
+                cvv='123',
+                card_holder_id='123456782',
+                include_registration_fee=False,
+            )
+
+        self.assertTrue(result['success'])
+        mock_charge.assert_not_called()
+        mock_verify.assert_not_called()
+        payment = Payment.objects.get(id=result['payment_id'])
+        self.assertEqual(payment.final_amount, Decimal('0.00'))
+        self.assertEqual(
+            RecurringPayment.objects.filter(initial_payment=payment).get().tranzila_token,
+            'already-saved-token',
+        )
+
     def test_first_monthly_charge_bills_the_full_month(self):
         """On the start date the recurring cron charges the plain monthly price."""
         from apps.customers.recurring_billing import process_due_recurring_charges

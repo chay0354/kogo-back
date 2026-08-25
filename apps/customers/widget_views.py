@@ -767,6 +767,7 @@ class WidgetChargeView(APIView):
             deferred_first_charge_date,
             payment_full_monthly_amount,
             payment_prorated_lesson_amount,
+            saved_card_token_for_child,
             subscription_tranzila_items,
         )
         from apps.customers.models import Payment, TranzilaTransaction, RecurringPayment
@@ -885,18 +886,30 @@ class WidgetChargeView(APIView):
                 duplicate_guard_key=f'payment-{payment.id}',
             )
         else:
-            # Nothing is due today (bundle member lesson with no דמי רישום), so the card
-            # is only verified to obtain the token the monthly billing will need.
-            result = tranzila.verify_card(
-                card_number=card_number,
-                expiry_month=expiry_month,
-                expiry_year=expiry_year,
-                cvv=cvv,
-                card_holder_id=card_holder_id,
-                amount=payment_full_monthly_amount(payment),
-                description=charge_description,
-                duplicate_guard_key=f'verify-{payment.id}',
-            )
+            # Nothing is due today (bundle member with no דמי רישום). Reuse the
+            # token from the first day in this signup — a second Tranzila verify
+            # was returning 20004 and aborting the rest of the checkout.
+            reused = saved_card_token_for_child(child)
+            if reused:
+                result = {
+                    'success': True,
+                    'token': reused,
+                    'transaction_id': '',
+                    'confirmation_code': '',
+                    'response_code': '000',
+                    'raw_response': {'reused_saved_card': True},
+                }
+            else:
+                result = tranzila.verify_card(
+                    card_number=card_number,
+                    expiry_month=expiry_month,
+                    expiry_year=expiry_year,
+                    cvv=cvv,
+                    card_holder_id=card_holder_id,
+                    amount=payment_full_monthly_amount(payment),
+                    description=charge_description,
+                    duplicate_guard_key=f'verify-{payment.id}',
+                )
 
         if result['success']:
             enrollment_id_for_whatsapp = None

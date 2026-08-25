@@ -827,9 +827,10 @@ class TranzilaService:
         """
         Validate a card and return a reusable token WITHOUT taking any money (J2).
 
-        txn_type 'verify' with verfiy_mode 2 only checks the card against the issuer,
-        so this is how a registration can save the card in one month and charge it in
-        the next. The amount is only what the issuer checks against, never captured.
+        txn_type 'verify' with verify_mode 2 only checks the card against the issuer.
+        Tranzila's current REST schema uses the correctly spelled `verify_mode`
+        and a minimal item (name/type/unit_price/units_number). Extra item fields
+        or the old `verfiy_mode` typo return application error 20004.
         https://docs.tranzila.com/docs/payments-and-billing/tranzila-transactions-api-1/create-a-credit-card-transaction
         """
         credential_error = self.credential_error()
@@ -839,21 +840,17 @@ class TranzilaService:
         payload = {
             'terminal_name': self.terminal,
             'txn_type': 'verify',
-            # Tranzila's own schema misspells this parameter; it must be sent as-is.
-            'verfiy_mode': 2,
+            'verify_mode': 2,
             'txn_currency_code': 'ILS',
             'card_number': card_number,
             'expire_month': expiry_month,
             'expire_year': expiry_year,
             'cvv': cvv,
             'items': [{
-                'name': description or 'אימות כרטיס',
+                'name': (description or 'אימות כרטיס')[:50],
                 'type': 'I',
-                'unit_price': float(amount),
+                'unit_price': float(amount) if amount and amount > 0 else 1.0,
                 'units_number': 1,
-                'unit_type': 1,
-                'price_type': 'G',
-                'currency_code': 'ILS',
             }],
         }
         # Schema requires exactly 9 digits; an empty string is a 20004 mismatch.

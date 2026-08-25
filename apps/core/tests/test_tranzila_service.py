@@ -134,6 +134,33 @@ class TranzilaServicePaymentRequestTest(TestCase):
         self.assertEqual(payload['txn_type'], 'debit')
         self.assertNotIn('DCdisable', payload)
 
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_verify_card_uses_documented_verify_mode_and_minimal_item(self, mock_api):
+        mock_api.return_value = {
+            'error_code': 0,
+            'message': 'ok',
+            'transaction_result': {
+                'transaction_id': 12,
+                'processor_response_code': '000',
+                'token': 'verify-token',
+            },
+        }
+        result = self.service.verify_card(
+            card_number='4580458045804580',
+            expiry_month=12,
+            expiry_year=2027,
+            cvv='123',
+            card_holder_id='123456782',
+            amount=Decimal('350.00'),
+        )
+        self.assertTrue(result['success'])
+        payload = mock_api.call_args.kwargs['params']
+        self.assertEqual(payload['txn_type'], 'verify')
+        self.assertEqual(payload['verify_mode'], 2)
+        self.assertNotIn('verfiy_mode', payload)
+        item = payload['items'][0]
+        self.assertEqual(set(item), {'name', 'type', 'unit_price', 'units_number'})
+
     def test_currency_code_conversion(self):
         """Test currency code conversion (ILS=1)"""
         url = self.service.create_payment_request(
