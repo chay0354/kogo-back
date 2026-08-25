@@ -122,7 +122,7 @@ class WidgetBundleRegistrationTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
     @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment')
-    def test_bundle_charges_registration_fee_per_lesson(self, mock_discount, _mock_tranzila):
+    def test_bundle_charges_registration_fee_once(self, mock_discount, _mock_tranzila):
         from apps.customers.discount_service import DiscountCalculation
 
         mock_discount.side_effect = lambda **kwargs: DiscountCalculation(
@@ -143,9 +143,9 @@ class WidgetBundleRegistrationTest(TestCase):
         self.assertEqual(res.status_code, 201, res.content)
         body = res.json()
         self.assertTrue(body['is_bundle'])
-        self.assertEqual(body['registration_fee'], 240.0)
+        self.assertEqual(body['registration_fee'], 120.0)
         fees = [p['registration_fee'] for p in body['payments']]
-        self.assertEqual(fees, [120.0, 120.0])
+        self.assertEqual(fees, [120.0, 0.0])
 
 
 class BillingIndexInflightTest(TestCase):

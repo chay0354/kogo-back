@@ -315,7 +315,8 @@ class WidgetRegisterView(APIView):
         the course's first lesson. Ignored if bundle_id is also provided.
       price_option_id (str) — register at an extra catalog price for the lesson.
         Ignored if bundle_id is provided.
-      include_registration_fee (bool) — optional; defaults to true (דמי רישום per lesson).
+      include_registration_fee (bool) — optional; defaults to true for a single lesson.
+        For a twice/thrice-a-week bundle the fee is applied once, on the first member.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -396,8 +397,10 @@ class WidgetRegisterView(APIView):
                         error_url=data.get('error_url', ''),
                         callback_url=data.get('callback_url', ''),
                         bundle_id=str(bundle.id),
+                        # One דמי רישום for the whole twice/thrice-a-week track.
+                        include_registration_fee=(index == 0),
                     )
-                    for member_lesson in bundle.lessons.all()
+                    for index, member_lesson in enumerate(bundle.lessons.all())
                 ]
                 return Response({
                     'is_bundle': True,

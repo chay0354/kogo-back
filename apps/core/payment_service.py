@@ -63,7 +63,7 @@ def parse_store_cart_notes(notes: Optional[str]) -> Optional[list]:
 
 
 def registration_fee_amount() -> Decimal:
-    """One-time registration fee for each new lesson subscription."""
+    """One-time registration fee added to a new lesson subscription."""
     raw = getattr(settings, 'REGISTRATION_FEE_ILS', 120)
     try:
         fee = Decimal(str(raw or 0))
@@ -374,8 +374,10 @@ class PaymentService:
                 of the regular/tiered course price (see resolve_billing_price). Caller
                 is responsible for calling this once per member lesson of the bundle.
             price_option_id: when set, bill the widget catalog price for this lesson.
-            include_registration_fee: pass False only when explicitly opting out (rare).
-                Default is true — דמי רישום is charged per lesson subscription.
+            include_registration_fee: pass False for extra days of a twice/thrice-a-week
+                bundle. Default is true — a standalone lesson still pays דמי רישום.
+                A combined bundle (פעמיים/שלוש בשבוע) pays the fee once, on the first
+                member lesson only.
 
         Returns:
             Dict with payment_id, tranzila_url, amount, discounts_applied
@@ -808,7 +810,8 @@ class PaymentService:
         bundle_id: when set, bill at bundle.combined_price / lesson_count (see resolve_billing_price).
         price_option_id: when set, bill the widget catalog price for this lesson.
         include_registration_fee: pass False only when explicitly opting out (rare).
-            Default is true — דמי רישום per lesson.
+            Default is true — דמי רישום per standalone lesson. For a twice/thrice-a-week
+            bundle, callers must pass False on every member after the first.
         """
         if payment_date is None:
             payment_date = date.today()
