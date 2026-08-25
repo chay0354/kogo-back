@@ -1,7 +1,11 @@
 """
 Fix split twice/thrice-a-week standing orders to one amount = widget combined_price
-(minus discounts once). The monthly amount is updated on Tranzila; extra STOs
-on the same token are inactivated there, and extra CRM rows are cancelled.
+(minus discounts once).
+
+Whoever holds the schedule for that card gets corrected: when Tranzila has a
+standing order its amount is replaced there and duplicates are inactivated;
+otherwise the CRM cron is the biller and only its amount changes. Extra CRM rows
+are cancelled either way.
 """
 from __future__ import annotations
 
@@ -16,10 +20,7 @@ from django.utils import timezone
 from apps.core.tranzila_service import TranzilaService
 from apps.courses.models import LessonBundle
 from apps.customers.models import RecurringPayment
-from apps.customers.recurring_amount import (
-    effective_date_for_amount_change,
-    schedule_recurring_amount,
-)
+from apps.customers.recurring_amount import schedule_recurring_amount
 from apps.enrollments.models import LessonEnrollment
 
 Q2 = Decimal('0.01')
@@ -289,12 +290,6 @@ def apply_bundle_sto_fixes(limit: int = DEFAULT_LIMIT) -> dict:
             token=token,
             amount=fix.expected,
             item_name=fix.course_name,
-            expire_month=keep.card_expire_month,
-            expire_year=keep.card_expire_year,
-            charge_dom=keep.billing_day or 1,
-            first_charge_date=effective_date_for_amount_change(keep),
-            client_name=fix.child_name,
-            client_phone=fix.phone,
         )
         if not gateway.get('success'):
             failed.append({
@@ -322,9 +317,11 @@ def apply_bundle_sto_fixes(limit: int = DEFAULT_LIMIT) -> dict:
             if not _close(old_amount, fix.expected, Decimal('0.00')):
                 updated = schedule_recurring_amount(keep, fix.expected)
             sto_id = str(gateway.get('sto_id') or '')
-            RecurringPayment.objects.filter(pk=updated.pk).update(
-                tranzila_recurring_index=sto_id,
-            )
+            if sto_id:
+                # Tranzila now owns the schedule, so the CRM cron must stand down.
+                RecurringPayment.objects.filter(pk=updated.pk).update(
+                    tranzila_recurring_index=sto_id,
+                )
             updated.refresh_from_db()
             synced.append({
                 'child': fix.child_name,

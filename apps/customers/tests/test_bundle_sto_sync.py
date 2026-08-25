@@ -212,6 +212,36 @@ class BundleStoSyncAPITests(TestCase):
         self.assertEqual(second.json()['synced'][0]['child'].split()[0], 'ויויאן')
 
     @patch('apps.customers.bundle_sto_sync.TranzilaService.production')
+    def test_crm_billed_child_is_fixed_without_handing_billing_to_tranzila(self, mock_production):
+        mock_production.return_value.sync_standing_order_to_amount.return_value = {
+            'success': True,
+            'sto_id': None,
+            'action': 'none',
+            'inactivated': [],
+        }
+        child, rp = self._sto('אלון', amount=Decimal('170.00'), created_offset_minutes=0, extra_lesson=self.lesson_b)
+
+        res = self.client.post(
+            '/api/v1/customers/recurring-payments/sync-bundle-amounts/',
+            {'limit': 5},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        body = res.json()
+        self.assertEqual(body['synced_count'], 1)
+        self.assertEqual(body['synced'][0]['new_amount'], '350.00')
+        self.assertEqual(body['synced'][0]['tranzila_sto_id'], '')
+
+        rp.refresh_from_db()
+        self.assertEqual(rp.pending_amount, Decimal('350.00'))
+        # Empty index keeps the row in the CRM cron queryset, which is the biller here.
+        self.assertEqual(rp.tranzila_recurring_index, '')
+        self.assertEqual(
+            RecurringPayment.objects.filter(child=child, status='active').count(),
+            1,
+        )
+
+    @patch('apps.customers.bundle_sto_sync.TranzilaService.production')
     def test_tranzila_failure_does_not_change_crm(self, mock_production):
         mock_production.return_value.sync_standing_order_to_amount.return_value = {
             'success': False,

@@ -75,6 +75,14 @@ def is_tranzila_rest_ok(error_code) -> bool:
     return str(error_code).strip() in TRANZILA_REST_OK_CODES
 
 
+def _is_no_stos_found(response: Optional[Dict]) -> bool:
+    """True when /v1/stos/get reports an empty result rather than a real failure."""
+    if not isinstance(response, dict):
+        return False
+    message = str(response.get('message') or response.get('error') or '').lower()
+    return 'no sto' in message
+
+
 def is_tranzila_duplicate_paid(response: Optional[Dict]) -> bool:
     """
     True when Tranzila refused a second charge because DCdisable already succeeded.
@@ -1087,6 +1095,10 @@ class TranzilaService:
         )
         if is_tranzila_rest_ok(response.get('error_code')):
             return self._build_success_response(stos=response.get('stos') or [], raw=response)
+        if _is_no_stos_found(response):
+            # "No STOs found" is an empty result, not a gateway failure: this card
+            # is billed by the CRM cron and never had a Tranzila standing order.
+            return self._build_success_response(stos=[], raw=response)
         return self._build_error_response(
             response.get('message') or response.get('error') or 'STO lookup failed',
             str(response.get('error_code') or response.get('response_code') or '999'),
@@ -1194,12 +1206,17 @@ class TranzilaService:
         first_charge_date: Optional[date] = None,
         client_name: str = '',
         client_phone: str = '',
+        create_if_missing: bool = False,
     ) -> Dict:
         """
         Make Tranzila charge `amount` monthly for this token.
 
-        Updates one existing active STO via V2 items replace; inactivates extras;
-        creates an STO if none exist.
+        Updates one existing active STO via V2 items replace and inactivates extras.
+
+        When the token has no Tranzila standing order, returns action='none': the
+        CRM cron is the biller for that card, and creating a gateway STO here would
+        move the charge to a schedule that never reports Payments/Invoices back.
+        Pass create_if_missing=True only when the CRM should hand billing over.
         """
         if not token:
             return self._build_error_response('אין טוקן כרטיס בטרנזילה')
@@ -1239,6 +1256,9 @@ class TranzilaService:
                 action='updated',
                 inactivated=inactivated,
             )
+
+        if not create_if_missing:
+            return self._build_success_response(sto_id=None, action='none', inactivated=[])
 
         if not expire_month or not expire_year or not first_charge_date:
             return self._build_error_response(

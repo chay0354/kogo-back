@@ -634,6 +634,31 @@ class TranzilaRestChargeParseTest(TestCase):
         self.assertEqual(mock_request.call_args_list[2].kwargs['params']['sto_status'], 'inactive')
 
     @patch.object(TranzilaService, '_make_api_request')
+    def test_sync_leaves_billing_with_the_crm_when_no_sto_exists(self, mock_request):
+        """Cards the CRM cron bills have no gateway STO — don't invent one."""
+        mock_request.return_value = {'error_code': 0, 'stos': []}
+        result = self.service.sync_standing_order_to_amount(
+            token='tok-1',
+            amount=Decimal('350.00'),
+            item_name='קפוארה',
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['action'], 'none')
+        self.assertIsNone(result['sto_id'])
+        self.assertEqual(mock_request.call_count, 1)
+
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_no_stos_found_is_an_empty_result_not_a_failure(self, mock_request):
+        mock_request.return_value = {'error_code': 20302, 'message': 'No STOs found'}
+        result = self.service.sync_standing_order_to_amount(
+            token='tok-1',
+            amount=Decimal('350.00'),
+            item_name='קפוארה',
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['action'], 'none')
+
+    @patch.object(TranzilaService, '_make_api_request')
     def test_sync_creates_sto_when_lookup_is_empty(self, mock_request):
         mock_request.side_effect = [
             {'error_code': 0, 'stos': []},
@@ -646,6 +671,7 @@ class TranzilaRestChargeParseTest(TestCase):
             expire_month=12,
             expire_year=2028,
             first_charge_date=date(2026, 9, 1),
+            create_if_missing=True,
         )
         self.assertTrue(result['success'])
         self.assertEqual(result['sto_id'], 9901)
