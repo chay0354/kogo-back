@@ -319,7 +319,7 @@ class PaymentServiceLessonBundleTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
-    def test_bundle_member_can_skip_registration_fee(self, mock_discount, mock_tranzila):
+    def test_bundle_charges_registration_fee_per_lesson(self, mock_discount, mock_tranzila):
         mock_discount.side_effect = self.passthrough_discount
         mock_tranzila.return_value = "https://tranzila.test/payment"
 
@@ -327,17 +327,14 @@ class PaymentServiceLessonBundleTest(TestCase):
             child_id=str(self.child.id),
             lesson_id=str(self.lesson_a.id),
             bundle_id=str(self.bundle.id),
-            include_registration_fee=True,
         )
         second = self.service.initiate_subscription_payment(
             child_id=str(self.child.id),
             lesson_id=str(self.lesson_b.id),
             bundle_id=str(self.bundle.id),
-            include_registration_fee=False,
         )
         self.assertEqual(first['registration_fee'], 120.00)
-        self.assertEqual(second['registration_fee'], 0.00)
-        self.assertGreater(first['final_amount'], second['final_amount'])
+        self.assertEqual(second['registration_fee'], 120.00)
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')

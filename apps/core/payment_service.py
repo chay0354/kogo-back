@@ -374,8 +374,8 @@ class PaymentService:
                 of the regular/tiered course price (see resolve_billing_price). Caller
                 is responsible for calling this once per member lesson of the bundle.
             price_option_id: when set, bill the widget catalog price for this lesson.
-            include_registration_fee: pass False for every member lesson of a bundle
-                after the first, so the one-time דמי רישום is charged once per bundle.
+            include_registration_fee: pass False only when explicitly opting out (rare).
+                Default is true — דמי רישום is charged per lesson subscription.
 
         Returns:
             Dict with payment_id, tranzila_url, amount, discounts_applied
@@ -807,8 +807,8 @@ class PaymentService:
 
         bundle_id: when set, bill at bundle.combined_price / lesson_count (see resolve_billing_price).
         price_option_id: when set, bill the widget catalog price for this lesson.
-        include_registration_fee: pass False for bundle member lessons after the first, so the
-            one-time דמי רישום is charged once per bundle rather than per lesson.
+        include_registration_fee: pass False only when explicitly opting out (rare).
+            Default is true — דמי רישום per lesson.
         """
         if payment_date is None:
             payment_date = date.today()

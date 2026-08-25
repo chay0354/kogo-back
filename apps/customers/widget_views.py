@@ -308,8 +308,7 @@ class WidgetRegisterView(APIView):
         the course's first lesson. Ignored if bundle_id is also provided.
       price_option_id (str) — register at an extra catalog price for the lesson.
         Ignored if bundle_id is provided.
-      include_registration_fee (bool) — pass false for extra lessons after the first
-        in the same checkout (same child). Bundles ignore this and charge the fee once.
+      include_registration_fee (bool) — optional; defaults to true (דמי רישום per lesson).
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -382,8 +381,6 @@ class WidgetRegisterView(APIView):
         # ── 3. Initiate payment (pricing + pending Payment record) ───────
         try:
             if bundle:
-                # A bundle is one subscription sold as "twice a week", so דמי רישום is
-                # charged once for it — not once per member lesson.
                 payments = [
                     PaymentService().initiate_subscription_payment(
                         child_id=str(child.id),
@@ -392,9 +389,8 @@ class WidgetRegisterView(APIView):
                         error_url=data.get('error_url', ''),
                         callback_url=data.get('callback_url', ''),
                         bundle_id=str(bundle.id),
-                        include_registration_fee=(index == 0),
                     )
-                    for index, member_lesson in enumerate(bundle.lessons.all())
+                    for member_lesson in bundle.lessons.all()
                 ]
                 return Response({
                     'is_bundle': True,
