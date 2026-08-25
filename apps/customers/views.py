@@ -1212,8 +1212,10 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         """
         Fix the earliest split twice/thrice-a-week standing orders.
 
+        Returns `remaining`; call again until it reaches 0 to cover everyone.
+
         POST /api/v1/customers/recurring-payments/sync-bundle-amounts/
-        Body: { "limit": 5 }
+        Body: { "limit": 20 }
         """
         from apps.customers.bundle_sto_sync import DEFAULT_LIMIT, apply_bundle_sto_fixes
 

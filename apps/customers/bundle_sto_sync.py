@@ -26,7 +26,9 @@ from apps.enrollments.models import LessonEnrollment
 Q2 = Decimal('0.01')
 SKIP_NAME_FRAGMENTS = ('ניסיון', 'test', 'טסט')
 CANCEL_REASON = 'סנכרון מסלול משולב — הוראת קבע כפולה'
-DEFAULT_LIMIT = 5
+# Batch size per request: the caller repeats until `remaining` is 0, so this only
+# has to stay under the serverless request timeout, not cover every child at once.
+DEFAULT_LIMIT = 20
 
 
 def _d(value) -> Decimal:
