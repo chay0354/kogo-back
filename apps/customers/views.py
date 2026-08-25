@@ -1215,7 +1215,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         Returns `remaining`; call again until it reaches 0 to cover everyone.
 
         POST /api/v1/customers/recurring-payments/sync-bundle-amounts/
-        Body: { "limit": 20 }
+        Body: { "limit": 5 }
         """
         from apps.customers.bundle_sto_sync import DEFAULT_LIMIT, apply_bundle_sto_fixes
 
