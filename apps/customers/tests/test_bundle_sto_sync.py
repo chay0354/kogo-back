@@ -211,6 +211,41 @@ class BundleStoSyncAPITests(TestCase):
         self.assertEqual(second.json()['remaining'], 0)
         self.assertEqual(second.json()['synced'][0]['child'].split()[0], 'ויויאן')
 
+        third = self.client.post(
+            '/api/v1/customers/recurring-payments/sync-bundle-amounts/',
+            {'limit': 5},
+            format='json',
+        )
+        self.assertEqual(third.status_code, 200, third.content)
+        self.assertEqual(third.json()['synced_count'], 0)
+        self.assertEqual(third.json()['failed_count'], 0)
+        self.assertEqual(third.json()['remaining'], 0)
+
+    @patch('apps.customers.bundle_sto_sync.TranzilaService.production')
+    def test_child_with_a_raise_already_scheduled_is_left_alone(self, mock_production):
+        mock_production.return_value.sync_standing_order_to_amount.return_value = {
+            'success': True,
+            'sto_id': 4411,
+            'action': 'updated',
+            'inactivated': [],
+        }
+        _, rp = self._sto('אלון', amount=Decimal('170.00'), created_offset_minutes=0)
+        rp.pending_amount = Decimal('340.00')
+        rp.pending_amount_effective_date = date(2026, 9, 1)
+        rp.save(update_fields=['pending_amount', 'pending_amount_effective_date'])
+
+        res = self.client.post(
+            '/api/v1/customers/recurring-payments/sync-bundle-amounts/',
+            {'limit': 5},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()['synced_count'], 0)
+        self.assertEqual(res.json()['remaining'], 0)
+        mock_production.return_value.sync_standing_order_to_amount.assert_not_called()
+        rp.refresh_from_db()
+        self.assertEqual(rp.pending_amount, Decimal('340.00'))
+
     @patch('apps.customers.bundle_sto_sync.TranzilaService.production')
     def test_crm_billed_child_is_fixed_without_handing_billing_to_tranzila(self, mock_production):
         mock_production.return_value.sync_standing_order_to_amount.return_value = {

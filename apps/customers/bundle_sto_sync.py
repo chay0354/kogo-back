@@ -186,7 +186,14 @@ def iter_bundle_sto_fixes() -> list[BundleStoFix]:
             and _close(keep.pending_amount, expected, Decimal('0.00'))
         )
         amount_matches = _close(keep.amount, expected, Decimal('0.00'))
-        if not extras and (amount_matches or pending_matches):
+        # A raise already waiting for the next cycle means this child was handled
+        # (here or by a manager), so leave the scheduled amount alone even if it
+        # no longer matches what we would compute today.
+        raise_already_scheduled = (
+            keep.pending_amount is not None
+            and _d(keep.pending_amount) > _d(keep.amount)
+        )
+        if not extras and (amount_matches or pending_matches or raise_already_scheduled):
             continue
 
         child = keep.child
