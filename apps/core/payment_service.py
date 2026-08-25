@@ -125,6 +125,36 @@ def payment_prorated_lesson_amount(payment: Payment) -> Decimal:
     return (payment.final_amount - fee).quantize(Decimal('0.01'))
 
 
+def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
+    """Activate the paid lesson, and every other day of a twice/thrice-a-week bundle.
+
+    Extra bundle days must not get their own Payment (that showed up as ₪0 דמי רישום).
+    """
+    members = list(bundle.lessons.all()) if bundle is not None else []
+    lessons = members or ([lesson] if lesson is not None else [])
+    if lesson is not None and lesson not in lessons:
+        lessons = [lesson] + lessons
+    today = date.today()
+    for member in lessons:
+        enrollment, created = LessonEnrollment.objects.get_or_create(
+            child=child,
+            lesson=member,
+            defaults={'start_date': today, 'status': 'active', 'bundle': bundle},
+        )
+        if created:
+            logger.info(
+                "Created LessonEnrollment %s for child %s lesson %s",
+                enrollment.id, child.id, member.id,
+            )
+            continue
+        enrollment.status = 'active'
+        if not enrollment.start_date:
+            enrollment.start_date = today
+        if bundle and not enrollment.bundle:
+            enrollment.bundle = bundle
+        enrollment.save()
+
+
 def should_create_recurring_for_payment(*, child, bundle, monthly_amount: Decimal) -> bool:
     """One standing order per twice/thrice-a-week bundle, at the full widget price."""
     if monthly_amount <= 0:
@@ -424,6 +454,24 @@ class PaymentService:
         except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
             logger.error(f"Child or Lesson not found: {e}")
             raise ValueError("Child or Lesson not found")
+
+        if not include_monthly_amount and not include_registration_fee:
+            # Extra bundle day: enrollment happens when the real payment completes.
+            return {
+                'success': True,
+                'enrollment_only': True,
+                'payment_id': None,
+                'child_id': str(child.id),
+                'lesson_id': str(lesson.id),
+                'bundle_id': bundle_id,
+                'base_amount': 0.0,
+                'discount_amount': 0.0,
+                'prorated_amount': 0.0,
+                'registration_fee': 0.0,
+                'final_amount': 0.0,
+                'monthly_amount': 0.0,
+                'discounts_applied': [],
+            }
 
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
             child, lesson, bundle_id, price_option_id
@@ -755,26 +803,11 @@ class PaymentService:
             
             # Create LessonEnrollment if payment has an associated lesson
             if payment.lesson:
-                enrollment, created = LessonEnrollment.objects.get_or_create(
+                enroll_child_in_paid_lessons(
                     child=child,
                     lesson=payment.lesson,
-                    defaults={
-                        'start_date': date.today(),
-                        'status': 'active',
-                        'bundle': payment.bundle,
-                    }
+                    bundle=payment.bundle,
                 )
-                if created:
-                    logger.info(f"Created LessonEnrollment: {enrollment.id} for child {child.id} and lesson {payment.lesson.id}")
-                else:
-                    # Update existing enrollment to active
-                    enrollment.status = 'active'
-                    if not enrollment.start_date:
-                        enrollment.start_date = date.today()
-                    if payment.bundle and not enrollment.bundle:
-                        enrollment.bundle = payment.bundle
-                    enrollment.save()
-                    logger.info(f"Updated existing LessonEnrollment: {enrollment.id}")
 
                 # Notify parent on WhatsApp (non-fatal — never block payment processing).
                 try:
@@ -858,6 +891,22 @@ class PaymentService:
         if payment_date is None:
             payment_date = date.today()
 
+        try:
+            child = Child.objects.select_related('family').get(id=child_id)
+            lesson = Lesson.objects.select_related('course__branch').get(id=lesson_id)
+        except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
+            raise ValueError("Child or Lesson not found")
+
+        if not include_monthly_amount and not include_registration_fee:
+            _, _, _, bundle, _ = resolve_billing_price(child, lesson, bundle_id, price_option_id)
+            enroll_child_in_paid_lessons(child=child, lesson=lesson, bundle=bundle)
+            return {
+                'success': True,
+                'enrollment_only': True,
+                'payment_id': None,
+                'invoice_number': None,
+            }
+
         card = validate_card_details({
             'card_number': card_number,
             'expiry_month': expiry_month,
@@ -870,12 +919,6 @@ class PaymentService:
         expiry_year = card['expiry_year']
         cvv = card['cvv']
         card_holder_id = card['card_holder_id']
-
-        try:
-            child = Child.objects.select_related('family').get(id=child_id)
-            lesson = Lesson.objects.select_related('course__branch').get(id=lesson_id)
-        except (Child.DoesNotExist, Lesson.DoesNotExist) as e:
-            raise ValueError("Child or Lesson not found")
 
         # Pricing (identical to initiate_subscription_payment)
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
@@ -1086,19 +1129,9 @@ class PaymentService:
                 child.paid_until_date = next_billing_date_c - timedelta(days=1)
             child.save()
 
-            # LessonEnrollment
-            enrollment, created = LessonEnrollment.objects.get_or_create(
-                child=child,
-                lesson=lesson,
-                defaults={'start_date': date.today(), 'status': 'active', 'bundle': bundle}
-            )
-            if not created:
-                enrollment.status = 'active'
-                if not enrollment.start_date:
-                    enrollment.start_date = date.today()
-                if bundle and not enrollment.bundle:
-                    enrollment.bundle = bundle
-                enrollment.save()
+            # LessonEnrollment — a bundle payment enrolls every member day, so extra
+            # days never need their own ₪0 Payment row.
+            enroll_child_in_paid_lessons(child=child, lesson=lesson, bundle=bundle)
 
             log_payment_operation("SUBSCRIPTION_CHARGED", child=child.full_name, payment_id=payment.id, amount=payment.final_amount)
 

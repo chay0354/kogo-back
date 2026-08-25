@@ -145,10 +145,9 @@ class WidgetBundleRegistrationTest(TestCase):
         self.assertTrue(body['is_bundle'])
         self.assertEqual(body['registration_fee'], 120.0)
         self.assertEqual(body['monthly_amount'], 300.0)
-        fees = [p['registration_fee'] for p in body['payments']]
-        self.assertEqual(fees, [120.0, 0.0])
-        monthlies = [p['monthly_amount'] for p in body['payments']]
-        self.assertEqual(monthlies, [300.0, 0.0])
+        self.assertEqual(len(body['payments']), 1)
+        self.assertEqual(body['payments'][0]['registration_fee'], 120.0)
+        self.assertEqual(body['payments'][0]['monthly_amount'], 300.0)
 
 
 class BillingIndexInflightTest(TestCase):

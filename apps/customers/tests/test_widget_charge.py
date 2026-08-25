@@ -7,6 +7,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.core.tests.test_fixtures import TestDataFactory
+from apps.courses.models import LessonBundle
 from apps.customers.models import Payment, RecurringPayment
 from apps.enrollments.models import LessonEnrollment
 
@@ -164,18 +165,19 @@ class WidgetChargeIdempotencyTest(TestCase):
     @patch('apps.core.tranzila_service.TranzilaService.verify_card')
     @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
     def test_zero_amount_bundle_day_reuses_token_without_verify(self, mock_charge, mock_verify, _whatsapp):
-        """After דמי רישום on day 1, day 2 is ₪0 and must not hit Tranzila verify (20004)."""
+        """A bundle is one payment; extra days enroll from that charge, with no ₪0 row."""
         lesson_b = TestDataFactory.create_lesson(course=self.lesson.course, day_of_week=3)
-        first = _payment_for(self.child, self.lesson, final_amount=Decimal('120.00'), registration_fee=Decimal('120.00'))
-        second = _payment_for(
-            self.child, lesson_b,
-            final_amount=Decimal('0.00'),
-            registration_fee=Decimal('0.00'),
-            base_amount=Decimal('0.00'),
+        bundle = LessonBundle.objects.create(course=self.lesson.course, combined_price=Decimal('300.00'))
+        bundle.lessons.set([self.lesson, lesson_b])
+        first = _payment_for(
+            self.child, self.lesson,
+            final_amount=Decimal('120.00'),
+            registration_fee=Decimal('120.00'),
+            bundle=bundle,
         )
         res = self.client.post(
             '/api/v1/customers/widget/charge/',
-            {'payment_ids': [str(first.id), str(second.id)], 'card_details': CARD},
+            {'payment_ids': [str(first.id)], 'card_details': CARD},
             format='json',
         )
         self.assertEqual(res.status_code, 200, res.content)
@@ -183,8 +185,8 @@ class WidgetChargeIdempotencyTest(TestCase):
         mock_charge.assert_called_once()
         mock_verify.assert_not_called()
         first.refresh_from_db()
-        second.refresh_from_db()
         self.assertEqual(first.status, 'completed')
-        self.assertEqual(second.status, 'completed')
+        self.assertEqual(Payment.objects.filter(child=self.child).count(), 1)
         self.assertEqual(RecurringPayment.objects.filter(child=self.child, status='active').count(), 1)
+        self.assertTrue(LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson, status='active').exists())
         self.assertTrue(LessonEnrollment.objects.filter(child=self.child, lesson=lesson_b, status='active').exists())

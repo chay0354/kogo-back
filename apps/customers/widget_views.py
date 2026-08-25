@@ -390,33 +390,32 @@ class WidgetRegisterView(APIView):
         # ── 3. Initiate payment (pricing + pending Payment record) ───────
         try:
             if bundle:
-                payments = [
-                    PaymentService().initiate_subscription_payment(
-                        child_id=str(child.id),
-                        lesson_id=str(member_lesson.id),
-                        success_url=data.get('success_url', ''),
-                        error_url=data.get('error_url', ''),
-                        callback_url=data.get('callback_url', ''),
-                        bundle_id=str(bundle.id),
-                        # One דמי רישום and one monthly standing order for the track.
-                        include_registration_fee=(index == 0),
-                        include_monthly_amount=(index == 0),
-                    )
-                    for index, member_lesson in enumerate(bundle.lessons.all())
-                ]
+                members = list(bundle.lessons.all())
+                first_lesson = lesson if lesson in members else members[0]
+                payment = PaymentService().initiate_subscription_payment(
+                    child_id=str(child.id),
+                    lesson_id=str(first_lesson.id),
+                    success_url=data.get('success_url', ''),
+                    error_url=data.get('error_url', ''),
+                    callback_url=data.get('callback_url', ''),
+                    bundle_id=str(bundle.id),
+                    include_registration_fee=True,
+                    include_monthly_amount=True,
+                )
+                payments = [payment]
                 return Response({
                     'is_bundle': True,
                     'child_id': str(child.id),
                     'bundle_id': str(bundle.id),
                     'payments': payments,
-                    'base_amount': sum(p['base_amount'] for p in payments),
-                    'discount_amount': sum(p['discount_amount'] for p in payments),
-                    'prorated_amount': sum(p['prorated_amount'] for p in payments),
-                    'registration_fee': sum(p['registration_fee'] for p in payments),
-                    'final_amount': sum(p['final_amount'] for p in payments),
-                    'monthly_amount': sum(p['monthly_amount'] for p in payments),
-                    'next_billing_date': payments[0]['next_billing_date'],
-                    'subscription_start_date': payments[0]['subscription_start_date'],
+                    'base_amount': payment['base_amount'],
+                    'discount_amount': payment['discount_amount'],
+                    'prorated_amount': payment['prorated_amount'],
+                    'registration_fee': payment['registration_fee'],
+                    'final_amount': payment['final_amount'],
+                    'monthly_amount': payment['monthly_amount'],
+                    'next_billing_date': payment['next_billing_date'],
+                    'subscription_start_date': payment['subscription_start_date'],
                 }, status=status.HTTP_201_CREATED)
 
             result = PaymentService().initiate_subscription_payment(
@@ -767,6 +766,7 @@ class WidgetChargeView(APIView):
         from apps.core.payment_service import (
             _compute_prorate,
             deferred_first_charge_date,
+            enroll_child_in_paid_lessons,
             payment_full_monthly_amount,
             payment_prorated_lesson_amount,
             saved_card_token_for_child,
@@ -1090,18 +1090,11 @@ class WidgetChargeView(APIView):
                     child.save()
 
                     if lesson:
-                        enrollment, created = LessonEnrollment.objects.get_or_create(
+                        enroll_child_in_paid_lessons(
                             child=child,
                             lesson=lesson,
-                            defaults={'start_date': date.today(), 'status': 'active', 'bundle': payment.bundle},
+                            bundle=payment.bundle,
                         )
-                        if not created:
-                            enrollment.status = 'active'
-                            if not enrollment.start_date:
-                                enrollment.start_date = date.today()
-                            if payment.bundle and not enrollment.bundle:
-                                enrollment.bundle = payment.bundle
-                            enrollment.save()
 
             if invoice_id_to_email:
                 def _send_invoice_email(invoice_id=invoice_id_to_email):

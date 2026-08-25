@@ -325,9 +325,9 @@ class PaymentServiceLessonBundleTest(TestCase):
             include_registration_fee=False,
             include_monthly_amount=False,
         )
-        self.assertEqual(result_b['base_amount'], 0.00)
-        self.assertEqual(result_b['monthly_amount'], 0.00)
-        self.assertEqual(result_b['registration_fee'], 0.00)
+        self.assertTrue(result_b.get('enrollment_only'))
+        self.assertIsNone(result_b['payment_id'])
+        self.assertEqual(Payment.objects.filter(child=self.child).count(), 1)
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
