@@ -420,3 +420,40 @@ class TranzilaServiceIntegrationTest(TestCase):
         self.assertEqual(parsed['token'], 'integration_token')
         # transaction_id comes from 'index' or 'TranzilaTK', not 'pdesc'
         self.assertEqual(parsed['transaction_id'], 'integration_token')
+
+
+@override_settings(
+    TRANZILA_TERMINAL='iframe_terminal',
+    TRANZILA_PUBLIC_KEY='iframe_pk',
+    TRANZILA_SECRET_KEY='iframe_sk',
+    TRANZILA_PROD_TERMINAL='prod_rest_terminal',
+    TRANZILA_PROD_TOKEN_TERMINAL='prod_token_terminal',
+    TRANZILA_PROD_SUPPLIER='prod_supplier',
+    TRANZILA_PROD_PUBLIC_KEY='prod_pk',
+    TRANZILA_PROD_SECRET_KEY='prod_sk',
+    TRANZILA_BASE_URL='https://direct.tranzila.test',
+    TRANZILA_HANDSHAKE_ENABLED=False,
+)
+class TranzilaIframeVsProductionTerminalTest(TestCase):
+    def test_iframe_uses_hosted_checkout_terminal(self):
+        url = TranzilaService.iframe().create_payment_request(amount=Decimal('4.00'))
+        self.assertIn('/iframe_terminal/iframenew.php', url)
+        self.assertNotIn('prod_rest_terminal', url)
+
+    def test_production_does_not_build_store_iframe_urls(self):
+        prod = TranzilaService.production()
+        self.assertEqual(prod.terminal, 'prod_rest_terminal')
+        self.assertEqual(TranzilaService.iframe().terminal, 'iframe_terminal')
+
+    def test_code_141_is_a_mapped_failure(self):
+        result = TranzilaService.iframe().parse_webhook_response({
+            'Response': '141',
+            'sum': '4.00',
+        })
+        self.assertFalse(result['is_successful'])
+        self.assertEqual(result['response_code'], '141')
+        self.assertIn('מסוף', result['error_message'])
+
+    def test_response_code_0_is_approved(self):
+        result = TranzilaService.iframe().parse_webhook_response({'Response': '0', 'sum': '4.00'})
+        self.assertTrue(result['is_successful'])

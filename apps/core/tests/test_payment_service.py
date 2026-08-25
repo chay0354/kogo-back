@@ -240,6 +240,41 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         self.assertEqual(third_result['course_index'], 3)
         self.assertEqual(third_result['base_amount'], 200.00)
 
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_second_lesson_in_same_checkout_uses_tier_price(self, mock_discount, mock_tranzila):
+        """A second lesson added in the same widget form is billed as course_index 2."""
+        course = self.lesson.course
+        course.price = Decimal('350.00')
+        course.save()
+        extra = TestDataFactory.create_lesson(course=course, branch=course.branch, day_of_week=3)
+        extra.additional_course_prices = [{'course_index': 2, 'price': 250}]
+        extra.save()
+
+        def passthrough_discount(**kwargs):
+            return DiscountCalculation(
+                applicable_discounts=[],
+                total_discount_amount=Decimal('0.00'),
+                final_price=kwargs['base_price'],
+                base_price=kwargs['base_price'],
+            )
+
+        mock_discount.side_effect = passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        first = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(first['course_index'], 1)
+
+        second = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(extra.id),
+        )
+        self.assertEqual(second['course_index'], 2)
+        self.assertEqual(second['base_amount'], 250.00)
+
 
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class PaymentServiceLessonBundleTest(TestCase):

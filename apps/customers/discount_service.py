@@ -200,10 +200,13 @@ class DiscountService:
         Logic:
         - Another child in the same family must already be signed to a team:
           an active LessonEnrollment that is NOT a trial (trial_lesson_date empty).
+        - A sibling with a pending/processing/completed subscription payment from
+          the same checkout also counts — widget multi-child registration prices
+          the second child before the first enrollment is created.
         - Trial-lesson enrollments don't count — a sibling who only did/booked
           a trial does not make this child eligible.
         - Order of registration doesn't matter; whichever sibling pays while
-          another sibling is already on a team gets the discount.
+          another sibling is already on a team (or signing up) gets the discount.
 
         Args:
             family_id: UUID of the family
@@ -213,12 +216,26 @@ class DiscountService:
             Discount object if applicable, None otherwise
         """
         from apps.enrollments.models import LessonEnrollment
+        from apps.customers.models import Payment
+        from django.db.models import Q
+        from django.utils import timezone
+        from datetime import timedelta
 
         sibling_on_team = LessonEnrollment.objects.filter(
             child__family_id=family_id,
             status='active',
             trial_lesson_date__isnull=True,
         ).exclude(child_id=child_id).exists()
+
+        if not sibling_on_team:
+            recent = timezone.now() - timedelta(hours=2)
+            sibling_on_team = Payment.objects.filter(
+                family_id=family_id,
+                payment_type='recurring_subscription',
+            ).exclude(child_id=child_id).filter(
+                Q(status='completed')
+                | Q(status__in=('pending', 'processing'), created_at__gte=recent)
+            ).exists()
 
         if not sibling_on_team:
             return None

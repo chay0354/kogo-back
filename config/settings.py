@@ -230,8 +230,9 @@ TRANZILA_SECRET_KEY = config('TRANZILA_SECRET_KEY', default='')  # Used to gener
 # Webhook security
 TRANZILA_WEBHOOK_SECRET = config('TRANZILA_WEBHOOK_SECRET', default='mock-webhook-secret')
 
-# Tranzila PRODUCTION terminal — separate credential set, used only by the /credit-cards admin charge
-# endpoint (apps/core/credit_card_charge_views.py). Not used by the iframe/webhook/token flows above.
+# Tranzila PRODUCTION terminal — REST token/card charges (admin /credit-cards, widget charge_with_card).
+# Hosted iframe checkout (B2C store, in-store iframe fallback) MUST use TRANZILA_TERMINAL above.
+# Sending iframe payments through this terminal returns Tranzila 141.
 TRANZILA_PROD_TERMINAL = config('TRANZILA_PROD_TERMINAL', default='')
 TRANZILA_PROD_TOKEN_TERMINAL = config('TRANZILA_PROD_TOKEN_TERMINAL', default='')
 TRANZILA_PROD_SUPPLIER = config('TRANZILA_PROD_SUPPLIER', default='')

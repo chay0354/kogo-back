@@ -107,33 +107,18 @@ class TranzilaLedgerTest(TestCase):
         result = list_ledger_documents(date.today(), date.today())
         self.assertTrue(any(row['document_number'] == '1001956' for row in result['documents']))
 
-    @patch('apps.core.tranzila_ledger._tranzila_client')
-    def test_payments_from_tranzila(self, mock_production):
-        mock_production.return_value.list_all_transactions.return_value = {
-            'success': True,
-            'transactions': [{
-                'index': '41044',
-                'transaction_date': date.today().isoformat(),
-                'transaction_time': '15:00:01',
-                'amount': '5.00',
-                'processor_response_code': '000',
-                'authorization_number': 'CONF1',
-                'contact': 'הורה בדיקה',
-            }],
-        }
-        result = list_ledger_payments(date.today(), date.today())
-        self.assertEqual(result['source'], 'tranzila')
-        self.assertEqual(len(result['payments']), 1)
-        self.assertEqual(result['payments'][0]['amount'], 5.0)
-        self.assertEqual(result['payments'][0]['status'], 'completed')
+    def test_payments_include_widget_and_store_only(self):
+        from apps.store.models import StoreInvoice
 
-    @patch('apps.core.tranzila_ledger._tranzila_client')
-    def test_payments_fallback_includes_local_charge(self, mock_production):
-        mock_production.return_value.list_all_transactions.return_value = {
-            'success': False,
-            'error': 'timeout',
-            'transactions': [],
-        }
+        unmatched = TranzilaTransaction.objects.create(
+            transaction_id='99999',
+            confirmation_code='ORPHAN',
+            transaction_type='charge',
+            response_code='000',
+            idempotency_key='ledger-orphan-99999',
+            is_successful=True,
+            response_timestamp=timezone.now(),
+        )
         txn = TranzilaTransaction.objects.create(
             transaction_id='41044',
             confirmation_code='CONF1',
@@ -156,9 +141,39 @@ class TranzilaLedgerTest(TestCase):
             tranzila_transaction=txn,
             payment_date=timezone.now(),
         )
+        StoreInvoice.objects.create(
+            invoice_number='INV-LEDGER-STORE-1',
+            child=self.child,
+            total_amount=Decimal('40.00'),
+            amount_paid=Decimal('40.00'),
+            payment_method='credit_card',
+            payment_status='completed',
+            tranzila_confirmation_code='STORE1',
+        )
+        Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            parent=self.parent,
+            branch=self.child.family.branch,
+            payment_type='recurring_subscription',
+            status='pending',
+            base_amount=Decimal('260.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('0.00'),
+            description='card verify only',
+        )
+
         result = list_ledger_payments(date.today(), date.today())
-        self.assertTrue(any(row['transaction_reference'] == 'CONF1' for row in result['payments']))
+        refs = [row['transaction_reference'] for row in result['payments']]
+        amounts = [row['amount'] for row in result['payments']]
+        sources = {row['source'] for row in result['payments']}
+        self.assertIn('CONF1', refs)
+        self.assertIn('STORE1', refs)
+        self.assertNotIn('ORPHAN', refs)
+        self.assertTrue(all(amount > 0 for amount in amounts))
+        self.assertEqual(sources, {'widget', 'store'})
         self.assertTrue(any(self.child.full_name in row['customer_name'] for row in result['payments']))
+        self.assertEqual(unmatched.confirmation_code, 'ORPHAN')
 
 
 class TranzilaLedgerApiTest(BaseAPITestCase):
@@ -179,19 +194,33 @@ class TranzilaLedgerApiTest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(any(row['document_number'] == '2001' for row in response.data['documents']))
 
-    @patch('apps.core.tranzila_ledger._tranzila_client')
-    def test_transactions_endpoint(self, mock_production):
-        mock_production.return_value.list_all_transactions.return_value = {
-            'success': True,
-            'transactions': [{
-                'index': '77',
-                'transaction_date': date.today().isoformat(),
-                'amount': '8.50',
-                'processor_response_code': '000',
-                'authorization_number': 'ZZ',
-            }],
-        }
+    def test_transactions_endpoint(self):
+        child = TestDataFactory.create_child()
+        parent = TestDataFactory.create_parent(family=child.family)
+        txn = TranzilaTransaction.objects.create(
+            transaction_id='77',
+            confirmation_code='ZZ',
+            transaction_type='charge',
+            response_code='000',
+            idempotency_key='ledger-api-77',
+            is_successful=True,
+            response_timestamp=timezone.now(),
+        )
+        Payment.objects.create(
+            child=child,
+            family=child.family,
+            parent=parent,
+            branch=child.family.branch,
+            payment_type='one_time',
+            status='completed',
+            base_amount=Decimal('8.50'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('8.50'),
+            tranzila_transaction=txn,
+            payment_date=timezone.now(),
+        )
         response = self.client.get('/api/v1/customers/payments/tranzila-transactions/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data['payments']), 1)
         self.assertEqual(response.data['payments'][0]['transaction_reference'], 'ZZ')
+        self.assertEqual(response.data['payments'][0]['source'], 'widget')

@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 BILLING_ENROLLMENT_STATUSES = ("active", "payments_problem")
 
 
+def parse_store_cart_notes(notes: Optional[str]) -> Optional[list]:
+    """Return cart line items stored on a StoreInvoice.notes JSON blob, or None."""
+    import json
+
+    try:
+        data = json.loads(notes or '')
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    if not all(isinstance(row, dict) and row.get('product_id') for row in data):
+        return None
+    return data
+
+
 def registration_fee_amount() -> Decimal:
     """One-time registration fee for each new lesson subscription."""
     raw = getattr(settings, 'REGISTRATION_FEE_ILS', 120)
@@ -206,16 +221,34 @@ def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
     Return the 1-based lesson number this lesson will be for the child.
 
     Existing active/payment-problem enrollments still count as signed lessons.
+    Pending widget/CRM payments from this checkout also count, so a second
+    lesson added in the same form uses the 2nd-lesson price tier instead of
+    being billed as another first lesson.
+
     The selected lesson is excluded so re-opening payment for the same lesson
     does not incorrectly move the child into the next price tier.
     """
-    signed_lessons_count = paying_enrollments(
-        LessonEnrollment.objects.filter(
+    signed_lesson_ids = set(
+        paying_enrollments(
+            LessonEnrollment.objects.filter(
+                child=child,
+                status__in=BILLING_ENROLLMENT_STATUSES,
+            )
+        ).exclude(lesson=lesson).values_list('lesson_id', flat=True)
+    )
+    recent_pending = timezone.now() - timedelta(hours=2)
+    inflight_lesson_ids = set(
+        Payment.objects.filter(
             child=child,
-            status__in=BILLING_ENROLLMENT_STATUSES,
+            payment_type='recurring_subscription',
+            status__in=('pending', 'processing'),
+            created_at__gte=recent_pending,
         )
-    ).exclude(lesson=lesson).count()
-    return signed_lessons_count + 1
+        .exclude(lesson=lesson)
+        .exclude(lesson_id__isnull=True)
+        .values_list('lesson_id', flat=True)
+    )
+    return len(signed_lesson_ids | inflight_lesson_ids) + 1
 
 
 def validate_bundle_capacity(bundle: 'LessonBundle') -> None:
@@ -302,7 +335,10 @@ class PaymentService:
     
     def __init__(self):
         self.discount_service = DiscountService()
+        # REST token/card charges.
         self.tranzila_service = TranzilaService.production()
+        # Hosted iframe checkout — TRANZILA_TERMINAL, not the REST production terminal.
+        self.iframe_tranzila_service = TranzilaService.iframe()
     
     def initiate_subscription_payment(
         self,
@@ -463,7 +499,7 @@ class PaymentService:
             raise RuntimeError("Failed to create payment record")
         
         # Generate Tranzila payment URL
-        tranzila_url= self.tranzila_service.create_recurring_payment_request(
+        tranzila_url= self.iframe_tranzila_service.create_recurring_payment_request(
             amount=prorated_final,
             currency='ILS',
             description=payment.description,
@@ -1357,7 +1393,7 @@ class PaymentService:
             customer_name = customer_info.get('name', '')
             customer_phone = customer_info.get('phone', '')
         
-        iframe_url = self.tranzila_service.create_payment_request(
+        iframe_url = self.iframe_tranzila_service.create_payment_request(
             amount=total_amount,
             currency='ILS',
             description=f"Store purchase - Invoice {invoice.invoice_number}",
@@ -1516,8 +1552,7 @@ class PaymentService:
             Dict with completion result
         """
         from apps.store.models import StoreInvoice, StoreProduct, StoreSale
-        import json
-        
+
         # Verify webhook signature for security
         if signature and not self.tranzila_service.verify_webhook_signature(tranzila_response, signature):
             logger.error(f"Invalid webhook signature for store invoice {invoice_id}")
@@ -1531,10 +1566,7 @@ class PaymentService:
         
         if tranzila_response['is_successful']:
             # Parse product items from invoice notes
-            try:
-                product_items = json.loads(invoice.notes) if invoice.notes else []
-            except json.JSONDecodeError:
-                product_items = []
+            product_items = parse_store_cart_notes(invoice.notes) or []
             
             # Update invoice
             invoice.payment_status = 'completed'
@@ -1599,10 +1631,15 @@ class PaymentService:
 
             return {'success': True, 'invoice_id': str(invoice.id)}
         else:
-            # Mark as failed
+            # Keep cart JSON in notes so the customer can retry the same order.
             invoice.payment_status = 'failed'
-            invoice.notes = f"Payment failed: {tranzila_response.get('error_message', 'Unknown')}"
-            invoice.save()
+            invoice.save(update_fields=['payment_status'])
+            logger.warning(
+                "Store iframe payment failed invoice=%s code=%s error=%s",
+                invoice.invoice_number,
+                tranzila_response.get('response_code'),
+                tranzila_response.get('error_message', 'Unknown'),
+            )
 
             if invoice.website_order_number:
                 from apps.store.website_integration import notify_website_order_status

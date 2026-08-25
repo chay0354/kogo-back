@@ -248,6 +248,41 @@ class DiscountServiceSecondChildTest(TestCase):
         self.assertEqual(result.final_price, Decimal('350.00'))
         self.assertEqual(len(result.applicable_discounts), 0)
 
+    def test_pending_sibling_payment_in_same_checkout_gets_discount(self):
+        """Second child in the same widget checkout gets the sibling discount."""
+        from apps.customers.models import Payment
+
+        Discount.objects.create(
+            name="הנחת ילד שני",
+            discount_type='fixed',
+            value=Decimal('50.00'),
+            applies_to='child',
+            promotion_type='permanent',
+            is_active=True,
+            is_built_in=True,
+        )
+        child1 = TestDataFactory.create_child(family=self.family, first_name="ראשון")
+        child2 = TestDataFactory.create_child(family=self.family, first_name="שני")
+        Payment.objects.create(
+            child=child1,
+            family=self.family,
+            branch=self.branch,
+            payment_type='recurring_subscription',
+            status='pending',
+            base_amount=Decimal('350.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('350.00'),
+        )
+
+        result = self.service.evaluate_discounts_for_payment(
+            family_id=str(self.family.id),
+            child_id=str(child2.id),
+            payment_date=date.today(),
+            base_price=Decimal('350.00'),
+        )
+        self.assertEqual(result.final_price, Decimal('300.00'))
+        self.assertEqual(result.total_discount_amount, Decimal('50.00'))
+
     def test_trial_sibling_does_not_grant_discount(self):
         """Sibling with only a trial-lesson enrollment doesn't grant the discount"""
         Discount.objects.create(

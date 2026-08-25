@@ -3,8 +3,8 @@ Unified Tranzila documents + transactions for the CRM invoices page.
 
 מסמכים = tax documents issued for Tranzila charges (live billing API, plus local
 FormalDocument / CRM / store invoices that belong to those charges).
-תשלומים = card transactions on the Tranzila terminal (live /v1/transactions,
-falling back to stored Payment / TranzilaTransaction / store charges).
+תשלומים = widget (CRM Payment) and store charges only — not every
+transaction on the Tranzila terminal, and not ₪0 card-verify signups.
 """
 from __future__ import annotations
 
@@ -396,7 +396,7 @@ def list_ledger_documents(start_date: Optional[date] = None, end_date: Optional[
 
 
 def _local_payment_rows(start: date, end: date) -> list[dict]:
-    from apps.customers.models import Payment, TranzilaTransaction
+    from apps.customers.models import Payment
     from apps.store.models import StoreInvoice
 
     rows = []
@@ -405,6 +405,7 @@ def _local_payment_rows(start: date, end: date) -> list[dict]:
         .select_related('child', 'family', 'tranzila_transaction', 'branch')
         .prefetch_related('invoices')
         .filter(created_at__date__gte=start, created_at__date__lte=end)
+        .filter(final_amount__gt=0)
         .filter(
             Q(tranzila_transaction__isnull=False)
             | Q(status__in=('completed', 'failed', 'processing', 'pending'))
@@ -430,14 +431,14 @@ def _local_payment_rows(start: date, end: date) -> list[dict]:
             ),
             'status': payment.status,
             'card_last4': '',
-            'source': 'crm',
+            'source': 'widget',
         })
 
     store = (
         StoreInvoice.objects
         .select_related('child', 'tranzila_txn')
         .filter(issue_date__date__gte=start, issue_date__date__lte=end)
-        .filter(Q(tranzila_transaction_id__gt='') | Q(tranzila_txn__isnull=False) | Q(payment_method='credit_card'))
+        .filter(total_amount__gt=0)
     )
     for inv in store:
         txn = inv.tranzila_txn
@@ -458,85 +459,17 @@ def _local_payment_rows(start: date, end: date) -> list[dict]:
             'source': 'store',
         })
 
-    orphan_txns = (
-        TranzilaTransaction.objects
-        .filter(created_at__date__gte=start, created_at__date__lte=end)
-        .filter(payments__isnull=True, store_invoices__isnull=True)
-        .distinct()
-    )
-    linked_ids = {row['transaction_reference'] for row in rows if row.get('transaction_reference')}
-    linked_ids.update(row['invoice_number'] for row in rows if row.get('invoice_number'))
-    for txn in orphan_txns:
-        if txn.transaction_id and txn.transaction_id in linked_ids:
-            continue
-        if txn.confirmation_code and txn.confirmation_code in linked_ids:
-            continue
-        rows.append({
-            'id': str(txn.id),
-            'created_at': _iso_datetime(txn.response_timestamp or txn.created_at),
-            'customer_name': '',
-            'invoice_number': txn.transaction_id,
-            'amount': _parse_amount((txn.response_data or {}).get('amount') or (txn.response_data or {}).get('sum')),
-            'payment_method': 'אשראי',
-            'transaction_reference': txn.confirmation_code or txn.transaction_id,
-            'status': 'completed' if txn.is_successful else 'failed',
-            'card_last4': '',
-            'source': 'crm',
-        })
+    rows.sort(key=lambda row: row.get('created_at') or '', reverse=True)
     return rows
-
-
-def _merge_payments(tranzila_rows: list[dict], local_rows: list[dict]) -> list[dict]:
-    if tranzila_rows:
-        by_ref = {}
-        for row in tranzila_rows:
-            for key in (row.get('transaction_reference'), row.get('invoice_number'), row.get('id')):
-                if key:
-                    by_ref[str(key)] = row
-        for local in local_rows:
-            match = (
-                by_ref.get(str(local.get('transaction_reference') or ''))
-                or by_ref.get(str(local.get('invoice_number') or ''))
-            )
-            if not match:
-                continue
-            if not match.get('customer_name') and local.get('customer_name'):
-                match['customer_name'] = local['customer_name']
-            if local.get('invoice_number') and (
-                not match.get('invoice_number')
-                or match['invoice_number'] == match.get('transaction_reference')
-            ):
-                match['invoice_number'] = local['invoice_number']
-        tranzila_rows.sort(key=lambda row: row.get('created_at') or '', reverse=True)
-        return tranzila_rows
-
-    local_rows.sort(key=lambda row: row.get('created_at') or '', reverse=True)
-    return local_rows
 
 
 def list_ledger_payments(start_date: Optional[date] = None, end_date: Optional[date] = None) -> dict:
     start, end = _default_range(start_date, end_date)
-    tranzila_rows = []
-    source = 'local'
-    error = None
-    try:
-        service = _tranzila_client()
-        result = service.list_all_transactions(start, end)
-        if result.get('success'):
-            tranzila_rows = [normalize_tranzila_transaction(row) for row in (result.get('transactions') or [])]
-            source = 'tranzila'
-        else:
-            error = result.get('error')
-            logger.warning('Tranzila list_transactions unavailable: %s', error)
-    except Exception as exc:
-        error = str(exc)
-        logger.exception('Tranzila list_transactions failed')
-
-    payments = _merge_payments(tranzila_rows, _local_payment_rows(start, end))
+    payments = _local_payment_rows(start, end)
     return {
         'payments': payments,
-        'source': source,
-        'error': error,
+        'source': 'local',
+        'error': None,
         'start_date': start.isoformat(),
         'end_date': end.isoformat(),
     }

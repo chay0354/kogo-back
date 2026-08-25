@@ -412,7 +412,8 @@ def _resolve_website_cart_items(items):
 
 def _website_payment_initiate_response(invoice, *, callback_url, success_url, error_url, customer, status=200):
     """Build Tranzila iframe response for a pending website invoice (or short-circuit if already paid)."""
-    from apps.core.payment_service import PaymentService
+    from apps.core.payment_service import parse_store_cart_notes
+    from apps.core.tranzila_service import TranzilaService
 
     if invoice.payment_status == 'completed':
         return Response({
@@ -423,17 +424,19 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
         }, status=status)
 
     if invoice.payment_status == 'failed':
-        return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
+        if parse_store_cart_notes(invoice.notes) is None:
+            return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
+        invoice.payment_status = 'pending'
+        invoice.save(update_fields=['payment_status'])
 
     if not callback_url:
         return Response({'error': 'callback_url required'}, status=400)
 
-    payment_service = PaymentService()
     name = (customer.get('name') or invoice.customer_name or '').strip()
     email = (customer.get('email') or '').strip()
     phone = (customer.get('phone') or invoice.customer_phone or '').strip()
 
-    iframe_url = payment_service.tranzila_service.create_payment_request(
+    iframe_url = TranzilaService.iframe().create_payment_request(
         amount=invoice.total_amount,
         currency='ILS',
         description=f"Website order {invoice.website_order_number or invoice.invoice_number}",

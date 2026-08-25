@@ -33,6 +33,7 @@ TRANZILA_RESPONSE_MESSAGES: dict[str, str] = {
     '033': 'הכרטיס נדחה',
     '036': 'פג תוקף',
     '039': 'מספר כרטיס שגוי',
+    '141': 'המסוף אינו מורשה לסלוק את סוג הכרטיס',
     '800': 'העסקה בוטלה',
     '900': 'אימות 3D Secure נכשל',
     '903': 'חשד להונאה',
@@ -145,8 +146,8 @@ class TranzilaService:
         Any credential can be overridden per-instance (e.g. to use a different
         terminal/credential set than the default settings-based one) by passing
         it explicitly; omitted kwargs fall back to the existing settings-based
-        defaults. Use `TranzilaService.production()` to charge against the
-        production terminal.
+        defaults. Use `TranzilaService.iframe()` for hosted iframe checkout
+        and `TranzilaService.production()` for REST token/card charges.
         """
         self.terminal = terminal if terminal is not None else getattr(settings, 'TRANZILA_TERMINAL', '')
         self.token_terminal = (
@@ -171,8 +172,18 @@ class TranzilaService:
             logger.warning("TRANZILA_SECRET_KEY not configured - REST API calls will fail")
 
     @classmethod
+    def iframe(cls) -> 'TranzilaService':
+        """Hosted iframe checkout (B2C store, in-store fallback, widget iframe).
+
+        Uses TRANZILA_TERMINAL. Do not send iframe charges through production() —
+        that REST terminal is not authorized to clear card brands in the iframe
+        (Tranzila response 141).
+        """
+        return cls()
+
+    @classmethod
     def production(cls) -> 'TranzilaService':
-        """TranzilaService instance wired to the production Tranzila terminal."""
+        """REST token/card charges against the production Tranzila terminal."""
         return cls(
             terminal=settings.TRANZILA_PROD_TERMINAL,
             token_terminal=settings.TRANZILA_PROD_TOKEN_TERMINAL,
@@ -1000,8 +1011,9 @@ class TranzilaService:
         response_code = str(payload.get('Response', '') or '').strip()
         raw_error = (payload.get('error') or payload.get('errormessage') or '').strip()
         mapped_error = TRANZILA_RESPONSE_MESSAGES.get(response_code, '')
+        approved = is_tranzila_approved(response_code)
         error_message = raw_error or mapped_error or (
-            f'קוד שגיאה {response_code}' if response_code and response_code != '000' else ''
+            f'קוד שגיאה {response_code}' if response_code and not approved else ''
         )
 
         return {
@@ -1015,7 +1027,7 @@ class TranzilaService:
             'token': payload.get('TranzilaTK', ''),
             'card_expire_month': int(payload.get('expmonth', 0)) if payload.get('expmonth') else None,
             'card_expire_year': int(payload.get('expyear', 0)) if payload.get('expyear') else None,
-            'is_successful': response_code == '000',
+            'is_successful': approved,
             'error_message': error_message,
             'timestamp': timezone.now(),
             'raw_payload': payload,
