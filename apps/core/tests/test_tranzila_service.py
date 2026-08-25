@@ -627,7 +627,7 @@ class TranzilaRestChargeParseTest(TestCase):
         self.assertEqual(result['sto_id'], 4411)
         self.assertEqual(result['action'], 'updated')
         self.assertEqual(result['inactivated'], [4412])
-        self.assertEqual(mock_request.call_args_list[0].kwargs['endpoint'], '/stos/get')
+        self.assertEqual(mock_request.call_args_list[0].kwargs['endpoint'], '/v1/stos/get')
         self.assertEqual(mock_request.call_args_list[1].kwargs['endpoint'], '/v2/sto/update')
         self.assertEqual(mock_request.call_args_list[1].kwargs['params']['items'][0]['unit_price'], 350.0)
         self.assertEqual(mock_request.call_args_list[2].kwargs['params']['sto_id'], 4412)
@@ -650,7 +650,7 @@ class TranzilaRestChargeParseTest(TestCase):
         self.assertTrue(result['success'])
         self.assertEqual(result['sto_id'], 9901)
         self.assertEqual(result['action'], 'created')
-        self.assertEqual(mock_request.call_args_list[0].kwargs['endpoint'], '/stos/get')
+        self.assertEqual(mock_request.call_args_list[0].kwargs['endpoint'], '/v1/stos/get')
         self.assertEqual(mock_request.call_args_list[1].kwargs['endpoint'], '/v2/sto/create')
         create_payload = mock_request.call_args_list[1].kwargs['params']
         self.assertEqual(create_payload['card']['token'], 'tok-1')

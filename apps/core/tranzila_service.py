@@ -975,8 +975,8 @@ class TranzilaService:
         Cancel a recurring payment (STO) on Tranzila.
 
         Flow (two steps, per tranzila-main-api.yaml):
-        1. POST /stos/get  — look up the STO integer sto_id by the TranzilaTK token
-        2. POST /sto/update — set sto_status="inactive" on that sto_id
+        1. POST /v1/stos/get — look up the STO integer sto_id by the TranzilaTK token
+        2. POST /v1/sto/update — set sto_status="inactive" on that sto_id
 
         Note: /stos/get is a paid Tranzila module. If it returns an error, the
         cancellation cannot proceed automatically and must be done via the
@@ -1000,7 +1000,7 @@ class TranzilaService:
         # Step 1: resolve the integer sto_id from the token
         lookup_response = self._make_api_request(
             params={'terminal_name': self.token_terminal, 'token': token},
-            endpoint='/stos/get',
+            endpoint='/v1/stos/get',
         )
 
         if lookup_response.get('error_code') != 0:
@@ -1040,7 +1040,7 @@ class TranzilaService:
                 'sto_id': int(sto_id),
                 'sto_status': 'inactive',
             },
-            endpoint='/sto/update',
+            endpoint='/v1/sto/update',
         )
 
         if update_response.get('error_code') != 0:
@@ -1078,12 +1078,12 @@ class TranzilaService:
         return '050', digits
 
     def list_standing_orders(self, token: str) -> Dict:
-        """POST /stos/get — standing orders for this card token."""
+        """POST /v1/stos/get — standing orders for this card token."""
         if not token:
             return self._build_error_response('No Tranzila token available')
         response = self._make_api_request(
             params={'terminal_name': self.token_terminal, 'token': token},
-            endpoint='/stos/get',
+            endpoint='/v1/stos/get',
         )
         if is_tranzila_rest_ok(response.get('error_code')):
             return self._build_success_response(stos=response.get('stos') or [], raw=response)
@@ -1323,14 +1323,14 @@ class TranzilaService:
         """
         Look up a standing order (STO) by its TranzilaTK token.
 
-        Uses POST /stos/get per tranzila-main-api.yaml.
+        Uses POST /v1/stos/get per tranzila-main-api.yaml.
         Returns the list of matching STO records (may be empty).
         Note: /stos/get is a paid Tranzila module.
         """
         self._log_api_call("GET_STO_STATUS", token=token)
         return self._make_api_request(
             params={'terminal_name': self.token_terminal, 'token': token},
-            endpoint='/stos/get',
+            endpoint='/v1/stos/get',
         )
     
     # ============================================================================
