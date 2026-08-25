@@ -457,3 +457,106 @@ class TranzilaIframeVsProductionTerminalTest(TestCase):
     def test_response_code_0_is_approved(self):
         result = TranzilaService.iframe().parse_webhook_response({'Response': '0', 'sum': '4.00'})
         self.assertTrue(result['is_successful'])
+
+
+class TranzilaRestChargeParseTest(TestCase):
+    """REST credit-card create: error_code 0 + processor 000, DCdisable duplicates."""
+
+    def setUp(self):
+        self.service = TranzilaService(
+            terminal='test_terminal',
+            public_key='pk',
+            secret_key='sk',
+        )
+
+    def test_string_error_code_zero_is_success(self):
+        result = self.service._parse_credit_card_create_response(
+            {
+                'error_code': '0',
+                'message': 'success',
+                'transaction_result': {
+                    'processor_response_code': '000',
+                    'transaction_id': 11,
+                    'token': 'tok_abc',
+                    'auth_number': '99',
+                },
+            },
+            amount=Decimal('120.00'),
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['token'], 'tok_abc')
+        self.assertEqual(result['transaction_id'], '11')
+
+    def test_processor_decline_is_not_success_even_if_error_code_zero(self):
+        result = self.service._parse_credit_card_create_response(
+            {
+                'error_code': 0,
+                'message': 'success',
+                'transaction_result': {'processor_response_code': '033'},
+            },
+            amount=Decimal('120.00'),
+        )
+        self.assertFalse(result['success'])
+
+    def test_dcdisable_already_paid_is_success(self):
+        result = self.service._parse_credit_card_create_response(
+            {
+                'error_code': 22103,
+                'message': 'This payment has already been made, please contact the business',
+                'transaction_result': {
+                    'processor_response_code': '000',
+                    'transaction_id': 55,
+                    'token': 'tok_dup',
+                },
+            },
+            amount=Decimal('120.00'),
+        )
+        self.assertTrue(result['success'])
+        self.assertTrue(result.get('duplicate'))
+        self.assertEqual(result['token'], 'tok_dup')
+
+    def test_duplicate_transaction_detected_flag_is_success(self):
+        result = self.service._parse_credit_card_create_response(
+            {
+                'error_code': 1,
+                'message': 'duplicate',
+                'duplicate_transaction_detected': 1,
+                'transaction_result': {
+                    'processor_response_code': '000',
+                    'transaction_id': 70,
+                    'token': 'tok_flag',
+                },
+            },
+            amount=Decimal('120.00'),
+        )
+        self.assertTrue(result['success'])
+        self.assertTrue(result.get('duplicate'))
+
+    def test_timeout_is_uncertain_not_a_hard_decline(self):
+        wrapped = self.service._build_error_response('Request timed out', '999', 'Connection timeout')
+        wrapped['uncertain'] = True
+        result = self.service._parse_credit_card_create_response(wrapped, amount=Decimal('120.00'))
+        self.assertFalse(result['success'])
+        self.assertTrue(result.get('uncertain'))
+
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_charge_with_card_uses_parser(self, mock_api):
+        mock_api.return_value = {
+            'error_code': '0',
+            'message': 'ok',
+            'transaction_result': {
+                'transaction_id': 99,
+                'processor_response_code': '000',
+                'token': 'saved-card-token',
+            },
+        }
+        result = self.service.charge_with_card(
+            card_number='4580458045804580',
+            expiry_month=12,
+            expiry_year=2027,
+            cvv='123',
+            card_holder_id='123456782',
+            amount=Decimal('120.00'),
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(result['token'], 'saved-card-token')

@@ -12,12 +12,19 @@ from rest_framework import status
 from django.db import transaction
 from django.db.models import Prefetch, Q
 
-from apps.customers.models import Family, Parent, Child
+from datetime import timedelta
+
+from django.utils import timezone
+from apps.core.tranzila_service import is_tranzila_uncertain_gateway_error
+from apps.customers.models import Family, Parent, Child, Payment
 from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.core.models import City, Branch
 from apps.core.payment_service import PaymentService
+
+
+WIDGET_STALE_PROCESSING_SECONDS = 90
 
 
 def _batch_paying_enrollment_counts(lesson_ids):
@@ -665,6 +672,16 @@ class WidgetChargeView(APIView):
                 if result.get('success'):
                     succeeded_any = True
                     continue
+                if result.get('processing'):
+                    for skipped in payment_ids[index + 1:]:
+                        results.append({
+                            'success': False,
+                            'processing': True,
+                            'payment_id': skipped,
+                            'skipped': True,
+                            'error': 'התשלום בעיבוד. אנא המתינו.',
+                        })
+                    break
 
                 # Abort the rest of the bundle: continuing after a decline only grows
                 # the amount the office would have to refund by hand.
@@ -678,15 +695,23 @@ class WidgetChargeView(APIView):
                 break
 
             all_success = all(r.get('success') for r in results)
+            any_processing = any(r.get('processing') for r in results)
             payload = {'success': all_success, 'results': results}
-            if succeeded_any and not all_success:
+            if any_processing and not all_success:
+                payload['processing'] = True
+                payload['error'] = payload.get('error') or 'התשלום בעיבוד. אנא המתינו ולא תנסו לשלם שוב.'
+            if succeeded_any and not all_success and not any_processing:
                 payload['partial'] = True
                 payload['error'] = 'חלק מהתשלומים בוצעו וחלק נכשלו. אנא פנו למשרד להשלמת ההרשמה.'
                 logger.error(
                     "Bundle charge partially completed, manual reconciliation required: %s",
                     [{'payment_id': r.get('payment_id'), 'success': r.get('success')} for r in results],
                 )
-            status_code = status.HTTP_200_OK if all_success else status.HTTP_400_BAD_REQUEST
+            status_code = (
+                status.HTTP_200_OK
+                if all_success or any_processing
+                else status.HTTP_400_BAD_REQUEST
+            )
             return Response(payload, status=status_code)
 
         payment_id = (request.data.get('payment_id') or '').strip()
@@ -694,7 +719,11 @@ class WidgetChargeView(APIView):
             return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
         result = self._charge_one(payment_id, card, send_subscription_whatsapp=True)
-        status_code = status.HTTP_200_OK if result.get('success') else status.HTTP_400_BAD_REQUEST
+        status_code = (
+            status.HTTP_200_OK
+            if result.get('success') or result.get('processing')
+            else status.HTTP_400_BAD_REQUEST
+        )
         return Response(result, status=status_code)
 
     def _precheck_bundle(self, payment_ids):
@@ -708,12 +737,14 @@ class WidgetChargeView(APIView):
         from apps.customers.models import Payment
 
         payments = list(
-            Payment.objects.select_related('bundle').filter(id__in=payment_ids, status='pending')
+            Payment.objects.select_related('bundle').filter(id__in=payment_ids)
         )
-        if len(payments) != len(payment_ids):
+        if len(payments) != len(set(payment_ids)):
             return 'אחד התשלומים אינו זמין לחיוב. אנא התחילו את ההרשמה מחדש.'
 
-        bundles = {p.bundle for p in payments if p.bundle_id}
+        # A retry after timeout may find some rows already completed/processing.
+        chargeable = [p for p in payments if p.status in ('pending', 'failed', 'processing')]
+        bundles = {p.bundle for p in chargeable if p.bundle_id}
         for bundle in bundles:
             try:
                 validate_bundle_capacity(bundle)
@@ -746,9 +777,34 @@ class WidgetChargeView(APIView):
 
         logger = logging.getLogger(__name__)
 
-        # Claim the payment under a row lock before any money moves. A payment left
-        # in 'processing' means the gateway call never reported back and needs manual
-        # reconciliation — deliberately preferred over risking a second charge.
+        def completed_payload(payment_obj):
+            has_recurring = RecurringPayment.objects.filter(
+                initial_payment=payment_obj, status='active',
+            ).exists()
+            return {
+                'success': True,
+                'payment_id': str(payment_obj.id),
+                'already_completed': True,
+                'recurring_active': bool(payment_obj.trial_lesson_date or has_recurring),
+            }
+
+        def processing_payload(payment_obj, error=None):
+            return {
+                'success': False,
+                'processing': True,
+                'payment_id': str(payment_obj.id),
+                'error': error or 'התשלום בעיבוד. אנא המתינו ולא תנסו לשלם שוב.',
+            }
+
+        def is_stale_processing(payment_obj):
+            if payment_obj.status != 'processing' or not payment_obj.updated_at:
+                return False
+            age = timezone.now() - payment_obj.updated_at
+            return age >= timedelta(seconds=WIDGET_STALE_PROCESSING_SECONDS)
+
+        # Claim the payment under a row lock before any money moves. Completed
+        # rows are success (idempotent retry). Fresh processing means another
+        # request still owns the Tranzila call — poll instead of charging twice.
         try:
             with transaction.atomic():
                 payment = (
@@ -757,7 +813,11 @@ class WidgetChargeView(APIView):
                     .select_related('child', 'family', 'lesson__course__branch', 'bundle')
                     .get(id=payment_id)
                 )
-                if payment.status != 'pending':
+                if payment.status == 'completed':
+                    return completed_payload(payment)
+                if payment.status == 'processing' and not is_stale_processing(payment):
+                    return processing_payload(payment)
+                if payment.status not in ('pending', 'failed', 'processing'):
                     return {
                         'success': False,
                         'payment_id': payment_id,
@@ -765,7 +825,7 @@ class WidgetChargeView(APIView):
                         'payment_status': payment.status,
                     }
                 payment.status = 'processing'
-                payment.save(update_fields=['status'])
+                payment.save(update_fields=['status', 'updated_at'])
         except Payment.DoesNotExist:
             return {'success': False, 'payment_id': payment_id, 'error': 'תשלום לא נמצא'}
 
@@ -837,24 +897,36 @@ class WidgetChargeView(APIView):
 
         if result['success']:
             enrollment_id_for_whatsapp = None
+            invoice_id_to_email = None
             with transaction.atomic():
+                payment = (
+                    Payment.objects
+                    .select_for_update(of=('self',))
+                    .select_related('child', 'family', 'lesson__course__branch', 'bundle')
+                    .get(id=payment.id)
+                )
+                if payment.status == 'completed':
+                    return completed_payload(payment)
+
                 payment.status = 'completed'
                 payment.payment_date = timezone.now()
+                payment.failure_reason = ''
+                payment.failure_code = ''
                 payment.save()
 
-                tranzila_txn = TranzilaTransaction.objects.create(
-                    transaction_id=result.get('transaction_id', ''),
-                    confirmation_code=result.get('confirmation_code', ''),
-                    transaction_type='charge' if is_trial_payment else 'recurring_setup',
-                    response_code=result.get('response_code', '000'),
-                    response_message='',
-                    request_data={},
-                    response_data=result.get('raw_response', {}),
-                    # Keyed on the payment, not the gateway transaction, so the unique
-                    # constraint itself blocks a second completed charge for it.
+                tranzila_txn, _created_txn = TranzilaTransaction.objects.get_or_create(
                     idempotency_key=f"widget_{payment.id}",
-                    is_successful=True,
-                    response_timestamp=timezone.now(),
+                    defaults={
+                        'transaction_id': result.get('transaction_id', ''),
+                        'confirmation_code': result.get('confirmation_code', ''),
+                        'transaction_type': 'charge' if is_trial_payment else 'recurring_setup',
+                        'response_code': result.get('response_code', '000'),
+                        'response_message': '',
+                        'request_data': {},
+                        'response_data': result.get('raw_response', {}),
+                        'is_successful': True,
+                        'response_timestamp': timezone.now(),
+                    },
                 )
                 payment.tranzila_transaction = tranzila_txn
                 payment.save(update_fields=['tranzila_transaction'])
@@ -880,35 +952,33 @@ class WidgetChargeView(APIView):
                         ])
                     enrollment_id_for_whatsapp = str(enrollment.id)
 
-                    invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-                    invoice = Invoice.objects.create(
-                        invoice_number=invoice_number,
-                        family=payment.family,
-                        parent=payment.parent,
-                        branch=payment.branch,
-                        payment=payment,
-                        amount=payment.final_amount,
-                        status='paid',
-                        payment_method='credit_card',
-                        payment_type='one_time',
-                        payer_name=payment.family.name,
-                        payer_email=payment.family.email if payment.family.email else '',
-                        payer_phone=payment.family.phone,
-                        tranzila_transaction_id=tranzila_txn.transaction_id,
-                        invoice_date=timezone.now(),
-                    )
-                    if child and lesson:
-                        InvoiceChild.objects.create(
-                            invoice=invoice,
-                            child=child,
-                            course=lesson.course,
-                            lesson=lesson,
+                    invoice = payment.invoices.first()
+                    if invoice is None:
+                        invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
+                        invoice = Invoice.objects.create(
+                            invoice_number=invoice_number,
+                            family=payment.family,
+                            parent=payment.parent,
+                            branch=payment.branch,
+                            payment=payment,
+                            amount=payment.final_amount,
+                            status='paid',
+                            payment_method='credit_card',
+                            payment_type='one_time',
+                            payer_name=payment.family.name,
+                            payer_email=payment.family.email if payment.family.email else '',
+                            payer_phone=payment.family.phone,
+                            tranzila_transaction_id=tranzila_txn.transaction_id,
+                            invoice_date=timezone.now(),
                         )
-                    try:
-                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                        send_subscription_invoice_email(invoice)
-                    except Exception:
-                        logger.exception('Trial invoice email failed (non-fatal)')
+                        if child and lesson:
+                            InvoiceChild.objects.create(
+                                invoice=invoice,
+                                child=child,
+                                course=lesson.course,
+                                lesson=lesson,
+                            )
+                        invoice_id_to_email = invoice.id
 
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
                 else:
@@ -921,7 +991,7 @@ class WidgetChargeView(APIView):
                             "monthly billing will not run until a token is stored",
                             payment.id, child.full_name if child else '',
                         )
-                    if token:
+                    if token and not RecurringPayment.objects.filter(initial_payment=payment).exists():
                         discount_details = [
                             {
                                 'name': s.discount_name,
@@ -956,35 +1026,33 @@ class WidgetChargeView(APIView):
 
                     # A card that was only verified has nothing to invoice.
                     if payment.final_amount > 0:
-                        invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-                        invoice = Invoice.objects.create(
-                            invoice_number=invoice_number,
-                            family=payment.family,
-                            parent=payment.parent,
-                            branch=payment.branch,
-                            payment=payment,
-                            amount=payment.final_amount,
-                            status='paid',
-                            payment_method='credit_card',
-                            payment_type='recurring',
-                            payer_name=payment.family.name,
-                            payer_email=payment.family.email if payment.family.email else '',
-                            payer_phone=payment.family.phone,
-                            tranzila_transaction_id=tranzila_txn.transaction_id,
-                            invoice_date=timezone.now(),
-                        )
-                        if child and lesson:
-                            InvoiceChild.objects.create(
-                                invoice=invoice,
-                                child=child,
-                                course=lesson.course,
-                                lesson=lesson,
+                        invoice = payment.invoices.first()
+                        if invoice is None:
+                            invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
+                            invoice = Invoice.objects.create(
+                                invoice_number=invoice_number,
+                                family=payment.family,
+                                parent=payment.parent,
+                                branch=payment.branch,
+                                payment=payment,
+                                amount=payment.final_amount,
+                                status='paid',
+                                payment_method='credit_card',
+                                payment_type='recurring',
+                                payer_name=payment.family.name,
+                                payer_email=payment.family.email if payment.family.email else '',
+                                payer_phone=payment.family.phone,
+                                tranzila_transaction_id=tranzila_txn.transaction_id,
+                                invoice_date=timezone.now(),
                             )
-                        try:
-                            from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                            send_subscription_invoice_email(invoice)
-                        except Exception:
-                            logger.exception('Subscription invoice email failed (non-fatal)')
+                            if child and lesson:
+                                InvoiceChild.objects.create(
+                                    invoice=invoice,
+                                    child=child,
+                                    course=lesson.course,
+                                    lesson=lesson,
+                                )
+                            invoice_id_to_email = invoice.id
 
                     child.status = 'active'
                     if deferred_start:
@@ -1012,6 +1080,15 @@ class WidgetChargeView(APIView):
                                 enrollment.bundle = payment.bundle
                             enrollment.save()
 
+            if invoice_id_to_email:
+                def _send_invoice_email(invoice_id=invoice_id_to_email):
+                    try:
+                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+                        send_subscription_invoice_email(Invoice.objects.get(pk=invoice_id))
+                    except Exception:
+                        logger.exception('Invoice email failed after widget charge (non-fatal)')
+                transaction.on_commit(_send_invoice_email)
+
             if enrollment_id_for_whatsapp:
                 try:
                     from apps.enrollments.trial_reminders import stamp_and_notify_trial_enrollment
@@ -1031,16 +1108,66 @@ class WidgetChargeView(APIView):
                 'recurring_active': bool(is_trial_payment or result.get('token')),
             }
 
-        else:
-            payment.status = 'failed'
-            payment.failure_reason = result.get('error', 'Unknown')
-            payment.failure_code = str(result.get('response_code', ''))[:50]
-            payment.save(update_fields=['status', 'failure_reason', 'failure_code'])
-            # An earlier lesson in the same bundle may already be paid and active;
-            # flagging the child as a payment problem then would be wrong.
-            if allow_child_status_downgrade and child:
-                Child.objects.filter(pk=child.pk).update(status='payment_problem')
+        if is_tranzila_uncertain_gateway_error(result):
+            # Timed out after Tranzila may already have charged. Leave processing
+            # so a retry is idempotent (DCdisable / completed status) instead of
+            # showing a false decline while the child is already enrolled.
+            logger.error(
+                "Widget charge uncertain for payment %s — leaving processing: %s",
+                payment.id, result.get('error'),
+            )
+            return processing_payload(
+                payment,
+                'בודקים את אישור הסליקה. אל תשלמו שוב — אם החיוב עבר, ההרשמה תושלם מיד.',
+            )
+
+        payment.status = 'failed'
+        payment.failure_reason = result.get('error', 'Unknown')
+        payment.failure_code = str(result.get('response_code', ''))[:50]
+        payment.save(update_fields=['status', 'failure_reason', 'failure_code', 'updated_at'])
+        # An earlier lesson in the same bundle may already be paid and active;
+        # flagging the child as a payment problem then would be wrong.
+        if allow_child_status_downgrade and child:
+            Child.objects.filter(pk=child.pk).update(status='payment_problem')
             return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
+
+
+class WidgetPaymentStatusView(APIView):
+    """
+    Public poll for widget checkout after a browser timeout.
+
+    GET /api/v1/customers/widget/payment-status/?payment_id=...
+    GET /api/v1/customers/widget/payment-status/?payment_ids=uuid,uuid
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        raw_ids = request.query_params.get('payment_ids') or request.query_params.get('payment_id') or ''
+        payment_ids = [pid.strip() for pid in str(raw_ids).split(',') if pid.strip()]
+        if not payment_ids:
+            return Response({'error': 'payment_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payments = list(Payment.objects.filter(id__in=payment_ids).only('id', 'status'))
+        if len(payments) != len(set(payment_ids)):
+            return Response({'success': False, 'error': 'תשלום לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        statuses = [p.status for p in payments]
+        payload = {
+            'results': [{'payment_id': str(p.id), 'status': p.status} for p in payments],
+        }
+        if all(s == 'completed' for s in statuses):
+            payload['success'] = True
+            payload['status'] = 'completed'
+            return Response(payload)
+        if any(s in ('processing', 'pending') for s in statuses):
+            payload['success'] = False
+            payload['processing'] = True
+            payload['status'] = 'processing'
+            return Response(payload)
+        payload['success'] = False
+        payload['status'] = 'failed'
+        return Response(payload)
 
 
 class WidgetCoursesView(APIView):

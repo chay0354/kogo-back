@@ -1,7 +1,19 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
-from .widget_views import WidgetLookupView, WidgetRegisterView, WidgetTrialRegisterView, WidgetChargeView, WidgetCitiesView, WidgetBranchesView, WidgetCoursesView, WidgetCourseTypesView, WidgetLessonOccurrencesView, WidgetTermsView, WidgetTermsView
+from .widget_views import (
+    WidgetLookupView,
+    WidgetRegisterView,
+    WidgetTrialRegisterView,
+    WidgetChargeView,
+    WidgetPaymentStatusView,
+    WidgetCitiesView,
+    WidgetBranchesView,
+    WidgetCoursesView,
+    WidgetCourseTypesView,
+    WidgetLessonOccurrencesView,
+    WidgetTermsView,
+)
 from .views import cron_recurring_billing
 
 router = DefaultRouter()
@@ -20,6 +32,7 @@ urlpatterns = [
     path('widget/register/', WidgetRegisterView.as_view(), name='widget-register'),
     path('widget/trial-register/', WidgetTrialRegisterView.as_view(), name='widget-trial-register'),
     path('widget/charge/', WidgetChargeView.as_view(), name='widget-charge'),
+    path('widget/payment-status/', WidgetPaymentStatusView.as_view(), name='widget-payment-status'),
     path('widget/courses/', WidgetCoursesView.as_view(), name='widget-courses'),
     path('widget/course-types/', WidgetCourseTypesView.as_view(), name='widget-course-types'),
     path('widget/cities/', WidgetCitiesView.as_view(), name='widget-cities'),
