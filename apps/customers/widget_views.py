@@ -308,6 +308,8 @@ class WidgetRegisterView(APIView):
         the course's first lesson. Ignored if bundle_id is also provided.
       price_option_id (str) — register at an extra catalog price for the lesson.
         Ignored if bundle_id is provided.
+      include_registration_fee (bool) — pass false for extra lessons after the first
+        in the same checkout (same child). Bundles ignore this and charge the fee once.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -416,6 +418,7 @@ class WidgetRegisterView(APIView):
                 error_url=data.get('error_url', ''),
                 callback_url=data.get('callback_url', ''),
                 price_option_id=price_option_id or None,
+                include_registration_fee=bool(data.get('include_registration_fee', True)),
             )
             result['child_id'] = str(child.id)
             return Response(result, status=status.HTTP_201_CREATED)
