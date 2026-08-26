@@ -1,7 +1,17 @@
+from django import forms
 from django.contrib import admin
 from .models import (
     Instructor, InstructorSalaryTier, InstructorBranch, InstructorBonus
 )
+
+
+class InstructorAdminForm(forms.ModelForm):
+    last_name = forms.CharField(required=False, max_length=100, label='שם משפחה')
+    email = forms.CharField(required=False, max_length=254, label='שם משתמש')
+
+    class Meta:
+        model = Instructor
+        fields = '__all__'
 
 
 class InstructorSalaryTierInline(admin.TabularInline):
@@ -16,6 +26,7 @@ class InstructorBranchInline(admin.TabularInline):
 
 @admin.register(Instructor)
 class InstructorAdmin(admin.ModelAdmin):
+    form = InstructorAdminForm
     list_display = ['full_name', 'phone', 'email', 'primary_branch', 'salary_model_type', 'is_active']
     list_filter = ['is_active', 'salary_model_type', 'primary_branch']
     search_fields = ['first_name', 'last_name', 'phone', 'email']

@@ -71,6 +71,38 @@ class InstructorUsernameTest(TestCase):
         self.assertEqual(res.data['email'], 'alegria')
         self.assertEqual(res.data['last_name'], '')
 
+    def test_create_without_email_field(self):
+        res = self.client.post('/api/v1/instructors/', {
+            'first_name': 'אלגריה',
+            'phone': '0505555555',
+            'salary_model_type': 'fixed_per_lesson',
+            'fixed_salary_per_lesson': 250,
+        }, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data.get('email') or '', '')
+
+    def test_update_email_to_plain_username(self):
+        instructor = Instructor.objects.create(
+            first_name='אלגריה',
+            last_name='מדריך',
+            phone='0506666666',
+            email='alegria@gmail.com',
+            primary_branch=self.branch,
+        )
+        res = self.client.put(f'/api/v1/instructors/{instructor.id}/', {
+            'first_name': 'אלגריה',
+            'last_name': '',
+            'phone': '0506666666',
+            'email': 'alegria',
+            'primary_branch': str(self.branch.id),
+            'salary_model_type': 'fixed_per_lesson',
+            'fixed_salary_per_lesson': 250,
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        instructor.refresh_from_db()
+        self.assertEqual(instructor.email, 'alegria')
+        self.assertEqual(instructor.last_name, '')
+
     def test_login_with_username(self):
         user = User.objects.create_user(username='alegria', email='', password='secret')
         UserProfile.objects.update_or_create(

@@ -62,6 +62,7 @@ class InstructorDropdownSerializer(serializers.ModelSerializer):
 class InstructorListSerializer(serializers.ModelSerializer):
     """Serializer for instructor list with basic info"""
     full_name = serializers.CharField(read_only=True)
+    email = serializers.CharField(required=False, allow_blank=True, max_length=254)
     primary_branch_name = serializers.CharField(source='primary_branch.name', read_only=True, allow_null=True)
     branches = serializers.SerializerMethodField()
     
@@ -115,6 +116,7 @@ class InstructorListSerializer(serializers.ModelSerializer):
 class InstructorDetailSerializer(serializers.ModelSerializer):
     """Detailed serializer for single instructor view"""
     full_name = serializers.CharField(read_only=True)
+    email = serializers.CharField(required=False, allow_blank=True, max_length=254)
     primary_branch_name = serializers.CharField(source='primary_branch.name', read_only=True, allow_null=True)
     branches = InstructorBranchSerializer(source='branch_assignments', many=True, read_only=True)
     salary_tiers = InstructorSalaryTierSerializer(many=True, read_only=True)
@@ -171,6 +173,10 @@ class InstructorCreateUpdateSerializer(serializers.ModelSerializer):
             'salary_tiers', 'branch_ids', 'is_active'
         ]
         read_only_fields = ['id']
+        extra_kwargs = {
+            'email': {'required': False, 'allow_blank': True, 'validators': []},
+            'last_name': {'required': False, 'allow_blank': True},
+        }
 
     def validate_email(self, value):
         """Login username — any string, unique when set."""
