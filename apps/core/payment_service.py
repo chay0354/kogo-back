@@ -155,6 +155,85 @@ def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
         enrollment.save()
 
 
+def heal_missing_bundle_enrollments() -> dict:
+    """Enroll every other day of a twice/thrice-a-week bundle the child is already billed for.
+
+    The first widget split charged the first day, failed (or skipped) the ₪0 extra day,
+    and left the standing order on the combined price. New signups enroll all members
+    in enroll_child_in_paid_lessons; this catches leftovers.
+    """
+    jobs: dict[tuple[str, str], tuple] = {}
+
+    enrollments = (
+        LessonEnrollment.objects.filter(status='active', bundle_id__isnull=False)
+        .select_related('child', 'bundle', 'lesson')
+        .prefetch_related('bundle__lessons')
+    )
+    for enrollment in enrollments:
+        bundle = enrollment.bundle
+        if bundle is None:
+            continue
+        members = list(bundle.lessons.all())
+        if len(members) < 2:
+            continue
+        jobs[(str(enrollment.child_id), str(bundle.id))] = (
+            enrollment.child,
+            enrollment.lesson,
+            bundle,
+        )
+
+    stos = (
+        RecurringPayment.objects.filter(
+            status='active',
+            initial_payment__bundle_id__isnull=False,
+        )
+        .select_related('child', 'initial_payment__bundle', 'initial_payment__lesson')
+        .prefetch_related('initial_payment__bundle__lessons')
+    )
+    for rp in stos:
+        payment = rp.initial_payment
+        bundle = payment.bundle if payment else None
+        lesson = payment.lesson if payment else None
+        if bundle is None or lesson is None:
+            continue
+        members = list(bundle.lessons.all())
+        if len(members) < 2:
+            continue
+        jobs.setdefault((str(rp.child_id), str(bundle.id)), (rp.child, lesson, bundle))
+
+    children_healed = 0
+    enrollments_created = 0
+    for child, lesson, bundle in jobs.values():
+        member_ids = list(bundle.lessons.values_list('id', flat=True))
+        active_count = LessonEnrollment.objects.filter(
+            child=child,
+            lesson_id__in=member_ids,
+            status='active',
+        ).count()
+        if active_count >= len(member_ids):
+            continue
+        enroll_child_in_paid_lessons(child=child, lesson=lesson, bundle=bundle)
+        after = LessonEnrollment.objects.filter(
+            child=child,
+            lesson_id__in=member_ids,
+            status='active',
+        ).count()
+        added = max(0, after - active_count)
+        if added:
+            children_healed += 1
+            enrollments_created += added
+
+    logger.info(
+        "Healed missing bundle enrollments: %s children, %s rows",
+        children_healed,
+        enrollments_created,
+    )
+    return {
+        'children': children_healed,
+        'enrollments_created': enrollments_created,
+    }
+
+
 def should_create_recurring_for_payment(*, child, bundle, monthly_amount: Decimal) -> bool:
     """One standing order per twice/thrice-a-week bundle, at the full widget price."""
     if monthly_amount <= 0:

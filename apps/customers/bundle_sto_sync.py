@@ -287,6 +287,9 @@ def _cancel_locally(rp: RecurringPayment, reason: str) -> None:
 def apply_bundle_sto_fixes(limit: int = DEFAULT_LIMIT) -> dict:
     if limit < 1:
         limit = DEFAULT_LIMIT
+    from apps.core.payment_service import heal_missing_bundle_enrollments
+
+    healed = heal_missing_bundle_enrollments()
     pending = iter_bundle_sto_fixes()
     chosen = pending[:limit]
     synced = []
@@ -355,4 +358,5 @@ def apply_bundle_sto_fixes(limit: int = DEFAULT_LIMIT) -> dict:
         'synced_count': len(synced),
         'failed_count': len(failed),
         'remaining': remaining,
+        'enrollments_healed': healed,
     }

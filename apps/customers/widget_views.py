@@ -320,10 +320,9 @@ class WidgetRegisterView(APIView):
       existing_child_id   (str)  — returned by lookup when child is already active
       success_url, error_url, callback_url
       bundle_id (str) — register for a combined "twice a week" LessonBundle of this
-        course instead of the course's first lesson. Creates one Payment per member
-        lesson; the first is billed at combined_price (plus דמי רישום once) and the
-        rest at ₪0 so one standing order matches the widget price. Response has
-        `is_bundle: True` and a `payments` list instead of a single payment_id.
+        course instead of the course's first lesson. Creates one Payment billed at
+        combined_price (plus דמי רישום once); extra days enroll from that charge.
+        Response has `is_bundle: True` and a `payments` list.
       lesson_id (str) — register for this specific Lesson of the course instead of
         the course's first lesson. Ignored if bundle_id is also provided.
       price_option_id (str) — register at an extra catalog price for the lesson.

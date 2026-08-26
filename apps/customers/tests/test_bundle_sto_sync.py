@@ -11,7 +11,9 @@ from rest_framework.test import APIClient
 from apps.core.models import UserProfile
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.courses.models import LessonBundle
+from apps.core.payment_service import heal_missing_bundle_enrollments
 from apps.customers.models import Payment, RecurringPayment
+from apps.enrollments.models import LessonEnrollment
 
 
 class BundleStoSyncAPITests(TestCase):
@@ -300,4 +302,70 @@ class BundleStoSyncAPITests(TestCase):
         self.assertEqual(
             RecurringPayment.objects.filter(child=child, status='active').count(),
             2,
+        )
+
+
+class HealMissingBundleEnrollmentsTests(TestCase):
+    def setUp(self):
+        self.course = TestDataFactory.create_course(price=Decimal('260.00'))
+        self.lesson_a = TestDataFactory.create_lesson(course=self.course, day_of_week=0)
+        self.lesson_b = TestDataFactory.create_lesson(course=self.course, day_of_week=3)
+        self.bundle = LessonBundle.objects.create(course=self.course, combined_price=Decimal('360.00'))
+        self.bundle.lessons.set([self.lesson_a, self.lesson_b])
+        family = TestDataFactory.create_family()
+        self.child = TestDataFactory.create_child(family=family, first_name='רואי', last_name='בדיקה')
+
+    def test_adds_the_missing_bundle_day(self):
+        LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=self.lesson_a,
+            bundle=self.bundle,
+            status='active',
+            start_date=date(2026, 8, 25),
+        )
+        result = heal_missing_bundle_enrollments()
+        self.assertEqual(result['children'], 1)
+        self.assertEqual(result['enrollments_created'], 1)
+        self.assertTrue(
+            LessonEnrollment.objects.filter(
+                child=self.child, lesson=self.lesson_b, status='active', bundle=self.bundle,
+            ).exists()
+        )
+        again = heal_missing_bundle_enrollments()
+        self.assertEqual(again['children'], 0)
+        self.assertEqual(again['enrollments_created'], 0)
+
+    def test_heals_from_standing_order_when_enrollment_has_no_bundle(self):
+        family = self.child.family
+        payment = Payment.objects.create(
+            child=self.child,
+            family=family,
+            branch=self.course.branch,
+            lesson=self.lesson_a,
+            bundle=self.bundle,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('170.00'),
+            discount_amount=Decimal('10.00'),
+            final_amount=Decimal('160.00'),
+        )
+        RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=payment,
+            status='active',
+            amount=Decimal('160.00'),
+            billing_day=1,
+            start_date=date(2026, 8, 25),
+            next_billing_date=date(2026, 9, 1),
+        )
+        LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=self.lesson_a,
+            status='active',
+            start_date=date(2026, 8, 25),
+        )
+        result = heal_missing_bundle_enrollments()
+        self.assertEqual(result['enrollments_created'], 1)
+        self.assertTrue(
+            LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson_b, status='active').exists()
         )

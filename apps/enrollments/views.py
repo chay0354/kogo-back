@@ -160,69 +160,46 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='change-lesson')
     def change_lesson(self, request, pk=None):
-        """Move a child to another lesson without changing what they pay."""
-        from django.db import transaction
+        """Move a child to another חוג without changing what they pay.
+
+        Twice/thrice-a-week courses are replaced as one unit.
+        """
         from django.core.exceptions import ValidationError as DjangoValidationError
 
-        from apps.customers.models import Payment
-        from apps.enrollments.enrollment_counts import count_capacity_enrollments
+        from apps.courses.models import Course
+        from apps.customers.serializers import _serialize_lesson_enrollment
+        from apps.enrollments.change_course import replace_course_unit
 
         enrollment = self.get_object()
+        course_id = (request.data.get('course_id') or request.data.get('course') or '').strip()
         new_lesson_id = (request.data.get('lesson_id') or request.data.get('lesson') or '').strip()
-        if not new_lesson_id:
-            return Response({'error': 'יש לבחור שיעור'}, status=status.HTTP_400_BAD_REQUEST)
+        if not course_id and not new_lesson_id:
+            return Response({'error': 'יש לבחור חוג'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            new_lesson = (
-                Lesson.objects
-                .select_related('course', 'course__branch', 'room')
-                .get(pk=new_lesson_id)
-            )
-        except (Lesson.DoesNotExist, DjangoValidationError, ValueError, TypeError):
-            return Response({'error': 'השיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-
-        old_lesson = enrollment.lesson
-        if old_lesson.id == new_lesson.id:
-            return Response(self.get_serializer(enrollment).data)
-
-        if (
-            LessonEnrollment.objects
-            .filter(child=enrollment.child, lesson=new_lesson)
-            .exclude(pk=enrollment.pk)
-            .exists()
-        ):
-            return Response({'error': 'הילד כבר רשום לשיעור זה'}, status=status.HTTP_400_BAD_REQUEST)
-
-        caps = []
-        if new_lesson.course.capacity:
-            caps.append(int(new_lesson.course.capacity))
-        if new_lesson.room and new_lesson.room.capacity:
-            caps.append(int(new_lesson.room.capacity))
-        if caps:
-            current = count_capacity_enrollments(lesson=new_lesson)
-            capacity = min(caps)
-            if current >= capacity:
-                return Response(
-                    {'error': f'השיעור מלא — קיבולת מקסימלית: {capacity} תלמידים'},
-                    status=status.HTTP_400_BAD_REQUEST,
+            if course_id:
+                new_course = Course.objects.select_related('branch').get(pk=course_id)
+            else:
+                new_lesson = (
+                    Lesson.objects
+                    .select_related('course', 'course__branch', 'room')
+                    .get(pk=new_lesson_id)
                 )
+                new_course = new_lesson.course
+        except (Course.DoesNotExist, Lesson.DoesNotExist, DjangoValidationError, ValueError, TypeError):
+            return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        keep_bundle = bool(
-            enrollment.bundle_id
-            and enrollment.bundle.lessons.filter(pk=new_lesson.pk).exists()
-        )
+        try:
+            result = replace_course_unit(enrollment=enrollment, new_course=new_course)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        with transaction.atomic():
-            enrollment.lesson = new_lesson
-            if enrollment.bundle_id and not keep_bundle:
-                enrollment.bundle = None
-            enrollment.save(update_fields=['lesson', 'bundle', 'updated_at'])
-            payment_update = {'lesson': new_lesson}
-            if not keep_bundle:
-                payment_update['bundle'] = None
-            Payment.objects.filter(child=enrollment.child, lesson=old_lesson).update(**payment_update)
-
-        return Response(self.get_serializer(enrollment).data)
+        kept = result['kept']
+        primary = next((row for row in kept if row.id == enrollment.id), kept[0])
+        data = dict(self.get_serializer(primary).data)
+        data['enrollments'] = [_serialize_lesson_enrollment(row) for row in kept]
+        data['removed_enrollment_ids'] = [str(row_id) for row_id in result['removed_ids']]
+        return Response(data)
 
 
 @api_view(['GET', 'POST'])
