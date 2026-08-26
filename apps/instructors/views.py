@@ -39,7 +39,7 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'phone', 'email', 'specialization']
     ordering_fields = ['first_name', 'last_name', 'created_at']
-    ordering = ['last_name', 'first_name']
+    ordering = ['first_name', 'last_name']
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""

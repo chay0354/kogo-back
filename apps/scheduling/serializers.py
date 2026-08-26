@@ -48,7 +48,7 @@ class LessonDetailSerializer(serializers.ModelSerializer):
     course_type_name = serializers.CharField(source='course.course_type.name', read_only=True)
     instructor_id = serializers.UUIDField(source='instructor.id', read_only=True)
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True)
-    instructor_email = serializers.EmailField(source='instructor.email', read_only=True)
+    instructor_email = serializers.CharField(source='instructor.email', read_only=True)
     branch_id = serializers.UUIDField(source='course.branch.id', read_only=True)
     branch_name = serializers.CharField(source='course.branch.name', read_only=True)
     city_id = serializers.UUIDField(source='course.branch.city.id', read_only=True, allow_null=True)

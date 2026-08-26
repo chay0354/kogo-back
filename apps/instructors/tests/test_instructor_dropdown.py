@@ -39,3 +39,16 @@ class InstructorDropdownListTest(TestCase):
         self.assertNotIn('revenue', row)
         self.assertNotIn('salary', row)
         self.assertNotIn('profit', row)
+
+    def test_dropdown_includes_instructor_listed_under_placeholder_last_name(self):
+        Instructor.objects.create(
+            first_name='אלגריה',
+            last_name='מדריך',
+            email='alegria@test.com',
+            phone='0502222222',
+            primary_branch=self.branch,
+        )
+        res = self.client.get('/api/v1/instructors/?dropdown=true')
+        self.assertEqual(res.status_code, 200)
+        names = [row['full_name'] for row in res.data]
+        self.assertIn('אלגריה מדריך', names)

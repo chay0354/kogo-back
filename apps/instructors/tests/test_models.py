@@ -47,6 +47,17 @@ class InstructorModelTest(TestCase):
         )
         
         self.assertEqual(instructor.full_name, "דני לוי")
+
+    def test_full_name_without_last_name(self):
+        instructor = Instructor.objects.create(
+            first_name="אלגריה",
+            last_name="",
+            phone="050-0000000",
+            email="alegria",
+            primary_branch=self.branch,
+        )
+        self.assertEqual(instructor.full_name, "אלגריה")
+        self.assertEqual(str(instructor), "אלגריה")
     
     def test_instructor_str_representation(self):
         """Test instructor string representation"""

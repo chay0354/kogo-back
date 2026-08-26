@@ -3,8 +3,8 @@ Course and branch visibility scoping.
 
 Managers see all courses and derived data.
 Partners see data only for explicitly assigned branches.
-Instructor users (worker role, matched to Instructor by email) see only
-courses where they teach at least one lesson.
+Instructor users (worker role, matched to Instructor by login username
+or email) see only courses where they teach at least one lesson.
 """
 from __future__ import annotations
 
@@ -59,14 +59,50 @@ def partner_branch_ids(user):
         return []
 
 
+def user_login_idents(user):
+    """Email and/or username the worker may log in with."""
+    idents = []
+    if not user:
+        return idents
+    for val in (getattr(user, 'email', None), getattr(user, 'username', None)):
+        ident = (val or '').strip()
+        if ident and ident not in idents:
+            idents.append(ident)
+    return idents
+
+
+def instructor_login_q(user, instructor_field='instructor'):
+    """
+    Match Instructor.email (stored login username) to the user's email or username.
+    instructor_field='instructor' → Lesson/Course; '' → Instructor queryset.
+    """
+    idents = user_login_idents(user)
+    if not idents:
+        return Q(pk__in=[])
+    key = f'{instructor_field}__email__iexact' if instructor_field else 'email__iexact'
+    q = Q()
+    for ident in idents:
+        q |= Q(**{key: ident})
+    return q
+
+
+def instructor_for_user(user):
+    """Instructor record whose login username matches this worker user."""
+    from apps.instructors.models import Instructor
+
+    if not user_login_idents(user):
+        return None
+    return Instructor.objects.filter(instructor_login_q(user, instructor_field='')).first()
+
+
 def instructor_course_ids(user):
     """Course ids where this instructor user is assigned to the team."""
     from apps.courses.models import Course
 
-    if not user or not user.email:
+    if not user_login_idents(user):
         return []
     return list(
-        Course.objects.filter(instructor__email__iexact=user.email)
+        Course.objects.filter(instructor_login_q(user))
         .values_list('id', flat=True)
         .distinct()
     )

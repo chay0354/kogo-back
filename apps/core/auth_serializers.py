@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import serializers
 
 from apps.core.models import Branch, UserProfile
@@ -10,7 +11,7 @@ User = get_user_model()
 
 
 class LoginSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.CharField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
 
@@ -91,6 +92,7 @@ class ManagedUserSerializer(serializers.ModelSerializer):
     )
     # Read-only mirrors
     role_display = serializers.SerializerMethodField(read_only=True)
+    email = serializers.CharField()
 
     class Meta:
         model = User
@@ -113,13 +115,15 @@ class ManagedUserSerializer(serializers.ModelSerializer):
             return None
 
     def validate_email(self, value):
-        email = value.strip().lower()
-        qs = User.objects.filter(email__iexact=email)
+        login_id = (value or '').strip()
+        if not login_id:
+            raise serializers.ValidationError('שם משתמש נדרש')
+        qs = User.objects.filter(Q(email__iexact=login_id) | Q(username__iexact=login_id))
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('אימייל כבר קיים במערכת')
-        return email
+            raise serializers.ValidationError('שם משתמש כבר קיים במערכת')
+        return login_id
 
     def validate(self, attrs):
         password = attrs.get('password')

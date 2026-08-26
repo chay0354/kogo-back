@@ -12,9 +12,9 @@ class Instructor(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     first_name = models.CharField(max_length=100, verbose_name="שם פרטי")
-    last_name = models.CharField(max_length=100, verbose_name="שם משפחה")
+    last_name = models.CharField(max_length=100, blank=True, default='', verbose_name="שם משפחה")
     phone = models.CharField(max_length=20, verbose_name="טלפון")
-    email = models.EmailField(verbose_name="אימייל")
+    email = models.CharField(max_length=254, blank=True, default='', verbose_name="שם משתמש")
     specialization = models.CharField(max_length=200, blank=True, verbose_name="התמחות")
     primary_branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, related_name='primary_instructors', verbose_name="סניף ראשי")
     salary_model_type = models.CharField(max_length=50, choices=SALARY_MODEL_CHOICES, default='fixed_per_lesson', verbose_name="סוג מודל שכר")
@@ -30,7 +30,7 @@ class Instructor(models.Model):
         ordering = ['last_name', 'first_name']
 
     def __str__(self):
-        return f"{self.first_name} {self.last_name}"
+        return self.full_name
 
     @property
     def full_name(self):
@@ -39,7 +39,7 @@ class Instructor(models.Model):
         USAGE: Used in Django admin displays
         USAGE: Referenced in ChildWithDetailsSerializer for instructor names
         """
-        return f"{self.first_name} {self.last_name}"
+        return " ".join(part for part in (self.first_name, self.last_name) if part).strip()
 
 
 class InstructorSalaryTier(models.Model):

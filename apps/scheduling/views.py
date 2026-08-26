@@ -110,9 +110,9 @@ class LessonViewSet(viewsets.ModelViewSet):
                 course__is_active=True,
             ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         elif user_role == UserProfile.ROLE_WORKER:
-            # Workers see only their own lessons (matched by email)
+            from apps.core.scoping import instructor_login_q
             return qs.filter(
-                instructor__email__iexact=user.email,
+                instructor_login_q(user),
                 course__is_active=True,
             ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         
@@ -632,9 +632,8 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         try:
             user_role = user.profile.role
             if user_role == UserProfile.ROLE_WORKER:
-                # Instructors see only non-rental events assigned to them.
-                from apps.instructors.models import Instructor
-                instructor = Instructor.objects.filter(email__iexact=user.email).first()
+                from apps.core.scoping import instructor_for_user
+                instructor = instructor_for_user(user)
                 if instructor:
                     queryset = queryset.filter(
                         assigned_instructors=instructor,

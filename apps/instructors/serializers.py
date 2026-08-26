@@ -153,6 +153,8 @@ class InstructorDetailSerializer(serializers.ModelSerializer):
 
 class InstructorCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating and updating instructors"""
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    email = serializers.CharField(required=False, allow_blank=True, max_length=254)
     salary_tiers = InstructorSalaryTierSerializer(many=True, required=False)
     branch_ids = serializers.ListField(
         child=serializers.UUIDField(),
@@ -169,6 +171,19 @@ class InstructorCreateUpdateSerializer(serializers.ModelSerializer):
             'salary_tiers', 'branch_ids', 'is_active'
         ]
         read_only_fields = ['id']
+
+    def validate_email(self, value):
+        """Login username — any string, unique when set."""
+        username = (value or '').strip()
+        if not username:
+            return ''
+        instructor_id = self.instance.id if self.instance else None
+        qs = Instructor.objects.filter(email__iexact=username)
+        if instructor_id:
+            qs = qs.exclude(id=instructor_id)
+        if qs.exists():
+            raise serializers.ValidationError("שם משתמש זה כבר בשימוש")
+        return username
     
     def validate_phone(self, value):
         """Ensure phone number is unique"""

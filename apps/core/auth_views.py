@@ -43,7 +43,7 @@ class LoginView(APIView):
 
         user = authenticate(request, email=email, password=password)
         if not user:
-            return Response({'error': 'אימייל או סיסמה שגויים'}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({'error': 'שם משתמש או סיסמה שגויים'}, status=status.HTTP_401_UNAUTHORIZED)
 
         # Create or reuse token
         token, _ = Token.objects.get_or_create(user=user)
