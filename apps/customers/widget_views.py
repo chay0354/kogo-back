@@ -17,6 +17,7 @@ from datetime import timedelta
 from django.utils import timezone
 from apps.core.tranzila_service import is_tranzila_uncertain_gateway_error
 from apps.customers.models import Family, Parent, Child, Payment
+from apps.customers.child_identity import find_existing_child_on_family
 from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
@@ -138,7 +139,7 @@ def _resolve_family_and_child(data, branch):
     existing_child_id = (data.get('existing_child_id') or '').strip()
 
     # ── 1. Find or create Family ──────────────────────────────
-    family = Family.objects.filter(parent_id_number=parent_id_number).first()
+    family = Family.objects.select_for_update().filter(parent_id_number=parent_id_number).first()
     if not family:
         family = Family.objects.create(
             name=data['parent_last_name'].strip(),
@@ -201,17 +202,15 @@ def _resolve_family_and_child(data, branch):
         ):
             child = candidate
 
-    # Fallback: look for active name match (handles re-submission edge cases)
-    if child is None and discount_confirmed:
-        child = family.children.filter(
-            first_name__iexact=child_first,
-            last_name__iexact=child_last,
-            status='active',
-        ).first()
-
-    # Same ת.ז. on this family — extra lessons must not create a duplicate child
-    if child is None and submitted_id_number:
-        child = family.children.filter(id_number=submitted_id_number).first()
+    # Same child already on this family (pending leftover, trial, or active).
+    # Retries must not create a second card with בתהליך רישום.
+    if child is None:
+        child = find_existing_child_on_family(
+            family,
+            first_name=child_first,
+            last_name=child_last,
+            id_number=submitted_id_number,
+        )
 
     # Otherwise create a new child
     if child is None:
@@ -222,9 +221,12 @@ def _resolve_family_and_child(data, branch):
             birth_date=data['child_birth_date'],
             gender=data['child_gender'],
             phone_number=(data.get('child_phone') or '').strip(),
-            id_number=(data.get('child_id_number') or '').strip(),
+            id_number=submitted_id_number,
             status='pending',
         )
+    elif submitted_id_number and not child.id_number:
+        child.id_number = submitted_id_number
+        child.save(update_fields=['id_number', 'updated_at'])
 
     return family, child
 
@@ -262,18 +264,18 @@ class WidgetLookupView(APIView):
                 'discount_question': None,
             })
 
-        # Family exists — check for an active child with matching name
-        active_child = family.children.filter(
-            first_name__iexact=child_first_name,
-            last_name__iexact=child_last_name,
-            status='active',
-        ).first()
+        # Family exists — same child (any status) vs a sibling
+        existing_child = find_existing_child_on_family(
+            family,
+            first_name=child_first_name,
+            last_name=child_last_name,
+        )
 
-        if active_child:
+        if existing_child and existing_child.status == 'active':
             return Response({
                 'family_status': 'existing',
                 'child_status': 'active',
-                'child_id': str(active_child.id),
+                'child_id': str(existing_child.id),
                 'discount_type': 'additional_lesson',
                 'discount_question': (
                     'זיהינו שהילד כבר מתאמן אצלנו. '
@@ -281,7 +283,17 @@ class WidgetLookupView(APIView):
                 ),
             })
 
-        # Family exists but child not active → sibling
+        if existing_child:
+            # Abandoned signup / trial retry — reuse this card, not a sibling.
+            return Response({
+                'family_status': 'existing',
+                'child_status': 'new',
+                'child_id': str(existing_child.id),
+                'discount_type': None,
+                'discount_question': None,
+            })
+
+        # Family exists but this name is new → sibling
         return Response({
             'family_status': 'existing',
             'child_status': 'new',

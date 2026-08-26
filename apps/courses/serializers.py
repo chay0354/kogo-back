@@ -387,6 +387,12 @@ class LessonSerializer(serializers.ModelSerializer):
     """Basic Lesson serializer for CRUD operations"""
     course_name = serializers.CharField(source='course.name', read_only=True)
     course_display_id = serializers.IntegerField(source='course.display_id', read_only=True)
+    course_type = serializers.SerializerMethodField()
+    course_type_name = serializers.SerializerMethodField()
+    branch_id = serializers.SerializerMethodField()
+    branch_name = serializers.SerializerMethodField()
+    min_age = serializers.IntegerField(source='course.min_age', read_only=True, allow_null=True)
+    max_age = serializers.IntegerField(source='course.max_age', read_only=True, allow_null=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
     instructor = serializers.PrimaryKeyRelatedField(
         queryset=Instructor.objects.filter(is_active=True),
@@ -400,7 +406,9 @@ class LessonSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lesson
-        fields = ['id', 'course', 'course_name', 'course_display_id', 'room', 'room_name',
+        fields = ['id', 'course', 'course_name', 'course_display_id',
+                  'course_type', 'course_type_name', 'branch_id', 'branch_name',
+                  'min_age', 'max_age', 'room', 'room_name',
                   'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
@@ -426,6 +434,22 @@ class LessonSerializer(serializers.ModelSerializer):
         """Convert day number to Hebrew name"""
         days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
         return days[obj.day_of_week] if 0 <= obj.day_of_week < 7 else ''
+
+    def get_course_type(self, obj):
+        course_type_id = getattr(obj.course, 'course_type_id', None)
+        return str(course_type_id) if course_type_id else None
+
+    def get_course_type_name(self, obj):
+        course_type = getattr(obj.course, 'course_type', None)
+        return course_type.name if course_type else None
+
+    def get_branch_id(self, obj):
+        branch_id = getattr(obj.course, 'branch_id', None)
+        return str(branch_id) if branch_id else None
+
+    def get_branch_name(self, obj):
+        branch = getattr(obj.course, 'branch', None)
+        return branch.name if branch else None
     
     def get_enrolled_students_count(self, obj):
         """Count paying enrollments for this lesson (batched in list view via context)."""

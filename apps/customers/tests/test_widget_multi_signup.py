@@ -188,3 +188,60 @@ class BillingIndexInflightTest(TestCase):
             get_child_lesson_index_for_billing(child, lesson_b),
             2,
         )
+
+
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
+class WidgetRegisterReusesExistingChildTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.course = TestDataFactory.create_course(price=Decimal('200.00'))
+        self.lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=0)
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
+    @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment')
+    def test_retry_register_reuses_pending_child(self, mock_discount, _mock_tranzila):
+        from apps.customers.discount_service import DiscountCalculation
+        from apps.customers.models import Child
+
+        mock_discount.side_effect = lambda **kwargs: DiscountCalculation(
+            applicable_discounts=[],
+            total_discount_amount=Decimal('0.00'),
+            final_price=kwargs['base_price'],
+            base_price=kwargs['base_price'],
+        )
+        payload = _register_payload(course_id=str(self.course.id), lesson_id=str(self.lesson.id))
+
+        first = self.client.post('/api/v1/customers/widget/register/', payload, format='json')
+        self.assertEqual(first.status_code, 201, first.content)
+        child_id = first.json()['child_id']
+
+        second = self.client.post('/api/v1/customers/widget/register/', payload, format='json')
+        self.assertEqual(second.status_code, 201, second.content)
+        self.assertEqual(second.json()['child_id'], child_id)
+        self.assertEqual(Child.objects.filter(id_number=payload['child_id_number']).count(), 1)
+
+    def test_lookup_does_not_treat_pending_child_as_sibling(self):
+        family = TestDataFactory.create_family(parent_id_number='123456782')
+        TestDataFactory.create_parent(family=family)
+        pending = TestDataFactory.create_child(
+            family=family,
+            first_name='Kid',
+            last_name='Parent',
+            status='pending',
+        )
+
+        response = self.client.post(
+            '/api/v1/customers/widget/lookup/',
+            {
+                'parent_id_number': '123456782',
+                'child_first_name': 'Kid',
+                'child_last_name': 'Parent',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(body['family_status'], 'existing')
+        self.assertIsNone(body['discount_type'])
+        self.assertEqual(body['child_id'], str(pending.id))
+

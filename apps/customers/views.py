@@ -26,6 +26,7 @@ from apps.customers.serializers import (
     RecurringPaymentCancelSerializer, BusinessCustomerSerializer
 )
 from apps.customers.discount_service import DiscountService
+from apps.customers.child_identity import exclude_weaker_duplicate_children
 from apps.core.payment_service import PaymentService
 from apps.enrollments.models import Enrollment, LessonEnrollment
 from apps.core.permissions import IsManager, IsManagerOrPartner
@@ -111,6 +112,17 @@ class ChildViewSet(viewsets.ModelViewSet):
             'lesson_enrollments',
             queryset=LessonEnrollment.objects.select_related(
                 'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+            ),
+        ),
+        Prefetch(
+            'family__children',
+            queryset=Child.objects.prefetch_related(
+                Prefetch(
+                    'lesson_enrollments',
+                    queryset=LessonEnrollment.objects.select_related(
+                        'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+                    ),
+                ),
             ),
         ),
     )
@@ -229,6 +241,14 @@ class ChildViewSet(viewsets.ModelViewSet):
         absent_irregularly = self.request.query_params.get('absent_irregularly')
         if absent_irregularly and absent_irregularly.lower() == 'true':
             queryset = queryset.filter(absent_irregularly=True)
+
+        # List/grouped views: hide leftover pending cards when the real child exists.
+        # Apply via pk__in so Subquery annotations are not stacked on enrollment joins.
+        if self.action in ('list', 'by_course'):
+            winner_ids = exclude_weaker_duplicate_children(
+                Child.objects.filter(pk__in=queryset.values('pk'))
+            ).values('pk')
+            queryset = queryset.filter(pk__in=winner_ids)
 
         return queryset
     

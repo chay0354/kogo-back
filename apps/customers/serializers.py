@@ -14,6 +14,55 @@ from apps.core.models import Branch
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 
 
+def _child_name_key(child):
+    return ((child.first_name or '').strip().lower(), (child.last_name or '').strip().lower())
+
+
+def _identity_children(child):
+    """Same person on this family (duplicate pending/trial cards from widget retries)."""
+    family = child.family
+    cached = getattr(family, '_prefetched_objects_cache', None)
+    children = cached.get('children') if cached else None
+    if children is None:
+        children = family.children.all()
+    key = _child_name_key(child)
+    return [row for row in children if _child_name_key(row) == key]
+
+
+def _active_lesson_enrollments(child):
+    seen = set()
+    rows = []
+    for person in _identity_children(child):
+        for enrollment in person.lesson_enrollments.all():
+            if enrollment.status != 'active' or enrollment.id in seen:
+                continue
+            seen.add(enrollment.id)
+            rows.append(enrollment)
+    return rows
+
+
+def _serialize_lesson_enrollment(enrollment):
+    lesson = enrollment.lesson
+    course = lesson.course
+    return {
+        'lesson_id': str(lesson.id),
+        'enrollment_id': str(enrollment.id),
+        'course_name': course.name,
+        'course_id': str(course.id),
+        'course_display_id': course.display_id,
+        'day_of_week': lesson.day_of_week,
+        'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else None,
+        'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
+        'branch_name': course.branch.name if course and course.branch_id else None,
+        'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
+        'status': enrollment.status,
+        'trial_lesson_date': (
+            enrollment.trial_lesson_date.isoformat()
+            if enrollment.trial_lesson_date else None
+        ),
+    }
+
+
 class ParentSerializer(serializers.ModelSerializer):
     """הורה"""
     full_name = serializers.CharField(read_only=True)
@@ -189,29 +238,12 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         seen_courses = set()
 
         # One row per active lesson enrollment so staff can move each slot.
-        for enrollment in obj.lesson_enrollments.all():
-            if enrollment.status != 'active':
-                continue
-            lesson = enrollment.lesson
-            course_id = str(lesson.course.id)
-            seen_courses.add(course_id)
-            result.append({
-                'lesson_id': str(lesson.id),
-                'enrollment_id': str(enrollment.id),
-                'course_name': lesson.course.name,
-                'course_id': course_id,
-                'course_display_id': lesson.course.display_id,
-                'day_of_week': lesson.day_of_week,
-                'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else None,
-                'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else None,
-                'branch_name': lesson.course.branch.name if lesson.course and lesson.course.branch_id else None,
-                'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
-                'status': enrollment.status,
-                'trial_lesson_date': (
-                    enrollment.trial_lesson_date.isoformat()
-                    if enrollment.trial_lesson_date else None
-                ),
-            })
+        # Include duplicate cards of the same child so a leftover trial signup
+        # still appears next to the regular lesson on the kept row.
+        for enrollment in _active_lesson_enrollments(obj):
+            payload = _serialize_lesson_enrollment(enrollment)
+            seen_courses.add(payload['course_id'])
+            result.append(payload)
 
         # Legacy course-level enrollments only when that course has no lesson rows.
         for enrollment in obj.enrollments.all():
@@ -230,7 +262,8 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                 'start_time': None,
                 'end_time': None,
                 'lesson_id': None,
-                'status': 'active'
+                'status': 'active',
+                'trial_lesson_date': None,
             })
 
         return result
@@ -239,9 +272,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         """Active trial lesson the child signed up for (date + enrollment id)."""
         chosen = None
         fallback = None
-        for enrollment in obj.lesson_enrollments.all():
-            if enrollment.status != 'active':
-                continue
+        for enrollment in _active_lesson_enrollments(obj):
             if fallback is None:
                 fallback = enrollment
             if enrollment.trial_lesson_date:

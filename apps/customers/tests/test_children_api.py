@@ -642,3 +642,112 @@ class ChildDeleteCascadeTests(TestCase):
         family.refresh_from_db()
         self.assertEqual(family.children.count(), 1)
 
+
+class ChildrenDuplicateCardsListTests(TestCase):
+    """Leftover pending cards must not appear beside the real child."""
+
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username='manager-dedupe@test.com',
+            email='manager-dedupe@test.com',
+            password='pass12345!',
+            is_active=True,
+        )
+        UserProfile.objects.update_or_create(user=self.user, defaults={'role': UserProfile.ROLE_MANAGER})
+        token = Token.objects.create(user=self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+        self.family = create_test_family(name="Izikovich")
+
+    def test_list_hides_pending_twin_when_active_exists(self):
+        create_test_child(
+            family=self.family,
+            first_name="ניתאי",
+            last_name="איזיקוביץ",
+            id_number="344056916",
+            status="pending",
+        )
+        active = create_test_child(
+            family=self.family,
+            first_name="ניתאי",
+            last_name="איזיקוביץ",
+            id_number="344056916",
+            status="active",
+        )
+        sibling = create_test_child(
+            family=self.family,
+            first_name="ראם",
+            last_name="איזיקוביץ",
+            id_number="344056917",
+            status="active",
+        )
+
+        response = self.client.get('/api/v1/customers/children/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        children = response.data['results'] if 'results' in response.data else response.data
+        ids = {row['id'] for row in children}
+        self.assertIn(str(active.id), ids)
+        self.assertIn(str(sibling.id), ids)
+        self.assertEqual(len(children), 2)
+        nitai = next(row for row in children if row['id'] == str(active.id))
+        self.assertEqual(nitai['status'], 'active')
+
+    def test_list_merges_trial_lessons_from_duplicate_card(self):
+        from datetime import time
+
+        from apps.courses.models import Lesson
+        from apps.enrollments.models import LessonEnrollment
+
+        active = create_test_child(
+            family=self.family,
+            first_name="גפן",
+            last_name="פולוסצקי",
+            id_number="111111111",
+            status="active",
+        )
+        trial_twin = create_test_child(
+            family=self.family,
+            first_name="גפן",
+            last_name="פולוסצקי",
+            id_number="111111111",
+            status="trial_signed",
+        )
+        course = create_test_course(name="קפוארה", branch=self.family.branch)
+        regular_lesson = Lesson.objects.create(
+            course=course,
+            day_of_week=0,
+            start_time=time(16, 0),
+            end_time=time(17, 0),
+            status='scheduled',
+        )
+        trial_lesson = Lesson.objects.create(
+            course=course,
+            day_of_week=2,
+            start_time=time(17, 0),
+            end_time=time(18, 0),
+            status='scheduled',
+        )
+        LessonEnrollment.objects.create(lesson=regular_lesson, child=active, status='active')
+        LessonEnrollment.objects.create(
+            lesson=trial_lesson,
+            child=trial_twin,
+            status='active',
+            trial_lesson_date=date(2026, 9, 14),
+        )
+
+        response = self.client.get('/api/v1/customers/children/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        children = response.data['results'] if 'results' in response.data else response.data
+        matching = [row for row in children if row['first_name'] == 'גפן']
+        self.assertEqual(len(matching), 1)
+        enrollments = matching[0]['enrollments']
+        self.assertEqual(len(enrollments), 2)
+        kinds = sorted(
+            'trial' if row.get('trial_lesson_date') else 'regular'
+            for row in enrollments
+        )
+        self.assertEqual(kinds, ['regular', 'trial'])
+
+
+
