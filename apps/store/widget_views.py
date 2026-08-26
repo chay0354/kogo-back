@@ -29,8 +29,18 @@ from apps.store.inventory_ops import (
     transfer_product_stock,
 )
 from apps.store.models import StoreProduct, StoreInvoice, StoreSale
-from apps.store.pricing import line_charge_amount, sale_unit_and_total
-from apps.store.stock_utils import decrement_product_stock, store_line_item_branch_id
+from apps.store.pricing import line_product_amount, order_delivery_amount, sale_unit_and_total
+from apps.store.stock_utils import (
+    available_stock_for_item,
+    decrement_product_stock,
+    peek_size_row,
+    store_line_item_branch_id,
+)
+from apps.store.website_fulfillment import (
+    parse_delivery_method,
+    resolve_pickup_branch,
+    website_line_branch,
+)
 from apps.store.website_integration import (
     link_product_to_website,
     product_in_stock,
@@ -306,7 +316,11 @@ class IntegrationTransferStockView(APIView):
 class WidgetStoreStockCheckView(APIView):
     """
     POST /api/v1/store/widget/stock-check/
-    Body: { "items": [{ "legacy_id": 123, "quantity": 2, "variant": "M" }] }
+    Body: {
+      "items": [{ "legacy_id": 123, "quantity": 2, "variant": "M" }],
+      "delivery_method": "delivery" | "pickup",
+      "pickup_branch_id": "<uuid>"  // optional; resolved to אם המושבות when omitted
+    }
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -317,6 +331,20 @@ class WidgetStoreStockCheckView(APIView):
         items = request.data.get('items') or []
         if not isinstance(items, list) or not items:
             return Response({'error': 'items required'}, status=400)
+
+        try:
+            delivery_method = parse_delivery_method(request.data.get('delivery_method'))
+            pickup_branch = (
+                resolve_pickup_branch(request.data.get('pickup_branch_id'))
+                if delivery_method == 'pickup'
+                else None
+            )
+            branch = website_line_branch(
+                delivery_method=delivery_method,
+                pickup_branch=pickup_branch,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=400)
 
         results = []
         all_ok = True
@@ -344,15 +372,9 @@ class WidgetStoreStockCheckView(APIView):
                 all_ok = False
                 continue
 
-            available = int(product.stock_quantity or 0)
+            stock_item = {'quantity': qty, 'size': variant, 'branch': branch}
+            available = available_stock_for_item(product, stock_item)
             ok = available >= qty
-            if variant and product.has_per_size_stock():
-                row = product.size_stocks.filter(size=variant).order_by('sort_order').first()
-                if row:
-                    available = int(row.stock_quantity or 0)
-                    ok = available >= qty
-                else:
-                    ok = False
 
             if not ok:
                 all_ok = False
@@ -368,14 +390,29 @@ class WidgetStoreStockCheckView(APIView):
         return Response({'ok': True, 'items': results})
 
 
-def _resolve_website_cart_items(items):
+def _fulfillment_from_request(data):
+    delivery_method = parse_delivery_method(data.get('delivery_method'))
+    pickup_branch = None
+    if delivery_method == 'pickup':
+        pickup_branch = resolve_pickup_branch(data.get('pickup_branch_id'))
+    branch = website_line_branch(delivery_method=delivery_method, pickup_branch=pickup_branch)
+    return delivery_method, pickup_branch, branch
+
+
+def _resolve_website_cart_items(items, *, delivery_method='delivery', pickup_branch=None):
     """
     Resolve B2C legacy_id lines to CRM products under row lock.
     Returns (total, resolved_lines, webhook_product_items).
+
+    Shipping is once per order on delivery. Pickup uses the branch location
+    (size_stock_id) and adds no delivery fee.
     """
+    branch = website_line_branch(delivery_method=delivery_method, pickup_branch=pickup_branch)
+    is_delivery = delivery_method != 'pickup'
     total = Decimal('0.00')
     resolved = []
     product_items = []
+    products = []
     for raw in items:
         legacy_id = int(raw['legacy_id'])
         qty = int(raw.get('quantity') or raw.get('qty') or 0)
@@ -390,10 +427,13 @@ def _resolve_website_cart_items(items):
         )
         if not product:
             raise ValueError(f'מוצר {legacy_id} לא מקושר ל-CRM')
-        if int(product.stock_quantity or 0) < qty:
+        stock_item = {'quantity': qty, 'size': variant, 'branch': branch}
+        if available_stock_for_item(product, stock_item) < qty:
             raise ValueError(f'אין מספיק מלאי עבור {product.name}')
-        line_total = line_charge_amount(product, qty, {'branch': 'delivery', 'quantity': qty})
+        size_row = peek_size_row(product, stock_item)
+        line_total = line_product_amount(product, qty)
         total += line_total
+        products.append(product)
         resolved.append({
             'product': product,
             'quantity': qty,
@@ -405,8 +445,11 @@ def _resolve_website_cart_items(items):
             'product_id': str(product.id),
             'quantity': qty,
             'size': variant,
-            'branch': 'delivery',
+            'branch': branch,
+            'size_stock_id': str(size_row.id) if size_row else None,
+            'line_delivery': False,
         })
+    total += order_delivery_amount(products, is_delivery=is_delivery)
     return total, resolved, product_items
 
 
@@ -510,8 +553,13 @@ class WidgetStorePaymentInitiateView(APIView):
         email = (customer.get('email') or '').strip()
 
         try:
+            delivery_method, pickup_branch, _branch = _fulfillment_from_request(request.data)
             with transaction.atomic():
-                total, resolved, product_items = _resolve_website_cart_items(items)
+                total, resolved, product_items = _resolve_website_cart_items(
+                    items,
+                    delivery_method=delivery_method,
+                    pickup_branch=pickup_branch,
+                )
 
                 if total < Decimal('1.00'):
                     raise ValueError('סכום מינימלי לתשלום מקוון: ₪1')
@@ -527,7 +575,9 @@ class WidgetStorePaymentInitiateView(APIView):
                     website_order_number=website_order_number,
                     website_idempotency_key=idempotency_key,
                     notes=json.dumps(product_items),
-                    branch=resolved[0]['product'].branch if resolved else None,
+                    branch=pickup_branch if pickup_branch else (
+                        resolved[0]['product'].branch if resolved else None
+                    ),
                 )
                 invoice.save()
 
@@ -592,10 +642,17 @@ class WidgetStoreWebsiteOrderView(APIView):
         email = (customer.get('email') or '').strip()
 
         try:
+            delivery_method, pickup_branch, _branch = _fulfillment_from_request(request.data)
             with transaction.atomic():
-                total, resolved, _product_items = _resolve_website_cart_items(items)
+                total, resolved, product_items = _resolve_website_cart_items(
+                    items,
+                    delivery_method=delivery_method,
+                    pickup_branch=pickup_branch,
+                )
 
                 notes_parts = ['הזמנה מהאתר']
+                if delivery_method == 'pickup':
+                    notes_parts.append('איסוף מהסניף')
                 if email:
                     notes_parts.append(f'email:{email}')
                 if website_order_number:
@@ -613,35 +670,28 @@ class WidgetStoreWebsiteOrderView(APIView):
                     website_order_number=website_order_number,
                     website_idempotency_key=idempotency_key,
                     notes=' | '.join(notes_parts),
-                    branch=resolved[0]['product'].branch if resolved else None,
+                    branch=pickup_branch if pickup_branch else (
+                        resolved[0]['product'].branch if resolved else None
+                    ),
                 )
                 invoice.save()
 
-                for line in resolved:
-                    product = line['product']
-                    item = {'quantity': line['quantity'], 'size': line['size'], 'branch': 'delivery'}
-                    if int(product.stock_quantity or 0) < line['quantity']:
-                        raise ValueError(f'אין מספיק מלאי עבור {product.name}')
-
-                    unit, total = sale_unit_and_total(product, item)
+                for item in product_items:
+                    product = StoreProduct.objects.get(id=item['product_id'])
+                    unit, line_total = sale_unit_and_total(product, item)
                     StoreSale.objects.create(
                         invoice=invoice,
                         product=product,
                         child=None,
-                        quantity=line['quantity'],
+                        quantity=item['quantity'],
                         unit_price=unit,
-                        total_price=total,
-                        size=line['size'],
+                        total_price=line_total,
+                        size=item.get('size', ''),
                         payment_method='credit_card',
                         branch_id=store_line_item_branch_id(item, product),
                         notes='website order',
                     )
-                    decrement_product_stock(product, {
-                        'product_id': str(product.id),
-                        'quantity': line['quantity'],
-                        'size': line['size'],
-                        'branch': 'delivery',
-                    })
+                    decrement_product_stock(product, item)
                     product.refresh_from_db(fields=['stock_quantity'])
                     push_product_to_website(product)
 

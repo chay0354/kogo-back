@@ -1,9 +1,9 @@
 """
-Line totals for store checkout, including optional per-product delivery.
+Line totals for store checkout, including optional delivery.
 
-`delivery_price` lives on `StoreProduct` and is charged per unit when the
-cart line is a delivery/online sale (branch is null / "delivery"). In-store
-branch pickup does not add the fee.
+`delivery_price` lives on `StoreProduct`. Website checkout charges it once
+per order (the max unit fee among items). Staff POS still adds it per line.
+Branch pickup does not add the fee.
 """
 from __future__ import annotations
 
@@ -41,11 +41,23 @@ def line_charge_amount(product: StoreProduct, quantity: int, item: Mapping | Non
     return line_product_amount(product, quantity) + line_delivery_amount(product, quantity, item)
 
 
+def order_delivery_amount(products: list[StoreProduct], *, is_delivery: bool) -> Decimal:
+    """Website shipping: once per order, not per product or unit."""
+    if not is_delivery:
+        return Decimal('0.00')
+    fees = [delivery_unit_price(product) for product in products]
+    fees = [fee for fee in fees if fee > 0]
+    if not fees:
+        return Decimal('0.00')
+    return max(fees).quantize(Decimal('0.01'))
+
+
 def sale_unit_and_total(product: StoreProduct, item: Mapping) -> tuple[Decimal, Decimal]:
     """Unit/total stored on StoreSale so invoice lines match the charged amount."""
     quantity = int(item.get('quantity') or 0)
     extra = Decimal('0.00')
-    if cart_item_is_delivery(item, product):
+    # Website checkout bills shipping once on the invoice, not on each sale line.
+    if item.get('line_delivery') is not False and cart_item_is_delivery(item, product):
         extra = delivery_unit_price(product)
     unit = (product.sale_price + extra).quantize(Decimal('0.01'))
     return unit, (unit * Decimal(quantity)).quantize(Decimal('0.01'))

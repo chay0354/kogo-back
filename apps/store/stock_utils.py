@@ -21,6 +21,27 @@ from apps.store.models import StoreProduct, StoreProductSize, StoreSale
 logger = logging.getLogger(__name__)
 
 
+def _size_row_qs(product: StoreProduct, item: Mapping, *, for_update: bool = False):
+    """Queryset for the size row matching a cart / sale item."""
+    qs = StoreProductSize.objects.filter(product=product)
+    if for_update:
+        qs = qs.select_for_update()
+
+    size_stock_id = str(item.get('size_stock_id') or '').strip()
+    if size_stock_id:
+        return qs.filter(pk=size_stock_id)
+
+    size = (item.get('size') or '').strip()
+    if not size:
+        return qs.none()
+    return qs.filter(size=size)
+
+
+def peek_size_row(product: StoreProduct, item: Mapping) -> StoreProductSize | None:
+    """Non-locking lookup of the size row a cart line would decrement."""
+    return _match_size_row(_size_row_qs(product, item, for_update=False), item)
+
+
 def _resolve_size_row(product: StoreProduct, item: Mapping) -> StoreProductSize | None:
     """
     Pick the `StoreProductSize` row to mutate for a cart / sale item.
@@ -29,38 +50,33 @@ def _resolve_size_row(product: StoreProduct, item: Mapping) -> StoreProductSize 
     `branch` (UUID or null for משלוח). Fall back to the first row for that size
     (legacy clients that only send size).
     """
-    size_stock_id = (item.get('size_stock_id') or '').strip()
+    return _match_size_row(_size_row_qs(product, item, for_update=True), item)
+
+
+def _match_size_row(qs, item: Mapping) -> StoreProductSize | None:
+    size_stock_id = str(item.get('size_stock_id') or '').strip()
     if size_stock_id:
-        return (
-            StoreProductSize.objects
-            .select_for_update()
-            .filter(product=product, pk=size_stock_id)
-            .first()
-        )
-
-    size = (item.get('size') or '').strip()
-    if not size:
-        return None
-
-    qs = (
-        StoreProductSize.objects
-        .select_for_update()
-        .filter(product=product, size=size)
-    )
+        return qs.first()
 
     if 'branch' in item:
         br = item.get('branch')
         if br in (None, '', 'delivery'):
-            row = qs.filter(branch__isnull=True).order_by('sort_order').first()
-            if row is not None:
-                return row
-        else:
-            bid = str(br).strip()
-            row = qs.filter(branch_id=bid).order_by('sort_order').first()
-            if row is not None:
-                return row
+            return qs.filter(branch__isnull=True).order_by('sort_order').first()
+        bid = str(br).strip()
+        return qs.filter(branch_id=bid).order_by('sort_order').first()
 
     return qs.order_by('sort_order').first()
+
+
+def available_stock_for_item(product: StoreProduct, item: Mapping) -> int:
+    """Units available for this line at the requested location (delivery vs branch)."""
+    size = (item.get('size') or '').strip()
+    if (size or item.get('size_stock_id')) and product.has_per_size_stock():
+        row = peek_size_row(product, item)
+        if row is None:
+            return 0
+        return int(row.stock_quantity or 0)
+    return int(product.stock_quantity or 0)
 
 
 def store_line_item_branch_id(item: Mapping, product: StoreProduct):
