@@ -5,10 +5,26 @@ import os
 from pathlib import Path
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
-from decouple import config
+from decouple import config, RepositoryEnv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Local-only override file (gitignored, never present in deployed environments).
+# python-decouple's `config()` only ever reads `.env` — it has no built-in concept
+# of `.env.local` — so we manually layer .env.local's keys into os.environ here,
+# before any config(...) calls below. decouple's Config.get() always checks
+# os.environ before falling back to the .env file, so this makes .env.local values
+# win over .env without touching any of the config(...) calls further down.
+_env_local_path = BASE_DIR / '.env.local'
+if _env_local_path.exists():
+    for _key, _value in RepositoryEnv(str(_env_local_path)).data.items():
+        os.environ[_key] = _value
+    ACTIVE_ENV_FILE = '.env.local'
+elif (BASE_DIR / '.env').exists():
+    ACTIVE_ENV_FILE = '.env'
+else:
+    ACTIVE_ENV_FILE = 'environment variables (no .env file found)'
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-development-key-change-in-production')

@@ -2,9 +2,10 @@ import logging
 from datetime import datetime
 from io import StringIO
 
+from django.conf import settings
 from django.core import management
-from django.http import HttpResponse
-from rest_framework.permissions import IsAuthenticated
+from django.http import HttpResponse, JsonResponse
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsSuperUser
@@ -60,3 +61,29 @@ class DatabaseBackupView(APIView):
         response = HttpResponse(buffer.getvalue(), content_type='application/json')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
+
+
+class EnvInfoView(APIView):
+    """
+    Dev-only diagnostic: which env file (.env vs .env.local) supplied config,
+    and which Tranzila terminals are effectively active — so a developer running
+    the app locally can tell at a glance whether a real charge could go through.
+
+    Returns 404 whenever DEBUG is off, so this is never reachable in a deployed
+    environment (Vercel/Fly.io production or preview) even if someone finds the URL.
+
+    Reports terminal *names* only — never public/secret keys.
+
+    GET /api/v1/core/devops/env-info/
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        if not settings.DEBUG:
+            return HttpResponse(status=404)
+
+        return JsonResponse({
+            'active_env_file': getattr(settings, 'ACTIVE_ENV_FILE', 'unknown'),
+            'tranzila_iframe_terminal': settings.TRANZILA_TERMINAL,
+            'tranzila_charge_terminal': settings.TRANZILA_PROD_TERMINAL,
+        })

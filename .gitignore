@@ -37,3 +37,4 @@ mediafiles/
 logs/*.log
 
 .vercel
+.env.local

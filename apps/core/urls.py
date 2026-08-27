@@ -7,7 +7,7 @@ from . import partner_views
 from .manychat_views import WhatsAppViewSet
 from .registration_terms_views import RegistrationTermsView
 from .credit_card_charge_views import CreditCardChargeView
-from .devops_views import DatabaseBackupView
+from .devops_views import DatabaseBackupView, EnvInfoView
 
 router = DefaultRouter()
 router.register(r'cities', views.CityViewSet, basename='city')
@@ -25,5 +25,6 @@ urlpatterns = [
     path('registration-terms/', RegistrationTermsView.as_view(), name='registration-terms'),
     path('credit-cards/charge/', CreditCardChargeView.as_view(), name='credit-card-charge'),
     path('devops/backup/', DatabaseBackupView.as_view(), name='devops-backup'),
+    path('devops/env-info/', EnvInfoView.as_view(), name='devops-env-info'),
 ]
 
