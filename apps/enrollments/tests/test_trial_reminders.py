@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from apps.core.models import Branch, Room
 from apps.courses.models import Course, CourseType, Lesson
-from apps.customers.models import Child, Family
+from apps.customers.models import Child, Family, Parent
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.trial_reminders import (
     TRIAL_LESSON_OCCURRENCE_LIMIT,
@@ -19,6 +19,7 @@ from apps.enrollments.trial_reminders import (
     iter_merged_upcoming_lesson_occurrences,
     iter_upcoming_lesson_occurrences,
     remove_expired_trial_enrollments,
+    reschedule_blocked_trial_enrollments,
     validate_trial_lesson_date,
 )
 
@@ -43,7 +44,7 @@ class TrialReminderTimingTest(TestCase):
     def test_compute_trial_lesson_date_uses_next_occurrence(self):
         lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0))
         now = timezone.make_aware(datetime(2026, 5, 22, 10, 0), ZoneInfo('Asia/Jerusalem'))
-        self.assertEqual(compute_trial_lesson_date(lesson, now=now), date(2026, 5, 25))
+        self.assertEqual(compute_trial_lesson_date(lesson, now=now), date(2026, 5, 24))
 
     def test_validate_trial_lesson_date_accepts_upcoming_occurrence(self):
         lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
@@ -56,6 +57,7 @@ class TrialReminderTimingTest(TestCase):
         with self.assertRaises(ValueError):
             validate_trial_lesson_date(lesson, date(2020, 1, 1))
 
+    @override_settings(BLOCKED_TRIAL_LESSON_DATES='')
     def test_iter_upcoming_lesson_occurrences_limits_to_three_for_widget(self):
         lesson = Lesson(day_of_week=0, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
         now = timezone.make_aware(datetime(2026, 5, 22, 10, 0), ZoneInfo('Asia/Jerusalem'))
@@ -89,6 +91,37 @@ class TrialReminderTimingTest(TestCase):
         self.assertTrue(all(d >= date(2026, 9, 1) for d in dates))
         with self.assertRaises(ValueError):
             validate_trial_lesson_date(lesson, date(2026, 8, 23), now=now)
+
+    @override_settings(
+        BLOCKED_TRIAL_LESSON_DATES='2026-09-13,2026-09-20,2026-09-21',
+        SUBSCRIPTION_FIRST_CHARGE_DATE='2026-09-01',
+        TIME_ZONE='Asia/Jerusalem',
+    )
+    def test_blocked_holiday_dates_are_not_offered_for_sunday_course(self):
+        lesson = Lesson(day_of_week=0, start_time=time(16, 45), end_time=time(17, 30), is_recurring=True)
+        now = timezone.make_aware(datetime(2026, 8, 27, 12, 0), ZoneInfo('Asia/Jerusalem'))
+        dates = iter_upcoming_lesson_occurrences(lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now)
+        self.assertEqual(len(dates), TRIAL_LESSON_OCCURRENCE_LIMIT)
+        self.assertNotIn(date(2026, 9, 13), dates)
+        self.assertNotIn(date(2026, 9, 20), dates)
+        self.assertEqual(dates[0], date(2026, 9, 6))
+        self.assertEqual(dates[1], date(2026, 9, 27))
+        with self.assertRaises(ValueError):
+            validate_trial_lesson_date(lesson, date(2026, 9, 13), now=now)
+
+    @override_settings(
+        BLOCKED_TRIAL_LESSON_DATES='2026-09-13,2026-09-20,2026-09-21',
+        SUBSCRIPTION_FIRST_CHARGE_DATE='2026-09-01',
+        TIME_ZONE='Asia/Jerusalem',
+    )
+    def test_blocked_holiday_dates_are_not_offered_for_monday_course(self):
+        lesson = Lesson(day_of_week=1, start_time=time(16, 0), end_time=time(17, 0), is_recurring=True)
+        now = timezone.make_aware(datetime(2026, 8, 27, 12, 0), ZoneInfo('Asia/Jerusalem'))
+        dates = iter_upcoming_lesson_occurrences(lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now)
+        self.assertNotIn(date(2026, 9, 21), dates)
+        self.assertTrue(all(d != date(2026, 9, 21) for d in dates))
+        with self.assertRaises(ValueError):
+            validate_trial_lesson_date(lesson, date(2026, 9, 21), now=now)
 
 
 class RemoveExpiredTrialEnrollmentTest(TestCase):
@@ -148,3 +181,61 @@ class RemoveExpiredTrialEnrollmentTest(TestCase):
         self.assertEqual(result['removed'], 1)
         self.assertEqual(self.enrollment.status, 'inactive')
         self.assertEqual(self.child.status, 'trial_completed')
+
+
+class RescheduleBlockedTrialEnrollmentTest(TestCase):
+    def setUp(self):
+        branch = Branch.objects.create(name='Main')
+        room = Room.objects.create(branch=branch, name='Studio', capacity=20)
+        ct = CourseType.objects.create(name='Dance')
+        course = Course.objects.create(
+            course_type=ct, name='Kids Sunday', price=400, capacity=10, branch=branch
+        )
+        self.lesson = Lesson.objects.create(
+            course=course,
+            room=room,
+            day_of_week=0,
+            start_time='16:45',
+            end_time='17:30',
+            is_recurring=True,
+        )
+        family = Family.objects.create(
+            name='Amir', phone='0500000000', email='amir@example.com', branch=branch,
+        )
+        Parent.objects.create(
+            family=family,
+            first_name='Nirit',
+            last_name='Amir',
+            phone='0526180843',
+            is_primary=True,
+        )
+        self.child = Child.objects.create(
+            family=family,
+            first_name='Maya',
+            last_name='Amir',
+            birth_date=date(2019, 1, 1),
+            gender='female',
+            status='trial_signed',
+        )
+        self.enrollment = LessonEnrollment.objects.create(
+            lesson=self.lesson,
+            child=self.child,
+            status='active',
+            start_date=date(2026, 9, 13),
+            trial_lesson_date=date(2026, 9, 13),
+        )
+
+    @override_settings(
+        BLOCKED_TRIAL_LESSON_DATES='2026-09-13,2026-09-20,2026-09-21',
+        SUBSCRIPTION_FIRST_CHARGE_DATE='2026-09-01',
+        TIME_ZONE='Asia/Jerusalem',
+    )
+    def test_moves_13_sep_trial_to_next_sunday_of_same_course(self):
+        rows = reschedule_blocked_trial_enrollments()
+        self.enrollment.refresh_from_db()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['parent_phone'], '0526180843')
+        self.assertEqual(rows[0]['old_trial_date'], '2026-09-13')
+        self.assertEqual(rows[0]['new_trial_date'], '2026-09-27')
+        self.assertEqual(self.enrollment.trial_lesson_date, date(2026, 9, 27))
+        self.assertEqual(self.enrollment.start_date, date(2026, 9, 27))

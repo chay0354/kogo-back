@@ -21,6 +21,7 @@ wheels/
 *.egg
 .env
 .venv
+reports/
 env/
 venv/
 ENV/

@@ -27,6 +27,28 @@ logger = logging.getLogger(__name__)
 # Nearest N lesson dates offered in the registration widget for trial signup.
 TRIAL_LESSON_OCCURRENCE_LIMIT = 3
 
+# Rosh Hashanah / Yom Kippur 2026 — not offered as trial lesson dates.
+DEFAULT_BLOCKED_TRIAL_LESSON_DATES = '2026-09-13,2026-09-20,2026-09-21'
+
+
+def blocked_trial_lesson_dates() -> frozenset[date]:
+    """Calendar dates that must not appear as trial-lesson options."""
+    raw = getattr(settings, 'BLOCKED_TRIAL_LESSON_DATES', None)
+    if raw is None:
+        raw = DEFAULT_BLOCKED_TRIAL_LESSON_DATES
+    if isinstance(raw, str) and not raw.strip():
+        return frozenset()
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        parts = [str(item).strip() for item in raw]
+    else:
+        parts = [p.strip() for p in str(raw).split(',')]
+    dates: set[date] = set()
+    for part in parts:
+        if not part:
+            continue
+        dates.add(date.fromisoformat(part[:10]))
+    return frozenset(dates)
+
 
 def trial_lesson_min_date(*, now: Optional[datetime] = None) -> date:
     """
@@ -87,6 +109,8 @@ def iter_upcoming_lesson_occurrences(
 
     if not lesson.is_recurring:
         if lesson.lesson_date and lesson.lesson_date >= min_date:
+            if lesson.lesson_date in blocked_trial_lesson_dates():
+                return []
             if not LessonCancellation.objects.filter(lesson=lesson, occurrence_date=lesson.lesson_date).exists():
                 return [lesson.lesson_date]
         return []
@@ -94,6 +118,7 @@ def iter_upcoming_lesson_occurrences(
     cancelled = set(
         LessonCancellation.objects.filter(lesson=lesson).values_list('occurrence_date', flat=True)
     )
+    blocked = blocked_trial_lesson_dates()
 
     results: list[date] = []
     cursor_now = now
@@ -105,7 +130,7 @@ def iter_upcoming_lesson_occurrences(
                 timezone.get_current_timezone(),
             )
             continue
-        if candidate not in cancelled and candidate not in results:
+        if candidate not in cancelled and candidate not in blocked and candidate not in results:
             results.append(candidate)
 
         next_week = candidate + timedelta(days=7)
@@ -148,11 +173,125 @@ def iter_merged_upcoming_lesson_occurrences(
 
 
 def validate_trial_lesson_date(lesson: Lesson, trial_date: date, *, now: Optional[datetime] = None) -> None:
+    if trial_date in blocked_trial_lesson_dates():
+        raise ValueError('תאריך שיעור הניסיון אינו זמין')
     allowed = iter_upcoming_lesson_occurrences(
         lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now,
     )
     if trial_date not in allowed:
         raise ValueError('תאריך שיעור הניסיון אינו זמין')
+
+
+def next_trial_date_after(lesson: Lesson, after: date, *, now: Optional[datetime] = None) -> Optional[date]:
+    """Next offered trial date for this lesson strictly after `after`."""
+    for occurrence in iter_upcoming_lesson_occurrences(lesson, count=16, now=now):
+        if occurrence > after:
+            return occurrence
+    return None
+
+
+def _parent_contact_for_child(child) -> tuple[str, str, str]:
+    family = getattr(child, 'family', None)
+    if not family:
+        return '', '', ''
+    parents = list(family.parents.all())
+    primary = next((p for p in parents if p.is_primary), None) or (parents[0] if parents else None)
+    parent_name = ''
+    parent_phone = ''
+    if primary:
+        parent_name = f"{primary.first_name} {primary.last_name}".strip()
+        parent_phone = (primary.phone or '').strip()
+    if not parent_phone:
+        parent_phone = (family.phone or '').strip()
+    if not parent_name:
+        parent_name = family.name or ''
+    return parent_name, parent_phone, (family.email or '').strip()
+
+
+def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]:
+    """
+    Move active trial enrollments off blocked dates to the next date of the same חוג.
+    Also updates matching payment.trial_lesson_date and start_date when it matched.
+    """
+    blocked = blocked_trial_lesson_dates()
+    if not blocked:
+        return []
+
+    qs = (
+        LessonEnrollment.objects
+        .select_related(
+            'lesson',
+            'lesson__course',
+            'lesson__course__branch',
+            'child',
+            'child__family',
+        )
+        .prefetch_related('child__family__parents')
+        .filter(
+            status='active',
+            trial_lesson_date__in=sorted(blocked),
+        )
+        .order_by('trial_lesson_date', 'child__last_name', 'child__first_name')
+    )
+
+    moved: list[dict] = []
+    for enrollment in qs:
+        lesson = enrollment.lesson
+        child = enrollment.child
+        old_date = enrollment.trial_lesson_date
+        if not lesson or not child or not old_date:
+            continue
+
+        new_date = next_trial_date_after(lesson, old_date)
+        parent_name, parent_phone, email = _parent_contact_for_child(child)
+        family = child.family
+        row = {
+            'enrollment_id': str(enrollment.id),
+            'child_id': str(child.id),
+            'child_first_name': child.first_name,
+            'child_last_name': child.last_name,
+            'child_status': child.status,
+            'family_name': family.name if family else '',
+            'parent_name': parent_name,
+            'parent_phone': parent_phone,
+            'email': email,
+            'course': lesson.course.name if lesson.course_id else '',
+            'branch': (
+                lesson.course.branch.name
+                if lesson.course_id and lesson.course.branch_id
+                else ''
+            ),
+            'old_trial_date': old_date.isoformat(),
+            'new_trial_date': new_date.isoformat() if new_date else '',
+            'moved': bool(new_date),
+        }
+
+        if new_date and not dry_run:
+            update_fields = ['trial_lesson_date', 'updated_at']
+            if enrollment.start_date == old_date:
+                enrollment.start_date = new_date
+                update_fields.append('start_date')
+            enrollment.trial_lesson_date = new_date
+            enrollment.trial_10am_reminder_sent_at = None
+            enrollment.trial_followup_reminder_sent_at = None
+            enrollment.trial_evening_reminder_sent_at = None
+            update_fields.extend([
+                'trial_10am_reminder_sent_at',
+                'trial_followup_reminder_sent_at',
+                'trial_evening_reminder_sent_at',
+            ])
+            enrollment.save(update_fields=update_fields)
+
+            from apps.customers.models import Payment
+            Payment.objects.filter(
+                child_id=child.id,
+                lesson_id=lesson.id,
+                trial_lesson_date=old_date,
+            ).update(trial_lesson_date=new_date)
+
+        moved.append(row)
+
+    return moved
 
 
 def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:

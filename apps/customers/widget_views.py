@@ -676,16 +676,27 @@ class WidgetChargeView(APIView):
 
             results = []
             succeeded_any = False
+            newly_completed_ids: list[str] = []
+            whatsapp_sent_children: set[str] = set()
+            child_ids_by_payment = {
+                str(row['id']): str(row['child_id']) if row['child_id'] else ''
+                for row in Payment.objects.filter(id__in=payment_ids).values('id', 'child_id')
+            }
             for index, pid in enumerate(payment_ids):
+                child_key = child_ids_by_payment.get(pid, '') or f'payment:{pid}'
                 result = self._charge_one(
                     pid,
                     card,
-                    send_subscription_whatsapp=not succeeded_any,
+                    send_subscription_whatsapp=child_key not in whatsapp_sent_children,
                     allow_child_status_downgrade=not succeeded_any,
+                    create_invoice=False,
                 )
                 results.append(result)
                 if result.get('success'):
                     succeeded_any = True
+                    whatsapp_sent_children.add(child_key)
+                    if not result.get('already_completed'):
+                        newly_completed_ids.append(pid)
                     continue
                 if result.get('processing'):
                     for skipped in payment_ids[index + 1:]:
@@ -708,6 +719,21 @@ class WidgetChargeView(APIView):
                         'error': 'לא חויב בעקבות כשל בתשלום קודם',
                     })
                 break
+
+            if newly_completed_ids:
+                try:
+                    from apps.customers.checkout_invoice import issue_widget_checkout_invoice
+                    issue_widget_checkout_invoice(
+                        Payment.objects
+                        .filter(id__in=payment_ids, status='completed', final_amount__gt=0)
+                        .select_related(
+                            'child', 'family', 'parent', 'branch',
+                            'lesson__course', 'bundle', 'tranzila_transaction',
+                        )
+                        .prefetch_related('bundle__lessons'),
+                    )
+                except Exception:
+                    logger.exception('Combined checkout invoice failed (non-fatal)')
 
             all_success = all(r.get('success') for r in results)
             any_processing = any(r.get('processing') for r in results)
@@ -773,6 +799,7 @@ class WidgetChargeView(APIView):
         card,
         send_subscription_whatsapp=True,
         allow_child_status_downgrade=True,
+        create_invoice=True,
     ):
         from apps.core.payment_service import (
             _compute_prorate,
@@ -785,7 +812,6 @@ class WidgetChargeView(APIView):
             subscription_tranzila_items,
         )
         from apps.customers.models import Payment, TranzilaTransaction, RecurringPayment
-        from apps.customers.financial_models import Invoice, InvoiceChild
         from apps.core.tranzila_service import TranzilaService
         from apps.enrollments.models import LessonEnrollment
         from django.utils import timezone
@@ -927,7 +953,6 @@ class WidgetChargeView(APIView):
 
         if result['success']:
             enrollment_id_for_whatsapp = None
-            invoice_id_to_email = None
             with transaction.atomic():
                 payment = (
                     Payment.objects
@@ -982,34 +1007,6 @@ class WidgetChargeView(APIView):
                         ])
                     enrollment_id_for_whatsapp = str(enrollment.id)
 
-                    invoice = payment.invoices.first()
-                    if invoice is None:
-                        invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-                        invoice = Invoice.objects.create(
-                            invoice_number=invoice_number,
-                            family=payment.family,
-                            parent=payment.parent,
-                            branch=payment.branch,
-                            payment=payment,
-                            amount=payment.final_amount,
-                            status='paid',
-                            payment_method='credit_card',
-                            payment_type='one_time',
-                            payer_name=payment.family.name,
-                            payer_email=payment.family.email if payment.family.email else '',
-                            payer_phone=payment.family.phone,
-                            tranzila_transaction_id=tranzila_txn.transaction_id,
-                            invoice_date=timezone.now(),
-                        )
-                        if child and lesson:
-                            InvoiceChild.objects.create(
-                                invoice=invoice,
-                                child=child,
-                                course=lesson.course,
-                                lesson=lesson,
-                            )
-                        invoice_id_to_email = invoice.id
-
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
                 else:
                     token = result.get('token', '')
@@ -1058,35 +1055,8 @@ class WidgetChargeView(APIView):
                                 next_billing_date=next_billing_date,
                             )
 
-                    # A card that was only verified has nothing to invoice.
-                    if payment.final_amount > 0:
-                        invoice = payment.invoices.first()
-                        if invoice is None:
-                            invoice_number = f"INV-{timezone.now().strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-                            invoice = Invoice.objects.create(
-                                invoice_number=invoice_number,
-                                family=payment.family,
-                                parent=payment.parent,
-                                branch=payment.branch,
-                                payment=payment,
-                                amount=payment.final_amount,
-                                status='paid',
-                                payment_method='credit_card',
-                                payment_type='recurring',
-                                payer_name=payment.family.name,
-                                payer_email=payment.family.email if payment.family.email else '',
-                                payer_phone=payment.family.phone,
-                                tranzila_transaction_id=tranzila_txn.transaction_id,
-                                invoice_date=timezone.now(),
-                            )
-                            if child and lesson:
-                                InvoiceChild.objects.create(
-                                    invoice=invoice,
-                                    child=child,
-                                    course=lesson.course,
-                                    lesson=lesson,
-                                )
-                            invoice_id_to_email = invoice.id
+                    # A card that was only verified has nothing to invoice here;
+                    # the checkout helper emits one receipt after the card request.
 
                     child.status = 'active'
                     if deferred_start:
@@ -1107,14 +1077,20 @@ class WidgetChargeView(APIView):
                             bundle=payment.bundle,
                         )
 
-            if invoice_id_to_email:
-                def _send_invoice_email(invoice_id=invoice_id_to_email):
-                    try:
-                        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                        send_subscription_invoice_email(Invoice.objects.get(pk=invoice_id))
-                    except Exception:
-                        logger.exception('Invoice email failed after widget charge (non-fatal)')
-                transaction.on_commit(_send_invoice_email)
+            if create_invoice and payment.final_amount > 0:
+                try:
+                    from apps.customers.checkout_invoice import issue_widget_checkout_invoice
+                    issue_widget_checkout_invoice(
+                        Payment.objects
+                        .filter(pk=payment.pk)
+                        .select_related(
+                            'child', 'family', 'parent', 'branch',
+                            'lesson__course', 'bundle', 'tranzila_transaction',
+                        )
+                        .prefetch_related('bundle__lessons'),
+                    )
+                except Exception:
+                    logger.exception('Invoice failed after widget charge (non-fatal)')
 
             if enrollment_id_for_whatsapp:
                 try:

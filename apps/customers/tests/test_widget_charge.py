@@ -190,3 +190,48 @@ class WidgetChargeIdempotencyTest(TestCase):
         self.assertEqual(RecurringPayment.objects.filter(child=self.child, status='active').count(), 1)
         self.assertTrue(LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson, status='active').exists())
         self.assertTrue(LessonEnrollment.objects.filter(child=self.child, lesson=lesson_b, status='active').exists())
+
+    @patch('apps.customers.subscription_invoice_email.send_subscription_invoice_email', return_value=True)
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
+    def test_multi_child_checkout_sends_whatsapp_per_child(self, mock_charge, mock_whatsapp, _email):
+        """Siblings charged in one card request each get a registration WhatsApp."""
+        sibling = TestDataFactory.create_child(family=self.family)
+        lesson_b = TestDataFactory.create_lesson()
+        first = _payment_for(self.child, self.lesson)
+        second = _payment_for(sibling, lesson_b)
+        res = self.client.post(
+            '/api/v1/customers/widget/charge/',
+            {'payment_ids': [str(first.id), str(second.id)], 'card_details': CARD},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.json()['success'])
+        self.assertEqual(mock_charge.call_count, 2)
+        self.assertEqual(mock_whatsapp.call_count, 2)
+        paid_ids = {call.args[0].id for call in mock_whatsapp.call_args_list}
+        self.assertEqual(paid_ids, {first.id, second.id})
+        from apps.customers.financial_models import Invoice
+        invoices = Invoice.objects.filter(family=self.family, invoice_number__contains='FAM')
+        self.assertEqual(invoices.count(), 1)
+        combined = invoices.get()
+        self.assertEqual(combined.amount, Decimal('240.00'))
+        self.assertEqual(combined.children.count(), 2)
+
+    @patch('apps.customers.subscription_invoice_email.send_subscription_invoice_email', return_value=True)
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
+    def test_multi_child_checkout_sends_one_receipt(self, mock_charge, _whatsapp, mock_email):
+        sibling = TestDataFactory.create_child(family=self.family)
+        lesson_b = TestDataFactory.create_lesson()
+        first = _payment_for(self.child, self.lesson)
+        second = _payment_for(sibling, lesson_b)
+        res = self.client.post(
+            '/api/v1/customers/widget/charge/',
+            {'payment_ids': [str(first.id), str(second.id)], 'card_details': CARD},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        from apps.customers.financial_models import Invoice
+        self.assertEqual(Invoice.objects.filter(family=self.family).count(), 1)
+        mock_email.assert_called_once()

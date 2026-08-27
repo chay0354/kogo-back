@@ -71,9 +71,11 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
 
         trial_date = data.get('trial_lesson_date')
         if trial_date:
+            from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
             allowed = set(iter_upcoming_lesson_occurrences(lesson, count=8))
-            if self.instance and self.instance.trial_lesson_date:
-                allowed.add(self.instance.trial_lesson_date)
+            current = self.instance.trial_lesson_date if self.instance else None
+            if current and current not in blocked_trial_lesson_dates():
+                allowed.add(current)
             if trial_date not in allowed:
                 raise serializers.ValidationError({
                     'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין',

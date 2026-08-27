@@ -135,7 +135,8 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         day_names = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
         dates = iter_upcoming_lesson_occurrences(lesson, count=8)
         current = enrollment.trial_lesson_date
-        if current and current not in dates:
+        from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
+        if current and current not in dates and current not in blocked_trial_lesson_dates():
             dates = [current] + dates
         day_name = day_names[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
         start_time = lesson.start_time.strftime('%H:%M') if lesson.start_time else ''

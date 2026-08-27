@@ -37,7 +37,7 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
     invoice = (
         Invoice.objects
         .select_related('family', 'parent', 'branch', 'payment')
-        .prefetch_related('children__child', 'children__course', 'children__lesson')
+        .prefetch_related('children__child', 'children__course', 'children__lesson', 'activity_logs')
         .get(pk=invoice.pk)
     )
 
@@ -118,38 +118,68 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
         Paragraph(_rtl('ילד'), label_style),
         Paragraph(_rtl('סה"כ'), label_style),
     ]]
-    payment = invoice.payment
-    registration_fee = Decimal('0')
-    if payment and payment.registration_fee:
-        registration_fee = payment.registration_fee
+    checkout_log = invoice.activity_logs.filter(action='checkout_lines').order_by('-created_at').first()
+    checkout_lines = []
+    if checkout_log and isinstance(checkout_log.details, dict):
+        checkout_lines = checkout_log.details.get('lines') or []
 
-    for entry in invoice.children.all():
-        child_name = entry.child.full_name if entry.child_id else '—'
-        if entry.lesson_id and entry.course_id:
-            desc = f'{entry.course.name} — {entry.lesson.get_day_of_week_display()}'
-        elif entry.course_id:
-            desc = entry.course.name
-        else:
-            desc = 'מנוי חוג'
-        line_amount = invoice.amount
-        if registration_fee > 0 and payment:
-            lesson_part = payment.final_amount - registration_fee
-            rows.append([
-                Paragraph(_rtl(f'מנוי חודשי — {desc}'), value_style),
-                Paragraph(_rtl(child_name), value_style),
-                Paragraph(_rtl(_money(lesson_part)), value_style),
-            ])
-            rows.append([
-                Paragraph(_rtl('דמי רישום (חד-פעמי)'), value_style),
-                Paragraph(_rtl(child_name), value_style),
-                Paragraph(_rtl(_money(registration_fee)), value_style),
-            ])
-        else:
-            rows.append([
-                Paragraph(_rtl(desc), value_style),
-                Paragraph(_rtl(child_name), value_style),
-                Paragraph(_rtl(_money(line_amount)), value_style),
-            ])
+    if checkout_lines:
+        for line in checkout_lines:
+            child_name = str(line.get('child_name') or '—')
+            desc = str(line.get('description') or 'מנוי חוג')
+            amount = Decimal(str(line.get('amount') or '0'))
+            fee = Decimal(str(line.get('registration_fee') or '0'))
+            lesson_part = amount - fee
+            if fee > 0 and lesson_part > 0:
+                rows.append([
+                    Paragraph(_rtl(f'מנוי חודשי — {desc}'), value_style),
+                    Paragraph(_rtl(child_name), value_style),
+                    Paragraph(_rtl(_money(lesson_part)), value_style),
+                ])
+                rows.append([
+                    Paragraph(_rtl('דמי רישום (חד-פעמי)'), value_style),
+                    Paragraph(_rtl(child_name), value_style),
+                    Paragraph(_rtl(_money(fee)), value_style),
+                ])
+            else:
+                rows.append([
+                    Paragraph(_rtl(desc if fee <= 0 else f'דמי רישום — {desc}'), value_style),
+                    Paragraph(_rtl(child_name), value_style),
+                    Paragraph(_rtl(_money(amount)), value_style),
+                ])
+    else:
+        payment = invoice.payment
+        registration_fee = Decimal('0')
+        if payment and payment.registration_fee:
+            registration_fee = payment.registration_fee
+
+        for entry in invoice.children.all():
+            child_name = entry.child.full_name if entry.child_id else '—'
+            if entry.lesson_id and entry.course_id:
+                desc = f'{entry.course.name} — {entry.lesson.get_day_of_week_display()}'
+            elif entry.course_id:
+                desc = entry.course.name
+            else:
+                desc = 'מנוי חוג'
+            line_amount = invoice.amount
+            if registration_fee > 0 and payment and invoice.children.count() <= 1:
+                lesson_part = payment.final_amount - registration_fee
+                rows.append([
+                    Paragraph(_rtl(f'מנוי חודשי — {desc}'), value_style),
+                    Paragraph(_rtl(child_name), value_style),
+                    Paragraph(_rtl(_money(lesson_part)), value_style),
+                ])
+                rows.append([
+                    Paragraph(_rtl('דמי רישום (חד-פעמי)'), value_style),
+                    Paragraph(_rtl(child_name), value_style),
+                    Paragraph(_rtl(_money(registration_fee)), value_style),
+                ])
+            else:
+                rows.append([
+                    Paragraph(_rtl(desc), value_style),
+                    Paragraph(_rtl(child_name), value_style),
+                    Paragraph(_rtl(_money(line_amount if invoice.children.count() <= 1 else Decimal('0'))), value_style),
+                ])
 
     if len(rows) == 1:
         rows.append([

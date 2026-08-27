@@ -317,6 +317,12 @@ MANYCHAT_DIDNT_ARRIVE_FLOW_NS = config('MANYCHAT_DIDNT_ARRIVE_FLOW_NS', default=
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))
 # Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
 TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))
+# Comma-separated YYYY-MM-DD dates that cannot be chosen as a trial lesson
+# (widget picker + API validation). Default: Rosh Hashanah / Yom Kippur 2026.
+BLOCKED_TRIAL_LESSON_DATES = config(
+    'BLOCKED_TRIAL_LESSON_DATES',
+    default='2026-09-13,2026-09-20,2026-09-21',
+)
 # Shared secret — Vercel Cron / external scheduler must send this in the X-Cron-Token header.
 CRON_TOKEN = config('CRON_TOKEN', default='')
 
