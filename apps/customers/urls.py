@@ -14,7 +14,7 @@ from .widget_views import (
     WidgetLessonOccurrencesView,
     WidgetTermsView,
 )
-from .views import cron_recurring_billing
+from .views import cron_recurring_billing, cron_recurring_billing_status
 
 router = DefaultRouter()
 router.register(r'families', views.FamilyViewSet, basename='family')
@@ -40,5 +40,6 @@ urlpatterns = [
     path('widget/lesson-occurrences/', WidgetLessonOccurrencesView.as_view(), name='widget-lesson-occurrences'),
     path('widget/terms/', WidgetTermsView.as_view(), name='widget-terms'),
     path('cron/recurring-billing/', cron_recurring_billing, name='cron-recurring-billing'),
+    path('cron/recurring-billing/status/', cron_recurring_billing_status, name='cron-recurring-billing-status'),
 ]
 

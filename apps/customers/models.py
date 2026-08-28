@@ -746,3 +746,18 @@ class BusinessCustomer(models.Model):
     def full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
 
+
+class CronHeartbeat(models.Model):
+    """Each authenticated hit on the recurring-billing cron endpoint."""
+    invoked_at = models.DateTimeField(auto_now_add=True)
+    user_agent = models.CharField(max_length=300, blank=True)
+    schedule_header = models.CharField(max_length=80, blank=True)
+    dry_run = models.BooleanField(default=False)
+    is_vercel_cron = models.BooleanField(default=False)
+    summary = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'cron_heartbeats'
+        ordering = ['-invoked_at']
+        indexes = [models.Index(fields=['-invoked_at'])]
+

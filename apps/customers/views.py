@@ -12,7 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date
 from django.conf import settings
-from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer
+from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer, CronHeartbeat
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
 from apps.customers.serializers import (
@@ -1316,6 +1316,66 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _cron_allowed_secrets():
+    expected = (getattr(settings, 'CRON_TOKEN', '') or '').strip()
+    vercel_secret = (os.environ.get('CRON_SECRET') or '').strip()
+    return {value for value in (expected, vercel_secret) if value}
+
+
+def _cron_request_authorized(request) -> bool:
+    allowed = _cron_allowed_secrets()
+    auth = (request.headers.get('Authorization') or '').strip()
+    bearer = auth[7:].strip() if auth.lower().startswith('bearer ') else ''
+    provided = (
+        request.headers.get('X-Cron-Token')
+        or request.query_params.get('token')
+        or ''
+    ).strip()
+    return bool(allowed) and (provided in allowed or bearer in allowed)
+
+
+def _record_cron_heartbeat(request, *, dry_run: bool, summary: dict):
+    ua = (request.headers.get('User-Agent') or request.META.get('HTTP_USER_AGENT') or '')[:300]
+    schedule = (
+        request.headers.get('X-Vercel-Cron-Schedule')
+        or request.META.get('HTTP_X_VERCEL_CRON_SCHEDULE')
+        or ''
+    )[:80]
+    CronHeartbeat.objects.create(
+        user_agent=ua,
+        schedule_header=schedule,
+        dry_run=dry_run,
+        is_vercel_cron='vercel-cron' in ua.lower(),
+        summary=summary or {},
+    )
+
+
+def _due_recurring_count():
+    from apps.core.payment_service import JERUSALEM_TZ
+    from django.utils import timezone as dj_tz
+
+    today = dj_tz.now().astimezone(JERUSALEM_TZ).date()
+    return (
+        RecurringPayment.objects
+        .filter(status='active', tranzila_recurring_index='', next_billing_date__lte=today)
+        .exclude(tranzila_token='')
+        .count()
+    )
+
+
+def _heartbeat_payload(row):
+    if row is None:
+        return None
+    return {
+        'invoked_at': row.invoked_at.isoformat(),
+        'is_vercel_cron': row.is_vercel_cron,
+        'dry_run': row.dry_run,
+        'user_agent': row.user_agent,
+        'schedule_header': row.schedule_header,
+        'summary': row.summary,
+    }
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def cron_recurring_billing(request):
@@ -1325,17 +1385,7 @@ def cron_recurring_billing(request):
     Auth: X-Cron-Token, ?token=, or Authorization Bearer matching CRON_TOKEN / CRON_SECRET.
     Vercel Cron on kogo-back hits this hourly 08:00–15:00 Israel on billing days.
     """
-    expected = (getattr(settings, 'CRON_TOKEN', '') or '').strip()
-    vercel_secret = (os.environ.get('CRON_SECRET') or '').strip()
-    auth = (request.headers.get('Authorization') or '').strip()
-    bearer = auth[7:].strip() if auth.lower().startswith('bearer ') else ''
-    provided = (
-        request.headers.get('X-Cron-Token')
-        or request.query_params.get('token')
-        or ''
-    ).strip()
-    allowed = {value for value in (expected, vercel_secret) if value}
-    if not allowed or (provided not in allowed and bearer not in allowed):
+    if not _cron_request_authorized(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
 
     from apps.customers.recurring_billing import process_due_recurring_charges
@@ -1346,7 +1396,33 @@ def cron_recurring_billing(request):
     except (TypeError, ValueError):
         limit = 40
     summary = process_due_recurring_charges(dry_run=dry_run, limit=limit)
+    _record_cron_heartbeat(request, dry_run=dry_run, summary=summary)
     return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def cron_recurring_billing_status(request):
+    """Did Vercel actually hit the cron? Last heartbeat + due count. Same auth as the cron."""
+    if not _cron_request_authorized(request):
+        return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    last = CronHeartbeat.objects.first()
+    last_vercel = CronHeartbeat.objects.filter(is_vercel_cron=True).first()
+    return Response({
+        'ok': True,
+        'cron_token_configured': bool((getattr(settings, 'CRON_TOKEN', '') or '').strip()),
+        'cron_secret_configured': bool((os.environ.get('CRON_SECRET') or '').strip()),
+        'due_today': _due_recurring_count(),
+        'vercel_cron_seen': last_vercel is not None,
+        'last_invocation': _heartbeat_payload(last),
+        'last_vercel_cron': _heartbeat_payload(last_vercel),
+        'schedule_utc': '0 5,6,7,8,9,10,11,12 * * *',
+        'note': (
+            'vercel_cron_seen=true only after Vercel Cron calls this app '
+            '(User-Agent vercel-cron/1.0). A dry_run from curl does not count.'
+        ),
+    })
 
 
 class BusinessCustomerViewSet(viewsets.ModelViewSet):
