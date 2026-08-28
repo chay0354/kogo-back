@@ -247,6 +247,7 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
         fields = ['id', 'display_id', 'name', 'description', 'price', 'capacity',
                   'min_age', 'max_age', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',
+                  'registration_fee_override', 'charge_standing_order_immediately',
                   'branch', 'branch_name', 'instructor', 'instructor_salary_override',
                   'external_link', 'lessons_count', 'course_enrollment_count',
                   'monthly_revenue', 'monthly_salary', 'monthly_profit', 'is_active']
@@ -306,6 +307,7 @@ class CourseSerializer(serializers.ModelSerializer):
                   'price', 'capacity', 'branch', 'branch_name',
                   'min_age', 'max_age', 'is_active', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',
+                  'registration_fee_override', 'charge_standing_order_immediately',
                   'external_link', 'lessons_count', 'enrolled_students_count',
                   'lessons', 'managers', 'managers_detail', 'instructor', 'instructor_detail',
                   'instructor_salary_override', 'created_at', 'updated_at']
@@ -393,6 +395,9 @@ class LessonSerializer(serializers.ModelSerializer):
     branch_name = serializers.SerializerMethodField()
     min_age = serializers.IntegerField(source='course.min_age', read_only=True, allow_null=True)
     max_age = serializers.IntegerField(source='course.max_age', read_only=True, allow_null=True)
+    must_attend_all_lessons = serializers.BooleanField(
+        source='course.must_attend_all_lessons', read_only=True,
+    )
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
     instructor = serializers.PrimaryKeyRelatedField(
         queryset=Instructor.objects.filter(is_active=True),
@@ -408,7 +413,8 @@ class LessonSerializer(serializers.ModelSerializer):
         model = Lesson
         fields = ['id', 'course', 'course_name', 'course_display_id',
                   'course_type', 'course_type_name', 'branch_id', 'branch_name',
-                  'min_age', 'max_age', 'room', 'room_name',
+                  'min_age', 'max_age', 'must_attend_all_lessons',
+                  'room', 'room_name',
                   'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
@@ -558,6 +564,7 @@ class LessonBundleLessonSerializer(serializers.ModelSerializer):
 class LessonBundleSerializer(serializers.ModelSerializer):
     """CRUD serializer for LessonBundle — combined-price packages of a course's own lessons."""
     lessons_detail = LessonBundleLessonSerializer(source='lessons', many=True, read_only=True)
+    course_name = serializers.CharField(source='course.name', read_only=True)
     price_per_lesson = serializers.SerializerMethodField()
     lesson_instructors = serializers.DictField(
         child=serializers.UUIDField(allow_null=True),
@@ -573,7 +580,7 @@ class LessonBundleSerializer(serializers.ModelSerializer):
     class Meta:
         model = LessonBundle
         fields = [
-            'id', 'course', 'name', 'lessons', 'lessons_detail',
+            'id', 'course', 'course_name', 'name', 'lessons', 'lessons_detail',
             'combined_price', 'price_per_lesson', 'is_active',
             'lesson_instructors', 'lesson_rooms', 'created_at', 'updated_at',
         ]

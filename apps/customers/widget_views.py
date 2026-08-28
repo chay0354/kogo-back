@@ -802,13 +802,16 @@ class WidgetChargeView(APIView):
         create_invoice=True,
     ):
         from apps.core.payment_service import (
+            JERUSALEM_TZ,
             _compute_prorate,
             deferred_first_charge_date,
             enroll_child_in_paid_lessons,
             payment_full_monthly_amount,
+            payment_is_fee_only,
             payment_prorated_lesson_amount,
             saved_card_token_for_child,
             should_create_recurring_for_payment,
+            standing_order_next_billing_date,
             subscription_tranzila_items,
         )
         from apps.customers.models import Payment, TranzilaTransaction, RecurringPayment
@@ -884,7 +887,13 @@ class WidgetChargeView(APIView):
 
         tranzila = TranzilaService.production()
         is_trial_payment = payment.trial_lesson_date is not None
-        deferred_start = None if is_trial_payment else deferred_first_charge_date()
+        today_il = timezone.now().astimezone(JERUSALEM_TZ).date()
+        deferred_start = None if is_trial_payment else deferred_first_charge_date(today_il)
+        sto_start = (
+            None
+            if is_trial_payment or lesson is None
+            else standing_order_next_billing_date(today=today_il, lesson=lesson)
+        )
         item_label = (
             f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"
             if is_trial_payment and lesson
@@ -1035,10 +1044,10 @@ class WidgetChargeView(APIView):
                                 }
                                 for s in payment.discount_snapshots.all()
                             ]
-                            enrollment_date = date.today()
+                            enrollment_date = today_il
                             lesson_dow = lesson.day_of_week if lesson else 1
                             _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
-                            next_billing_date = deferred_start or next_billing_date
+                            next_billing_date = sto_start or next_billing_date
                             RecurringPayment.objects.create(
                                 child=child,
                                 initial_payment=payment,
@@ -1059,9 +1068,12 @@ class WidgetChargeView(APIView):
                     # the checkout helper emits one receipt after the card request.
 
                     child.status = 'active'
-                    if deferred_start:
+                    if sto_start and payment_is_fee_only(payment):
                         # No month is paid for yet — the charge on that date fills
                         # paid_until_date in.
+                        child.subscription_start_date = sto_start
+                        child.paid_until_date = None
+                    elif deferred_start:
                         child.subscription_start_date = deferred_start
                         child.paid_until_date = None
                     else:
@@ -1258,6 +1270,7 @@ class WidgetCoursesView(APIView):
                 'must_attend_all_lessons': course.must_attend_all_lessons,
                 'trial_lesson_is_paid': course.trial_lesson_is_paid,
                 'trial_lesson_price': str(course.trial_lesson_price) if course.trial_lesson_price is not None else None,
+                'charge_standing_order_immediately': course.charge_standing_order_immediately,
                 'external_link': course.external_link,
                 'lessons_count': len(lessons),
                 'lessons': lessons,

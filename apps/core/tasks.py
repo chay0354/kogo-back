@@ -133,7 +133,7 @@ def process_recurring_subscription_charges(self):
     from apps.customers.recurring_billing import process_due_recurring_charges
 
     try:
-        summary = process_due_recurring_charges(dry_run=False)
+        summary = process_due_recurring_charges(dry_run=False, limit=200)
         logger.info('Recurring billing completed: %s', summary)
         return {'success': True, 'summary': summary}
     except Exception as e:

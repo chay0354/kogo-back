@@ -685,6 +685,48 @@ class DeferredSubscriptionStartTest(TestCase):
         self.assertEqual(payment.base_amount, Decimal('260.00'))
         self.assertTrue(payment.description.startswith('דמי רישום'))
 
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_immediate_standing_order_course_bills_custom_fee_and_starts_today(
+        self, mock_discount, mock_tranzila,
+    ):
+        mock_discount.return_value = DiscountCalculation(
+            applicable_discounts=[],
+            total_discount_amount=Decimal('0.00'),
+            final_price=Decimal('5.00'),
+            base_price=Decimal('5.00'),
+        )
+        mock_tranzila.return_value = 'https://tranzila.test/payment'
+        self.lesson.course.price = Decimal('5.00')
+        self.lesson.course.registration_fee_override = Decimal('5.00')
+        self.lesson.course.charge_standing_order_immediately = True
+        self.lesson.course.save(update_fields=[
+            'price', 'registration_fee_override', 'charge_standing_order_immediately',
+        ])
+        other = TestDataFactory.create_lesson()
+
+        with override_settings(SUBSCRIPTION_FIRST_CHARGE_DATE=self.start_date.isoformat()):
+            immediate = self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+            )
+            regular = self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(other.id),
+            )
+
+        today = date.today()
+        self.assertEqual(immediate['registration_fee'], 5.00)
+        self.assertEqual(immediate['final_amount'], 5.00)
+        self.assertEqual(immediate['monthly_amount'], 5.00)
+        self.assertEqual(immediate['next_billing_date'], today.isoformat())
+        self.assertEqual(immediate['subscription_start_date'], today.isoformat())
+
+        self.assertEqual(regular['registration_fee'], 120.00)
+        self.assertEqual(regular['final_amount'], 120.00)
+        self.assertEqual(regular['next_billing_date'], self.start_date.isoformat())
+        self.assertEqual(regular['subscription_start_date'], self.start_date.isoformat())
+
     @patch('apps.core.payment_service.TranzilaService.charge_with_card')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
     def test_card_charge_bills_fee_now_and_starts_monthly_on_the_date(self, mock_discount, mock_charge):

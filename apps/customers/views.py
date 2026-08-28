@@ -1,4 +1,5 @@
 import logging
+import os
 from decimal import Decimal
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -1321,22 +1322,30 @@ def cron_recurring_billing(request):
     """
     Charge due monthly subscriptions and email invoices.
 
-    Auth: X-Cron-Token header or ?token= matching settings.CRON_TOKEN.
-    Schedule daily (e.g. 08:00 Israel) — charges when next_billing_date <= today.
+    Auth: X-Cron-Token, ?token=, or Authorization Bearer matching CRON_TOKEN / CRON_SECRET.
+    Vercel Cron on kogo-back hits this hourly 08:00–15:00 Israel on billing days.
     """
     expected = (getattr(settings, 'CRON_TOKEN', '') or '').strip()
+    vercel_secret = (os.environ.get('CRON_SECRET') or '').strip()
+    auth = (request.headers.get('Authorization') or '').strip()
+    bearer = auth[7:].strip() if auth.lower().startswith('bearer ') else ''
     provided = (
         request.headers.get('X-Cron-Token')
         or request.query_params.get('token')
         or ''
     ).strip()
-    if not expected or provided != expected:
+    allowed = {value for value in (expected, vercel_secret) if value}
+    if not allowed or (provided not in allowed and bearer not in allowed):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
 
     from apps.customers.recurring_billing import process_due_recurring_charges
 
     dry_run = str(request.query_params.get('dry_run', '')).lower() in ('1', 'true', 'yes')
-    summary = process_due_recurring_charges(dry_run=dry_run)
+    try:
+        limit = int(request.query_params.get('limit') or 40)
+    except (TypeError, ValueError):
+        limit = 40
+    summary = process_due_recurring_charges(dry_run=dry_run, limit=limit)
     return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
 
 

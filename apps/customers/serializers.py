@@ -56,6 +56,7 @@ def _serialize_lesson_enrollment(enrollment):
         'branch_name': course.branch.name if course and course.branch_id else None,
         'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
         'status': enrollment.status,
+        'bundle_id': str(enrollment.bundle_id) if enrollment.bundle_id else None,
         'trial_lesson_date': (
             enrollment.trial_lesson_date.isoformat()
             if enrollment.trial_lesson_date else None

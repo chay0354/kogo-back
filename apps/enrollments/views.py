@@ -129,12 +129,22 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='trial-dates')
     def trial_dates(self, request, pk=None):
-        """Upcoming lesson dates staff can move a trial signup to."""
+        """Upcoming lesson dates staff can move a trial signup to.
+
+        Pass ?lesson_id= to preview dates for a different שיעור before saving.
+        """
         enrollment = self.get_object()
-        lesson = enrollment.lesson
+        lesson_id = (request.query_params.get('lesson_id') or '').strip()
+        if lesson_id:
+            try:
+                lesson = Lesson.objects.select_related('course').get(pk=lesson_id)
+            except (Lesson.DoesNotExist, ValueError, TypeError):
+                return Response({'error': 'השיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            lesson = enrollment.lesson
         day_names = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
         dates = iter_upcoming_lesson_occurrences(lesson, count=8)
-        current = enrollment.trial_lesson_date
+        current = enrollment.trial_lesson_date if str(enrollment.lesson_id) == str(lesson.id) else None
         from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
         if current and current not in dates and current not in blocked_trial_lesson_dates():
             dates = [current] + dates
@@ -167,31 +177,95 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         """
         from django.core.exceptions import ValidationError as DjangoValidationError
 
-        from apps.courses.models import Course
+        from apps.courses.models import Course, LessonBundle
         from apps.customers.serializers import _serialize_lesson_enrollment
-        from apps.enrollments.change_course import replace_course_unit
+        from apps.enrollments.change_course import move_trial_enrollment, replace_course_unit, replace_unit
 
         enrollment = self.get_object()
         course_id = (request.data.get('course_id') or request.data.get('course') or '').strip()
         new_lesson_id = (request.data.get('lesson_id') or request.data.get('lesson') or '').strip()
-        if not course_id and not new_lesson_id:
+        bundle_id = (request.data.get('bundle_id') or request.data.get('bundle') or '').strip()
+        if not course_id and not new_lesson_id and not bundle_id:
             return Response({'error': 'יש לבחור חוג'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if enrollment.trial_lesson_date:
+            if bundle_id:
+                return Response(
+                    {'error': 'שיעור ניסיון אפשר להעביר לשיעור בודד'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                if new_lesson_id:
+                    new_lesson = (
+                        Lesson.objects
+                        .select_related('course', 'course__branch', 'room')
+                        .get(pk=new_lesson_id)
+                    )
+                else:
+                    new_course = Course.objects.select_related('branch').get(pk=course_id)
+                    course_lessons = [
+                        lesson for lesson in new_course.lessons.exclude(status='cancelled')
+                        .select_related('course', 'room')
+                        .order_by('day_of_week', 'start_time', 'id')
+                    ]
+                    if len(course_lessons) != 1:
+                        return Response(
+                            {'error': 'שיעור ניסיון אפשר להעביר לשיעור בודד'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    new_lesson = course_lessons[0]
+                result = move_trial_enrollment(
+                    enrollment=enrollment,
+                    new_lesson=new_lesson,
+                    trial_date=request.data.get('trial_lesson_date'),
+                )
+            except (Course.DoesNotExist, Lesson.DoesNotExist, DjangoValidationError, TypeError):
+                return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+            except ValueError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            kept = result['kept']
+            primary = kept[0]
+            data = dict(self.get_serializer(primary).data)
+            data['enrollments'] = [_serialize_lesson_enrollment(row) for row in kept]
+            data['removed_enrollment_ids'] = [str(row_id) for row_id in result['removed_ids']]
+            return Response(data)
+
         try:
-            if course_id:
-                new_course = Course.objects.select_related('branch').get(pk=course_id)
-            else:
+            if bundle_id:
+                bundle = (
+                    LessonBundle.objects
+                    .select_related('course', 'course__branch')
+                    .prefetch_related('lessons', 'lessons__course', 'lessons__room')
+                    .get(pk=bundle_id)
+                )
+                target_lessons = [
+                    lesson for lesson in bundle.lessons.all()
+                    if lesson.status != 'cancelled'
+                ]
+                target_lessons.sort(
+                    key=lambda lesson: (lesson.day_of_week, str(lesson.start_time), str(lesson.id))
+                )
+                result = replace_unit(
+                    enrollment=enrollment,
+                    target_lessons=target_lessons,
+                    target_bundle=bundle,
+                )
+            elif new_lesson_id:
                 new_lesson = (
                     Lesson.objects
                     .select_related('course', 'course__branch', 'room')
                     .get(pk=new_lesson_id)
                 )
-                new_course = new_lesson.course
-        except (Course.DoesNotExist, Lesson.DoesNotExist, DjangoValidationError, ValueError, TypeError):
+                result = replace_unit(
+                    enrollment=enrollment,
+                    target_lessons=[new_lesson],
+                    target_bundle=None,
+                )
+            else:
+                new_course = Course.objects.select_related('branch').get(pk=course_id)
+                result = replace_course_unit(enrollment=enrollment, new_course=new_course)
+        except (Course.DoesNotExist, Lesson.DoesNotExist, LessonBundle.DoesNotExist, DjangoValidationError, TypeError):
             return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-
-        try:
-            result = replace_course_unit(enrollment=enrollment, new_course=new_course)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -201,6 +275,20 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         data['enrollments'] = [_serialize_lesson_enrollment(row) for row in kept]
         data['removed_enrollment_ids'] = [str(row_id) for row_id in result['removed_ids']]
         return Response(data)
+
+    @action(detail=True, methods=['post'], url_path='drop-course')
+    def drop_course(self, request, pk=None):
+        """Remove the child from this חוג and cancel the standing order from the next charge."""
+        from apps.enrollments.change_course import drop_course_unit
+
+        enrollment = self.get_object()
+        reason = (request.data.get('cancellation_reason') or '').strip()
+        result = drop_course_unit(enrollment=enrollment, cancellation_reason=reason)
+        return Response({
+            'removed_enrollment_ids': [str(row_id) for row_id in result['removed_ids']],
+            'cancelled_recurring_ids': result['cancelled_recurring_ids'],
+            'child_status': result['child_status'],
+        })
 
 
 @api_view(['GET', 'POST'])

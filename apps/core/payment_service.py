@@ -62,14 +62,33 @@ def parse_store_cart_notes(notes: Optional[str]) -> Optional[list]:
     return data
 
 
-def registration_fee_amount() -> Decimal:
+def registration_fee_amount(course=None) -> Decimal:
     """One-time registration fee added to a new lesson subscription."""
+    override = getattr(course, 'registration_fee_override', None) if course is not None else None
+    if override is not None:
+        try:
+            return max(Decimal('0.00'), Decimal(str(override)).quantize(Decimal('0.01')))
+        except Exception:
+            pass
     raw = getattr(settings, 'REGISTRATION_FEE_ILS', 120)
     try:
         fee = Decimal(str(raw or 0))
     except Exception:
         fee = Decimal('0')
     return max(Decimal('0.00'), fee.quantize(Decimal('0.01')))
+
+
+def standing_order_next_billing_date(*, today: date, lesson) -> date:
+    """When the monthly standing order should first run for this lesson."""
+    course = getattr(lesson, 'course', None) if lesson is not None else None
+    if course is not None and getattr(course, 'charge_standing_order_immediately', False):
+        return today
+    deferred = deferred_first_charge_date(today)
+    if deferred:
+        return deferred
+    day_of_week = lesson.day_of_week if lesson is not None else 1
+    _, _, _, nxt = _compute_prorate(today, day_of_week)
+    return nxt
 
 
 def deferred_first_charge_date(today: Optional[date] = None) -> Optional[date]:
@@ -586,15 +605,17 @@ class PaymentService:
             today_local, lesson.day_of_week
         )
         full_monthly_amount = discount_calculation.final_price
-        registration_fee = registration_fee_amount() if include_registration_fee else Decimal('0.00')
+        registration_fee = (
+            registration_fee_amount(lesson.course) if include_registration_fee else Decimal('0.00')
+        )
 
         # When monthly billing only starts later, signup charges דמי רישום alone and the
         # full monthly price is first billed by the recurring cron on that date.
         deferred_charge_date = deferred_first_charge_date(today_local)
+        next_billing_date = standing_order_next_billing_date(today=today_local, lesson=lesson)
         if deferred_charge_date:
             prorate_factor = Decimal('0')
             prorate_lessons_remaining = 0
-            next_billing_date = deferred_charge_date
             prorated_lesson = Decimal('0.00')
         elif full_monthly_amount <= 0:
             prorated_lesson = Decimal('0.00')
@@ -705,7 +726,11 @@ class PaymentService:
             'total_lessons_this_month': total_lessons_this_month,
             'next_billing_date': next_billing_date.isoformat(),
             'monthly_amount': float(full_monthly_amount),
-            'subscription_start_date': deferred_charge_date.isoformat() if deferred_charge_date else None,
+            'subscription_start_date': (
+                next_billing_date.isoformat()
+                if deferred_charge_date or getattr(lesson.course, 'charge_standing_order_immediately', False)
+                else None
+            ),
             'discounts_applied': [
                 {
                     'name': d.name,
@@ -830,7 +855,9 @@ class PaymentService:
                     lesson_dow = payment.lesson.day_of_week if payment.lesson else 1
                     _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
                     if payment_is_fee_only(payment):
-                        next_billing_date = deferred_first_charge_date(enrollment_date) or next_billing_date
+                        next_billing_date = standing_order_next_billing_date(
+                            today=enrollment_date, lesson=payment.lesson,
+                        )
 
                     recurring_payment = RecurringPayment.objects.create(
                         child=payment.child,
@@ -867,7 +894,7 @@ class PaymentService:
             _, _, _, next_billing_date_child = _compute_prorate(enrollment_date_child, lesson_dow_child)
             child.status = 'active'
             deferred_start_child = (
-                deferred_first_charge_date(enrollment_date_child)
+                standing_order_next_billing_date(today=enrollment_date_child, lesson=payment.lesson)
                 if payment.payment_type == 'recurring_subscription' and payment_is_fee_only(payment)
                 else None
             )
@@ -1028,12 +1055,14 @@ class PaymentService:
         # Pro-rate the first payment to the remaining lessons of the current month.
         prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date, lesson.day_of_week)
         full_monthly_amount_c = discount_calculation.final_price
-        registration_fee_c = registration_fee_amount() if include_registration_fee else Decimal('0.00')
+        registration_fee_c = (
+            registration_fee_amount(lesson.course) if include_registration_fee else Decimal('0.00')
+        )
 
         # When monthly billing only starts later, signup charges דמי רישום alone.
         deferred_charge_date_c = deferred_first_charge_date(payment_date)
+        next_billing_date_c = standing_order_next_billing_date(today=payment_date, lesson=lesson)
         if deferred_charge_date_c:
-            next_billing_date_c = deferred_charge_date_c
             prorated_lesson_c = Decimal('0.00')
         elif full_monthly_amount_c <= 0:
             prorated_lesson_c = Decimal('0.00')
@@ -1201,7 +1230,7 @@ class PaymentService:
             if deferred_charge_date_c:
                 # The subscription itself has not started and no month is paid for yet;
                 # the recurring charge on that date fills paid_until_date in.
-                child.subscription_start_date = deferred_charge_date_c
+                child.subscription_start_date = next_billing_date_c
                 child.paid_until_date = None
             else:
                 child.subscription_start_date = payment_date

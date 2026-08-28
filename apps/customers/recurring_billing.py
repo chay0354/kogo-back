@@ -28,17 +28,21 @@ def _paid_until(end_of_charge_month: date) -> date:
     return date(end_of_charge_month.year, end_of_charge_month.month, last_day)
 
 
-def process_due_recurring_charges(*, dry_run: bool = False) -> dict:
+def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> dict:
     """
     Charge active RecurringPayment rows whose next_billing_date is today or earlier.
     Creates Payment + Invoice and sends email (via PaymentService._create_invoice_from_payment).
+
+    `limit` keeps each Vercel cron invocation under the function timeout; leftover
+    rows stay due and the next hourly run continues.
     """
     from apps.core.payment_service import PaymentService
 
     apply_due_pending_recurring_amounts()
-    today = timezone.localdate()
+    today = timezone.now().astimezone(JERUSALEM_TZ).date()
     service = PaymentService()
     tranzila = TranzilaService.production()
+    batch = max(1, min(int(limit or 40), 200))
 
     due = (
         RecurringPayment.objects
@@ -54,12 +58,23 @@ def process_due_recurring_charges(*, dry_run: bool = False) -> dict:
             'initial_payment__lesson__course__branch',
             'initial_payment__bundle',
         )
+        .order_by('next_billing_date', 'created_at')[:batch]
     )
+    due_rows = list(due)
 
-    summary = {'checked': due.count(), 'charged': 0, 'failed': 0, 'skipped': 0, 'errors': []}
+    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0, 'errors': []}
 
-    for recurring in due:
+    for recurring in due_rows:
         if recurring.last_charge_date and recurring.last_charge_date >= today:
+            summary['skipped'] += 1
+            continue
+
+        idempotency_key = f"recurring_{recurring.id}_{today.isoformat()}"
+        if TranzilaTransaction.objects.filter(idempotency_key=idempotency_key, is_successful=True).exists():
+            charge_month = recurring.next_billing_date or today
+            recurring.last_charge_date = today
+            recurring.next_billing_date = _next_month_first(charge_month)
+            recurring.save(update_fields=['last_charge_date', 'next_billing_date', 'updated_at'])
             summary['skipped'] += 1
             continue
 
@@ -141,7 +156,7 @@ def process_due_recurring_charges(*, dry_run: bool = False) -> dict:
                     response_message='',
                     request_data={},
                     response_data=result.get('raw_response', {}),
-                    idempotency_key=f"recurring_{recurring.id}_{today.isoformat()}",
+                    idempotency_key=idempotency_key,
                     is_successful=True,
                     response_timestamp=timezone.now(),
                 )

@@ -324,7 +324,9 @@ class TranzilaService:
             return
         if not getattr(settings, 'TRANZILA_DCDISABLE_ENABLED', False):
             return
-        payload['DCdisable'] = str(key)[:254]
+        fields = list(payload.get('user_defined_fields') or [])
+        fields.append({'name': 'DCdisable', 'value': str(key)[:254]})
+        payload['user_defined_fields'] = fields
 
     def live_readiness(self) -> Dict:
         """
@@ -711,13 +713,17 @@ class TranzilaService:
                 'unit_price': float(amount),
                 'units_number': 1
             }]
+
+        expire_year = self._normalize_card_year(expire_year)
+        if not expire_month or not expire_year:
+            return self._build_error_response('חסר תוקף כרטיס לחיוב הוראת קבע')
                 
         payload = {
             'terminal_name': self.token_terminal,
             'txn_type': 'debit',
             'txn_currency_code': 'ILS',
-            'expire_month': expire_month,
-            'expire_year': expire_year,
+            'expire_month': int(expire_month),
+            'expire_year': int(expire_year),
             'card_number': token,
             'items': items
         }

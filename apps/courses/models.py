@@ -69,6 +69,19 @@ class Course(models.Model):
         blank=True,
         verbose_name="מחיר שיעור ניסיון (₪)",
     )
+    registration_fee_override = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="דמי רישום מותאמים (₪)",
+        help_text="אם מוגדר, מחליף את דמי הרישום הכלליים רק לחוג זה.",
+    )
+    charge_standing_order_immediately = models.BooleanField(
+        default=False,
+        verbose_name="חיוב הוראת קבע מיידי",
+        help_text="כאשר מופעל, הוראת הקבע של החוג הזה מחויבת מהיום ולא מתאריך תחילת העונה הכללי.",
+    )
     external_link = models.CharField(
         max_length=500,
         blank=True,
