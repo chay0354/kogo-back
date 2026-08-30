@@ -371,6 +371,7 @@ def stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
             trial_date = compute_trial_lesson_date(lesson)
             enrollment.trial_lesson_date = trial_date
             enrollment.save(update_fields=['trial_lesson_date', 'updated_at'])
+            enrollment.refresh_from_db()
     except Exception:
         logger.exception("Failed to compute trial_lesson_date for enrollment %s", enrollment_id)
 

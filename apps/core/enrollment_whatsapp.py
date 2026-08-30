@@ -51,17 +51,17 @@ def build_enrollment_whatsapp_context(
         _add_name(primary_parent.first_name)
         _add_name(primary_parent.last_name)
 
+    branch = lesson.course.branch if lesson.course_id and lesson.course.branch_id else None
+    branch_name = (branch.name if branch else '') or ''
+    address = (branch.address or '').strip() if branch else ''
     return {
         'phone': parent_phone,
         'parent_name': parent_name or family.name,
         'lookup_names': lookup_names,
         'child_name': f"{child.first_name} {child.last_name}".strip(),
         'course_name': lesson.course.name if lesson.course_id else '',
-        'branch_name': (
-            lesson.course.branch.name
-            if lesson.course_id and lesson.course.branch_id
-            else ''
-        ),
+        'branch_name': branch_name,
+        'location': address or branch_name,
         'day_name': dict(Lesson.DAY_OF_WEEK_CHOICES).get(lesson.day_of_week, ''),
         'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
         'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else '',

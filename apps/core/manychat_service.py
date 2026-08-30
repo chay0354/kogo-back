@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 import requests
@@ -11,6 +12,15 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 MANYCHAT_API_BASE = 'https://api.manychat.com'
+
+# ManyChat indexes custom fields asynchronously. Sending the WhatsApp template
+# immediately after setCustomFields often renders empty {{kogo_*}} variables.
+FIELD_SETTLE_SECONDS = 1.5
+
+# Duplicate User Fields created by ManyChat imports keep the original name plus
+# a timestamp, e.g. "kogo_branch_name (2026-07-26 07:28:15)". WhatsApp templates
+# are often mapped to those copies, which stay empty if we only write the original.
+_TIMESTAMPED_FIELD = re.compile(r'^(.+?) \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)$')
 
 
 class ManyChatError(Exception):
@@ -37,6 +47,7 @@ class ManyChatService:
         self.api_key = (api_key or getattr(settings, 'MANYCHAT_KEY', '') or '').strip()
         field_id = getattr(settings, 'MANYCHAT_PHONE_FIELD_ID', '') or ''
         self.phone_field_id = str(field_id).strip() or None
+        self._custom_field_defs: list[dict] | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -213,17 +224,88 @@ class ManyChatService:
         }
         return self._request('POST', '/fb/sending/sendContent', json_body=payload)
 
+    def list_custom_fields(self) -> list[dict]:
+        """Page User Field definitions (id + name), cached on this client."""
+        if self._custom_field_defs is None:
+            result = self._request('GET', '/fb/page/getCustomFields')
+            data = result.get('data') or []
+            self._custom_field_defs = [row for row in data if isinstance(row, dict)]
+        return self._custom_field_defs
+
+    @staticmethod
+    def _is_timestamp_alias(actual: str, logical: str) -> bool:
+        match = _TIMESTAMPED_FIELD.match((actual or '').strip())
+        return bool(match and match.group(1) == logical)
+
+    def _expand_field_aliases(self, fields: dict[str, Any]) -> dict[str, Any]:
+        """Also write timestamp-suffixed copies of the same User Field."""
+        expanded = dict(fields)
+        try:
+            defs = self.list_custom_fields()
+        except ManyChatError as exc:
+            logger.warning('ManyChat getCustomFields failed; writing original names only: %s', exc)
+            return expanded
+        for logical, value in list(fields.items()):
+            for row in defs:
+                name = (row.get('name') or '').strip()
+                if name != logical and self._is_timestamp_alias(name, logical):
+                    expanded[name] = value
+        return expanded
+
     def set_custom_fields(self, subscriber_id: int | str, fields: dict[str, Any]) -> dict:
-        """Set multiple ManyChat User Fields by name. Skips empty values."""
+        """Set multiple ManyChat User Fields by name. Skips empty values.
+
+        Also writes ManyChat timestamp-alias copies so WhatsApp templates that
+        map to those fields are not empty.
+
+        If the batch call fails (unknown field name, validation), retry each
+        field on its own so one bad field does not wipe branch/date/time.
+        """
+        fields = self._expand_field_aliases(fields)
         clean = [
             {'field_name': str(k), 'field_value': '' if v is None else str(v)}
             for k, v in fields.items()
             if v is not None and str(v) != ''
         ]
+        known = {
+            (row.get('name') or '').strip()
+            for row in (self._custom_field_defs or [])
+            if (row.get('name') or '').strip()
+        }
+        if known:
+            clean = [item for item in clean if item['field_name'] in known]
         if not clean:
             return {'status': 'success', 'skipped': True}
         payload = {'subscriber_id': int(subscriber_id), 'fields': clean}
-        return self._request('POST', '/fb/subscriber/setCustomFields', json_body=payload)
+        try:
+            return self._request('POST', '/fb/subscriber/setCustomFields', json_body=payload)
+        except ManyChatError as exc:
+            logger.warning(
+                'ManyChat setCustomFields batch failed for %s (%s); retrying fields one by one',
+                subscriber_id,
+                exc,
+            )
+            applied = 0
+            last_exc = exc
+            for item in clean:
+                try:
+                    self._request(
+                        'POST',
+                        '/fb/subscriber/setCustomFields',
+                        json_body={'subscriber_id': int(subscriber_id), 'fields': [item]},
+                    )
+                    applied += 1
+                except ManyChatError as field_exc:
+                    last_exc = field_exc
+                    logger.warning(
+                        'ManyChat setCustomField %s failed for %s: %s',
+                        item.get('field_name'),
+                        subscriber_id,
+                        field_exc,
+                    )
+            if applied == 0:
+                raise last_exc
+            return {'status': 'success', 'partial': True, 'applied': applied}
 
     def send_flow(self, subscriber_id: int | str, flow_ns: str) -> dict:
         """Trigger a published Automation/Flow (use this for WhatsApp Templates)."""
@@ -281,6 +363,7 @@ class ManyChatService:
             'test-lesson-register',
             'test lesson register',
             'test-lesson-registser',
+            'test-lesson-regitser',
         ),
         'MANYCHAT_PAYMENT_FAILED_FLOW_NS': ('payment-failed',),
         'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
@@ -490,6 +573,8 @@ class ManyChatService:
             if (name or '').strip():
                 try:
                     self.set_custom_fields(sid, {'kogo_parent_name': name.strip()})
+                    if FIELD_SETTLE_SECONDS > 0:
+                        time.sleep(FIELD_SETTLE_SECONDS)
                 except ManyChatError as exc:
                     logger.warning('ManyChat setCustomFields (broadcast) failed for %s: %s', sid, exc)
             self.send_flow(sid, flow_ns)
@@ -517,15 +602,18 @@ class ManyChatService:
         kind: str = REGISTRATION_KIND_SUBSCRIPTION,
         lookup_names: list[str] | None = None,
         trial_date: str = '',
+        location: str = '',
     ) -> dict:
         """
         Send a course-registration / trial confirmation to the parent on WhatsApp.
 
         Strategy:
           1. Resolve or create a ManyChat subscriber for the phone.
-          2. Set the 6 custom fields used by the WhatsApp Template flow.
-          3. If the matching flow ns is configured → trigger the approved template.
-             Otherwise fall back to free-text (only delivers within 24h window).
+          2. Set custom fields used by the WhatsApp Template flow.
+          3. Wait briefly so ManyChat indexes the fields (otherwise the template
+             arrives with empty branch/date/time).
+          4. If fields were written and a flow ns is configured → trigger it.
+             Otherwise fall back to free-text so the parent still gets details.
         """
         if not self.is_configured:
             return {'sent': False, 'reason': 'manychat_not_configured'}
@@ -556,16 +644,16 @@ class ManyChatService:
             'kogo_branch_name': branch_name,
             'kogo_lesson_day': day_name,
             'kogo_lesson_time': time_range,
+            'kogo_location': location or branch_name,
         }
         if trial_date:
             custom_fields['kogo_trial_date'] = trial_date
-        try:
-            self.set_custom_fields(sid, custom_fields)
-        except ManyChatError as exc:
-            logger.warning('ManyChat setCustomFields failed for %s: %s', sid, exc)
+        fields_ok = self._set_custom_fields_with_retry(sid, custom_fields)
 
         flow_ns = self.resolve_flow_ns(config_entry['flow_setting'])
-        if flow_ns:
+        if flow_ns and fields_ok:
+            if FIELD_SETTLE_SECONDS > 0:
+                time.sleep(FIELD_SETTLE_SECONDS)
             try:
                 self.send_flow(sid, flow_ns)
                 return {
@@ -587,6 +675,13 @@ class ManyChatService:
                     'error': str(exc),
                     'subscriber_id': sid,
                 }
+        if flow_ns and not fields_ok:
+            logger.warning(
+                'ManyChat skipping flow %s for %s: custom fields were not set; '
+                'sending fallback text so the template is not empty',
+                flow_ns,
+                sid,
+            )
 
         # Fallback (only delivers if user is within 24h customer-service window).
         text = config_entry['fallback_template'].format(
@@ -608,6 +703,29 @@ class ManyChatService:
                 'error': str(exc),
                 'subscriber_id': sid,
             }
+
+    def _set_custom_fields_with_retry(self, subscriber_id: int | str, fields: dict[str, str]) -> bool:
+        last_error: ManyChatError | None = None
+        for attempt in range(1, 3):
+            try:
+                result = self.set_custom_fields(subscriber_id, fields)
+                if result.get('skipped'):
+                    return False
+                return True
+            except ManyChatError as exc:
+                last_error = exc
+                logger.warning(
+                    'ManyChat setCustomFields attempt %s failed for %s: %s',
+                    attempt,
+                    subscriber_id,
+                    exc,
+                )
+        logger.warning(
+            'ManyChat setCustomFields failed after retries for %s: %s',
+            subscriber_id,
+            last_error,
+        )
+        return False
 
     def _matches_for_phone(self, rows: list[dict], phone: str) -> list[dict]:
         """Keep subscribers whose WhatsApp/system phone matches the requested number."""
