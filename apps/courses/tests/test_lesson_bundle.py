@@ -51,6 +51,18 @@ class LessonBundleModelTest(TestCase):
             bundle,
         )
 
+    def test_serializer_rejects_inverted_bundle_age_range(self):
+        serializer = LessonBundleSerializer(data={
+            'course': str(self.course.id),
+            'name': 'פעמיים בשבוע',
+            'lessons': [str(self.lesson_a.id), str(self.lesson_b.id)],
+            'combined_price': '330.00',
+            'min_age': 16,
+            'max_age': 15,
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('max_age', serializer.errors)
+
     def test_inactive_bundle_hidden_when_course_is_not_must_attend(self):
         bundle = LessonBundle.objects.create(
             course=self.course,

@@ -28,6 +28,126 @@ from apps.core.payment_service import PaymentService
 WIDGET_STALE_PROCESSING_SECONDS = 90
 
 
+def _charge_result_token(result) -> str:
+    """Saved-card token from a charge result, including nested Tranzila JSON."""
+    from apps.core.tranzila_service import extract_card_token
+
+    raw = result.get('raw_response') if isinstance(result, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    txn = raw.get('transaction_result')
+    txn = txn if isinstance(txn, dict) else {}
+    return extract_card_token(txn, raw, result if isinstance(result, dict) else {})
+
+
+def _token_from_stored_transaction(payment) -> str:
+    from apps.core.tranzila_service import extract_card_token
+
+    txn_row = getattr(payment, 'tranzila_transaction', None)
+    raw = (txn_row.response_data if txn_row else None) or {}
+    if not isinstance(raw, dict):
+        return ''
+    nested = raw.get('transaction_result')
+    nested = nested if isinstance(nested, dict) else {}
+    return extract_card_token(nested, raw)
+
+
+def _expiry_from_stored_transaction(payment):
+    txn_row = getattr(payment, 'tranzila_transaction', None)
+    raw = (txn_row.response_data if txn_row else None) or {}
+    nested = raw.get('transaction_result') if isinstance(raw, dict) else {}
+    if not isinstance(nested, dict):
+        return None, None
+    month, year = nested.get('expiry_month'), nested.get('expiry_year')
+    try:
+        month = int(month) if month is not None else None
+        year = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        return None, None
+    return month, year
+
+
+def _ensure_recurring_payment_for_widget_charge(
+    *,
+    payment,
+    child,
+    lesson,
+    token,
+    expiry_month,
+    expiry_year,
+    enrollment_date,
+    next_billing_date,
+) -> bool:
+    """Create the CRM standing order after a successful widget charge, if missing."""
+    from apps.core.payment_service import payment_full_monthly_amount, should_create_recurring_for_payment
+    from apps.customers.models import RecurringPayment
+
+    token = (token or '').strip()
+    if not token or child is None:
+        return False
+    if RecurringPayment.objects.filter(initial_payment=payment).exists():
+        return True
+    monthly_amount = payment_full_monthly_amount(payment)
+    if not should_create_recurring_for_payment(
+        child=child,
+        bundle=payment.bundle,
+        monthly_amount=monthly_amount,
+    ):
+        return False
+    try:
+        month = int(expiry_month) if expiry_month is not None else None
+        year = int(expiry_year) if expiry_year is not None else None
+    except (TypeError, ValueError):
+        month, year = None, None
+    RecurringPayment.objects.create(
+        child=child,
+        initial_payment=payment,
+        tranzila_token=token,
+        card_expire_month=month,
+        card_expire_year=year,
+        status='active',
+        base_amount=payment.base_amount,
+        discount_amount=payment.discount_amount,
+        amount=monthly_amount,
+        discount_details=[
+            {
+                'name': s.discount_name,
+                'type': s.discount_type,
+                'value': str(s.discount_value),
+                'amount_deducted': str(s.amount_deducted),
+                'reason': s.reason,
+            }
+            for s in payment.discount_snapshots.all()
+        ],
+        billing_day=1,
+        start_date=enrollment_date,
+        next_billing_date=next_billing_date,
+    )
+    return True
+
+
+def _heal_missing_recurring_from_stored_charge(payment) -> bool:
+    """If דמי רישום succeeded but RecurringPayment was skipped, attach it from the saved token."""
+    from apps.core.payment_service import JERUSALEM_TZ, standing_order_next_billing_date
+
+    if payment.trial_lesson_date or payment.lesson is None:
+        return False
+    token = _token_from_stored_transaction(payment)
+    if not token:
+        return False
+    today_il = timezone.now().astimezone(JERUSALEM_TZ).date()
+    month, year = _expiry_from_stored_transaction(payment)
+    return _ensure_recurring_payment_for_widget_charge(
+        payment=payment,
+        child=payment.child,
+        lesson=payment.lesson,
+        token=token,
+        expiry_month=month,
+        expiry_year=year,
+        enrollment_date=today_il,
+        next_billing_date=standing_order_next_billing_date(today=today_il, lesson=payment.lesson),
+    )
+
+
 def _batch_paying_enrollment_counts(lesson_ids):
     """lesson_id -> paying enrollment count (widget capacity)."""
     if not lesson_ids:
@@ -92,6 +212,8 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
         'id': str(bundle.id),
         'name': bundle.name,
         'combined_price': str(bundle.combined_price),
+        'min_age': bundle.min_age,
+        'max_age': bundle.max_age,
         'lessons': lesson_payloads,
         'is_full': bundle_full,
     }
@@ -810,7 +932,6 @@ class WidgetChargeView(APIView):
             payment_is_fee_only,
             payment_prorated_lesson_amount,
             saved_card_token_for_child,
-            should_create_recurring_for_payment,
             standing_order_next_billing_date,
             subscription_tranzila_items,
         )
@@ -825,6 +946,7 @@ class WidgetChargeView(APIView):
         logger = logging.getLogger(__name__)
 
         def completed_payload(payment_obj):
+            _heal_missing_recurring_from_stored_charge(payment_obj)
             has_recurring = RecurringPayment.objects.filter(
                 initial_payment=payment_obj, status='active',
             ).exists()
@@ -1018,7 +1140,7 @@ class WidgetChargeView(APIView):
 
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
                 else:
-                    token = result.get('token', '')
+                    token = _charge_result_token(result) or _token_from_stored_transaction(payment)
                     if not token:
                         # The charge went through but no saved card came back, so the
                         # monthly subscription cannot be billed automatically.
@@ -1027,42 +1149,20 @@ class WidgetChargeView(APIView):
                             "monthly billing will not run until a token is stored",
                             payment.id, child.full_name if child else '',
                         )
-                    if token and not RecurringPayment.objects.filter(initial_payment=payment).exists():
-                        monthly_amount = payment_full_monthly_amount(payment)
-                        if should_create_recurring_for_payment(
-                            child=child,
-                            bundle=payment.bundle,
-                            monthly_amount=monthly_amount,
-                        ):
-                            discount_details = [
-                                {
-                                    'name': s.discount_name,
-                                    'type': s.discount_type,
-                                    'value': str(s.discount_value),
-                                    'amount_deducted': str(s.amount_deducted),
-                                    'reason': s.reason,
-                                }
-                                for s in payment.discount_snapshots.all()
-                            ]
-                            enrollment_date = today_il
-                            lesson_dow = lesson.day_of_week if lesson else 1
-                            _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
-                            next_billing_date = sto_start or next_billing_date
-                            RecurringPayment.objects.create(
-                                child=child,
-                                initial_payment=payment,
-                                tranzila_token=token,
-                                card_expire_month=expiry_month,
-                                card_expire_year=expiry_year,
-                                status='active',
-                                base_amount=payment.base_amount,
-                                discount_amount=payment.discount_amount,
-                                amount=monthly_amount,
-                                discount_details=discount_details,
-                                billing_day=1,
-                                start_date=enrollment_date,
-                                next_billing_date=next_billing_date,
-                            )
+                    enrollment_date = today_il
+                    lesson_dow = lesson.day_of_week if lesson else 1
+                    _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
+                    next_billing_date = sto_start or next_billing_date
+                    _ensure_recurring_payment_for_widget_charge(
+                        payment=payment,
+                        child=child,
+                        lesson=lesson,
+                        token=token,
+                        expiry_month=expiry_month,
+                        expiry_year=expiry_year,
+                        enrollment_date=enrollment_date,
+                        next_billing_date=next_billing_date,
+                    )
 
                     # A card that was only verified has nothing to invoice here;
                     # the checkout helper emits one receipt after the card request.
@@ -1120,7 +1220,11 @@ class WidgetChargeView(APIView):
             return {
                 'success': True,
                 'payment_id': str(payment.id),
-                'recurring_active': bool(is_trial_payment or result.get('token')),
+                'recurring_active': bool(
+                    is_trial_payment
+                    or _charge_result_token(result)
+                    or RecurringPayment.objects.filter(initial_payment=payment, status='active').exists()
+                ),
             }
 
         if is_tranzila_uncertain_gateway_error(result):

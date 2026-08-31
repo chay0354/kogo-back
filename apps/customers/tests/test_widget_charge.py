@@ -85,6 +85,43 @@ class WidgetChargeIdempotencyTest(TestCase):
             LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson, status='active').exists()
         )
 
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card')
+    def test_nested_tranzila_token_still_creates_standing_order(self, mock_charge, _whatsapp):
+        mock_charge.return_value = {
+            'success': True,
+            'transaction_id': '462984',
+            'confirmation_code': '0033260',
+            'amount': 5.0,
+            'response_code': '000',
+            'raw_response': {
+                'error_code': 0,
+                'transaction_result': {
+                    'token': 'Ynested4528',
+                    'expiry_month': '02',
+                    'expiry_year': '32',
+                    'last_4': '4528',
+                },
+            },
+        }
+        payment = _payment_for(
+            self.child,
+            self.lesson,
+            base_amount=Decimal('5.00'),
+            final_amount=Decimal('5.00'),
+            registration_fee=Decimal('5.00'),
+        )
+        res = self.client.post(
+            '/api/v1/customers/widget/charge/',
+            {'payment_id': str(payment.id), 'card_details': CARD},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.json()['success'])
+        sto = RecurringPayment.objects.get(child=self.child, status='active')
+        self.assertEqual(sto.tranzila_token, 'Ynested4528')
+        self.assertEqual(sto.amount, Decimal('5.00'))
+
     @patch('apps.core.tranzila_service.TranzilaService.charge_with_card')
     def test_already_completed_charge_returns_success_without_charging_again(self, mock_charge):
         payment = _payment_for(self.child, self.lesson, status='completed')

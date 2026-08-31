@@ -60,6 +60,13 @@ class TranzilaHelperTests(SimpleTestCase):
             'abc123token',
         )
         self.assertEqual(extract_card_token({'token': 'from_result'}), 'from_result')
+        self.assertEqual(
+            extract_card_token({
+                'error_code': 0,
+                'transaction_result': {'token': 'Ynested4528'},
+            }),
+            'Ynested4528',
+        )
 
     def test_pdesc_strips_uuid_hyphens_and_roundtrips(self):
         uid = '550e8400-e29b-41d4-a716-446655440000'

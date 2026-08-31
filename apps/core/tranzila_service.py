@@ -167,6 +167,11 @@ def extract_card_token(*sources: Optional[Dict]) -> str:
     for source in sources:
         if not isinstance(source, dict):
             continue
+        nested = source.get('transaction_result')
+        if isinstance(nested, dict):
+            found = extract_card_token(nested)
+            if found:
+                return found
         for key in TOKEN_RESPONSE_KEYS:
             token = str(source.get(key) or '').strip()
             if token:
@@ -817,9 +822,14 @@ class TranzilaService:
                 endpoint='/v1/transaction/credit_card/create'
             )
 
-            return self._parse_credit_card_create_response(
+            parsed = self._parse_credit_card_create_response(
                 response, amount=amount, last4=str(card_number)[-4:],
             )
+            if parsed.get('success') and not parsed.get('token'):
+                parsed['token'] = extract_card_token(
+                    (response.get('transaction_result') or {}), response,
+                )
+            return parsed
 
         except Exception as e:
             logger.error(f"Exception during card charge: {str(e)}", exc_info=True)

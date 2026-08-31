@@ -581,7 +581,7 @@ class LessonBundleSerializer(serializers.ModelSerializer):
         model = LessonBundle
         fields = [
             'id', 'course', 'course_name', 'name', 'lessons', 'lessons_detail',
-            'combined_price', 'price_per_lesson', 'is_active',
+            'combined_price', 'price_per_lesson', 'min_age', 'max_age', 'is_active',
             'lesson_instructors', 'lesson_rooms', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -605,6 +605,11 @@ class LessonBundleSerializer(serializers.ModelSerializer):
         combined_price = data.get('combined_price', getattr(self.instance, 'combined_price', None))
         if combined_price is not None and combined_price < 0:
             raise serializers.ValidationError({'combined_price': 'המחיר לא יכול להיות שלילי'})
+
+        min_age = data.get('min_age', getattr(self.instance, 'min_age', None) if self.instance else None)
+        max_age = data.get('max_age', getattr(self.instance, 'max_age', None) if self.instance else None)
+        if min_age is not None and max_age is not None and max_age < min_age:
+            raise serializers.ValidationError({'max_age': 'גיל מקסימום חייב להיות גדול או שווה לגיל מינימום'})
 
         selected = lessons or []
         self._validate_instructor_mapping(data.get('lesson_instructors'), selected)
