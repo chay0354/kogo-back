@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import models
 from django.db.models import Sum, Count, Q, Avg, Max, F
-from django.db.models.functions import TruncMonth
+from django.db.models.functions import Least, TruncMonth
 from django.utils import timezone
 from datetime import datetime, timedelta, date
 from decimal import Decimal
@@ -793,6 +793,17 @@ class DashboardViewSet(viewsets.ViewSet):
         latest_month = max(months) if months else None
 
         if latest_month:
+            # Seats are summed over the same rows as the students, so a course
+            # running two groups is measured against two groups' worth of
+            # capacity. Per lesson the real limit is the smaller of the course
+            # capacity and the room it sits in -- the same rule the widget uses
+            # in _resolve_lesson_capacity. LEAST ignores a NULL room.
+            seats_by_course = {
+                row['course_id']: row['seats'] or 0
+                for row in snapshots.filter(month=latest_month).values('course_id').annotate(
+                    seats=Sum(Least('course__capacity', 'lesson__room__capacity')),
+                )
+            }
             students_by_course = {
                 row['course_id']: row['students'] or 0
                 for row in snapshots.filter(month=latest_month).values('course_id').annotate(
@@ -800,6 +811,7 @@ class DashboardViewSet(viewsets.ViewSet):
                 )
             }
         else:
+            seats_by_course = {}
             students_by_course = {
                 row['course_id']: row['students'] or 0
                 for row in snapshots.values('course_id').annotate(
@@ -816,6 +828,7 @@ class DashboardViewSet(viewsets.ViewSet):
             'course_id',
             'course__name',
             'course__display_id',
+            'course__capacity',
             'branch__name',
         ).annotate(
             revenue_total=Sum('revenue'),
@@ -833,7 +846,9 @@ class DashboardViewSet(viewsets.ViewSet):
             course_display_id = row['course__display_id']
             branch_name = row['branch__name']
 
-            capacity = 20
+            # Falls back to the course capacity for the rare period with no
+            # snapshot rows to sum seats from.
+            capacity = seats_by_course.get(cid) or row.get('course__capacity') or 0
             occupancy = min(100, (students / capacity * 100)) if capacity > 0 else 0
 
             if occupancy >= 90:
