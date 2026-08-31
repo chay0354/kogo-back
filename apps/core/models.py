@@ -350,6 +350,41 @@ class BranchMonthlySnapshot(models.Model):
         return f"{self.branch.name} - {self.month}"
 
 
+class IntegrationCredential(models.Model):
+    """
+    A credential a manager can set from inside the app.
+
+    This deployment's environment variables can only be changed by whoever holds
+    the hosting account, which is not always the person who needs a feature
+    working. A credential stored here is used only when the matching environment
+    variable is absent, so the moment one is added it takes over and this row
+    becomes dead weight that can be deleted.
+
+    The value is write-only over the API: it is never serialized back to a
+    caller, and the screen that sets it reports only whether one is present.
+    """
+
+    key = models.CharField(max_length=64, unique=True, verbose_name="שם ההגדרה")
+    value = models.TextField(verbose_name="ערך")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן בתאריך")
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='integration_credentials_set',
+        verbose_name="עודכן על ידי",
+    )
+
+    class Meta:
+        db_table = 'integration_credentials'
+        verbose_name = "הגדרת חיבור"
+        verbose_name_plural = "הגדרות חיבור"
+
+    def __str__(self):
+        return self.key
+
+
 class RegistrationTerms(models.Model):
     """תקנון הרישום לווידג'ט — רשומה יחידה (pk=1)."""
 

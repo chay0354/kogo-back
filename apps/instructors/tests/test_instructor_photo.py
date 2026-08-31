@@ -180,6 +180,19 @@ class InstructorPhotoTest(TestCase):
         self.assertIn('2.5MB', res.data['error'])
         storage_post.assert_not_called()
 
+    def test_unconfigured_storage_says_so_instead_of_asking_to_retry(self):
+        """Retrying cannot fix a missing credential, so it must not say "try again"."""
+        with override_settings(SUPABASE_SERVICE_ROLE_KEY=''):
+            with patch('apps.instructors.views.requests.post') as storage_post:
+                res = self.client.post(
+                    self.url, {'photo': upload()}, format='multipart'
+                )
+
+        self.assertEqual(res.status_code, 503)
+        self.assertIn('אינו מוגדר', res.data['error'])
+        self.assertNotIn('נסה שוב', res.data['error'])
+        storage_post.assert_not_called()
+
     def test_non_image_upload_is_rejected(self):
         res, storage_post = self._post(
             name='cv.pdf', content=b'%PDF-1.4 not an image', content_type='application/pdf'

@@ -391,3 +391,22 @@ def resolve_viewable_user(request, as_user_id):
         return ViewableSubject(target, link.branch_id)
 
     raise PermissionDenied('אין הרשאה לצפות במשתמש הזה')
+
+
+def integration_credential(name):
+    """
+    A credential, taken from the environment when it is set there and otherwise
+    from the row a manager filled in.
+
+    The environment always wins, so adding the variable to the deployment
+    silently retires the stored copy rather than competing with it.
+    """
+    from django.conf import settings as django_settings
+
+    from apps.core.models import IntegrationCredential
+
+    value = (getattr(django_settings, name, '') or '').strip()
+    if value:
+        return value
+    stored = IntegrationCredential.objects.filter(key=name).values_list('value', flat=True).first()
+    return (stored or '').strip()

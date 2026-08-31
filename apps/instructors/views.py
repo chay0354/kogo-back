@@ -825,6 +825,24 @@ def _instructor_photo_object_name(instructor_id, content_type):
     return f'{instructor_id}.{extension}'
 
 
+def _storage_key():
+    """
+    The service-role key, from the environment or from what a manager stored.
+
+    Whoever holds the hosting account is not always the person who needs photos
+    working, so the key can also be set from the settings screen. The
+    environment wins whenever it carries one.
+    """
+    from apps.core.scoping import integration_credential
+
+    return integration_credential('SUPABASE_SERVICE_ROLE_KEY')
+
+
+def _storage_is_configured():
+    """Whether this deployment can reach the bucket at all."""
+    return bool(settings.SUPABASE_URL and _storage_key())
+
+
 def _supabase_storage_headers():
     """
     Service-role credentials for the storage API.
@@ -832,7 +850,7 @@ def _supabase_storage_headers():
     The service role key bypasses RLS, so it stays server-side: it is never
     serialized, never returned to a caller and never logged.
     """
-    key = settings.SUPABASE_SERVICE_ROLE_KEY
+    key = _storage_key()
     return {'apikey': key, 'Authorization': f'Bearer {key}'}
 
 
@@ -905,6 +923,15 @@ class InstructorPhotoView(APIView):
         instructor = Instructor.objects.filter(id=instructor_id).first()
         if instructor is None:
             return Response({'error': 'מדריך לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        # An unconfigured deployment cannot be retried into working, so say
+        # that rather than asking a manager to try again forever.
+        if not _storage_is_configured():
+            logger.error('[INSTRUCTOR PHOTO] storage credentials are not configured')
+            return Response(
+                {'error': 'אחסון התמונות אינו מוגדר בשרת. פנו למנהל המערכת.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         image_bytes, content_type, error = _prepare_instructor_photo(request.FILES.get('photo'))
         if error:
