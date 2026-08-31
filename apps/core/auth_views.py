@@ -187,11 +187,15 @@ class LinkedUsersView(APIView):
 
     GET    /api/v1/core/auth/linked-users/            → my own links
     GET    ?user_id=<id>                              → someone else's (manager only)
-    POST   {user_id, linked_user_id}                  → grant   (manager only)
+    POST   {user_id, linked_user_id, branch_id?}      → grant   (manager only)
     DELETE ?user_id=<id>&linked_user_id=<id>          → revoke  (manager only)
 
     Granting is a manager action: an instructor can use a link but can never
     create one for themselves.
+
+    branch_id limits a link to one branch of that colleague's timetable; sending
+    it again with a different branch — or without one — moves the limit on the
+    same row, so a colleague is listed once and reads as one rule.
     """
 
     permission_classes = [IsAuthenticated]
@@ -209,6 +213,14 @@ class LinkedUsersView(APIView):
             'role': getattr(getattr(user, 'profile', None), 'role', None),
         }
 
+    def _serialize_link(self, link):
+        """The linked account plus how far the link reaches into it."""
+        return {
+            **self._serialize(link.linked),
+            'branch_id': str(link.branch_id) if link.branch_id else None,
+            'branch_name': link.branch.name if link.branch_id else None,
+        }
+
     def get(self, request):
         from apps.core.models import LinkedUserAccess
 
@@ -224,16 +236,18 @@ class LinkedUsersView(APIView):
         links = (
             LinkedUserAccess.objects
             .filter(owner=owner)
-            .select_related('linked', 'linked__profile')
+            .select_related('linked', 'linked__profile', 'branch')
             .order_by('linked__first_name', 'linked__username')
         )
         return Response({
             'user': self._serialize(owner),
-            'linked_users': [self._serialize(link.linked) for link in links],
+            'linked_users': [self._serialize_link(link) for link in links],
         })
 
     def post(self, request):
-        from apps.core.models import LinkedUserAccess
+        from django.core.exceptions import ValidationError
+
+        from apps.core.models import Branch, LinkedUserAccess
 
         if not self._is_manager(request.user):
             return Response({'detail': 'אין הרשאה.'}, status=status.HTTP_403_FORBIDDEN)
@@ -250,10 +264,26 @@ class LinkedUsersView(APIView):
         if owner is None or linked is None:
             return Response({'detail': 'משתמש לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        LinkedUserAccess.objects.get_or_create(
-            owner=owner, linked=linked, defaults={'created_by': request.user}
+        branch = None
+        branch_id = request.data.get('branch_id')
+        if branch_id:
+            try:
+                branch = Branch.objects.filter(pk=branch_id).first()
+            except (ValueError, TypeError, ValidationError):
+                branch = None
+            if branch is None:
+                return Response({'detail': 'סניף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        link, created = LinkedUserAccess.objects.get_or_create(
+            owner=owner, linked=linked,
+            defaults={'created_by': request.user, 'branch': branch},
         )
-        return Response(self._serialize(linked), status=status.HTTP_201_CREATED)
+        # Re-granting an existing link is how a manager narrows or widens it, so
+        # the branch is written even when nothing else about the row changes.
+        if not created and link.branch_id != getattr(branch, 'id', None):
+            link.branch = branch
+            link.save(update_fields=['branch'])
+        return Response(self._serialize_link(link), status=status.HTTP_201_CREATED)
 
     def delete(self, request):
         from apps.core.models import LinkedUserAccess

@@ -100,6 +100,85 @@ class LinkedUserAccessTests(APITestCase):
         self.assertEqual(res.data['linked_users'], [])
 
 
+class LinkedUserBranchApiTests(APITestCase):
+    """Granting one branch of a colleague, and reading back which one it is."""
+
+    def setUp(self):
+        from apps.core.models import Branch, City
+
+        self.alice = make_user('alice4@test', first_name='אליס')
+        self.bob = make_user('bob4@test', first_name='בוב')
+        self.manager = make_user('manager4@test', role=UserProfile.ROLE_MANAGER)
+        self.url = reverse('auth-linked-users')
+
+        city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=city)
+        self.south = Branch.objects.create(name='סניף דרום', city=city)
+
+    def auth(self, user):
+        token, _ = Token.objects.get_or_create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    def test_link_without_a_branch_covers_everything(self):
+        self.auth(self.manager)
+        res = self.client.post(
+            self.url, {'user_id': str(self.alice.id), 'linked_user_id': str(self.bob.id)}
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(res.data['branch_id'])
+        self.assertIsNone(res.data['branch_name'])
+
+    def test_link_can_be_limited_to_one_branch(self):
+        self.auth(self.manager)
+        res = self.client.post(self.url, {
+            'user_id': str(self.alice.id),
+            'linked_user_id': str(self.bob.id),
+            'branch_id': str(self.north.id),
+        })
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['branch_id'], str(self.north.id))
+        self.assertEqual(res.data['branch_name'], 'סניף צפון')
+
+        self.auth(self.alice)
+        res = self.client.get(self.url)
+        self.assertEqual(res.data['linked_users'][0]['branch_id'], str(self.north.id))
+        self.assertEqual(res.data['linked_users'][0]['branch_name'], 'סניף צפון')
+
+    def test_granting_again_moves_the_limit_instead_of_adding_a_row(self):
+        """One row per colleague, so the screen can never show two rules at once."""
+        self.auth(self.manager)
+        for branch_id in (str(self.north.id), str(self.south.id), ''):
+            payload = {'user_id': str(self.alice.id), 'linked_user_id': str(self.bob.id)}
+            if branch_id:
+                payload['branch_id'] = branch_id
+            self.client.post(self.url, payload)
+
+        self.assertEqual(LinkedUserAccess.objects.count(), 1)
+        self.assertIsNone(LinkedUserAccess.objects.get().branch_id)
+
+    def test_unknown_branch_is_refused(self):
+        self.auth(self.manager)
+        for junk in ('99999999', 'abc', '00000000-0000-0000-0000-000000000000'):
+            res = self.client.post(self.url, {
+                'user_id': str(self.alice.id),
+                'linked_user_id': str(self.bob.id),
+                'branch_id': junk,
+            })
+            self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND, junk)
+            self.assertFalse(LinkedUserAccess.objects.exists(), junk)
+
+    def test_instructor_cannot_grant_themselves_a_branch(self):
+        """A branch on the payload must not turn a refused grant into a grant."""
+        self.auth(self.alice)
+        res = self.client.post(self.url, {
+            'user_id': str(self.alice.id),
+            'linked_user_id': str(self.bob.id),
+            'branch_id': str(self.north.id),
+        })
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(LinkedUserAccess.objects.exists())
+
+
 class LinkedUserDashboardAccessTests(APITestCase):
     """The dashboard must refuse an id it was not given a row for."""
 
@@ -217,3 +296,202 @@ class LinkedUserLessonAccessTests(APITestCase):
         self.auth(self.alice)
         res = self.client.get('/api/v1/scheduling/lessons/')
         self.assertEqual(len(res.data), 0)
+
+
+class LinkedUserBranchScopeTests(APITestCase):
+    """
+    A link limited to one branch is a smaller permission, not a hint.
+
+    Bob teaches in two branches. Every test here hands Alice a link to the north
+    branch and then tries to reach the south one — through the list, through a
+    single lesson, through the register, and through the dashboard.
+    """
+
+    def setUp(self):
+        from apps.core.models import Branch, City
+        from apps.courses.models import Course, CourseType, Lesson
+        from apps.instructors.models import Instructor
+
+        self.alice = make_user('alice5@test')
+        self.bob = make_user('bob5@test')
+        self.manager = make_user('manager5@test', role=UserProfile.ROLE_MANAGER)
+
+        city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=city)
+        self.south = Branch.objects.create(name='סניף דרום', city=city)
+        ctype = CourseType.objects.create(name='סוג בדיקה')
+
+        self.bob_instructor = Instructor.objects.create(
+            first_name='בוב', last_name='מדריך', email='bob5@test', primary_branch=self.north
+        )
+        self.north_lesson = self._lesson('חוג צפון', self.north, ctype, day_of_week=1)
+        self.south_lesson = self._lesson('חוג דרום', self.south, ctype, day_of_week=2)
+
+    def _lesson(self, name, branch, ctype, day_of_week):
+        from apps.courses.models import Course, Lesson
+
+        course = Course.objects.create(
+            name=name, branch=branch, course_type=ctype,
+            price=Decimal('200.00'), capacity=12,
+        )
+        return Lesson.objects.create(
+            course=course, instructor=self.bob_instructor,
+            day_of_week=day_of_week, start_time='16:00', end_time='17:00', is_recurring=True,
+        )
+
+    def auth(self, user):
+        token, _ = Token.objects.get_or_create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    def lesson_ids(self):
+        res = self.client.get('/api/v1/scheduling/lessons/', {'as_user': str(self.bob.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        return {str(row['id']) for row in res.data}
+
+    def test_branch_scoped_link_lists_only_that_branch(self):
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob, branch=self.north)
+        self.auth(self.alice)
+        self.assertEqual(self.lesson_ids(), {str(self.north_lesson.id)})
+
+    def test_unscoped_link_still_lists_everything(self):
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob)
+        self.auth(self.alice)
+        self.assertEqual(
+            self.lesson_ids(),
+            {str(self.north_lesson.id), str(self.south_lesson.id)},
+        )
+
+    def open_lesson(self, lesson):
+        return self.client.get(
+            f'/api/v1/scheduling/lessons/{lesson.id}/',
+            {'as_user': str(self.bob.id), 'date': '2026-09-01'},
+        )
+
+    def mark_register(self, lesson):
+        return self.client.post(
+            f'/api/v1/scheduling/lessons/{lesson.id}/mark_attendance/'
+            f'?as_user={self.bob.id}',
+            {'date': '2026-09-01', 'attendance': []},
+            format='json',
+        )
+
+    def test_branch_scoped_link_cannot_open_a_lesson_elsewhere(self):
+        """The list hiding it is not enough — the id is guessable."""
+        link = LinkedUserAccess.objects.create(
+            owner=self.alice, linked=self.bob, branch=self.north
+        )
+        self.auth(self.alice)
+        self.assertEqual(self.open_lesson(self.north_lesson).status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.open_lesson(self.south_lesson).status_code, status.HTTP_404_NOT_FOUND
+        )
+
+        # The same id opens once the limit is lifted, so the 404 above is the
+        # branch talking and not some unrelated refusal.
+        link.branch = None
+        link.save(update_fields=['branch'])
+        self.assertEqual(self.open_lesson(self.south_lesson).status_code, status.HTTP_200_OK)
+
+    def test_branch_scoped_link_cannot_mark_a_register_elsewhere(self):
+        """Covering a colleague includes marking, so the limit has to reach it."""
+        link = LinkedUserAccess.objects.create(
+            owner=self.alice, linked=self.bob, branch=self.north
+        )
+        self.auth(self.alice)
+        self.assertEqual(self.mark_register(self.north_lesson).status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self.mark_register(self.south_lesson).status_code, status.HTTP_404_NOT_FOUND
+        )
+
+        link.branch = None
+        link.save(update_fields=['branch'])
+        self.assertEqual(self.mark_register(self.south_lesson).status_code, status.HTTP_200_OK)
+
+    def test_moving_the_branch_takes_effect_immediately(self):
+        link = LinkedUserAccess.objects.create(
+            owner=self.alice, linked=self.bob, branch=self.north
+        )
+        self.auth(self.alice)
+        self.assertEqual(self.lesson_ids(), {str(self.north_lesson.id)})
+
+        link.branch = self.south
+        link.save(update_fields=['branch'])
+        self.assertEqual(self.lesson_ids(), {str(self.south_lesson.id)})
+
+        link.branch = None
+        link.save(update_fields=['branch'])
+        self.assertEqual(
+            self.lesson_ids(),
+            {str(self.north_lesson.id), str(self.south_lesson.id)},
+        )
+
+    def test_manager_switching_is_not_narrowed_by_someone_elses_link(self):
+        """A row belongs to its owner; it must not shrink what a manager sees."""
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob, branch=self.north)
+        self.auth(self.manager)
+        res = self.client.get('/api/v1/scheduling/lessons/', {'as_user': str(self.bob.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data), 2)
+
+    def dashboard_branches(self):
+        res = self.client.get(
+            reverse('instructor-my-dashboard'), {'as_user': str(self.bob.id)}
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        return {b['name'] for b in res.data['branches']}, {
+            g['course_name'] for g in res.data['groups']
+        }
+
+    def test_dashboard_obeys_the_branch_limit(self):
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob, branch=self.north)
+        self.auth(self.alice)
+        branches, groups = self.dashboard_branches()
+        self.assertEqual(branches, {'סניף צפון'})
+        self.assertEqual(groups, {'חוג צפון'})
+
+    def test_dashboard_unscoped_link_still_counts_everything(self):
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob)
+        self.auth(self.alice)
+        branches, groups = self.dashboard_branches()
+        self.assertEqual(branches, {'סניף צפון', 'סניף דרום'})
+        self.assertEqual(groups, {'חוג צפון', 'חוג דרום'})
+
+    def test_dashboard_branch_param_cannot_reach_past_the_limit(self):
+        """The client picks a branch too; its pick must not widen the link."""
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob, branch=self.north)
+        self.auth(self.alice)
+        res = self.client.get(reverse('instructor-my-dashboard'), {
+            'as_user': str(self.bob.id),
+            'branch_id': str(self.south.id),
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['groups'], [])
+
+    def test_own_view_is_never_narrowed_by_a_link_they_hold(self):
+        """Alice's limit on Bob says nothing about Alice's own timetable."""
+        from apps.instructors.models import Instructor
+
+        Instructor.objects.create(
+            first_name='אליס', last_name='מדריכה', email='alice5@test',
+            primary_branch=self.south,
+        )
+        alice_lesson = self._lesson_for_alice()
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob, branch=self.north)
+        self.auth(self.alice)
+        res = self.client.get('/api/v1/scheduling/lessons/')
+        self.assertEqual([str(row['id']) for row in res.data], [str(alice_lesson.id)])
+
+    def _lesson_for_alice(self):
+        from apps.courses.models import Course, CourseType, Lesson
+        from apps.instructors.models import Instructor
+
+        instructor = Instructor.objects.get(email='alice5@test')
+        course = Course.objects.create(
+            name='חוג של אליס', branch=self.south,
+            course_type=CourseType.objects.first(),
+            price=Decimal('200.00'), capacity=12,
+        )
+        return Lesson.objects.create(
+            course=course, instructor=instructor,
+            day_of_week=3, start_time='16:00', end_time='17:00', is_recurring=True,
+        )

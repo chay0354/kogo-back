@@ -20,6 +20,10 @@ class Instructor(models.Model):
     salary_model_type = models.CharField(max_length=50, choices=SALARY_MODEL_CHOICES, default='fixed_per_lesson', verbose_name="סוג מודל שכר")
     fixed_salary_per_lesson = models.DecimalField(max_digits=10, decimal_places=2, default=250, verbose_name="שכר קבוע לשיעור")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    # The image itself lives in Supabase Storage, which the browser reads
+    # straight from its CDN. Only this public link is kept here, and it carries a
+    # version so a replaced photo is never served stale from that CDN.
+    photo_url = models.CharField(max_length=500, null=True, blank=True, verbose_name="קישור לתמונה")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 

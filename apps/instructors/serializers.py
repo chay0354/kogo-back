@@ -65,7 +65,7 @@ class InstructorListSerializer(serializers.ModelSerializer):
     email = serializers.CharField(required=False, allow_blank=True, max_length=254)
     primary_branch_name = serializers.CharField(source='primary_branch.name', read_only=True, allow_null=True)
     branches = serializers.SerializerMethodField()
-    
+
     # Financial metrics (will be added by viewset)
     lessons_count = serializers.IntegerField(read_only=True, required=False)
     students_count = serializers.IntegerField(read_only=True, required=False)
@@ -82,13 +82,14 @@ class InstructorListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'first_name', 'last_name', 'full_name', 'phone', 'email',
             'specialization', 'primary_branch', 'primary_branch_name', 'branches',
+            'photo_url',
             'salary_model_type', 'fixed_salary_per_lesson', 'is_active',
             'lessons_count', 'students_count', 'revenue', 'salary', 'profit',
             'cancelled_count', 'avg_attendance_rate', 'salary_is_finalized', 'bonuses_amount',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'full_name', 'created_at', 'updated_at']
-    
+        read_only_fields = ['id', 'full_name', 'photo_url', 'created_at', 'updated_at']
+
     def get_branches(self, obj):
         """Get all branches the instructor is assigned to"""
         branches = []
@@ -121,7 +122,7 @@ class InstructorDetailSerializer(serializers.ModelSerializer):
     branches = InstructorBranchSerializer(source='branch_assignments', many=True, read_only=True)
     salary_tiers = InstructorSalaryTierSerializer(many=True, read_only=True)
     bonuses = InstructorBonusSerializer(many=True, read_only=True)
-    
+
     # Financial summary (will be added by viewset)
     total_students = serializers.IntegerField(read_only=True, required=False)
     total_revenue = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True, required=False)
@@ -138,12 +139,13 @@ class InstructorDetailSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'full_name', 'phone', 'email',
             'specialization', 'primary_branch', 'primary_branch_name', 'branches',
             'salary_model_type', 'fixed_salary_per_lesson', 'salary_tiers',
+            'photo_url',
             'is_active', 'bonuses', 'total_students', 'total_revenue',
             'total_salary', 'total_profit', 'lessons', 'courses',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'full_name', 'created_at', 'updated_at']
-    
+        read_only_fields = ['id', 'full_name', 'photo_url', 'created_at', 'updated_at']
+
     def get_lessons(self, obj):
         """Get lessons data - will be populated by viewset"""
         return self.context.get('lessons', [])

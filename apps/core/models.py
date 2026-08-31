@@ -180,6 +180,10 @@ class LinkedUserAccess(models.Model):
     point. It grants nothing outside scheduling: no salary, no customer records,
     no management screens, and no ability to create further links.
 
+    A colleague who teaches in several branches can be handed over one branch at
+    a time: set `branch` and the link reaches that branch only. Leave it empty
+    and the link reaches the colleague's whole timetable.
+
     Every request re-checks the row. The id in the query string is a request,
     never a permission.
     """
@@ -199,6 +203,17 @@ class LinkedUserAccess(models.Model):
         verbose_name="משתמש מקושר",
         help_text="המשתמש שאותו מותר לצפות",
     )
+    branch = models.ForeignKey(
+        Branch,
+        # Deleting a branch takes the limited link with it. SET_NULL would turn
+        # a one-branch link into a whole-timetable one without anyone asking.
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='linked_user_access',
+        verbose_name="סניף",
+        help_text="השאירו ריק כדי לצפות בכל הסניפים של המשתמש המקושר",
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -214,6 +229,12 @@ class LinkedUserAccess(models.Model):
         verbose_name = "משתמש מקושר"
         verbose_name_plural = "משתמשים מקושרים"
         constraints = [
+            # One row per pair, with the branch as a property of it. Widening
+            # this to (owner, linked, branch) would let an unlimited row sit
+            # beside a branch-limited one for the same colleague — Postgres
+            # counts NULLs as distinct, so it would not even stop two unlimited
+            # rows — and the screen could then show one name granting both a
+            # single branch and everything at once.
             models.UniqueConstraint(fields=['owner', 'linked'], name='uniq_linked_user_pair'),
             # Linking an account to itself is always allowed implicitly; a row
             # saying so would only be a second, contradictable source of truth.

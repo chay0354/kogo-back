@@ -8,6 +8,8 @@ or email) see only courses where they teach at least one lesson.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from django.db.models import Q
 
 from apps.core.models import UserProfile
@@ -302,7 +304,13 @@ def scope_instructors(qs, user):
 
 
 def linked_user_ids(user):
-    """Accounts this user was granted read access to. Never includes themselves."""
+    """
+    Accounts this user was granted read access to. Never includes themselves.
+
+    Answers only *which* accounts, never *how much* of them — a link may be
+    limited to one branch. Nothing that decides what may be read should be
+    built on this; use resolve_viewable_user, which carries the limit.
+    """
     from apps.core.models import LinkedUserAccess
 
     if not user or not user.is_authenticated:
@@ -312,17 +320,45 @@ def linked_user_ids(user):
     )
 
 
+class ViewableSubject(NamedTuple):
+    """
+    The account a read request runs as, and how far that reaches.
+
+    Both answers come out of the same check, so they travel together: a link
+    limited to one branch must never be able to hand a caller the account
+    without also handing it the limit. Filter through the methods here rather
+    than rebuilding a filter from `.user`, which would drop the limit silently.
+    """
+
+    user: object
+    branch_id: object = None
+
+    def branch_q(self, branch_lookup='course__branch_id') -> Q:
+        """The branch limit alone, for a queryset narrowed by identity elsewhere."""
+        if not self.branch_id:
+            return Q()
+        return Q(**{branch_lookup: self.branch_id})
+
+    def lesson_q(self) -> Q:
+        """Lessons this request may reach: whose they are, and where."""
+        return instructor_login_q(self.user) & self.branch_q()
+
+
 def resolve_viewable_user(request, as_user_id):
     """
-    Who a read request is allowed to run as.
+    Who a read request is allowed to run as, and in which branch.
 
-    Returns `request.user` when no other account was asked for. Otherwise the
-    requested account, but only if a manager asked, or a LinkedUserAccess row
-    grants it. Anything else raises PermissionDenied — the id in the query
-    string is a request, never a permission.
+    Returns a ViewableSubject for `request.user` when no other account was asked
+    for. Otherwise the requested account, but only if a manager asked, or a
+    LinkedUserAccess row grants it. Anything else raises PermissionDenied — the
+    id in the query string is a request, never a permission.
 
-    Callers decide what the resolved user may then do. On the lesson queryset it
-    widens both reading a register and marking it, which is intended: an
+    A row that names a branch grants that branch only, and the subject carries
+    that limit so no call site has to remember it. A manager is not limited this
+    way: they already reach every branch without a row.
+
+    Callers decide what the resolved subject may then do. On the lesson queryset
+    it widens both reading a register and marking it, which is intended: an
     instructor covering a colleague has to be able to mark. Do not reuse this to
     widen anything a manager alone should reach.
     """
@@ -330,11 +366,11 @@ def resolve_viewable_user(request, as_user_id):
     from django.core.exceptions import ValidationError
     from rest_framework.exceptions import PermissionDenied
 
-    from apps.core.models import UserProfile
+    from apps.core.models import LinkedUserAccess, UserProfile
 
     user = request.user
     if not as_user_id or str(as_user_id) == str(user.id):
-        return user
+        return ViewableSubject(user)
 
     User = get_user_model()
     try:
@@ -348,9 +384,10 @@ def resolve_viewable_user(request, as_user_id):
 
     role = getattr(getattr(user, 'profile', None), 'role', None)
     if role == UserProfile.ROLE_MANAGER:
-        return target
+        return ViewableSubject(target)
 
-    if target.id in linked_user_ids(user):
-        return target
+    link = LinkedUserAccess.objects.filter(owner=user, linked=target).first()
+    if link is not None:
+        return ViewableSubject(target, link.branch_id)
 
     raise PermissionDenied('אין הרשאה לצפות במשתמש הזה')

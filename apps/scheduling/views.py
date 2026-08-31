@@ -120,14 +120,16 @@ class LessonViewSet(viewsets.ModelViewSet):
                 course__is_active=True,
             ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         elif user_role == UserProfile.ROLE_WORKER:
-            from apps.core.scoping import instructor_login_q, resolve_viewable_user
+            from apps.core.scoping import resolve_viewable_user
 
             # An instructor linked to a colleague's account may open that
             # colleague's registers. resolve_viewable_user re-checks the link
             # and raises if there is none, so the id alone grants nothing.
+            # lesson_q carries whichever branch the link was limited to, and
+            # this queryset is also what mark_attendance resolves through.
             subject = resolve_viewable_user(self.request, self.request.query_params.get('as_user'))
             return qs.filter(
-                instructor_login_q(subject),
+                subject.lesson_q(),
                 course__is_active=True,
             ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         

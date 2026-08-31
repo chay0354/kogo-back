@@ -204,6 +204,16 @@ def _lesson_widget_capacity(lesson, course, enrolled_counts):
     }
 
 
+def _widget_instructor_photo_url(instructor):
+    """
+    Where the widget fetches the instructor's photo from.
+
+    A public Supabase Storage link, so the browser loads it from that CDN and
+    never through us — only the string itself travels in this payload.
+    """
+    return (instructor.photo_url or None) if instructor else None
+
+
 def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
     bundle_lessons = list(bundle.lessons.all())
     lesson_payloads = []
@@ -218,6 +228,7 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
             'start_time': str(bl.start_time)[:5],
             'end_time': str(bl.end_time)[:5],
             'instructor_name': bl.instructor.full_name if bl.instructor else None,
+            'instructor_photo_url': _widget_instructor_photo_url(bl.instructor),
         })
     return {
         'id': str(bundle.id),
@@ -1355,6 +1366,7 @@ class WidgetCoursesView(APIView):
                         'end_time': str(lesson.end_time)[:5],
                         'price': str(course.price),
                         'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
+                        'instructor_photo_url': _widget_instructor_photo_url(lesson.instructor),
                         'lesson_date': lesson.lesson_date.isoformat() if lesson.lesson_date else None,
                         'is_recurring': lesson.is_recurring,
                         'price_options': [

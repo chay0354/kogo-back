@@ -12,6 +12,7 @@ urlpatterns = [
     path('my-branches/', views.MyBranchesView.as_view(), name='instructor-my-branches'),
     path('my-dashboard/', views.MyDashboardView.as_view(), name='instructor-my-dashboard'),
     path('login-diagnostics/', views.LoginDiagnosticsView.as_view(), name='instructor-login-diagnostics'),
+    path('<uuid:instructor_id>/photo/', views.InstructorPhotoView.as_view(), name='instructor-photo'),
     path('', include(router.urls)),
 ]
 

@@ -2,12 +2,19 @@ from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from django.conf import settings
 from django.db.models import Q, Prefetch, Count, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from datetime import datetime, date, timedelta
 from decimal import Decimal
+from io import BytesIO
+from urllib.parse import urlparse
+import hashlib
+import logging
+import requests
 
 from apps.instructors.models import Instructor, InstructorBonus
 from apps.instructors.serializers import (
@@ -24,6 +31,8 @@ from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMix
 from apps.core.scoping import scope_instructors
 from apps.scheduling.models import LessonCancellation
 from apps.instructors.utils import calculate_lesson_salary_with_override
+
+logger = logging.getLogger(__name__)
 
 
 class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
@@ -406,6 +415,7 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         snapshots_serializer = InstructorMonthlySnapshotSerializer(snapshots, many=True)
 
         serializer = self.get_serializer(instructor, context={
+            'request': request,
             'lessons': lessons_data,
             'courses': list(unique_courses.values()),
         })
@@ -742,6 +752,212 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         return Response(response_data)
 
 
+# A manager uploads whatever their designer or their phone produced, so the
+# stored copy is bounded on both ends: anything bigger than this never reaches
+# Pillow, and what is kept is at most a few hundred KB. The cap also matches the
+# bucket's own file size limit, so nothing is refused only at the far end.
+INSTRUCTOR_PHOTO_MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+INSTRUCTOR_PHOTO_MAX_PIXELS = 512
+INSTRUCTOR_PHOTO_BUCKET = 'instructor-photos'
+INSTRUCTOR_PHOTO_CACHE_SECONDS = 31536000
+
+
+def _prepare_instructor_photo(upload):
+    """
+    Validate and shrink an uploaded instructor photo.
+
+    Returns (image_bytes, content_type, error_message); exactly one of the bytes
+    and the error message is set.
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    if upload is None:
+        return None, None, 'לא נבחר קובץ תמונה'
+
+    if upload.size > INSTRUCTOR_PHOTO_MAX_UPLOAD_BYTES:
+        return None, None, 'הקובץ גדול מדי. ניתן להעלות תמונה של עד 2MB'
+
+    try:
+        image = Image.open(upload)
+        image.load()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        return None, None, 'הקובץ שנבחר אינו תמונה תקינה'
+
+    # Instructor photos are cut-outs on no background, so the alpha channel has
+    # to survive. A picture that never had one is kept as JPEG, which is far
+    # smaller than the same photo re-encoded as PNG.
+    has_alpha = image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+    image = image.convert('RGBA' if has_alpha else 'RGB')
+    image.thumbnail((INSTRUCTOR_PHOTO_MAX_PIXELS, INSTRUCTOR_PHOTO_MAX_PIXELS))
+
+    buffer = BytesIO()
+    if has_alpha:
+        image.save(buffer, format='PNG', optimize=True)
+        return buffer.getvalue(), 'image/png', None
+
+    image.save(buffer, format='JPEG', quality=85, optimize=True)
+    return buffer.getvalue(), 'image/jpeg', None
+
+
+def _instructor_photo_object_name(instructor_id, content_type):
+    """Named after the instructor, so replacing a photo overwrites the old one."""
+    extension = 'png' if content_type == 'image/png' else 'jpg'
+    return f'{instructor_id}.{extension}'
+
+
+def _supabase_storage_headers():
+    """
+    Service-role credentials for the storage API.
+
+    The service role key bypasses RLS, so it stays server-side: it is never
+    serialized, never returned to a caller and never logged.
+    """
+    key = settings.SUPABASE_SERVICE_ROLE_KEY
+    return {'apikey': key, 'Authorization': f'Bearer {key}'}
+
+
+def _put_instructor_photo(object_name, image_bytes, content_type):
+    """Upload the photo to the public bucket, replacing whatever was there."""
+    url = f'{settings.SUPABASE_URL.rstrip("/")}/storage/v1/object/{INSTRUCTOR_PHOTO_BUCKET}/{object_name}'
+    return requests.post(
+        url,
+        headers={
+            **_supabase_storage_headers(),
+            'Content-Type': content_type,
+            'x-upsert': 'true',
+            # Objects default to no-cache, which would make every widget card
+            # revalidate. The saved URL is versioned, so a year is safe.
+            'Cache-Control': f'max-age={INSTRUCTOR_PHOTO_CACHE_SECONDS}',
+        },
+        data=image_bytes,
+        timeout=20,
+    )
+
+
+def _remove_instructor_photo(object_name):
+    url = f'{settings.SUPABASE_URL.rstrip("/")}/storage/v1/object/{INSTRUCTOR_PHOTO_BUCKET}/{object_name}'
+    return requests.delete(url, headers=_supabase_storage_headers(), timeout=20)
+
+
+def _stored_photo_object_name(instructor):
+    """
+    The object a saved photo URL points at.
+
+    Read back from the URL rather than rebuilt, so that replacing a transparent
+    PNG with a photograph removes the PNG instead of orphaning it in the bucket.
+    """
+    if not instructor.photo_url:
+        return None
+    marker = f'/public/{INSTRUCTOR_PHOTO_BUCKET}/'
+    path = urlparse(instructor.photo_url).path
+    if marker not in path:
+        return None
+    return path.split(marker, 1)[1]
+
+
+def _instructor_photo_public_url(object_name, version):
+    """
+    What the CRM and the widget put in an img src.
+
+    The bucket is public, so the browser reads this straight from Supabase's CDN
+    and never through us. The version defeats that CDN on replacement.
+    """
+    base = settings.SUPABASE_URL.rstrip('/')
+    return f'{base}/storage/v1/object/public/{INSTRUCTOR_PHOTO_BUCKET}/{object_name}?v={version}'
+
+
+class InstructorPhotoView(APIView):
+    """
+    The instructor's photo, shown in the CRM and in the public enrolment widget.
+
+    POST   /api/v1/instructors/{id}/photo/  — managers only; multipart field "photo"
+    DELETE /api/v1/instructors/{id}/photo/  — managers only
+
+    There is no read route here on purpose. The image lives in a public Supabase
+    bucket, so every payload carries only its URL and the browser fetches it from
+    the CDN — nothing about showing a photo goes through this backend.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def post(self, request, instructor_id):
+        instructor = Instructor.objects.filter(id=instructor_id).first()
+        if instructor is None:
+            return Response({'error': 'מדריך לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        image_bytes, content_type, error = _prepare_instructor_photo(request.FILES.get('photo'))
+        if error:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+
+        object_name = _instructor_photo_object_name(instructor.id, content_type)
+        try:
+            upload = _put_instructor_photo(object_name, image_bytes, content_type)
+        except requests.RequestException:
+            logger.exception('[INSTRUCTOR PHOTO] upload failed for %s', instructor.id)
+            return Response(
+                {'error': 'שמירת התמונה נכשלה. נסה שוב.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if upload.status_code >= 400:
+            # The body can carry the storage key back in an error echo, so only
+            # the status is recorded.
+            logger.error(
+                '[INSTRUCTOR PHOTO] storage rejected upload for %s: %s',
+                instructor.id, upload.status_code,
+            )
+            return Response(
+                {'error': 'שמירת התמונה נכשלה. נסה שוב.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        replaced = _stored_photo_object_name(instructor)
+        if replaced and replaced != object_name:
+            self._discard_object(replaced, instructor.id)
+
+        version = hashlib.sha256(image_bytes).hexdigest()[:16]
+        instructor.photo_url = _instructor_photo_public_url(object_name, version)
+        instructor.save(update_fields=['photo_url', 'updated_at'])
+
+        return Response({'photo_url': instructor.photo_url})
+
+    def delete(self, request, instructor_id):
+        instructor = Instructor.objects.filter(id=instructor_id).first()
+        if instructor is None:
+            return Response({'error': 'מדריך לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        object_name = _stored_photo_object_name(instructor)
+        if object_name:
+            self._discard_object(object_name, instructor.id)
+
+        if instructor.photo_url:
+            instructor.photo_url = None
+            instructor.save(update_fields=['photo_url', 'updated_at'])
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _discard_object(object_name, instructor_id):
+        """
+        Drop an object we no longer point at.
+
+        Failure is logged and swallowed: a manager who removed a photo must not
+        keep seeing it just because the bucket call did not go through, and the
+        row is the thing the CRM and the widget actually read.
+        """
+        try:
+            removed = _remove_instructor_photo(object_name)
+        except requests.RequestException:
+            logger.exception('[INSTRUCTOR PHOTO] delete failed for %s', instructor_id)
+            return
+        if removed.status_code >= 400:
+            logger.error(
+                '[INSTRUCTOR PHOTO] storage rejected delete for %s: %s',
+                instructor_id, removed.status_code,
+            )
+
+
 class MyBranchesView(APIView):
     """
     Branches the signed-in instructor is allowed to work in.
@@ -798,6 +1014,11 @@ class MyBranchesView(APIView):
         })
 
 
+# Attendance was first taken in the app on this date. Anything earlier was kept
+# on paper, so it is not counted as a register that was never filled in.
+ATTENDANCE_TRACKING_START = date(2026, 9, 1)
+
+
 class MyDashboardView(APIView):
     """
     The instructor's own numbers.
@@ -839,15 +1060,17 @@ class MyDashboardView(APIView):
         if date_from > date_to:
             date_from, date_to = date_to, date_from
 
+        # The branch limit is applied before the role is read, so a link tied to
+        # one branch stays tied to it however the rest of this narrows down.
         lessons = Lesson.objects.select_related(
             'course', 'course__branch', 'course__course_type'
-        ).filter(course__is_active=True)
+        ).filter(subject.branch_q(), course__is_active=True)
 
-        instructor = instructor_for_user(subject)
+        instructor = instructor_for_user(subject.user)
         if instructor is not None:
-            lessons = lessons.filter(instructor_login_q(subject))
-        elif getattr(getattr(subject, 'profile', None), 'role', None) != UserProfile.ROLE_MANAGER:
-            return Response(self._empty_payload(request, subject))
+            lessons = lessons.filter(instructor_login_q(subject.user))
+        elif getattr(getattr(subject.user, 'profile', None), 'role', None) != UserProfile.ROLE_MANAGER:
+            return Response(self._empty_payload(request, subject.user))
 
         branch_id = request.query_params.get('branch_id')
         if branch_id and branch_id != 'all':
@@ -856,7 +1079,7 @@ class MyDashboardView(APIView):
         lessons = list(lessons)
         lesson_ids = [lesson.id for lesson in lessons]
         if not lesson_ids:
-            return Response(self._empty_payload(request, subject))
+            return Response(self._empty_payload(request, subject.user))
 
         enrollments = list(
             LessonEnrollment.objects
@@ -931,12 +1154,15 @@ class MyDashboardView(APIView):
             marked.setdefault((lesson_id, occurrence_date), set()).add(child_id)
 
         window_end = min(date_to, today)
+        # Registers were not kept in the app before this date, so every lesson
+        # behind it would read as missing attendance for the rest of time.
+        window_start = max(date_from, ATTENDANCE_TRACKING_START)
         unmarked = []
         for lesson in lessons:
             roster = current.get(lesson.id, set())
             if not roster:
                 continue  # nothing to mark
-            for occ in self._occurrences(lesson, date_from, window_end):
+            for occ in self._occurrences(lesson, window_start, window_end):
                 if (lesson.id, occ) in cancelled:
                     continue
                 done = marked.get((lesson.id, occ), set())
@@ -967,7 +1193,7 @@ class MyDashboardView(APIView):
             'low_group_threshold': self.LOW_GROUP_THRESHOLD,
             'date_from': date_from.isoformat(),
             'date_to': date_to.isoformat(),
-            'subject': self._subject(request, subject),
+            'subject': self._subject(request, subject.user),
         })
 
     def _empty_payload(self, request, subject):
