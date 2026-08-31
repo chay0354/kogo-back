@@ -89,6 +89,23 @@ class PayingEnrollmentCountTest(TestCase):
         )
         self.assertEqual(count_capacity_enrollments(lesson=self.lesson), 1)
 
+    def test_schedule_occurrence_returns_roster_and_trial_counts(self):
+        trial_date = date(2026, 6, 10)
+        # Wednesday: matches the requested occurrence, independent of today's date.
+        self.lesson.day_of_week = 3
+        self.lesson.save(update_fields=['day_of_week'])
+
+        res = self.client.get(
+            '/api/v1/scheduling/lessons/',
+            {'start_date': trial_date.isoformat(), 'end_date': trial_date.isoformat()},
+        )
+
+        self.assertEqual(res.status_code, 200, res.data)
+        row = next(item for item in res.data if item['id'] == str(self.lesson.id))
+        self.assertEqual(row['enrollment_count'], 2)
+        self.assertEqual(row['student_count'], 2)
+        self.assertEqual(row['trial_student_count'], 1)
+
     def test_course_enrollment_count_same_across_lessons_includes_trial(self):
         lesson_two = Lesson.objects.create(
             course=self.course,

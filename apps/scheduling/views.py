@@ -285,14 +285,26 @@ class LessonViewSet(viewsets.ModelViewSet):
                     if counts_toward_capacity(enr, occurrence_date=occurrence_date)
                 )
 
+            def visible_enrollments(lesson_id, occurrence_date):
+                return [
+                    enr for enr in enrollments_by_lesson.get(lesson_id, [])
+                    if enrollment_visible_on_date(enr, occurrence_date)
+                ]
+
+            def occurrence_roster_counts(lesson_id, occurrence_date):
+                roster = visible_enrollments(lesson_id, occurrence_date)
+                trial_count = sum(
+                    1
+                    for enr in roster
+                    if enr.trial_lesson_date == occurrence_date
+                    and enr.child.status in TRIAL_CHILD_STATUSES
+                )
+                return len(roster), trial_count
+
             def attendance_complete(lesson_id, occurrence_date, cancelled=False):
                 if cancelled or not occurrence_date:
                     return False
-                child_ids = [
-                    str(enr.child_id)
-                    for enr in enrollments_by_lesson.get(lesson_id, [])
-                    if enrollment_visible_on_date(enr, occurrence_date)
-                ]
+                child_ids = [str(enr.child_id) for enr in visible_enrollments(lesson_id, occurrence_date)]
                 if not child_ids:
                     return False
                 marked = marked_map.get((str(lesson_id), occurrence_date), set())
@@ -305,6 +317,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     occ = lesson.lesson_date or start
                     if occ:
                         data['enrollment_count'] = capacity_count(lesson.id, occ)
+                        data['student_count'], data['trial_student_count'] = occurrence_roster_counts(lesson.id, occ)
                     data['attendance_complete'] = attendance_complete(
                         lesson.id, occ, cancelled=data.get('status') == 'cancelled'
                     )
@@ -326,6 +339,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     data = dict(base_data)
                     data['lesson_date'] = occ.isoformat()
                     data['enrollment_count'] = capacity_count(lesson.id, occ)
+                    data['student_count'], data['trial_student_count'] = occurrence_roster_counts(lesson.id, occ)
                     if c:
                         data['status'] = 'cancelled'
                         data['cancellation_reason'] = c.reason or None
