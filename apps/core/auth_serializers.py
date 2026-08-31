@@ -110,12 +110,17 @@ class ManagedUserSerializer(serializers.ModelSerializer):
     # Read-only mirrors
     role_display = serializers.SerializerMethodField(read_only=True)
     email = serializers.CharField()
+    # Accounts made outside this screen can carry a login name with no email.
+    # Without it such a user shows as a blank row and looks absent, while still
+    # blocking their own name at creation.
+    username = serializers.CharField(read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id',
             'email',
+            'username',
             'first_name',
             'last_name',
             'is_active',
