@@ -4,6 +4,8 @@ import logging
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.db.models import F
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -11,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from django.contrib.auth import get_user_model
+from apps.core.models import UserProfile
 from apps.core.auth_serializers import (
     LoginSerializer,
     CurrentUserSerializer,
@@ -47,6 +50,13 @@ class LoginView(APIView):
 
         # Create or reuse token
         token, _ = Token.objects.get_or_create(user=user)
+
+        # Count this sign-in. F() so two tabs signing in at once cannot both
+        # read the same value and write the same increment.
+        profile = getattr(user, 'profile', None)
+        if profile is not None:
+            UserProfile.objects.filter(pk=profile.pk).update(login_count=F('login_count') + 1)
+            profile.refresh_from_db(fields=['login_count'])
 
         response = Response(
             {
@@ -147,3 +157,25 @@ class UserViewSet(viewsets.ModelViewSet):
         return ctx
 
 
+class CompleteTourView(APIView):
+    """
+    Mark the guided tour as finished for the signed-in user.
+
+    POST /api/v1/core/auth/complete-tour/
+
+    Called when the user finishes the last step or skips. Once set, the tour
+    never opens on its own again — it stays reachable from the menu.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        profile = getattr(request.user, 'profile', None)
+        if profile is None:
+            return Response({'ok': True, 'tour_completed': False}, status=status.HTTP_200_OK)
+
+        if profile.tour_completed_at is None:
+            profile.tour_completed_at = timezone.now()
+            profile.save(update_fields=['tour_completed_at'])
+
+        return Response({'ok': True, 'tour_completed': True}, status=status.HTTP_200_OK)

@@ -135,6 +135,17 @@ class UserProfile(models.Model):
         default=ROLE_WORKER,
         verbose_name="תפקיד",
     )
+    # How many times this account has signed in. Drives the guided tour:
+    # the first sign-in shows it and cannot be skipped, the next two show it
+    # with a skip, and from the fourth it no longer opens on its own.
+    # Kept on the account rather than in the browser so clearing site data or
+    # moving to another device does not restart the tour.
+    login_count = models.PositiveIntegerField(default=0, verbose_name="מספר כניסות")
+    tour_completed_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="סיים הדרכה",
+        help_text="Set when the user finishes or dismisses the tour; stops it opening again.",
+    )
+
     assigned_branches = models.ManyToManyField(
         Branch,
         blank=True,
