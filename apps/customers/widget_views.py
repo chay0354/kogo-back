@@ -212,6 +212,8 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
         'id': str(bundle.id),
         'name': bundle.name,
         'combined_price': str(bundle.combined_price),
+        'min_age': bundle.min_age,
+        'max_age': bundle.max_age,
         'lessons': lesson_payloads,
         'is_full': bundle_full,
     }

@@ -221,6 +221,18 @@ class LessonBundle(models.Model):
     lessons = models.ManyToManyField(Lesson, related_name='bundles', verbose_name="שיעורים במסלול")
     name = models.CharField(max_length=200, blank=True, verbose_name="שם המסלול")
     combined_price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="מחיר משולב")
+    min_age = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="גיל מינימום בווידג'ט",
+        help_text="ריק = אותה קבוצת גיל כמו החוג. כשמוגדר, המסלול יופיע גם כשבוחרים גיל זה בווידג'ט.",
+    )
+    max_age = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="גיל מקסימום בווידג'ט",
+        help_text="ריק = אותה קבוצת גיל כמו החוג.",
+    )
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
