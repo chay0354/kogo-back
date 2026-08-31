@@ -55,10 +55,27 @@ class ResetPasswordSerializer(serializers.Serializer):
 class CurrentUserSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     branch_ids = serializers.SerializerMethodField()
+    login_count = serializers.SerializerMethodField()
+    tour_completed = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'role', 'branch_ids']
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser',
+            'role', 'branch_ids', 'login_count', 'tour_completed',
+        ]
+
+    def get_login_count(self, obj):
+        try:
+            return obj.profile.login_count
+        except UserProfile.DoesNotExist:
+            return 0
+
+    def get_tour_completed(self, obj):
+        try:
+            return obj.profile.tour_completed_at is not None
+        except UserProfile.DoesNotExist:
+            return False
 
     def get_role(self, obj):
         try:
