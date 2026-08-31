@@ -776,8 +776,8 @@ class DashboardViewSet(viewsets.ViewSet):
             # Fallback: Count courses with actual lessons in the date range
             from apps.courses.models import Lesson
             lessons_query = Lesson.objects.filter(
-                scheduled_date__gte=date_from,
-                scheduled_date__lte=date_to,
+                lesson_date__gte=date_from,
+                lesson_date__lte=date_to,
                 course__is_active=True
             )
             if course_id and course_id != 'all':
