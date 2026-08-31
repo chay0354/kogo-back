@@ -58,6 +58,19 @@ class LessonEnrollment(models.Model):
     enrolled_at = models.DateTimeField(auto_now_add=True, verbose_name="מועד רישום")
     notes = models.TextField(blank=True, verbose_name="הערות")
     # Trial-reminder tracking — populated only for trial enrollments.
+    # A walk-in the instructor added from the attendance screen. The child is
+    # created with status 'ghost': it is not a real registration, so it must not
+    # reach capacity counts, trial lists, billing or messaging.
+    #
+    # It shows for the next few occurrences of this lesson and then stops. It is
+    # also superseded the moment a real child with the same phone, or the same
+    # full name on this lesson, exists — resolved when the roster is read, so a
+    # ghost can never outlive its replacement.
+    ghost_visible_until = models.DateField(
+        null=True, blank=True, verbose_name="רפאים — מוצג עד",
+        help_text="Set only for walk-ins added from the attendance screen.",
+    )
+
     trial_lesson_date = models.DateField(null=True, blank=True, verbose_name="תאריך שיעור ניסיון")
     trial_evening_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת ערב נשלחה (לא בשימוש)")
     trial_10am_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת 10:00 ביום הניסיון נשלחה")

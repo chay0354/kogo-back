@@ -179,3 +179,92 @@ class CompleteTourView(APIView):
             profile.save(update_fields=['tour_completed_at'])
 
         return Response({'ok': True, 'tour_completed': True}, status=status.HTTP_200_OK)
+
+
+class LinkedUsersView(APIView):
+    """
+    Accounts the signed-in user may also look at.
+
+    GET    /api/v1/core/auth/linked-users/            → my own links
+    GET    ?user_id=<id>                              → someone else's (manager only)
+    POST   {user_id, linked_user_id}                  → grant   (manager only)
+    DELETE ?user_id=<id>&linked_user_id=<id>          → revoke  (manager only)
+
+    Granting is a manager action: an instructor can use a link but can never
+    create one for themselves.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _is_manager(self, user):
+        return getattr(getattr(user, 'profile', None), 'role', None) == UserProfile.ROLE_MANAGER
+
+    def _serialize(self, user):
+        name = f"{user.first_name} {user.last_name}".strip()
+        return {
+            'id': str(user.id),
+            'name': name or user.username,
+            'username': user.username,
+            'email': user.email,
+            'role': getattr(getattr(user, 'profile', None), 'role', None),
+        }
+
+    def get(self, request):
+        from apps.core.models import LinkedUserAccess
+
+        owner = request.user
+        requested = request.query_params.get('user_id')
+        if requested and str(requested) != str(request.user.id):
+            if not self._is_manager(request.user):
+                return Response({'detail': 'אין הרשאה.'}, status=status.HTTP_403_FORBIDDEN)
+            owner = User.objects.filter(pk=requested).first()
+            if owner is None:
+                return Response({'detail': 'משתמש לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        links = (
+            LinkedUserAccess.objects
+            .filter(owner=owner)
+            .select_related('linked', 'linked__profile')
+            .order_by('linked__first_name', 'linked__username')
+        )
+        return Response({
+            'user': self._serialize(owner),
+            'linked_users': [self._serialize(link.linked) for link in links],
+        })
+
+    def post(self, request):
+        from apps.core.models import LinkedUserAccess
+
+        if not self._is_manager(request.user):
+            return Response({'detail': 'אין הרשאה.'}, status=status.HTTP_403_FORBIDDEN)
+
+        owner_id = request.data.get('user_id')
+        linked_id = request.data.get('linked_user_id')
+        if not owner_id or not linked_id:
+            return Response({'detail': 'חסרים שדות'}, status=status.HTTP_400_BAD_REQUEST)
+        if str(owner_id) == str(linked_id):
+            return Response({'detail': 'לא ניתן לקשר משתמש לעצמו'}, status=status.HTTP_400_BAD_REQUEST)
+
+        owner = User.objects.filter(pk=owner_id).first()
+        linked = User.objects.filter(pk=linked_id).first()
+        if owner is None or linked is None:
+            return Response({'detail': 'משתמש לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        LinkedUserAccess.objects.get_or_create(
+            owner=owner, linked=linked, defaults={'created_by': request.user}
+        )
+        return Response(self._serialize(linked), status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        from apps.core.models import LinkedUserAccess
+
+        if not self._is_manager(request.user):
+            return Response({'detail': 'אין הרשאה.'}, status=status.HTTP_403_FORBIDDEN)
+
+        owner_id = request.query_params.get('user_id')
+        linked_id = request.query_params.get('linked_user_id')
+        if not owner_id or not linked_id:
+            return Response({'detail': 'חסרים שדות'}, status=status.HTTP_400_BAD_REQUEST)
+
+        LinkedUserAccess.objects.filter(owner_id=owner_id, linked_id=linked_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

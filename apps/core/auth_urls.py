@@ -3,6 +3,7 @@ from django.urls import path
 from apps.core.auth_views import (
     CompleteTourView,
     ForgotPasswordView,
+    LinkedUsersView,
     LoginView,
     LogoutView,
     MeView,
@@ -15,6 +16,7 @@ urlpatterns = [
     path('logout/', LogoutView.as_view(), name='auth-logout'),
     path('me/', MeView.as_view(), name='auth-me'),
     path('complete-tour/', CompleteTourView.as_view(), name='auth-complete-tour'),
+    path('linked-users/', LinkedUsersView.as_view(), name='auth-linked-users'),
     path('forgot-password/', ForgotPasswordView.as_view(), name='auth-forgot-password'),
     path('reset-password/', ResetPasswordView.as_view(), name='auth-reset-password'),
 ]

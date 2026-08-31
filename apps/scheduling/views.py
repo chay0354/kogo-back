@@ -44,6 +44,12 @@ def enrollment_visible_on_date(enrollment, occ_date):
         return False
 
     if enrollment.child.status == 'ghost' and occ_date:
+        # Walk-ins added from the attendance screen carry their own window —
+        # a few occurrences of this lesson, not a flat number of days.
+        window_end = getattr(enrollment, 'ghost_visible_until', None)
+        if window_end is not None:
+            return occ_date <= window_end
+        # Ghosts created before that field existed keep the old 30-day rule.
         days_since_creation = (occ_date - enrollment.child.created_at.date()).days
         if days_since_creation > 30:
             return False
@@ -110,9 +116,14 @@ class LessonViewSet(viewsets.ModelViewSet):
                 course__is_active=True,
             ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         elif user_role == UserProfile.ROLE_WORKER:
-            from apps.core.scoping import instructor_login_q
+            from apps.core.scoping import instructor_login_q, resolve_viewable_user
+
+            # An instructor linked to a colleague's account may open that
+            # colleague's registers. resolve_viewable_user re-checks the link
+            # and raises if there is none, so the id alone grants nothing.
+            subject = resolve_viewable_user(self.request, self.request.query_params.get('as_user'))
             return qs.filter(
-                instructor_login_q(user),
+                instructor_login_q(subject),
                 course__is_active=True,
             ).filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
         
@@ -152,7 +163,18 @@ class LessonViewSet(viewsets.ModelViewSet):
         else:
             attendance_qs = attendance_qs.filter(occurrence_date__isnull=True)
 
-        enrollments = lesson.enrollments.filter(status='active').select_related('child', 'child__family')
+        enrollments = list(
+            lesson.enrollments.filter(status='active').select_related('child', 'child__family')
+        )
+
+        # Walk-ins the instructor added from this screen. They are not 'active',
+        # so they never reach capacity, pay or billing; they ride along on the
+        # roster only, and only while they are still within their window and
+        # have not been replaced by a real child.
+        if occ_date:
+            from apps.enrollments.ghost_students import visible_ghost_enrollments
+
+            enrollments = enrollments + visible_ghost_enrollments(lesson, occ_date, enrollments)
 
         data = LessonDetailSerializer(lesson).data
         if occ_date:
@@ -611,6 +633,62 @@ class LessonViewSet(viewsets.ModelViewSet):
                 })
         
         return Response({'results': results})
+
+    @action(detail=True, methods=['post'], url_path='add-walkin')
+    def add_walkin(self, request, pk=None):
+        """
+        Add a child who turned up but is not on the roster.
+
+        The instructor needs to mark them present now; the office decides later
+        whether this becomes a real registration. So the child is created with
+        status 'ghost' — every billing and messaging path already skips that —
+        and the enrolment is 'inactive', which keeps it out of capacity and pay.
+        It shows for a few occurrences and then stops on its own.
+
+        Reachable only for lessons this user can already open: get_object() runs
+        the same scoping as the rest of the ViewSet.
+        """
+        lesson = self.get_object()
+
+        occ_date = self._parse_occurrence_date(request.data.get('date'))
+        if request.data.get('date') and not occ_date:
+            return Response({'error': 'תאריך לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        if lesson.is_recurring and not occ_date:
+            return Response({'error': 'חסר שדה date'}, status=status.HTTP_400_BAD_REQUEST)
+        if occ_date is None:
+            occ_date = lesson.lesson_date
+
+        if lesson.is_recurring and occ_date:
+            if LessonCancellation.objects.filter(lesson=lesson, occurrence_date=occ_date).exists():
+                return Response({'error': 'לא ניתן להוסיף תלמיד לשיעור מבוטל'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.enrollments.ghost_students import create_ghost_enrollment
+
+        try:
+            enrollment, created = create_ghost_enrollment(
+                lesson=lesson,
+                first_name=request.data.get('first_name', ''),
+                last_name=request.data.get('last_name', ''),
+                phone=request.data.get('phone', ''),
+                occurrence_date=occ_date,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        child = enrollment.child
+        return Response(
+            {
+                'id': str(enrollment.id),
+                'child_id': str(child.id),
+                'child_name': child.full_name,
+                'child_status': child.status,
+                'child_phone': child_contact_phone(child),
+                'trial_lesson_date': None,
+                'is_trial': False,
+                'created': created,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class ScheduleEventViewSet(viewsets.ModelViewSet):

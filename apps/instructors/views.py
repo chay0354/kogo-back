@@ -1,9 +1,11 @@
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q, Prefetch, Count, Sum
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 
@@ -738,6 +740,272 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             response_data['errors'] = errors
         
         return Response(response_data)
+
+
+class MyBranchesView(APIView):
+    """
+    Branches the signed-in instructor is allowed to work in.
+
+    GET /api/v1/instructors/my-branches/
+
+    Built from the instructor's actual assignments — primary_branch plus every
+    InstructorBranch row — not from whichever branches happen to have a lesson
+    today. An instructor who teaches in three branches should still be able to
+    switch to a branch that is quiet this morning.
+
+    Managers and partners get their own scoped branch list instead, so the
+    switcher works for them too.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.core.models import Branch, UserProfile
+        from apps.core.scoping import (
+            instructor_for_user,
+            is_scoped_partner,
+            partner_branch_ids,
+        )
+
+        user = request.user
+
+        if is_scoped_partner(user):
+            qs = Branch.objects.filter(id__in=partner_branch_ids(user))
+        else:
+            instructor = instructor_for_user(user)
+            if instructor is not None:
+                assigned = list(
+                    instructor.branch_assignments.values_list('branch_id', flat=True)
+                )
+                if instructor.primary_branch_id:
+                    assigned.append(instructor.primary_branch_id)
+                qs = Branch.objects.filter(id__in=set(assigned))
+            else:
+                role = getattr(getattr(user, 'profile', None), 'role', None)
+                # A manager (or anyone not tied to an instructor record) sees all.
+                qs = Branch.objects.all() if role == UserProfile.ROLE_MANAGER else Branch.objects.none()
+
+        branches = qs.select_related('city').order_by('name')
+        return Response({
+            'branches': [
+                {
+                    'id': str(b.id),
+                    'name': b.name,
+                    'city': b.city.name if b.city_id else '',
+                }
+                for b in branches
+            ]
+        })
+
+
+class MyDashboardView(APIView):
+    """
+    The instructor's own numbers.
+
+    GET /api/v1/instructors/my-dashboard/?date_from=&date_to=&branch_id=
+
+    Everything here is counted from real rows — there is no estimate and no
+    placeholder. "Student" means an active enrolment of an active child, so
+    walk-ins, trial signups and children who left are all out.
+
+    Instructors see only their own lessons; managers looking at the same screen
+    see the whole scope they already have.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    # Below this many active students a group is worth a second look.
+    LOW_GROUP_THRESHOLD = 8
+
+    def get(self, request):
+        from apps.core.models import UserProfile
+        from apps.core.scoping import (
+            instructor_for_user,
+            instructor_login_q,
+            resolve_viewable_user,
+        )
+        from apps.enrollments.models import LessonAttendance
+
+        # A head instructor may hold links to colleagues' accounts. The id is
+        # re-checked server-side; an unlinked id raises rather than falling back
+        # to the caller's own data, which would silently show the wrong numbers.
+        subject = resolve_viewable_user(request, request.query_params.get('as_user'))
+
+        today = date.today()
+        date_from = parse_date(request.query_params.get('date_from') or '') or (
+            today - timedelta(days=180)
+        )
+        date_to = parse_date(request.query_params.get('date_to') or '') or today
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+
+        lessons = Lesson.objects.select_related(
+            'course', 'course__branch', 'course__course_type'
+        ).filter(course__is_active=True)
+
+        instructor = instructor_for_user(subject)
+        if instructor is not None:
+            lessons = lessons.filter(instructor_login_q(subject))
+        elif getattr(getattr(subject, 'profile', None), 'role', None) != UserProfile.ROLE_MANAGER:
+            return Response(self._empty_payload(request, subject))
+
+        branch_id = request.query_params.get('branch_id')
+        if branch_id and branch_id != 'all':
+            lessons = lessons.filter(course__branch_id=branch_id)
+
+        lessons = list(lessons)
+        lesson_ids = [lesson.id for lesson in lessons]
+        if not lesson_ids:
+            return Response(self._empty_payload(request, subject))
+
+        enrollments = list(
+            LessonEnrollment.objects
+            .filter(lesson_id__in=lesson_ids, status='active', child__status='active')
+            .values('lesson_id', 'child_id', 'start_date', 'end_date')
+        )
+
+        # --- trend: distinct children taught in each month of the range ---
+        # A child in two of this instructor's groups is one student, not two.
+        monthly_trend = []
+        cursor = date(date_from.year, date_from.month, 1)
+        last = date(date_to.year, date_to.month, 1)
+        while cursor <= last:
+            if cursor.month == 12:
+                month_end = date(cursor.year, 12, 31)
+            else:
+                month_end = date(cursor.year, cursor.month + 1, 1) - timedelta(days=1)
+            children = {
+                e['child_id'] for e in enrollments
+                if (e['start_date'] is None or e['start_date'] <= month_end)
+                and (e['end_date'] is None or e['end_date'] >= cursor)
+            }
+            monthly_trend.append({
+                'month': cursor.strftime('%Y-%m'),
+                'students': len(children),
+            })
+            cursor = date(cursor.year + 1, 1, 1) if cursor.month == 12 else date(cursor.year, cursor.month + 1, 1)
+
+        # --- per-group headcount, as of today ---
+        current = {}
+        for e in enrollments:
+            if e['start_date'] and e['start_date'] > today:
+                continue
+            if e['end_date'] and e['end_date'] < today:
+                continue
+            current.setdefault(e['lesson_id'], set()).add(e['child_id'])
+
+        groups = []
+        for lesson in lessons:
+            count = len(current.get(lesson.id, ()))
+            groups.append({
+                'lesson_id': str(lesson.id),
+                'course_name': lesson.course.name if lesson.course_id else '',
+                'branch_name': lesson.course.branch.name if lesson.course_id and lesson.course.branch_id else '',
+                'day_of_week': lesson.day_of_week,
+                'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
+                'active_students': count,
+                'is_low': count < self.LOW_GROUP_THRESHOLD,
+            })
+        groups.sort(key=lambda g: (g['active_students'], g['course_name']))
+
+        total_active = len({cid for ids in current.values() for cid in ids})
+
+        # --- occurrences still waiting for attendance ---
+        # Only dates that have already happened: a lesson later today is not
+        # "missing", it simply has not been taught yet.
+        cancelled = {
+            (str(c['lesson_id']), c['occurrence_date'])
+            for c in LessonCancellation.objects
+            .filter(lesson_id__in=lesson_ids, occurrence_date__gte=date_from, occurrence_date__lte=date_to)
+            .values('lesson_id', 'occurrence_date')
+        }
+        marked = {}
+        for row in (
+            LessonAttendance.objects
+            .filter(lesson_id__in=lesson_ids, occurrence_date__gte=date_from, occurrence_date__lte=date_to)
+            .exclude(status='not_marked')
+            .values('lesson_id', 'occurrence_date', 'child_id')
+        ):
+            marked.setdefault((str(row['lesson_id']), row['occurrence_date']), set()).add(row['child_id'])
+
+        window_end = min(date_to, today)
+        unmarked = []
+        for lesson in lessons:
+            roster = current.get(lesson.id, set())
+            if not roster:
+                continue  # nothing to mark
+            for occ in self._occurrences(lesson, date_from, window_end):
+                if (str(lesson.id), occ) in cancelled:
+                    continue
+                done = marked.get((str(lesson.id), occ), set())
+                if roster.issubset(done):
+                    continue
+                unmarked.append({
+                    'lesson_id': str(lesson.id),
+                    'date': occ.isoformat(),
+                    'course_name': lesson.course.name if lesson.course_id else '',
+                    'branch_name': lesson.course.branch.name if lesson.course_id and lesson.course.branch_id else '',
+                    'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
+                    'missing': len(roster - done),
+                })
+        unmarked.sort(key=lambda u: (u['date'], u['start_time']), reverse=True)
+
+        branch_names = {}
+        for lesson in lessons:
+            if lesson.course_id and lesson.course.branch_id:
+                branch_names[str(lesson.course.branch_id)] = lesson.course.branch.name
+
+        return Response({
+            'branches': [{'id': bid, 'name': name} for bid, name in sorted(branch_names.items(), key=lambda kv: kv[1])],
+            'monthly_trend': monthly_trend,
+            'groups': groups,
+            'unmarked_lessons': unmarked[:40],
+            'unmarked_total': len(unmarked),
+            'total_active_students': total_active,
+            'low_group_threshold': self.LOW_GROUP_THRESHOLD,
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+            'subject': self._subject(request, subject),
+        })
+
+    def _empty_payload(self, request, subject):
+        """Same keys as a populated answer, so the client never special-cases."""
+        return {
+            'branches': [],
+            'monthly_trend': [],
+            'groups': [],
+            'unmarked_lessons': [],
+            'unmarked_total': 0,
+            'total_active_students': 0,
+            'low_group_threshold': self.LOW_GROUP_THRESHOLD,
+            'subject': self._subject(request, subject),
+        }
+
+    @staticmethod
+    def _subject(request, subject):
+        return {
+            'id': str(subject.id),
+            'name': f"{subject.first_name} {subject.last_name}".strip() or subject.username,
+            'is_self': subject.id == request.user.id,
+        }
+
+    @staticmethod
+    def _occurrences(lesson, start, end):
+        """Dates this lesson actually falls on, same weekly rule the schedule uses."""
+        if not lesson.is_recurring:
+            if lesson.lesson_date and start <= lesson.lesson_date <= end:
+                yield lesson.lesson_date
+            return
+        if lesson.day_of_week is None:
+            return
+        first = start
+        if lesson.lesson_date and lesson.lesson_date > first:
+            first = lesson.lesson_date
+        target = (lesson.day_of_week - 1) % 7
+        occ = first + timedelta(days=(target - first.weekday()) % 7)
+        while occ <= end:
+            yield occ
+            occ = occ + timedelta(days=7)
 
 
 class InstructorBonusViewSet(viewsets.ModelViewSet):

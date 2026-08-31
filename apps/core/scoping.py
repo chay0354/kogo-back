@@ -299,3 +299,58 @@ def scope_instructors(qs, user):
         | Q(branch_assignments__branch_id__in=ids)
         | Q(lessons__course__branch_id__in=ids)
     ).distinct()
+
+
+def linked_user_ids(user):
+    """Accounts this user was granted read access to. Never includes themselves."""
+    from apps.core.models import LinkedUserAccess
+
+    if not user or not user.is_authenticated:
+        return set()
+    return set(
+        LinkedUserAccess.objects.filter(owner=user).values_list('linked_id', flat=True)
+    )
+
+
+def resolve_viewable_user(request, as_user_id):
+    """
+    Who a read request is allowed to run as.
+
+    Returns `request.user` when no other account was asked for. Otherwise the
+    requested account, but only if a manager asked, or a LinkedUserAccess row
+    grants it. Anything else raises PermissionDenied — the id in the query
+    string is a request, never a permission.
+
+    Callers decide what the resolved user may then do. On the lesson queryset it
+    widens both reading a register and marking it, which is intended: an
+    instructor covering a colleague has to be able to mark. Do not reuse this to
+    widen anything a manager alone should reach.
+    """
+    from django.contrib.auth import get_user_model
+    from django.core.exceptions import ValidationError
+    from rest_framework.exceptions import PermissionDenied
+
+    from apps.core.models import UserProfile
+
+    user = request.user
+    if not as_user_id or str(as_user_id) == str(user.id):
+        return user
+
+    User = get_user_model()
+    try:
+        target = User.objects.filter(pk=as_user_id).first()
+    except (ValueError, TypeError, ValidationError):
+        # A malformed id is a bad request from an untrusted string, not a
+        # server error. Treat it the same as an id that grants nothing.
+        raise PermissionDenied('אין הרשאה לצפות במשתמש הזה')
+    if target is None:
+        raise PermissionDenied('משתמש לא נמצא')
+
+    role = getattr(getattr(user, 'profile', None), 'role', None)
+    if role == UserProfile.ROLE_MANAGER:
+        return target
+
+    if target.id in linked_user_ids(user):
+        return target
+
+    raise PermissionDenied('אין הרשאה לצפות במשתמש הזה')

@@ -165,6 +165,68 @@ class UserProfile(models.Model):
         return f"{self.user.email or self.user.username} ({self.role})"
 
 
+class LinkedUserAccess(models.Model):
+    """
+    One account another account may look at.
+
+    A head instructor who covers for colleagues needs to open their registers
+    and see their numbers without a second login. A manager grants that from
+    the users screen; the instructor then gets a switcher next to the branch
+    picker.
+
+    One-way: a link lets `owner` reach `linked`'s lessons, never the reverse.
+    Within those lessons the owner can do what an instructor does — read the
+    register and mark attendance — because covering a colleague is the whole
+    point. It grants nothing outside scheduling: no salary, no customer records,
+    no management screens, and no ability to create further links.
+
+    Every request re-checks the row. The id in the query string is a request,
+    never a permission.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='linked_accounts',
+        verbose_name="משתמש",
+        help_text="המשתמש שמקבל את ההרשאה לצפות",
+    )
+    linked = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='linked_from',
+        verbose_name="משתמש מקושר",
+        help_text="המשתמש שאותו מותר לצפות",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='linked_users_created',
+        verbose_name="נוצר על ידי",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+
+    class Meta:
+        db_table = 'linked_user_access'
+        verbose_name = "משתמש מקושר"
+        verbose_name_plural = "משתמשים מקושרים"
+        constraints = [
+            models.UniqueConstraint(fields=['owner', 'linked'], name='uniq_linked_user_pair'),
+            # Linking an account to itself is always allowed implicitly; a row
+            # saying so would only be a second, contradictable source of truth.
+            models.CheckConstraint(
+                check=~models.Q(owner=models.F('linked')),
+                name='linked_user_not_self',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.owner} → {self.linked}"
+
+
 class InstructorMonthlySnapshot(models.Model):
     """צילום חודשי של ביצועי מדריכים"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
