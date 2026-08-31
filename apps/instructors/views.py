@@ -913,20 +913,22 @@ class MyDashboardView(APIView):
         # --- occurrences still waiting for attendance ---
         # Only dates that have already happened: a lesson later today is not
         # "missing", it simply has not been taught yet.
+        # A group with nobody on it is skipped below, so its registers — years of
+        # rows on a long-running group — are never worth reading.
+        rostered_ids = [lesson.id for lesson in lessons if current.get(lesson.id)]
         cancelled = {
-            (str(c['lesson_id']), c['occurrence_date'])
-            for c in LessonCancellation.objects
-            .filter(lesson_id__in=lesson_ids, occurrence_date__gte=date_from, occurrence_date__lte=date_to)
-            .values('lesson_id', 'occurrence_date')
+            row for row in LessonCancellation.objects
+            .filter(lesson_id__in=rostered_ids, occurrence_date__gte=date_from, occurrence_date__lte=date_to)
+            .values_list('lesson_id', 'occurrence_date')
         }
         marked = {}
-        for row in (
+        for lesson_id, occurrence_date, child_id in (
             LessonAttendance.objects
-            .filter(lesson_id__in=lesson_ids, occurrence_date__gte=date_from, occurrence_date__lte=date_to)
+            .filter(lesson_id__in=rostered_ids, occurrence_date__gte=date_from, occurrence_date__lte=date_to)
             .exclude(status='not_marked')
-            .values('lesson_id', 'occurrence_date', 'child_id')
+            .values_list('lesson_id', 'occurrence_date', 'child_id')
         ):
-            marked.setdefault((str(row['lesson_id']), row['occurrence_date']), set()).add(row['child_id'])
+            marked.setdefault((lesson_id, occurrence_date), set()).add(child_id)
 
         window_end = min(date_to, today)
         unmarked = []
@@ -935,9 +937,9 @@ class MyDashboardView(APIView):
             if not roster:
                 continue  # nothing to mark
             for occ in self._occurrences(lesson, date_from, window_end):
-                if (str(lesson.id), occ) in cancelled:
+                if (lesson.id, occ) in cancelled:
                     continue
-                done = marked.get((str(lesson.id), occ), set())
+                done = marked.get((lesson.id, occ), set())
                 if roster.issubset(done):
                     continue
                 unmarked.append({

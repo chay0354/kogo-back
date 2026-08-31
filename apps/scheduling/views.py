@@ -95,8 +95,12 @@ class LessonViewSet(viewsets.ModelViewSet):
                 )
             )
         else:
-            qs = qs.prefetch_related('enrollments')
-        
+            # The detail serializer reads child fields off every enrolment, so a
+            # bare prefetch costs one more query per child on the roster.
+            qs = qs.prefetch_related(
+                Prefetch('enrollments', queryset=LessonEnrollment.objects.select_related('child'))
+            )
+
         try:
             user_role = user.profile.role
         except UserProfile.DoesNotExist:
@@ -162,6 +166,7 @@ class LessonViewSet(viewsets.ModelViewSet):
             attendance_qs = attendance_qs.filter(occurrence_date=occ_date)
         else:
             attendance_qs = attendance_qs.filter(occurrence_date__isnull=True)
+        attendance_records = list(attendance_qs)
 
         enrollments = list(
             lesson.enrollments.filter(status='active').select_related('child', 'child__family')
@@ -175,6 +180,16 @@ class LessonViewSet(viewsets.ModelViewSet):
             from apps.enrollments.ghost_students import visible_ghost_enrollments
 
             enrollments = enrollments + visible_ghost_enrollments(lesson, occ_date, enrollments)
+
+        # Both roster fields the serializer builds are replaced further down with
+        # the per-occurrence versions. Handing it the rows already read keeps it
+        # from re-reading every attendance row this lesson has ever had — on a
+        # recurring lesson that is the whole history, for a discarded result.
+        lesson._prefetched_objects_cache = {
+            **getattr(lesson, '_prefetched_objects_cache', {}),
+            'enrollments': enrollments,
+            'attendance_records': attendance_records,
+        }
 
         data = LessonDetailSerializer(lesson).data
         if occ_date:
@@ -215,7 +230,7 @@ class LessonViewSet(viewsets.ModelViewSet):
             })
         
         data['enrollments'] = visible_enrollments
-        data['attendance'] = AttendanceSerializer(attendance_qs, many=True).data
+        data['attendance'] = AttendanceSerializer(attendance_records, many=True).data
         return data
     
     def list(self, request, *args, **kwargs):
@@ -274,75 +289,84 @@ class LessonViewSet(viewsets.ModelViewSet):
             except ValueError:
                 return Response({'error': 'תאריכים לא תקינים'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Preload cancellations for the range
+            lessons_list = list(queryset)
+            lesson_ids = [lesson.id for lesson in lessons_list]
+            lesson_serializer = LessonListSerializer(context={'request': request})
+
+            # Preload cancellations for the range. Filtering on the ids rather
+            # than on the queryset keeps Postgres from re-running the lesson
+            # query — enrolment join, capacity aggregate and all — as a subquery.
             cancellations = LessonCancellation.objects.filter(
                 occurrence_date__gte=start,
                 occurrence_date__lte=end,
-                lesson__in=queryset,
+                lesson_id__in=lesson_ids,
             )
-            cancel_map = {(str(c.lesson_id), c.occurrence_date): c for c in cancellations}
+            cancel_map = {(c.lesson_id, c.occurrence_date): c for c in cancellations}
 
-            lessons_list = list(queryset)
-            lesson_serializer = LessonListSerializer(context={'request': request})
-
+            # Only the columns the per-occurrence counters below read: a month
+            # view walks every enrolment once per occurrence, so full Child and
+            # Family rows are thousands of objects built for nothing.
             enrollments_by_lesson: dict = defaultdict(list)
             for enr in LessonEnrollment.objects.filter(
-                lesson_id__in=[lesson.id for lesson in lessons_list],
+                lesson_id__in=lesson_ids,
                 status='active',
-            ).select_related('child', 'child__family'):
+            ).select_related('child').only(
+                'lesson', 'child', 'status', 'trial_lesson_date', 'ghost_visible_until',
+                'child__status', 'child__created_at',
+            ):
                 enrollments_by_lesson[enr.lesson_id].append(enr)
 
             marked_map = defaultdict(set)
             for rec in LessonAttendance.objects.filter(
-                lesson_id__in=[lesson.id for lesson in lessons_list],
+                lesson_id__in=lesson_ids,
                 occurrence_date__gte=start,
                 occurrence_date__lte=end,
                 status__in=['present', 'absent'],
             ).values_list('lesson_id', 'occurrence_date', 'child_id'):
-                marked_map[(str(rec[0]), rec[1])].add(str(rec[2]))
+                marked_map[(rec[0], rec[1])].add(rec[2])
 
-            def capacity_count(lesson_id, occurrence_date):
-                return sum(
-                    1 for enr in enrollments_by_lesson.get(lesson_id, [])
-                    if counts_toward_capacity(enr, occurrence_date=occurrence_date)
-                )
+            def occurrence_counts(lesson_id, occurrence_date, marked):
+                """
+                enrollment_count, student_count, trial_student_count and whether
+                the register is finished, in one pass over the roster.
 
-            def visible_enrollments(lesson_id, occurrence_date):
-                return [
-                    enr for enr in enrollments_by_lesson.get(lesson_id, [])
-                    if enrollment_visible_on_date(enr, occurrence_date)
-                ]
-
-            def occurrence_roster_counts(lesson_id, occurrence_date):
-                roster = visible_enrollments(lesson_id, occurrence_date)
-                trial_count = sum(
-                    1
-                    for enr in roster
-                    if enr.trial_lesson_date == occurrence_date
-                    and enr.child.status in TRIAL_CHILD_STATUSES
-                )
-                return len(roster), trial_count
-
-            def attendance_complete(lesson_id, occurrence_date, cancelled=False):
-                if cancelled or not occurrence_date:
-                    return False
-                child_ids = [str(enr.child_id) for enr in visible_enrollments(lesson_id, occurrence_date)]
-                if not child_ids:
-                    return False
-                marked = marked_map.get((str(lesson_id), occurrence_date), set())
-                return all(cid in marked for cid in child_ids)
+                marked is None when the occurrence cannot be complete (cancelled,
+                or no date at all), otherwise the children already marked on it.
+                """
+                capacity = 0
+                roster = 0
+                trials = 0
+                complete = marked is not None
+                for enr in enrollments_by_lesson.get(lesson_id, ()):
+                    if counts_toward_capacity(enr, occurrence_date=occurrence_date):
+                        capacity += 1
+                    if not enrollment_visible_on_date(enr, occurrence_date):
+                        continue
+                    roster += 1
+                    if (
+                        enr.trial_lesson_date == occurrence_date
+                        and enr.child.status in TRIAL_CHILD_STATUSES
+                    ):
+                        trials += 1
+                    if complete and enr.child_id not in marked:
+                        complete = False
+                return capacity, roster, trials, complete and roster > 0
 
             expanded = []
             for lesson in lessons_list:
                 if not lesson.is_recurring:
                     data = lesson_serializer.to_representation(lesson)
                     occ = lesson.lesson_date or start
-                    if occ:
-                        data['enrollment_count'] = capacity_count(lesson.id, occ)
-                        data['student_count'], data['trial_student_count'] = occurrence_roster_counts(lesson.id, occ)
-                    data['attendance_complete'] = attendance_complete(
-                        lesson.id, occ, cancelled=data.get('status') == 'cancelled'
+                    marked = (
+                        None if data.get('status') == 'cancelled'
+                        else marked_map.get((lesson.id, occ), set())
                     )
+                    (
+                        data['enrollment_count'],
+                        data['student_count'],
+                        data['trial_student_count'],
+                        data['attendance_complete'],
+                    ) = occurrence_counts(lesson.id, occ, marked)
                     expanded.append(data)
                     continue
 
@@ -357,11 +381,16 @@ class LessonViewSet(viewsets.ModelViewSet):
                 base_data = lesson_serializer.to_representation(lesson)
                 occ = first_occ
                 while occ <= end:
-                    c = cancel_map.get((str(lesson.id), occ))
+                    c = cancel_map.get((lesson.id, occ))
                     data = dict(base_data)
                     data['lesson_date'] = occ.isoformat()
-                    data['enrollment_count'] = capacity_count(lesson.id, occ)
-                    data['student_count'], data['trial_student_count'] = occurrence_roster_counts(lesson.id, occ)
+                    marked = None if c else marked_map.get((lesson.id, occ), set())
+                    (
+                        data['enrollment_count'],
+                        data['student_count'],
+                        data['trial_student_count'],
+                        attendance_done,
+                    ) = occurrence_counts(lesson.id, occ, marked)
                     if c:
                         data['status'] = 'cancelled'
                         data['cancellation_reason'] = c.reason or None
@@ -370,9 +399,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                         data['status'] = 'scheduled'
                         data['cancellation_reason'] = None
                         data['cancelled_at'] = None
-                    data['attendance_complete'] = attendance_complete(
-                        lesson.id, occ, cancelled=bool(c)
-                    )
+                    data['attendance_complete'] = attendance_done
                     expanded.append(data)
                     occ = occ + timedelta(days=7)
 
