@@ -39,3 +39,4 @@ logs/*.log
 
 .vercel
 .env.local
+backups/
