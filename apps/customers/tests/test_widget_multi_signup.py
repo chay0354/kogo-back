@@ -41,7 +41,7 @@ class WidgetMultiLessonRegistrationFeeTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
     @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment')
-    def test_second_lesson_includes_registration_fee(self, mock_discount, _mock_tranzila):
+    def test_second_lesson_skips_registration_fee(self, mock_discount, _mock_tranzila):
         from apps.customers.discount_service import DiscountCalculation
 
         mock_discount.side_effect = lambda **kwargs: DiscountCalculation(
@@ -70,7 +70,7 @@ class WidgetMultiLessonRegistrationFeeTest(TestCase):
             format='json',
         )
         self.assertEqual(second.status_code, 201, second.content)
-        self.assertEqual(second.json()['registration_fee'], 120.0)
+        self.assertEqual(second.json()['registration_fee'], 0.0)
         self.assertEqual(second.json()['course_index'], 2)
 
 

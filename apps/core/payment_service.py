@@ -63,7 +63,7 @@ def parse_store_cart_notes(notes: Optional[str]) -> Optional[list]:
 
 
 def registration_fee_amount(course=None) -> Decimal:
-    """One-time registration fee added to a new lesson subscription."""
+    """One-time registration fee added to a child's first subscription."""
     override = getattr(course, 'registration_fee_override', None) if course is not None else None
     if override is not None:
         try:
@@ -76,6 +76,44 @@ def registration_fee_amount(course=None) -> Decimal:
     except Exception:
         fee = Decimal('0')
     return max(Decimal('0.00'), fee.quantize(Decimal('0.01')))
+
+
+def child_already_has_registration_fee(child, current_lesson=None) -> bool:
+    """True when this child should not be charged דמי רישום again.
+
+    The fee is once per child: extra courses in the same checkout, and later
+    signups for the same child, all skip it. A retry of the *same* unpaid
+    lesson still charges, so an abandoned pending row cannot hide the fee.
+    Existing paying students (completed subscription or active standing order)
+    also skip, including older rows that never split the fee onto the field.
+    """
+    payments = Payment.objects.filter(child=child)
+    if payments.filter(registration_fee__gt=0, status='completed').exists():
+        return True
+
+    in_flight = payments.filter(
+        registration_fee__gt=0,
+        status__in=('pending', 'processing'),
+    )
+    if current_lesson is not None:
+        in_flight = in_flight.exclude(lesson=current_lesson)
+    if in_flight.exists():
+        return True
+
+    if payments.filter(payment_type='recurring_subscription', status='completed').exists():
+        return True
+
+    return RecurringPayment.objects.filter(
+        child=child,
+        status__in=('active', 'paused'),
+    ).exists()
+
+
+def resolve_include_registration_fee(child, lesson, requested: bool) -> bool:
+    """Honor an explicit opt-out, otherwise charge only if this child has not paid yet."""
+    if not requested:
+        return False
+    return not child_already_has_registration_fee(child, current_lesson=lesson)
 
 
 def standing_order_next_billing_date(*, today: date, lesson) -> date:
@@ -534,9 +572,8 @@ class PaymentService:
                 this once per member lesson of the bundle.
             price_option_id: when set, bill the widget catalog price for this lesson.
             include_registration_fee: pass False for extra days of a twice/thrice-a-week
-                bundle. Default is true — a standalone lesson still pays דמי רישום.
-                A combined bundle (פעמיים/שלוש בשבוע) pays the fee once, on the first
-                member lesson only.
+                bundle. Default is true, but the fee is still skipped when this child
+                already paid (or has an in-flight first-course charge). One fee per child.
             include_monthly_amount: pass False for extra days of a twice/thrice-a-week
                 bundle so only one standing order is created at the full widget price.
 
@@ -605,9 +642,6 @@ class PaymentService:
             today_local, lesson.day_of_week
         )
         full_monthly_amount = discount_calculation.final_price
-        registration_fee = (
-            registration_fee_amount(lesson.course) if include_registration_fee else Decimal('0.00')
-        )
 
         # When monthly billing only starts later, signup charges דמי רישום alone and the
         # full monthly price is first billed by the recurring cron on that date.
@@ -624,14 +658,21 @@ class PaymentService:
                 Decimal('1.00'),
                 (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
             )
-        prorated_final = prorated_lesson + registration_fee
 
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
         payment = None
+        registration_fee = Decimal('0.00')
+        prorated_final = prorated_lesson
         max_attempts = 5
         for attempt in range(1, max_attempts + 1):
             try:
                 with transaction.atomic():
+                    Child.objects.select_for_update().get(id=child.id)
+                    charge_fee = resolve_include_registration_fee(child, lesson, include_registration_fee)
+                    registration_fee = (
+                        registration_fee_amount(lesson.course) if charge_fee else Decimal('0.00')
+                    )
+                    prorated_final = prorated_lesson + registration_fee
                     payment = Payment.objects.create(
                         child=child,
                         family=child.family,
@@ -989,8 +1030,7 @@ class PaymentService:
         bundle_id: when set, bill the widget combined_price on the first member lesson.
         price_option_id: when set, bill the widget catalog price for this lesson.
         include_registration_fee: pass False only when explicitly opting out (rare).
-            Default is true — דמי רישום per standalone lesson. For a twice/thrice-a-week
-            bundle, callers must pass False on every member after the first.
+            Default is true, but the fee is still once per child — later lessons skip it.
         include_monthly_amount: pass False for extra bundle days so one standing order
             is created at the full widget price.
         """
@@ -1055,8 +1095,10 @@ class PaymentService:
         # Pro-rate the first payment to the remaining lessons of the current month.
         prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date, lesson.day_of_week)
         full_monthly_amount_c = discount_calculation.final_price
+        Child.objects.select_for_update().get(id=child.id)
+        charge_fee_c = resolve_include_registration_fee(child, lesson, include_registration_fee)
         registration_fee_c = (
-            registration_fee_amount(lesson.course) if include_registration_fee else Decimal('0.00')
+            registration_fee_amount(lesson.course) if charge_fee_c else Decimal('0.00')
         )
 
         # When monthly billing only starts later, signup charges דמי רישום alone.

@@ -87,8 +87,8 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
-    def test_registration_fee_on_second_lesson(self, mock_discount, mock_tranzila):
-        """Each new lesson subscription includes דמי רישום."""
+    def test_registration_fee_once_per_child(self, mock_discount, mock_tranzila):
+        """A child pays דמי רישום on the first course only — extra courses skip it."""
         mock_discount.return_value = self.mock_discount_calculation
         mock_tranzila.return_value = "https://tranzila.test/payment"
 
@@ -103,8 +103,64 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
             child_id=str(self.child.id),
             lesson_id=str(other_lesson.id),
         )
+        self.assertEqual(second['registration_fee'], 0.00)
+        self.assertEqual(second['final_amount'], second['prorated_amount'])
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_later_signup_skips_fee_after_completed_payment(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        first = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        Payment.objects.filter(id=first['payment_id']).update(status='completed')
+
+        other_lesson = TestDataFactory.create_lesson(course=self.lesson.course, day_of_week=2)
+        later = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(other_lesson.id),
+        )
+        self.assertEqual(later['registration_fee'], 0.00)
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_failed_first_payment_still_charges_fee_on_next_course(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        first = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        Payment.objects.filter(id=first['payment_id']).update(status='failed')
+
+        other_lesson = TestDataFactory.create_lesson(course=self.lesson.course, day_of_week=2)
+        second = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(other_lesson.id),
+        )
         self.assertEqual(second['registration_fee'], 120.00)
-        self.assertGreater(second['final_amount'], second['prorated_amount'])
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_siblings_each_pay_registration_fee(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+        sibling = TestDataFactory.create_child(family=self.child.family, first_name='Sibling')
+
+        first = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        other = self.service.initiate_subscription_payment(
+            child_id=str(sibling.id),
+            lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(first['registration_fee'], 120.00)
+        self.assertEqual(other['registration_fee'], 120.00)
     
     def test_child_not_found_error(self):
         """Test error when child doesn't exist"""
@@ -722,8 +778,8 @@ class DeferredSubscriptionStartTest(TestCase):
         self.assertEqual(immediate['next_billing_date'], today.isoformat())
         self.assertEqual(immediate['subscription_start_date'], today.isoformat())
 
-        self.assertEqual(regular['registration_fee'], 120.00)
-        self.assertEqual(regular['final_amount'], 120.00)
+        self.assertEqual(regular['registration_fee'], 0.00)
+        self.assertEqual(regular['final_amount'], 0.00)
         self.assertEqual(regular['next_billing_date'], self.start_date.isoformat())
         self.assertEqual(regular['subscription_start_date'], self.start_date.isoformat())
 

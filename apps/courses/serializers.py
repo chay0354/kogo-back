@@ -250,7 +250,8 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
                   'registration_fee_override', 'charge_standing_order_immediately',
                   'branch', 'branch_name', 'instructor', 'instructor_salary_override',
                   'external_link', 'lessons_count', 'course_enrollment_count',
-                  'monthly_revenue', 'monthly_salary', 'monthly_profit', 'is_active']
+                  'monthly_revenue', 'monthly_salary', 'monthly_profit',
+                  'is_active', 'show_in_widget']
 
     def get_lessons_count(self, obj):
         return self.context.get('lessons_counts', {}).get(obj.id, 0)
@@ -305,7 +306,7 @@ class CourseSerializer(serializers.ModelSerializer):
         model = Course
         fields = ['id', 'display_id', 'course_type', 'course_type_name', 'name', 'description',
                   'price', 'capacity', 'branch', 'branch_name',
-                  'min_age', 'max_age', 'is_active', 'is_adult', 'must_attend_all_lessons',
+                  'min_age', 'max_age', 'is_active', 'show_in_widget', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',
                   'registration_fee_override', 'charge_standing_order_immediately',
                   'external_link', 'lessons_count', 'enrolled_students_count',
