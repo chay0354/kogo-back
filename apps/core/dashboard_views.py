@@ -1157,6 +1157,61 @@ class DashboardViewSet(viewsets.ViewSet):
             'discount_breakdown': discount_breakdown
         })
     
+    @action(detail=False, methods=['get'], url_path='activity')
+    def activity_data(self, request):
+        """
+        When the week's lessons actually happen.
+
+        Two distributions over the recurring lesson templates that are visible
+        to this user: how many run on each weekday, and how many start in each
+        hour. Both are read-only counts over Lesson; nothing here touches
+        payments or customer data.
+        """
+        from apps.courses.models import Lesson
+
+        scoped, scoped_course_ids, scoped_branch_ids, _i_ids = self._scope(request)
+
+        lessons = Lesson.objects.filter(
+            course__is_active=True,
+        ).exclude(status='cancelled')
+
+        if scoped:
+            lessons = lessons.filter(course_id__in=scoped_course_ids)
+
+        branch_id = request.query_params.get('branch_id')
+        if branch_id and branch_id != 'all':
+            lessons = lessons.filter(course__branch_id=branch_id)
+        city_id = request.query_params.get('city_id')
+        if city_id and city_id != 'all':
+            lessons = lessons.filter(course__branch__city_id=city_id)
+
+        rows = list(lessons.values('day_of_week', 'start_time'))
+
+        by_weekday = [0] * 7
+        by_hour = [0] * 24
+        for row in rows:
+            dow = row.get('day_of_week')
+            if dow is not None and 0 <= int(dow) <= 6:
+                by_weekday[int(dow)] += 1
+            start = row.get('start_time')
+            if start is not None:
+                by_hour[start.hour] += 1
+
+        peak_weekday = max(range(7), key=lambda i: by_weekday[i]) if any(by_weekday) else None
+        peak_hour = max(range(24), key=lambda i: by_hour[i]) if any(by_hour) else None
+
+        return Response({
+            'total_lessons': len(rows),
+            'by_weekday': [
+                {'day_of_week': i, 'lessons': by_weekday[i]} for i in range(7)
+            ],
+            'by_hour': [
+                {'hour': i, 'lessons': by_hour[i]} for i in range(24)
+            ],
+            'peak_weekday': peak_weekday,
+            'peak_hour': peak_hour,
+        })
+
     @action(detail=False, methods=['post'], url_path='refresh-current-month')
     def refresh_current_month(self, request):
         """
