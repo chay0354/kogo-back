@@ -55,6 +55,11 @@ class Course(models.Model):
     min_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מינימום")
     max_age = models.PositiveIntegerField(null=True, blank=True, verbose_name="גיל מקסימום")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    show_in_widget = models.BooleanField(
+        default=True,
+        verbose_name="מוצג בווידג'ט",
+        help_text="כבוי = החוג נשאר ב-CRM אבל לא מופיע בהרשמה הציבורית.",
+    )
     is_adult = models.BooleanField(default=False, verbose_name="18+")
     must_attend_all_lessons = models.BooleanField(default=False, verbose_name="מחוייב בכל השיעורים")
     trial_lesson_is_paid = models.BooleanField(

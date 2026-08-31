@@ -329,7 +329,7 @@ class Payment(models.Model):
         decimal_places=2,
         default=Decimal('0.00'),
         verbose_name="דמי רישום",
-        help_text="דמי רישום חד-פעמיים בחיוב ראשון לכל הרשמה לשיעור",
+        help_text="דמי רישום חד-פעמיים — פעם אחת לכל ילד, בחיוב הראשון בלבד",
     )
     
     # Tranzila reference

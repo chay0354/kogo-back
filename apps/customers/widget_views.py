@@ -28,6 +28,17 @@ from apps.core.payment_service import PaymentService
 WIDGET_STALE_PROCESSING_SECONDS = 90
 
 
+def _widget_catalog_courses():
+    """Courses parents can see and register for in the public widget."""
+    return Course.objects.filter(is_active=True, show_in_widget=True)
+
+
+def _reject_if_hidden_from_widget(course):
+    if not course.is_active or not course.show_in_widget:
+        return Response({'error': 'חוג זה אינו פתוח להרשמה'}, status=status.HTTP_404_NOT_FOUND)
+    return None
+
+
 def _charge_result_token(result) -> str:
     """Saved-card token from a charge result, including nested Tranzila JSON."""
     from apps.core.tranzila_service import extract_card_token
@@ -450,7 +461,9 @@ class WidgetRegisterView(APIView):
       price_option_id (str) — register at an extra catalog price for the lesson.
         Ignored if bundle_id is provided.
       include_registration_fee (bool) — optional; defaults to true for a single lesson.
-        For a twice/thrice-a-week bundle the fee is applied once, on the first member.
+        The fee is once per child: extra courses in this checkout, and later
+        signups for the same child, skip it. A twice/thrice-a-week bundle also
+        applies the fee only on the first member.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -475,6 +488,9 @@ class WidgetRegisterView(APIView):
             course = Course.objects.prefetch_related('lessons').get(id=course_id)
         except Course.DoesNotExist:
             return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        hidden = _reject_if_hidden_from_widget(course)
+        if hidden:
+            return hidden
 
         lessons = list(course.lessons.select_related('course__branch').all())
         if not lessons:
@@ -609,6 +625,9 @@ class WidgetTrialRegisterView(APIView):
             course = Course.objects.prefetch_related('lessons').get(id=course_id)
         except Course.DoesNotExist:
             return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        hidden = _reject_if_hidden_from_widget(course)
+        if hidden:
+            return hidden
 
         lessons = list(course.lessons.select_related('course__branch').all())
         if not lessons:
@@ -1300,11 +1319,8 @@ class WidgetCoursesView(APIView):
             return Response({'error': 'branch_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
         courses = list(
-            Course.objects
-            .filter(
-                branch_id=branch_id,
-                is_active=True,
-            )
+            _widget_catalog_courses()
+            .filter(branch_id=branch_id)
             .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
             .select_related('course_type', 'branch')
             .prefetch_related(
@@ -1395,8 +1411,8 @@ class WidgetCourseTypesView(APIView):
             return Response({'error': 'branch_id נדרש'}, status=status.HTTP_400_BAD_REQUEST)
 
         rows = (
-            Course.objects
-            .filter(branch_id=branch_id, is_active=True, course_type_id__isnull=False)
+            _widget_catalog_courses()
+            .filter(branch_id=branch_id, course_type_id__isnull=False)
             .filter(Q(course_type__is_active=True))
             .values('course_type_id', 'course_type__name')
             .distinct()
@@ -1443,8 +1459,8 @@ class WidgetBranchesView(APIView):
         )
 
         type_rows = (
-            Course.objects
-            .filter(is_active=True, course_type_id__isnull=False, course_type__is_active=True)
+            _widget_catalog_courses()
+            .filter(course_type_id__isnull=False, course_type__is_active=True)
             .values('branch_id', 'course_type_id', 'course_type__name')
             .distinct()
         )
