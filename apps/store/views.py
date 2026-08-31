@@ -415,15 +415,33 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
         Get store analytics dashboard data.
 
         Query params:
-        - days: int (default 30) — lookback window for sales
+        - date_from / date_to: YYYY-MM-DD — explicit window (preferred)
+        - days: int (default 30) — lookback window, used when no dates are given
         - branch: uuid | 'delivery' — filter all data to one branch
         - city: uuid — filter all data to branches in one city
 
         Returns KPIs, chart data, low-stock list, recent sales, inventory value,
         shrinkage by reason, and top product.
+
+        `days` is kept so the store page keeps working unchanged; the dashboard
+        passes an explicit window so its store tab follows the same global date
+        filter as every other tab.
         """
+        def _parse_day(raw):
+            try:
+                return date.fromisoformat(raw) if raw else None
+            except (TypeError, ValueError):
+                return None
+
         days = int(request.query_params.get('days', 30))
-        start_date = date.today() - timedelta(days=days)
+        date_from = _parse_day(request.query_params.get('date_from'))
+        date_to = _parse_day(request.query_params.get('date_to'))
+
+        if date_from:
+            start_date = date_from
+        else:
+            start_date = date.today() - timedelta(days=days)
+        end_date = date_to
         branch_param = request.query_params.get('branch', '')
         city_param = request.query_params.get('city', '')
 
@@ -432,12 +450,16 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
             sale_date__gte=start_date,
             invoice__payment_status='completed',
         ).select_related('product', 'child', 'branch', 'invoice')
+        if end_date:
+            completed_sales = completed_sales.filter(sale_date__lte=end_date)
 
         # Base products queryset
         products_qs = StoreProduct.objects.filter(is_active=True)
 
         # Base adjustments queryset (all time for shrinkage is scoped to same date window)
         adjustments_qs = InventoryAdjustment.objects.filter(created_at__date__gte=start_date)
+        if end_date:
+            adjustments_qs = adjustments_qs.filter(created_at__date__lte=end_date)
 
         if branch_param and branch_param != 'all':
             if branch_param == 'delivery':
