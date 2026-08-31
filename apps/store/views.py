@@ -13,6 +13,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from apps.core.permissions import IsManagerOrPartner
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
@@ -41,7 +42,7 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     """
     queryset = StoreProduct.objects.filter(is_active=True).prefetch_related('size_stocks__branch')
     serializer_class = StoreProductSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_queryset(self):
         """Filter products by query parameters."""
@@ -277,7 +278,7 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
     """
     queryset = StoreInvoice.objects.all()
     serializer_class = StoreInvoiceSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_queryset(self):
         """Filter invoices by query parameters."""
@@ -393,7 +394,7 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = StoreSale.objects.all()
     serializer_class = StoreSaleSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
     
     def get_queryset(self):
         """Filter sales by query parameters."""
@@ -600,7 +601,7 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsManagerOrPartner])
 def initiate_payment(request):
     """
     Initiate payment for store purchase.
@@ -642,7 +643,7 @@ def initiate_payment(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsManagerOrPartner])
 def charge_card(request):
     """
     Charge a credit card directly using card details.

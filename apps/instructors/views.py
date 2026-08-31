@@ -1008,6 +1008,130 @@ class MyDashboardView(APIView):
             occ = occ + timedelta(days=7)
 
 
+class LoginDiagnosticsView(APIView):
+    """
+    Why an instructor does or does not see their lessons.
+
+    GET /api/v1/instructors/login-diagnostics/    (manager only)
+
+    A worker's schedule is built by matching Instructor.email against the
+    email or username they sign in with. When those two drift apart — a typo,
+    a stray space, a second Instructor row, a login created before the
+    instructor record — the person signs in successfully and sees an empty
+    week, with nothing anywhere saying why.
+
+    This lists both sides and the exact reason for each mismatch. It exposes
+    nothing a manager cannot already see on the users and instructors screens.
+    """
+
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        from django.contrib.auth import get_user_model
+
+        from apps.core.models import UserProfile
+        from apps.core.scoping import instructor_login_q
+
+        User = get_user_model()
+
+        instructors = list(Instructor.objects.all())
+        by_ident = {}
+        for inst in instructors:
+            key = (inst.email or '').strip().casefold()
+            if key:
+                by_ident.setdefault(key, []).append(inst)
+
+        lesson_counts = {
+            row['instructor_id']: row['n']
+            for row in Lesson.objects.filter(course__is_active=True)
+            .values('instructor_id')
+            .annotate(n=Count('id'))
+        }
+
+        accounts = []
+        for user in User.objects.select_related('profile').order_by('username'):
+            role = getattr(getattr(user, 'profile', None), 'role', None)
+            if role != UserProfile.ROLE_WORKER:
+                continue
+
+            idents = [
+                (v or '').strip().casefold()
+                for v in (user.email, user.username)
+                if (v or '').strip()
+            ]
+            matched = []
+            for ident in idents:
+                for inst in by_ident.get(ident, []):
+                    if inst not in matched:
+                        matched.append(inst)
+
+            lessons = Lesson.objects.filter(
+                instructor_login_q(user), course__is_active=True
+            ).count()
+
+            problem = None
+            if not idents:
+                problem = 'למשתמש אין אימייל ואין שם משתמש'
+            elif not matched:
+                problem = 'אין רשומת מדריך שהשם משתמש שלה תואם לכניסה הזו'
+            elif len(matched) > 1:
+                problem = 'יותר מרשומת מדריך אחת עם אותו שם משתמש'
+            elif lessons == 0:
+                problem = 'המדריך מזוהה, אך אין שיעורים פעילים המשויכים אליו'
+
+            accounts.append({
+                'user_id': str(user.id),
+                'username': user.username,
+                'email': user.email,
+                'name': f'{user.first_name} {user.last_name}'.strip(),
+                'is_active': user.is_active,
+                'matched_instructors': [
+                    {
+                        'id': str(i.id),
+                        'name': f'{i.first_name} {i.last_name}'.strip(),
+                        'email': i.email,
+                        'lessons': lesson_counts.get(i.id, 0),
+                    }
+                    for i in matched
+                ],
+                'visible_lessons': lessons,
+                'problem': problem,
+            })
+
+        # Instructor records with lessons but no way to sign in.
+        user_idents = set()
+        for user in User.objects.all():
+            for v in (user.email, user.username):
+                v = (v or '').strip().casefold()
+                if v:
+                    user_idents.add(v)
+
+        orphans = []
+        for inst in instructors:
+            key = (inst.email or '').strip().casefold()
+            n = lesson_counts.get(inst.id, 0)
+            if key and key in user_idents:
+                continue
+            orphans.append({
+                'id': str(inst.id),
+                'name': f'{inst.first_name} {inst.last_name}'.strip(),
+                'email': inst.email,
+                'lessons': n,
+                'problem': 'לרשומת המדריך אין שם משתמש' if not key
+                else 'אין חשבון כניסה עם שם המשתמש הזה',
+            })
+
+        return Response({
+            'accounts': accounts,
+            'instructors_without_login': orphans,
+            'summary': {
+                'worker_accounts': len(accounts),
+                'with_problem': sum(1 for a in accounts if a['problem']),
+                'instructors_without_login': len(orphans),
+            },
+        })
+
+
 class InstructorBonusViewSet(viewsets.ModelViewSet):
     """
     ViewSet for InstructorBonus CRUD operations
