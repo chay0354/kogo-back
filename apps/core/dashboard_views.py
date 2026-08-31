@@ -743,7 +743,14 @@ class DashboardViewSet(viewsets.ViewSet):
         
         if course_id and course_id != 'all':
             snapshots = snapshots.filter(course_id=course_id)
-        
+
+        # Discipline filter (קפוארה / מחול / אקרובטיקה …). CourseType is the
+        # discipline a course belongs to, so filtering on it narrows the tab to
+        # one field of activity.
+        course_type_id = request.query_params.get('course_type_id')
+        if course_type_id and course_type_id != 'all':
+            snapshots = snapshots.filter(course__course_type_id=course_type_id)
+
         if branch_id and branch_id != 'all':
             snapshots = snapshots.filter(branch_id=branch_id)
         
@@ -759,6 +766,8 @@ class DashboardViewSet(viewsets.ViewSet):
             courses_query = courses_query.filter(id__in=scoped_course_ids)
         if course_id and course_id != 'all':
             courses_query = courses_query.filter(id=course_id)
+        if course_type_id and course_type_id != 'all':
+            courses_query = courses_query.filter(course_type_id=course_type_id)
         if branch_id and branch_id != 'all':
             courses_query = courses_query.filter(branch_id=branch_id)
         if city_id and city_id != 'all':
@@ -829,6 +838,7 @@ class DashboardViewSet(viewsets.ViewSet):
             'course__name',
             'course__display_id',
             'course__capacity',
+            'course__course_type__name',
             'branch__name',
         ).annotate(
             revenue_total=Sum('revenue'),
@@ -844,6 +854,7 @@ class DashboardViewSet(viewsets.ViewSet):
             lessons_count = row['snapshot_rows'] or 0
             course_name = row['course__name']
             course_display_id = row['course__display_id']
+            course_type_name = row['course__course_type__name']
             branch_name = row['branch__name']
 
             # Falls back to the course capacity for the rare period with no
@@ -868,6 +879,7 @@ class DashboardViewSet(viewsets.ViewSet):
                 'name': course_name,
                 'display_id': course_display_id,
                 'branch': branch_name,
+                'course_type': course_type_name or '',
                 'lessons': lessons_count,
                 'students': students,
                 'occupancy': round(occupancy, 1),
