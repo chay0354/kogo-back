@@ -1157,6 +1157,89 @@ class DashboardViewSet(viewsets.ViewSet):
             'discount_breakdown': discount_breakdown
         })
     
+    @action(detail=False, methods=['get'], url_path='invoicing')
+    def invoicing_data(self, request):
+        """
+        Revenue as the invoices see it, and what is still owed.
+
+        The invoices page reads the Tranzila ledger, which makes a live call to
+        the provider on every request. The dashboard must not: it loads on every
+        visit and would then depend on Tranzila being up and fast. So this reads
+        only the LOCAL rows that ledger merges — formal documents, CRM invoices
+        and store invoices — and aggregates them.
+
+        Consequence to keep in mind: documents that exist only at Tranzila and
+        were never mirrored locally are not counted here. The figure is
+        "invoiced by us", not "everything Tranzila knows".
+        """
+        from apps.core.tranzila_ledger import (
+            _local_formal_rows,
+            _local_crm_invoice_rows,
+            _local_store_invoice_rows,
+        )
+
+        date_from, date_to = parse_date_filters(request)
+        scoped, _c_ids, scoped_branch_ids, _i_ids = self._scope(request)
+
+        rows = (
+            _local_formal_rows(date_from, date_to)
+            + _local_crm_invoice_rows(date_from, date_to)
+            + _local_store_invoice_rows(date_from, date_to)
+        )
+
+        if scoped:
+            # Conservative for a partner: a row without a branch is excluded
+            # rather than shown to everyone.
+            allowed = {str(b) for b in (scoped_branch_ids or [])}
+            rows = [r for r in rows if str(r.get('branch_id') or '') in allowed]
+
+        def money(value):
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        by_source = {}
+        totals = {'invoiced': 0.0, 'collected': 0.0, 'open': 0.0, 'documents': 0}
+        by_status = {}
+
+        for r in rows:
+            total = money(r.get('total_amount'))
+            paid = money(r.get('amount_paid'))
+            open_balance = money(r.get('open_balance'))
+            status = str(r.get('status') or 'pending')
+            src = str(r.get('source') or 'other')
+
+            totals['invoiced'] += total
+            totals['collected'] += paid
+            totals['open'] += open_balance
+            totals['documents'] += 1
+
+            bucket = by_source.setdefault(src, {'source': src, 'invoiced': 0.0, 'collected': 0.0, 'open': 0.0, 'documents': 0})
+            bucket['invoiced'] += total
+            bucket['collected'] += paid
+            bucket['open'] += open_balance
+            bucket['documents'] += 1
+
+            sb = by_status.setdefault(status, {'status': status, 'amount': 0.0, 'documents': 0})
+            sb['amount'] += total
+            sb['documents'] += 1
+
+        collection_rate = (
+            round(totals['collected'] / totals['invoiced'] * 100, 1)
+            if totals['invoiced'] > 0 else 0.0
+        )
+
+        return Response({
+            'invoiced': round(totals['invoiced'], 2),
+            'collected': round(totals['collected'], 2),
+            'open_balance': round(totals['open'], 2),
+            'documents': totals['documents'],
+            'collection_rate': collection_rate,
+            'by_source': sorted(by_source.values(), key=lambda x: -x['invoiced']),
+            'by_status': sorted(by_status.values(), key=lambda x: -x['amount']),
+        })
+
     @action(detail=False, methods=['get'], url_path='activity')
     def activity_data(self, request):
         """
