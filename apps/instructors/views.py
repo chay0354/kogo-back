@@ -756,15 +756,23 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
 # stored copy is bounded on both ends: anything bigger than this never reaches
 # Pillow, and what is kept is at most a few hundred KB. The cap also matches the
 # bucket's own file size limit, so nothing is refused only at the far end.
-INSTRUCTOR_PHOTO_MAX_UPLOAD_BYTES = 2 * 1024 * 1024
-INSTRUCTOR_PHOTO_MAX_PIXELS = 512
+INSTRUCTOR_PHOTO_MAX_UPLOAD_BYTES = int(2.5 * 1024 * 1024)
+# Generous enough that a normal photo is never touched, and that the one that
+# is still has pixels to spare on a retina screen at any size the page uses.
+INSTRUCTOR_PHOTO_MAX_PIXELS = 1600
 INSTRUCTOR_PHOTO_BUCKET = 'instructor-photos'
 INSTRUCTOR_PHOTO_CACHE_SECONDS = 31536000
 
 
 def _prepare_instructor_photo(upload):
     """
-    Validate and shrink an uploaded instructor photo.
+    Check an uploaded instructor photo, and shrink it only if it is enormous.
+
+    These are retouched cut-outs, so the file is kept byte for byte whenever it
+    can be: re-encoding a photograph that is already a sensible size costs
+    quality and buys nothing. Only a picture straight off a camera, far larger
+    than anything the page will ever draw, is resized — and then with the best
+    resampling Pillow has and at a quality that leaves no visible artefact.
 
     Returns (image_bytes, content_type, error_message); exactly one of the bytes
     and the error message is set.
@@ -775,27 +783,39 @@ def _prepare_instructor_photo(upload):
         return None, None, 'לא נבחר קובץ תמונה'
 
     if upload.size > INSTRUCTOR_PHOTO_MAX_UPLOAD_BYTES:
-        return None, None, 'הקובץ גדול מדי. ניתן להעלות תמונה של עד 2MB'
+        return None, None, 'הקובץ גדול מדי. ניתן להעלות תמונה של עד 2.5MB'
 
+    upload.seek(0)
+    original = upload.read()
+    upload.seek(0)
+
+    # Decoding is also how the file is checked: a renamed PDF fails here, on its
+    # content rather than on the extension somebody typed.
     try:
         image = Image.open(upload)
         image.load()
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
         return None, None, 'הקובץ שנבחר אינו תמונה תקינה'
 
-    # Instructor photos are cut-outs on no background, so the alpha channel has
-    # to survive. A picture that never had one is kept as JPEG, which is far
-    # smaller than the same photo re-encoded as PNG.
     has_alpha = image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+    content_type = 'image/png' if has_alpha else 'image/jpeg'
+
+    if max(image.size) <= INSTRUCTOR_PHOTO_MAX_PIXELS:
+        return original, content_type, None
+
     image = image.convert('RGBA' if has_alpha else 'RGB')
-    image.thumbnail((INSTRUCTOR_PHOTO_MAX_PIXELS, INSTRUCTOR_PHOTO_MAX_PIXELS))
+    image.thumbnail(
+        (INSTRUCTOR_PHOTO_MAX_PIXELS, INSTRUCTOR_PHOTO_MAX_PIXELS),
+        Image.LANCZOS,
+    )
 
     buffer = BytesIO()
     if has_alpha:
+        # PNG is lossless, so the cut-out edge survives the resize intact.
         image.save(buffer, format='PNG', optimize=True)
         return buffer.getvalue(), 'image/png', None
 
-    image.save(buffer, format='JPEG', quality=85, optimize=True)
+    image.save(buffer, format='JPEG', quality=95, subsampling=0, optimize=True)
     return buffer.getvalue(), 'image/jpeg', None
 
 

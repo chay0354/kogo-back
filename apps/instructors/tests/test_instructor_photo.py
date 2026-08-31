@@ -98,10 +98,11 @@ class InstructorPhotoTest(TestCase):
         # Long-lived because the saved URL is versioned.
         self.assertEqual(headers['Cache-Control'], 'max-age=31536000')
 
-        # The body is the processed image, not the raw upload.
+        # A photo this size is sent exactly as it arrived: re-encoding it would
+        # cost quality for nothing.
         sent = Image.open(BytesIO(kwargs['data']))
         self.assertEqual(sent.format, 'PNG')
-        self.assertLessEqual(max(sent.size), 512)
+        self.assertLessEqual(max(sent.size), 1600)
 
     def test_saved_url_is_the_public_read_url_with_a_version(self):
         self._post()
@@ -176,7 +177,7 @@ class InstructorPhotoTest(TestCase):
         # Random noise, so the file cannot be compressed back under the cap.
         res, storage_post = self._post(name='big.png', content=os.urandom(3 * 1024 * 1024))
         self.assertEqual(res.status_code, 400)
-        self.assertIn('2MB', res.data['error'])
+        self.assertIn('2.5MB', res.data['error'])
         storage_post.assert_not_called()
 
     def test_non_image_upload_is_rejected(self):
@@ -210,10 +211,18 @@ class InstructorPhotoTest(TestCase):
         self.assertEqual(sent.mode, 'RGBA')
         self.assertEqual(sent.getpixel((0, 0))[3], 0)
 
-    def test_a_big_photo_is_downscaled_before_it_is_sent(self):
-        _, storage_post = self._post(content=png_bytes(size=(1800, 1200)))
+    def test_a_photo_that_already_fits_is_stored_untouched(self):
+        """Quality is the point: an ordinary photo must not be re-encoded."""
+        original = png_bytes(size=(900, 600))
+        _, storage_post = self._post(content=original)
+        self.assertEqual(storage_post.call_args[1]['data'], original)
+
+    def test_only_an_enormous_photo_is_downscaled(self):
+        _, storage_post = self._post(content=png_bytes(size=(4000, 3000)))
         sent = Image.open(BytesIO(storage_post.call_args[1]['data']))
-        self.assertLessEqual(max(sent.size), 512)
+        self.assertLessEqual(max(sent.size), 1600)
+        # Still far larger than anything the page draws.
+        self.assertGreaterEqual(max(sent.size), 1200)
 
     def test_manager_can_remove_photo(self):
         self._post()
