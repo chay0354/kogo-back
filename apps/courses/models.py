@@ -142,6 +142,14 @@ class Course(models.Model):
             instructor_salary_override=None,
         )
 
+    def sync_required_track_bundle_prices(self):
+        """Required multi-day tracks bill the course monthly price from EditCourseDialog."""
+        if not self.must_attend_all_lessons:
+            return 0
+        return self.lesson_bundles.exclude(combined_price=self.price).update(
+            combined_price=self.price,
+        )
+
 
 class Lesson(models.Model):
     """שיעורים"""

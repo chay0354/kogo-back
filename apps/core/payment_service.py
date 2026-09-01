@@ -506,6 +506,8 @@ def resolve_billing_price(
         if not bundle.lessons.filter(pk=lesson.pk).exists():
             raise ValueError("השיעור אינו חלק מהמסלול המשולב")
         validate_bundle_capacity(bundle)
+        if bundle.course.must_attend_all_lessons:
+            return bundle.course.price, True, course_index, bundle, None
         return bundle.combined_price, True, course_index, bundle, None
 
     tier_price = get_lesson_price_for_course_index(lesson, course_index)

@@ -431,7 +431,8 @@ class PaymentServiceLessonBundleTest(TestCase):
         mock_discount.side_effect = self.passthrough_discount
         mock_tranzila.return_value = "https://tranzila.test/payment"
         self.course.must_attend_all_lessons = True
-        self.course.save(update_fields=['must_attend_all_lessons'])
+        self.course.price = Decimal('300.00')
+        self.course.save(update_fields=['must_attend_all_lessons', 'price'])
         self.bundle.is_active = False
         self.bundle.save(update_fields=['is_active'])
 
@@ -442,6 +443,23 @@ class PaymentServiceLessonBundleTest(TestCase):
         )
         self.assertEqual(result['base_amount'], 300.00)
         self.assertEqual(result['bundle_id'], str(self.bundle.id))
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_must_attend_bundle_bills_course_price_not_stale_bundle(self, mock_discount, mock_tranzila):
+        mock_discount.side_effect = self.passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+        self.course.must_attend_all_lessons = True
+        self.course.price = Decimal('455.00')
+        self.course.save(update_fields=['must_attend_all_lessons', 'price'])
+
+        result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_a.id),
+            bundle_id=str(self.bundle.id),
+        )
+        self.assertEqual(result['base_amount'], 455.00)
+        self.assertEqual(result['monthly_amount'], 455.00)
 
     def test_inactive_bundle_rejected_when_course_is_not_must_attend(self):
         self.bundle.is_active = False

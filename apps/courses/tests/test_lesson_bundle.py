@@ -10,7 +10,7 @@ from rest_framework.exceptions import ValidationError
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.courses.models import LessonBundle
-from apps.courses.serializers import LessonBundleSerializer
+from apps.courses.serializers import CourseSerializer, LessonBundleSerializer
 from apps.enrollments.models import LessonEnrollment
 
 
@@ -75,6 +75,35 @@ class LessonBundleModelTest(TestCase):
         self.assertIsNone(
             resolve_registration_bundle(course=self.course, bundle_id=str(bundle.id)),
         )
+
+    def test_editing_course_price_syncs_must_attend_bundle(self):
+        self.course.must_attend_all_lessons = True
+        self.course.price = Decimal('415.00')
+        self.course.save(update_fields=['must_attend_all_lessons', 'price'])
+        bundle = LessonBundle.objects.create(
+            course=self.course,
+            combined_price=Decimal('415.00'),
+        )
+
+        serializer = CourseSerializer(self.course, data={'price': '455.00'}, partial=True)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        bundle.refresh_from_db()
+        self.assertEqual(bundle.combined_price, Decimal('455.00'))
+
+    def test_optional_bundle_keeps_its_own_price_when_course_price_changes(self):
+        bundle = LessonBundle.objects.create(
+            course=self.course,
+            combined_price=Decimal('300.00'),
+        )
+
+        serializer = CourseSerializer(self.course, data={'price': '455.00'}, partial=True)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
+        bundle.refresh_from_db()
+        self.assertEqual(bundle.combined_price, Decimal('300.00'))
 
 
 class LessonBundleSerializerTest(TestCase):

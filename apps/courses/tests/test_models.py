@@ -79,6 +79,19 @@ class CourseModelTest(TestCase):
         
         self.assertEqual(course.name, "מתחילים")
         self.assertEqual(course.price, Decimal('350.00'))
+
+    def test_required_track_syncs_bundle_to_course_price(self):
+        from apps.courses.models import LessonBundle
+
+        course = TestDataFactory.create_course(price=Decimal('455.00'))
+        course.must_attend_all_lessons = True
+        course.save(update_fields=['must_attend_all_lessons'])
+        bundle = LessonBundle.objects.create(course=course, combined_price=Decimal('415.00'))
+
+        updated = course.sync_required_track_bundle_prices()
+        bundle.refresh_from_db()
+        self.assertEqual(updated, 1)
+        self.assertEqual(bundle.combined_price, Decimal('455.00'))
         self.assertEqual(course.capacity, 20)
         self.assertTrue(course.is_active)
     

@@ -375,6 +375,7 @@ class CourseSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         course = super().create(validated_data)
         course.sync_instructor_to_lessons()
+        course.sync_required_track_bundle_prices()
         return course
 
     def update(self, instance, validated_data):
@@ -382,6 +383,7 @@ class CourseSerializer(serializers.ModelSerializer):
         course = super().update(instance, validated_data)
         if 'instructor' in validated_data and previous_instructor != course.instructor:
             course.sync_instructor_to_lessons(previous_instructor=previous_instructor)
+        course.sync_required_track_bundle_prices()
         return course
 
 
@@ -529,6 +531,9 @@ class LessonBundleSerializer(serializers.ModelSerializer):
             outside_course = [l for l in lessons if course and l.course_id != course.id]
             if outside_course:
                 raise serializers.ValidationError({'lessons': 'כל השיעורים במסלול חייבים להשתייך לאותו חוג'})
+
+        if course and course.must_attend_all_lessons:
+            data['combined_price'] = course.price
 
         combined_price = data.get('combined_price', getattr(self.instance, 'combined_price', None))
         if combined_price is not None and combined_price < 0:
