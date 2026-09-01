@@ -10,7 +10,6 @@ from apps.enrollments.enrollment_counts import count_distinct_paying_children, c
 from apps.core.models import Branch, Room, UserProfile
 from apps.core.scoping import scope_courses
 from apps.instructors.models import Instructor
-from apps.scheduling.studio_conflict import timed_event_conflicts_lesson
 
 
 User = get_user_model()
@@ -470,11 +469,8 @@ class LessonSerializer(serializers.ModelSerializer):
         return obj.room.capacity if obj.room else None
     
     def validate(self, data):
-        """Validate that room and instructor are available during the requested time"""
-        # Branch now lives on the course, not the lesson
+        """Studio overlap is a warning in the CRM; instructor overlap still blocks."""
         course = data.get('course') or (self.instance.course if self.instance else None)
-        branch = course.branch if course else None
-        room = data.get('room') or (self.instance.room if self.instance else None)
         if 'instructor' in data:
             instructor = data.get('instructor')
         elif self.instance:
@@ -484,8 +480,6 @@ class LessonSerializer(serializers.ModelSerializer):
         day_of_week = data.get('day_of_week', self.instance.day_of_week if self.instance else None)
         start_time = data.get('start_time', self.instance.start_time if self.instance else None)
         end_time = data.get('end_time', self.instance.end_time if self.instance else None)
-        lesson_is_recurring = data.get('is_recurring', self.instance.is_recurring if self.instance else True)
-        lesson_date = data.get('lesson_date', self.instance.lesson_date if self.instance else None)
 
         if not all([day_of_week is not None, start_time, end_time]):
             return data
@@ -499,32 +493,8 @@ class LessonSerializer(serializers.ModelSerializer):
         # Exclude current instance if updating
         exclude_query = Q(pk=self.instance.pk) if self.instance else Q(pk=None)
 
-        # Check for room conflicts (if room is specified)
-        if branch and room:
-            room_conflicts = Lesson.objects.filter(
-                base_conflict_query,
-                course__branch=branch,
-                room=room,
-            ).exclude(exclude_query)
-
-            if room_conflicts.exists():
-                conflict = room_conflicts.first()
-                raise serializers.ValidationError({
-                    'room': f'החדר תפוס ביום זה בין השעות {conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
-                })
-
-            if timed_event_conflicts_lesson(
-                branch,
-                room,
-                day_of_week,
-                start_time,
-                end_time,
-                lesson_is_recurring=lesson_is_recurring,
-                lesson_date=lesson_date,
-            ):
-                raise serializers.ValidationError({
-                    'room': 'החדר תפוס באותה שעה (אירוע או שכירות בלוח)'
-                })
+        # Studio overlap is a CRM warning only — managers can still save
+        # price/details (or keep a shared studio) when another course is booked.
 
         # Check for instructor conflicts (if instructor is specified)
         if instructor:
@@ -662,24 +632,7 @@ class LessonBundleSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'lesson_rooms': 'הסטודיו חייב להיות בסניף של החוג',
                 })
-            lesson = next((l for l in selected if str(l.id) == str(lesson_id)), None)
-            if lesson is None:
-                continue
-            conflict_message = self._room_busy_message(lesson, room)
-            if conflict_message:
-                raise serializers.ValidationError({'lesson_rooms': conflict_message})
-            if timed_event_conflicts_lesson(
-                branch,
-                room,
-                lesson.day_of_week,
-                lesson.start_time,
-                lesson.end_time,
-                lesson_is_recurring=lesson.is_recurring,
-                lesson_date=lesson.lesson_date,
-            ):
-                raise serializers.ValidationError({
-                    'lesson_rooms': 'החדר תפוס באותה שעה (אירוע או שכירות בלוח)',
-                })
+            # Occupied studios are allowed; the CRM shows a warning instead.
 
     def create(self, validated_data):
         instructor_mapping = validated_data.pop('lesson_instructors', None)

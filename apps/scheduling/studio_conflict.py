@@ -201,6 +201,84 @@ def event_conflicts_lessons(candidate):
     return False
 
 
+DAY_NAMES_HE = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+
+
+def list_studio_occupants(
+    *,
+    room_id,
+    day_of_week,
+    start_time,
+    end_time,
+    exclude_lesson_ids=None,
+    exclude_course_id=None,
+    lesson_date=None,
+):
+    """Lessons and timed events already using this studio slot (warning only)."""
+    occupants: list[dict] = []
+    if not room_id or day_of_week is None or not start_time or not end_time:
+        return occupants
+
+    lessons = (
+        Lesson.objects.filter(
+            day_of_week=day_of_week,
+            status='scheduled',
+            room_id=room_id,
+        )
+        .exclude(Q(end_time__lte=start_time) | Q(start_time__gte=end_time))
+        .select_related('course')
+    )
+    if exclude_lesson_ids:
+        lessons = lessons.exclude(pk__in=list(exclude_lesson_ids))
+    if exclude_course_id:
+        lessons = lessons.exclude(course_id=exclude_course_id)
+
+    for lesson in lessons:
+        occupants.append({
+            'kind': 'lesson',
+            'name': lesson.course.name,
+            'day_of_week': lesson.day_of_week,
+            'day_name': DAY_NAMES_HE[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '',
+            'start_time': lesson.start_time.strftime('%H:%M'),
+            'end_time': lesson.end_time.strftime('%H:%M'),
+        })
+
+    from apps.scheduling.models import ScheduleEvent
+
+    events = ScheduleEvent.objects.filter(
+        is_active=True,
+        studio_id=room_id,
+        is_daily_event=False,
+    )
+    for ev in events:
+        for ev_dow, ev_start, ev_end in event_day_time_pairs(ev):
+            if not ev_start or not ev_end:
+                continue
+            if not times_overlap(start_time, end_time, ev_start, ev_end):
+                continue
+            if ev.event_type == 'weekly':
+                if ev_dow != day_of_week:
+                    continue
+            elif ev.event_type == 'one_time':
+                if lesson_date is None or lesson_date != ev.event_date:
+                    continue
+                if day_of_week != ev_dow:
+                    continue
+            else:
+                continue
+            occupants.append({
+                'kind': 'event',
+                'name': ev.name or ev.renter_name or 'אירוע או שכירות בלוח',
+                'day_of_week': ev_dow,
+                'day_name': DAY_NAMES_HE[ev_dow] if 0 <= ev_dow < 7 else '',
+                'start_time': ev_start.strftime('%H:%M') if hasattr(ev_start, 'strftime') else str(ev_start)[:5],
+                'end_time': ev_end.strftime('%H:%M') if hasattr(ev_end, 'strftime') else str(ev_end)[:5],
+            })
+            break
+
+    return occupants
+
+
 def timed_event_conflicts_lesson(
     branch,
     room,

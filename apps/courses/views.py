@@ -366,6 +366,52 @@ class LessonViewSet(viewsets.ModelViewSet):
         days_ahead = (target_py_weekday - start_from.weekday()) % 7
         return start_from + timedelta(days=days_ahead)
 
+    @action(detail=False, methods=['get'], url_path='room-conflicts')
+    def room_conflicts(self, request):
+        """Occupied studio slots for a CRM warning — does not block saving."""
+        from datetime import datetime
+
+        from apps.scheduling.studio_conflict import list_studio_occupants
+
+        room_id = (request.query_params.get('room') or '').strip()
+        day_raw = request.query_params.get('day_of_week')
+        start_raw = (request.query_params.get('start_time') or '').strip()
+        end_raw = (request.query_params.get('end_time') or '').strip()
+        exclude_course = (request.query_params.get('exclude_course') or '').strip() or None
+        exclude_raw = request.query_params.getlist('exclude')
+        exclude_ids = []
+        for chunk in exclude_raw:
+            exclude_ids.extend(part for part in str(chunk).split(',') if part.strip())
+
+        def parse_clock(value):
+            for fmt in ('%H:%M:%S', '%H:%M'):
+                try:
+                    return datetime.strptime(value, fmt).time()
+                except ValueError:
+                    continue
+            return None
+
+        try:
+            day_of_week = int(day_raw)
+        except (TypeError, ValueError):
+            return Response({'conflicts': []})
+
+        start_time = parse_clock(start_raw)
+        end_time = parse_clock(end_raw)
+        if not room_id or start_time is None or end_time is None:
+            return Response({'conflicts': []})
+
+        return Response({
+            'conflicts': list_studio_occupants(
+                room_id=room_id,
+                day_of_week=day_of_week,
+                start_time=start_time,
+                end_time=end_time,
+                exclude_lesson_ids=exclude_ids or None,
+                exclude_course_id=exclude_course,
+            )
+        })
+
     def perform_create(self, serializer):
         instance = serializer.save()
 
