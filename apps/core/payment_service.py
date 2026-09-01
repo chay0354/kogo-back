@@ -519,30 +519,65 @@ def resolve_billing_price(
     return base_price, used_lesson_tier, course_index, None, None
 
 
+def _expiry_and_token_from_tranzila_payload(payment):
+    """Read expiry + token from the charge's own Tranzila response when the STO is gone."""
+    txn = getattr(payment, 'tranzila_transaction', None)
+    data = getattr(txn, 'response_data', None) if txn else None
+    if not isinstance(data, dict):
+        return None, None, None
+    original = data.get('original_request') if isinstance(data.get('original_request'), dict) else {}
+    result = data.get('transaction_result') if isinstance(data.get('transaction_result'), dict) else {}
+    month = original.get('expire_month') or result.get('expiry_month')
+    year = original.get('expire_year') or result.get('expiry_year')
+    token = result.get('token') or original.get('card_number')
+    try:
+        month = int(month) if month not in (None, '') else None
+    except (TypeError, ValueError):
+        month = None
+    try:
+        year = int(year) if year not in (None, '') else None
+    except (TypeError, ValueError):
+        year = None
+    token = str(token).strip() if token else None
+    if token and set(token) <= set('*'):
+        token = None
+    return month, year, token
+
+
 def card_details_for_payment_refund(payment):
     """Card token + expiry to refund this Payment via Tranzila.
 
     Signup charges sit on RecurringPayment.initial_payment. Monthly cron
-    charges do not — match the standing order for the same child + lesson
-    so a child with two courses is not refunded on the wrong token.
+    charges do not — match the standing order for the same child + lesson.
+    Cancelled standing orders still hold the card; fall back to the charge payload.
     """
-    if not getattr(payment, 'child_id', None):
-        return None, None, None
+    month = year = token = None
+    if getattr(payment, 'child_id', None):
+        qs = payment.child.recurring_payments.all()
+        recurring = qs.filter(initial_payment_id=payment.id).first()
+        if not recurring and payment.lesson_id:
+            recurring = (
+                qs.filter(initial_payment__lesson_id=payment.lesson_id)
+                .order_by('-updated_at')
+                .first()
+            )
+        if not recurring:
+            recurring = (
+                qs.exclude(tranzila_token='')
+                .order_by('-updated_at')
+                .first()
+            )
+        if recurring:
+            month = recurring.card_expire_month
+            year = recurring.card_expire_year
+            token = recurring.tranzila_token or None
 
-    qs = payment.child.recurring_payments.all()
-    recurring = qs.filter(initial_payment_id=payment.id).first()
-    if not recurring and payment.lesson_id:
-        recurring = (
-            qs.filter(initial_payment__lesson_id=payment.lesson_id)
-            .exclude(status='cancelled')
-            .order_by('-updated_at')
-            .first()
-        )
-    if not recurring:
-        recurring = qs.filter(status='active').order_by('-updated_at').first()
-    if not recurring:
-        return None, None, None
-    return recurring.card_expire_month, recurring.card_expire_year, recurring.tranzila_token
+    payload_month, payload_year, payload_token = _expiry_and_token_from_tranzila_payload(payment)
+    return (
+        month or payload_month,
+        year or payload_year,
+        token or payload_token,
+    )
 
 
 class PaymentService:

@@ -1065,7 +1065,7 @@ class PaymentRefundTokenTest(TestCase):
             final_amount=Decimal('235.00'),
             description='מנוי חודשי - חוג ב',
         )
-        RecurringPayment.objects.create(
+        self.sto_a = RecurringPayment.objects.create(
             child=self.child,
             initial_payment=self.signup_a,
             tranzila_token='token_course_a',
@@ -1076,7 +1076,7 @@ class PaymentRefundTokenTest(TestCase):
             billing_day=1,
             start_date=date.today(),
         )
-        RecurringPayment.objects.create(
+        self.sto_b = RecurringPayment.objects.create(
             child=self.child,
             initial_payment=self.signup_b,
             tranzila_token='token_course_b',
@@ -1138,3 +1138,45 @@ class PaymentRefundTokenTest(TestCase):
         self.assertEqual(kwargs['transaction_id'], 'TRX_MONTH_B')
         self.monthly_b.refresh_from_db()
         self.assertEqual(self.monthly_b.status, 'refunded')
+
+    def test_cancelled_sto_without_lesson_still_uses_card(self):
+        from apps.core.payment_service import card_details_for_payment_refund
+
+        self.sto_a.status = 'cancelled'
+        self.sto_a.save(update_fields=['status'])
+        self.sto_b.status = 'cancelled'
+        self.sto_b.save(update_fields=['status'])
+        self.sto_b.save(update_fields=['updated_at'])
+        self.monthly_b.lesson = None
+        self.monthly_b.save(update_fields=['lesson'])
+
+        month, year, token = card_details_for_payment_refund(self.monthly_b)
+        self.assertEqual(token, 'token_course_b')
+        self.assertEqual(month, 6)
+        self.assertEqual(year, 2031)
+
+    def test_card_from_tranzila_payload_when_no_standing_order(self):
+        from apps.core.payment_service import card_details_for_payment_refund
+
+        self.child.recurring_payments.all().delete()
+        self.monthly_b.lesson = None
+        self.monthly_b.save(update_fields=['lesson'])
+        txn = self.monthly_b.tranzila_transaction
+        txn.response_data = {
+            'original_request': {
+                'expire_month': 2,
+                'expire_year': 2032,
+                'card_number': 'Y0payloadtoken',
+            },
+            'transaction_result': {
+                'token': 'Y0payloadtoken',
+                'expiry_month': '02',
+                'expiry_year': '32',
+            },
+        }
+        txn.save(update_fields=['response_data'])
+
+        month, year, token = card_details_for_payment_refund(self.monthly_b)
+        self.assertEqual(token, 'Y0payloadtoken')
+        self.assertEqual(month, 2)
+        self.assertEqual(year, 2032)
