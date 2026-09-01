@@ -3,6 +3,7 @@ import os
 from decimal import Decimal
 from rest_framework import viewsets, filters, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -889,6 +890,12 @@ class DiscountViewSet(viewsets.ModelViewSet):
 # Payment ViewSets - Tranzila Integration
 # ============================================================================
 
+class PaymentLedgerPagination(PageNumberPagination):
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+
 class PaymentViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Payment management
@@ -904,6 +911,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ).prefetch_related('discount_snapshots')
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    pagination_class = PaymentLedgerPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['child__first_name', 'child__last_name', 'family__name']
     ordering_fields = ['created_at', 'payment_date', 'final_amount']
@@ -920,6 +928,13 @@ class PaymentViewSet(viewsets.ModelViewSet):
         child_id = self.request.query_params.get('child_id')
         if child_id:
             queryset = queryset.filter(child_id=child_id)
+
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        if start_date:
+            queryset = queryset.filter(created_at__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(created_at__date__lte=end_date)
         
         return queryset
 

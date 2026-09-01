@@ -519,6 +519,32 @@ def resolve_billing_price(
     return base_price, used_lesson_tier, course_index, None, None
 
 
+def card_details_for_payment_refund(payment):
+    """Card token + expiry to refund this Payment via Tranzila.
+
+    Signup charges sit on RecurringPayment.initial_payment. Monthly cron
+    charges do not — match the standing order for the same child + lesson
+    so a child with two courses is not refunded on the wrong token.
+    """
+    if not getattr(payment, 'child_id', None):
+        return None, None, None
+
+    qs = payment.child.recurring_payments.all()
+    recurring = qs.filter(initial_payment_id=payment.id).first()
+    if not recurring and payment.lesson_id:
+        recurring = (
+            qs.filter(initial_payment__lesson_id=payment.lesson_id)
+            .exclude(status='cancelled')
+            .order_by('-updated_at')
+            .first()
+        )
+    if not recurring:
+        recurring = qs.filter(status='active').order_by('-updated_at').first()
+    if not recurring:
+        return None, None, None
+    return recurring.card_expire_month, recurring.card_expire_year, recurring.tranzila_token
+
+
 class PaymentService:
     """
     Service for managing payment operations and business logic.
@@ -2036,17 +2062,8 @@ class PaymentService:
         
         # Prefer the saved card from THIS payment's subscription. A child with two
         # lessons can have two tokens; .first() on the child would refund the wrong one.
-        card_expire_month = None
-        card_expire_year = None
-        token = None
-        if payment.child:
-            recurring = payment.child.recurring_payments.filter(
-                initial_payment=payment,
-            ).first() or payment.child.recurring_payments.filter(status='active').first()
-            if recurring:
-                card_expire_month = recurring.card_expire_month
-                card_expire_year = recurring.card_expire_year
-                token = recurring.tranzila_token
+        # Monthly cron charges are not the initial_payment — match by lesson too.
+        card_expire_month, card_expire_year, token = card_details_for_payment_refund(payment)
         
         # Use full amount if not specified
         refund_amount = amount if amount else payment.final_amount

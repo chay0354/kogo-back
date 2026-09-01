@@ -1027,3 +1027,114 @@ class PaymentServiceIntegrationTest(TestCase):
         self.assertIsNotNone(recurring)
         self.assertEqual(recurring.status, 'active')
         self.assertEqual(recurring.tranzila_token, 'recurring_token_123')
+
+
+class PaymentRefundTokenTest(TestCase):
+    """Refunds of monthly standing-order charges must use that course's card."""
+
+    def setUp(self):
+        self.service = PaymentService()
+        self.child = TestDataFactory.create_child()
+        self.lesson_a = TestDataFactory.create_lesson(
+            course=TestDataFactory.create_course(name='חוג א'),
+        )
+        self.lesson_b = TestDataFactory.create_lesson(
+            course=TestDataFactory.create_course(name='חוג ב', branch=self.lesson_a.course.branch),
+        )
+        self.signup_a = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            branch=self.lesson_a.course.branch,
+            lesson=self.lesson_a,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('200.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('200.00'),
+            description='מנוי חודשי - חוג א',
+        )
+        self.signup_b = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            branch=self.lesson_b.course.branch,
+            lesson=self.lesson_b,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('235.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('235.00'),
+            description='מנוי חודשי - חוג ב',
+        )
+        RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=self.signup_a,
+            tranzila_token='token_course_a',
+            card_expire_month=1,
+            card_expire_year=2030,
+            status='active',
+            amount=Decimal('200.00'),
+            billing_day=1,
+            start_date=date.today(),
+        )
+        RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=self.signup_b,
+            tranzila_token='token_course_b',
+            card_expire_month=6,
+            card_expire_year=2031,
+            status='active',
+            amount=Decimal('235.00'),
+            billing_day=1,
+            start_date=date.today(),
+        )
+        self.monthly_b = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            branch=self.lesson_b.course.branch,
+            lesson=self.lesson_b,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('235.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('235.00'),
+            description='מנוי חודשי - חוג ב - ילד',
+        )
+        txn = TranzilaTransaction.objects.create(
+            transaction_id='TRX_MONTH_B',
+            confirmation_code='AUTH_B',
+            transaction_type='recurring_charge',
+            is_successful=True,
+            idempotency_key='refund-token-test-month-b',
+        )
+        self.monthly_b.tranzila_transaction = txn
+        self.monthly_b.save(update_fields=['tranzila_transaction'])
+
+    def test_monthly_charge_uses_same_lesson_token(self):
+        from apps.core.payment_service import card_details_for_payment_refund
+
+        month, year, token = card_details_for_payment_refund(self.monthly_b)
+        self.assertEqual(token, 'token_course_b')
+        self.assertEqual(month, 6)
+        self.assertEqual(year, 2031)
+
+    @patch('apps.core.tranzila_service.TranzilaService.refund_transaction')
+    def test_refund_payment_sends_matching_token(self, mock_refund):
+        mock_refund.return_value = {
+            'success': True,
+            'transaction_id': 'REFUND_1',
+            'confirmation_code': 'R1',
+            'response_code': '000',
+            'message': 'ok',
+            'raw_response': {},
+        }
+
+        result = self.service.refund_payment(str(self.monthly_b.id), reason='בדיקה')
+
+        self.assertTrue(result['success'])
+        mock_refund.assert_called_once()
+        kwargs = mock_refund.call_args.kwargs
+        self.assertEqual(kwargs['token'], 'token_course_b')
+        self.assertEqual(kwargs['card_expire_month'], 6)
+        self.assertEqual(kwargs['transaction_id'], 'TRX_MONTH_B')
+        self.monthly_b.refresh_from_db()
+        self.assertEqual(self.monthly_b.status, 'refunded')
