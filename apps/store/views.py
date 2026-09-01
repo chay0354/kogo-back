@@ -11,6 +11,7 @@ from django.db.models import Sum, F, Q, Count
 from django.http import HttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from apps.core.permissions import IsManagerOrPartner
@@ -267,6 +268,12 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class StoreInvoicePagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+
 class StoreInvoiceViewSet(viewsets.ModelViewSet):
     """
     API endpoints for store invoices.
@@ -279,6 +286,7 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
     queryset = StoreInvoice.objects.all()
     serializer_class = StoreInvoiceSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    pagination_class = StoreInvoicePagination
     
     def get_queryset(self):
         """Filter invoices by query parameters."""

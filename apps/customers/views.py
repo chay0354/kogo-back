@@ -11,7 +11,7 @@ from django.db.models import Q, Prefetch, Count, Value, CharField
 from django.db.models.functions import Concat
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from django.conf import settings
 from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer, CronHeartbeat
 # Store models moved to apps.store
@@ -22,7 +22,7 @@ from apps.customers.serializers import (
     # Store serializers moved to apps.store.serializers
     DiscountSerializer, EarlySignupDiscountSerializer, SecondChildDiscountSerializer,
     AdditionalLessonDiscountSerializer,
-    PaymentSerializer, RecurringPaymentSerializer,
+    PaymentSerializer, PaymentLedgerSerializer, RecurringPaymentSerializer,
     PaymentInitiationRequestSerializer, PaymentInitiationResponseSerializer,
     WebhookCallbackSerializer,     RecurringPaymentUpdateSerializer, RecurringPaymentScheduleAmountSerializer,
     RecurringPaymentCancelSerializer, BusinessCustomerSerializer
@@ -891,9 +891,9 @@ class DiscountViewSet(viewsets.ModelViewSet):
 # ============================================================================
 
 class PaymentLedgerPagination(PageNumberPagination):
-    page_size = 100
+    page_size = 20
     page_size_query_param = 'page_size'
-    max_page_size = 500
+    max_page_size = 200
 
 
 class PaymentViewSet(viewsets.ModelViewSet):
@@ -937,6 +937,27 @@ class PaymentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(created_at__date__lte=end_date)
         
         return queryset
+
+    @action(detail=False, methods=['get'], url_path='ledger')
+    def ledger(self, request):
+        """
+        Slim charge list for the invoices payments tab.
+
+        GET /api/v1/customers/payments/ledger/?start_date=&end_date=&page=&page_size=
+        Defaults to the last 90 days when start_date is omitted.
+        """
+        from django.utils import timezone
+
+        queryset = self.filter_queryset(self.get_queryset())
+        if not request.query_params.get('start_date'):
+            queryset = queryset.filter(
+                created_at__date__gte=timezone.localdate() - timedelta(days=90)
+            )
+        page = self.paginate_queryset(queryset)
+        serializer = PaymentLedgerSerializer(page if page is not None else queryset, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=False, methods=['get'], url_path='tranzila-transactions')
     def tranzila_transactions(self, request):

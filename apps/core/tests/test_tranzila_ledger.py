@@ -98,6 +98,13 @@ class TranzilaLedgerTest(TestCase):
         self.assertEqual(match['customer_name'], self.child.full_name)
 
     @patch('apps.core.tranzila_ledger._tranzila_client')
+    def test_local_only_skips_tranzila(self, mock_client):
+        result = list_ledger_documents(date.today(), date.today(), local_only=True)
+        mock_client.assert_not_called()
+        self.assertEqual(result['source'], 'local')
+        self.assertTrue(any(row['document_number'] == '1001956' for row in result['documents']))
+
+    @patch('apps.core.tranzila_ledger._tranzila_client')
     def test_documents_fallback_to_local(self, mock_production):
         mock_production.return_value.list_documents.return_value = {
             'success': False,

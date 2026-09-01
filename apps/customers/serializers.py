@@ -565,6 +565,39 @@ class PaymentSerializer(serializers.ModelSerializer):
         ]
 
 
+class PaymentLedgerSerializer(serializers.ModelSerializer):
+    """Slim payment row for the invoices charges tab — no nested graphs."""
+    child_name = serializers.CharField(source='child.full_name', read_only=True)
+    family_name = serializers.CharField(source='family.name', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+    lesson_name = serializers.SerializerMethodField()
+    tranzila_transaction_id = serializers.SerializerMethodField()
+    tranzila_confirmation_code = serializers.SerializerMethodField()
+
+    def get_lesson_name(self, obj):
+        if obj.lesson_id and obj.lesson and obj.lesson.course:
+            return obj.lesson.course.name
+        return None
+
+    def get_tranzila_transaction_id(self, obj):
+        txn = obj.tranzila_transaction
+        return txn.transaction_id if txn else None
+
+    def get_tranzila_confirmation_code(self, obj):
+        txn = obj.tranzila_transaction
+        return txn.confirmation_code if txn else None
+
+    class Meta:
+        model = Payment
+        fields = [
+            'id', 'child_name', 'family_name', 'branch', 'branch_name',
+            'lesson_name', 'payment_type', 'status', 'final_amount',
+            'registration_fee', 'trial_lesson_date', 'description',
+            'payment_date', 'created_at',
+            'tranzila_transaction_id', 'tranzila_confirmation_code',
+        ]
+
+
 class RecurringPaymentInitialPaymentSlimSerializer(serializers.ModelSerializer):
     """Lesson/branch labels for standing-order lists — avoids N+1 on nested payment graphs."""
     lesson_name = serializers.SerializerMethodField()

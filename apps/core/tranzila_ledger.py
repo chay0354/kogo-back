@@ -92,7 +92,7 @@ def _iso_datetime(value) -> str:
 
 def _default_range(start: Optional[date], end: Optional[date]) -> tuple[date, date]:
     today = timezone.localdate()
-    return (start or (today - timedelta(days=365)), end or today)
+    return (start or (today - timedelta(days=90)), end or today)
 
 
 def _document_status_from_tranzila(doc_type: str, action) -> str:
@@ -352,33 +352,40 @@ def _merge_documents(*groups: list[dict]) -> list[dict]:
     return merged
 
 
-def list_ledger_documents(start_date: Optional[date] = None, end_date: Optional[date] = None) -> dict:
+def list_ledger_documents(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    local_only: bool = False,
+) -> dict:
     start, end = _default_range(start_date, end_date)
     tranzila_rows = []
     source = 'local'
     error = None
     local_formal = _local_formal_rows(start, end)
-    try:
-        service = _tranzila_client()
-        result = service.list_documents(start, end)
-        if result.get('success'):
-            local_by_id = {
-                row['tranzila_doc_id']: row
-                for row in local_formal
-                if row.get('tranzila_doc_id')
-            }
-            local_by_number = {row['document_number']: row for row in local_formal}
-            for raw in result.get('documents') or []:
-                match = local_by_id.get(str(raw.get('id') or '')) or local_by_number.get(str(raw.get('number') or ''))
-                customer = match['customer_name'] if match else ''
-                tranzila_rows.append(normalize_tranzila_document(raw, customer_name=customer))
-            source = 'tranzila'
-        else:
-            error = result.get('error')
-            logger.warning('Tranzila get_documents unavailable: %s', error)
-    except Exception as exc:
-        error = str(exc)
-        logger.exception('Tranzila get_documents failed')
+    if not local_only:
+        try:
+            service = _tranzila_client()
+            result = service.list_documents(start, end)
+            if result.get('success'):
+                local_by_id = {
+                    row['tranzila_doc_id']: row
+                    for row in local_formal
+                    if row.get('tranzila_doc_id')
+                }
+                local_by_number = {row['document_number']: row for row in local_formal}
+                for raw in result.get('documents') or []:
+                    match = local_by_id.get(str(raw.get('id') or '')) or local_by_number.get(
+                        str(raw.get('number') or '')
+                    )
+                    customer = match['customer_name'] if match else ''
+                    tranzila_rows.append(normalize_tranzila_document(raw, customer_name=customer))
+                source = 'tranzila'
+            else:
+                error = result.get('error')
+                logger.warning('Tranzila get_documents unavailable: %s', error)
+        except Exception as exc:
+            error = str(exc)
+            logger.exception('Tranzila get_documents failed')
 
     documents = _merge_documents(
         tranzila_rows,

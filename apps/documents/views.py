@@ -69,9 +69,11 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             except ValueError:
                 return None
 
+        local_only = str(request.query_params.get('local_only') or '').lower() in ('1', 'true', 'yes')
         result = list_ledger_documents(
             start_date=parse_day(request.query_params.get('start_date')),
             end_date=parse_day(request.query_params.get('end_date')),
+            local_only=local_only,
         )
         return Response(result)
 
