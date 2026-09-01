@@ -1113,10 +1113,17 @@ class MyDashboardView(APIView):
             'course', 'course__branch', 'course__course_type'
         ).filter(subject.branch_q(), course__is_active=True)
 
+        # Whose numbers these are is the subject's question; whether they may
+        # be read without narrowing is the caller's. An unnarrowed screen is a
+        # manager reading the scope they already hold, so reading the role off
+        # the subject would make a link to a manager account — an account that
+        # teaches nothing, so there is no identity to narrow by — hand the whole
+        # business to whoever holds the link.
+        caller_role = getattr(getattr(request.user, 'profile', None), 'role', None)
         instructor = instructor_for_user(subject.user)
         if instructor is not None:
             lessons = lessons.filter(instructor_login_q(subject.user))
-        elif getattr(getattr(subject.user, 'profile', None), 'role', None) != UserProfile.ROLE_MANAGER:
+        elif caller_role != UserProfile.ROLE_MANAGER:
             return Response(self._empty_payload(request, subject.user))
 
         branch_id = request.query_params.get('branch_id')

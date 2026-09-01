@@ -74,10 +74,25 @@ class LessonViewSet(viewsets.ModelViewSet):
     
     - Managers see all lessons
     - Workers see only lessons they instruct (matched by email)
+    - Managers and partners can create, edit or delete a lesson
     - Only managers can cancel lessons
     """
     permission_classes = [IsAuthenticated]
-    
+
+    def get_permissions(self):
+        """
+        Reading a register and marking it is the instructor's job; the lesson
+        itself is the office's.
+
+        The queryset cannot draw that line on its own: it widens for every
+        action at once, so the link that lets one instructor cover another
+        would carry editing and deleting along with the register. Creating
+        never passes through the queryset at all.
+        """
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsManagerOrPartner()]
+        return [IsAuthenticated()]
+
     def get_queryset(self):
         """Filter lessons based on user role"""
         user = self.request.user

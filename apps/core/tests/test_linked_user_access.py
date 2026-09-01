@@ -495,3 +495,231 @@ class LinkedUserBranchScopeTests(APITestCase):
             course=course, instructor=instructor,
             day_of_week=3, start_time='16:00', end_time='17:00', is_recurring=True,
         )
+
+
+class LinkedSubjectWithoutAnInstructorRecordTests(APITestCase):
+    """
+    A link hands over a colleague's reach and never more than it.
+
+    The dashboard narrows what it counts by the subject's Instructor row. When
+    the linked account has no such row there is nothing to narrow by, and what
+    is left over decides the answer: an unnarrowed screen belongs to a manager
+    reading their own numbers, and a link must not be a way to buy one.
+    """
+
+    def setUp(self):
+        from apps.core.models import Branch, City
+        from apps.courses.models import CourseType
+        from apps.instructors.models import Instructor
+
+        self.alice = make_user('alice6@test', first_name='אליס')
+        self.bob = make_user('bob6@test', first_name='בוב')
+        # A manager account with no Instructor row — the shape the link abuses.
+        self.chief = make_user('chief6@test', role=UserProfile.ROLE_MANAGER)
+        self.partner = make_user('partner6@test', role=UserProfile.ROLE_PARTNER)
+
+        city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=city)
+        self.south = Branch.objects.create(name='סניף דרום', city=city)
+        self.ctype = CourseType.objects.create(name='סוג בדיקה')
+
+        bob_instructor = Instructor.objects.create(
+            first_name='בוב', last_name='מדריך', email='bob6@test', primary_branch=self.north
+        )
+        # Nobody holds a link to Dana. Her group is what "everything" looks like.
+        dana_instructor = Instructor.objects.create(
+            first_name='דנה', last_name='מדריכה', email='dana6@test', primary_branch=self.south
+        )
+        self.bob_lesson = self._lesson('חוג של בוב', self.north, bob_instructor, 1)
+        self.dana_lesson = self._lesson('חוג של דנה', self.south, dana_instructor, 2)
+        self.url = reverse('instructor-my-dashboard')
+
+    def _lesson(self, name, branch, instructor, day_of_week):
+        from apps.courses.models import Course, Lesson
+
+        course = Course.objects.create(
+            name=name, branch=branch, course_type=self.ctype,
+            price=Decimal('200.00'), capacity=12,
+        )
+        return Lesson.objects.create(
+            course=course, instructor=instructor,
+            day_of_week=day_of_week, start_time='16:00', end_time='17:00', is_recurring=True,
+        )
+
+    def auth(self, user):
+        token, _ = Token.objects.get_or_create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    def groups(self, **params):
+        res = self.client.get(self.url, params)
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        return {g['course_name'] for g in res.data['groups']}
+
+    def test_link_to_an_account_without_an_instructor_record_counts_nothing(self):
+        """The manager teaches nothing, so the link inherits nothing."""
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.chief)
+        self.auth(self.alice)
+        self.assertEqual(self.groups(as_user=str(self.chief.id)), set())
+
+    def test_the_same_caller_still_sees_a_linked_instructors_groups(self):
+        """Positive control: the empty answer above is the rule, not the fixture."""
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob)
+        self.auth(self.alice)
+        self.assertEqual(self.groups(as_user=str(self.bob.id)), {'חוג של בוב'})
+
+    def test_the_lesson_list_through_that_link_is_already_empty(self):
+        """The register path narrows by identity whatever the subject is."""
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.chief)
+        self.auth(self.alice)
+        res = self.client.get('/api/v1/scheduling/lessons/', {'as_user': str(self.chief.id)})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data), 0)
+
+    def test_the_managers_own_dashboard_still_counts_everything(self):
+        self.auth(self.chief)
+        self.assertEqual(self.groups(), {'חוג של בוב', 'חוג של דנה'})
+
+    def test_a_manager_switching_accounts_is_unchanged(self):
+        self.auth(self.chief)
+        self.assertEqual(self.groups(as_user=str(self.bob.id)), {'חוג של בוב'})
+
+    def test_a_partners_own_dashboard_is_unchanged(self):
+        """A partner has no register screen here, and gains none from this."""
+        self.partner.profile.assigned_branches.add(self.north)
+        self.auth(self.partner)
+        self.assertEqual(self.groups(), set())
+
+
+class LinkedSessionReadsAndMarksOnlyTests(APITestCase):
+    """
+    Covering a colleague is opening a register, marking it, and adding a
+    walk-in. Editing the lesson itself belongs to the office, and a link is
+    not a way to reach it.
+    """
+
+    def setUp(self):
+        from apps.core.models import Branch, City
+        from apps.courses.models import CourseType
+        from apps.instructors.models import Instructor
+
+        self.alice = make_user('alice7@test', first_name='אליס')
+        self.bob = make_user('bob7@test', first_name='בוב')
+        self.manager = make_user('manager7@test', role=UserProfile.ROLE_MANAGER)
+        self.partner = make_user('partner7@test', role=UserProfile.ROLE_PARTNER)
+
+        city = City.objects.create(name='עיר בדיקה')
+        self.branch = Branch.objects.create(name='סניף בדיקה', city=city)
+        self.ctype = CourseType.objects.create(name='סוג בדיקה')
+        self.partner.profile.assigned_branches.add(self.branch)
+
+        alice_instructor = Instructor.objects.create(
+            first_name='אליס', last_name='מדריכה', email='alice7@test', primary_branch=self.branch
+        )
+        bob_instructor = Instructor.objects.create(
+            first_name='בוב', last_name='מדריך', email='bob7@test', primary_branch=self.branch
+        )
+        self.alice_lesson = self._lesson('חוג של אליס', alice_instructor, 3)
+        self.bob_lesson = self._lesson('חוג של בוב', bob_instructor, 1)
+        LinkedUserAccess.objects.create(owner=self.alice, linked=self.bob)
+
+    def _lesson(self, name, instructor, day_of_week):
+        from apps.courses.models import Course, Lesson
+
+        course = Course.objects.create(
+            name=name, branch=self.branch, course_type=self.ctype,
+            price=Decimal('200.00'), capacity=12,
+        )
+        return Lesson.objects.create(
+            course=course, instructor=instructor,
+            day_of_week=day_of_week, start_time='16:00', end_time='17:00', is_recurring=True,
+        )
+
+    def auth(self, user):
+        token, _ = Token.objects.get_or_create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
+
+    def detail_url(self, lesson, as_user=None):
+        suffix = f'?as_user={as_user.id}' if as_user else ''
+        return f'/api/v1/scheduling/lessons/{lesson.id}/{suffix}'
+
+    def test_linked_instructor_cannot_edit_a_colleagues_lesson(self):
+        self.auth(self.alice)
+        res = self.client.patch(
+            self.detail_url(self.bob_lesson, as_user=self.bob),
+            {'notes': 'נערך על ידי מי שאינו מלמד'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.bob_lesson.refresh_from_db()
+        self.assertNotEqual(self.bob_lesson.notes, 'נערך על ידי מי שאינו מלמד')
+
+    def test_linked_instructor_cannot_delete_a_colleagues_lesson(self):
+        from apps.courses.models import Lesson
+
+        self.auth(self.alice)
+        res = self.client.delete(self.detail_url(self.bob_lesson, as_user=self.bob))
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Lesson.objects.filter(pk=self.bob_lesson.pk).exists())
+
+    def test_linked_instructor_can_still_read_mark_and_add_a_walkin(self):
+        """Positive control: the refusals above are about writing, not the link."""
+        self.auth(self.alice)
+
+        res = self.client.get(
+            f'/api/v1/scheduling/lessons/{self.bob_lesson.id}/',
+            {'as_user': str(self.bob.id), 'date': '2026-09-01'},
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        res = self.client.post(
+            f'/api/v1/scheduling/lessons/{self.bob_lesson.id}/mark_attendance/'
+            f'?as_user={self.bob.id}',
+            {'date': '2026-09-01', 'attendance': []},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        res = self.client.post(
+            f'/api/v1/scheduling/lessons/{self.bob_lesson.id}/add-walkin/'
+            f'?as_user={self.bob.id}',
+            {'date': '2026-09-01', 'first_name': 'נועם', 'last_name': 'כהן', 'phone': '0501234567'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+    def test_a_worker_cannot_edit_or_delete_their_own_lesson(self):
+        from apps.courses.models import Lesson
+
+        self.auth(self.alice)
+        res = self.client.patch(
+            self.detail_url(self.alice_lesson), {'notes': 'שינוי'}, format='json'
+        )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+        res = self.client.delete(self.detail_url(self.alice_lesson))
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Lesson.objects.filter(pk=self.alice_lesson.pk).exists())
+
+    def test_a_manager_still_edits_and_deletes(self):
+        from apps.courses.models import Lesson
+
+        self.auth(self.manager)
+        res = self.client.patch(
+            self.detail_url(self.bob_lesson), {'notes': 'עודכן במשרד'}, format='json'
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.bob_lesson.refresh_from_db()
+        self.assertEqual(self.bob_lesson.notes, 'עודכן במשרד')
+
+        res = self.client.delete(self.detail_url(self.bob_lesson))
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Lesson.objects.filter(pk=self.bob_lesson.pk).exists())
+
+    def test_a_partner_still_edits_a_lesson_in_an_assigned_branch(self):
+        self.auth(self.partner)
+        res = self.client.patch(
+            self.detail_url(self.bob_lesson), {'notes': 'עודכן על ידי שותף'}, format='json'
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.bob_lesson.refresh_from_db()
+        self.assertEqual(self.bob_lesson.notes, 'עודכן על ידי שותף')
