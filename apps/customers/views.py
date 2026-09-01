@@ -911,7 +911,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ).prefetch_related('discount_snapshots')
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
-    pagination_class = PaymentLedgerPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['child__first_name', 'child__last_name', 'family__name']
     ordering_fields = ['created_at', 'payment_date', 'final_amount']
@@ -984,10 +983,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
         ).aggregate(total=Sum('final_amount'))['total'] or 0
         pending_count = queryset.filter(status__in=('pending', 'processing')).count()
 
-        page = self.paginate_queryset(queryset)
+        paginator = PaymentLedgerPagination()
+        page = paginator.paginate_queryset(queryset, request)
         serializer = PaymentLedgerSerializer(page if page is not None else queryset, many=True)
         if page is not None:
-            response = self.get_paginated_response(serializer.data)
+            response = paginator.get_paginated_response(serializer.data)
             response.data['month_total'] = float(month_total)
             response.data['pending_count'] = pending_count
             return response
