@@ -956,10 +956,12 @@ class DashboardViewSet(viewsets.ViewSet):
                 )
         
         # KPIs - Only total_students and total_profit (removed active_branches and avg_room_utilization)
-        # For students: Count only children whose status is NOT ghost, non_active, or sign_in
-        # Use direct query on Child model for accurate filtering
+        # A walk-in was never a registration, and a child who left is not a
+        # current student. 'non_active' and 'sign_in' are not statuses this
+        # model has ever defined, so neither exclusion matched anything and
+        # everyone who had left was being counted.
         children_query = Child.objects.exclude(
-            status__in=['ghost', 'non_active', 'sign_in']
+            status__in=['ghost', 'inactive']
         )
         if scoped:
             children_query = children_query.filter(family__branch_id__in=scoped_branch_ids)
@@ -995,7 +997,9 @@ class DashboardViewSet(viewsets.ViewSet):
             logger.debug("Total Profit aggregation result: %s", total_profit_agg)
             logger.debug("Total Profit (sum of snapshots.profit): %s", total_profit)
         
-        excluded_child_statuses = ['ghost', 'non_active', 'sign_in']
+        # Same two names that never matched anything, so the per-branch counts
+        # carried departed children too.
+        excluded_child_statuses = ['ghost', 'inactive']
 
         branch_rows = snapshots.values(
             'branch_id',
