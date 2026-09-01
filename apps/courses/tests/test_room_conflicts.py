@@ -39,6 +39,17 @@ class RoomConflictWarningTest(BaseAPITestCase):
         self.our_lesson.refresh_from_db()
         self.assertEqual(self.our_lesson.room_id, self.room.id)
 
+    def test_lesson_update_saves_when_instructor_is_busy(self):
+        self.our_lesson.instructor = self.other_lesson.instructor
+        self.our_lesson.save(update_fields=['instructor'])
+        serializer = LessonSerializer(
+            self.our_lesson,
+            data={'price': None, 'instructor': str(self.other_lesson.instructor_id)},
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+
     def test_room_conflicts_lists_the_other_course(self):
         res = self.client.get(
             '/api/v1/courses/lessons/room-conflicts/',
@@ -54,3 +65,18 @@ class RoomConflictWarningTest(BaseAPITestCase):
         names = [row['name'] for row in res.data['conflicts']]
         self.assertIn('ו-ז-ח', names)
         self.assertNotIn('מסלול להקה', names)
+
+    def test_room_conflicts_lists_instructor_overlap(self):
+        res = self.client.get(
+            '/api/v1/courses/lessons/room-conflicts/',
+            {
+                'instructor': str(self.other_lesson.instructor_id),
+                'day_of_week': 4,
+                'start_time': '17:00',
+                'end_time': '18:00',
+                'exclude_course': str(self.ours.id),
+            },
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        kinds = {row['kind']: row['name'] for row in res.data['conflicts']}
+        self.assertEqual(kinds.get('instructor'), 'ו-ז-ח')

@@ -371,9 +371,10 @@ class LessonViewSet(viewsets.ModelViewSet):
         """Occupied studio slots for a CRM warning — does not block saving."""
         from datetime import datetime
 
-        from apps.scheduling.studio_conflict import list_studio_occupants
+        from apps.scheduling.studio_conflict import list_instructor_occupants, list_studio_occupants
 
         room_id = (request.query_params.get('room') or '').strip()
+        instructor_id = (request.query_params.get('instructor') or '').strip()
         day_raw = request.query_params.get('day_of_week')
         start_raw = (request.query_params.get('start_time') or '').strip()
         end_raw = (request.query_params.get('end_time') or '').strip()
@@ -398,19 +399,29 @@ class LessonViewSet(viewsets.ModelViewSet):
 
         start_time = parse_clock(start_raw)
         end_time = parse_clock(end_raw)
-        if not room_id or start_time is None or end_time is None:
+        if start_time is None or end_time is None or (not room_id and not instructor_id):
             return Response({'conflicts': []})
 
-        return Response({
-            'conflicts': list_studio_occupants(
+        conflicts = []
+        if room_id:
+            conflicts.extend(list_studio_occupants(
                 room_id=room_id,
                 day_of_week=day_of_week,
                 start_time=start_time,
                 end_time=end_time,
                 exclude_lesson_ids=exclude_ids or None,
                 exclude_course_id=exclude_course,
-            )
-        })
+            ))
+        if instructor_id:
+            conflicts.extend(list_instructor_occupants(
+                instructor_id=instructor_id,
+                day_of_week=day_of_week,
+                start_time=start_time,
+                end_time=end_time,
+                exclude_lesson_ids=exclude_ids or None,
+                exclude_course_id=exclude_course,
+            ))
+        return Response({'conflicts': conflicts})
 
     def perform_create(self, serializer):
         instance = serializer.save()

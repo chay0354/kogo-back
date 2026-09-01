@@ -279,6 +279,46 @@ def list_studio_occupants(
     return occupants
 
 
+def list_instructor_occupants(
+    *,
+    instructor_id,
+    day_of_week,
+    start_time,
+    end_time,
+    exclude_lesson_ids=None,
+    exclude_course_id=None,
+):
+    """Lessons already assigned to this instructor in the same slot (warning only)."""
+    occupants: list[dict] = []
+    if not instructor_id or day_of_week is None or not start_time or not end_time:
+        return occupants
+
+    lessons = (
+        Lesson.objects.filter(
+            day_of_week=day_of_week,
+            status='scheduled',
+            instructor_id=instructor_id,
+        )
+        .exclude(Q(end_time__lte=start_time) | Q(start_time__gte=end_time))
+        .select_related('course')
+    )
+    if exclude_lesson_ids:
+        lessons = lessons.exclude(pk__in=list(exclude_lesson_ids))
+    if exclude_course_id:
+        lessons = lessons.exclude(course_id=exclude_course_id)
+
+    for lesson in lessons:
+        occupants.append({
+            'kind': 'instructor',
+            'name': lesson.course.name,
+            'day_of_week': lesson.day_of_week,
+            'day_name': DAY_NAMES_HE[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '',
+            'start_time': lesson.start_time.strftime('%H:%M'),
+            'end_time': lesson.end_time.strftime('%H:%M'),
+        })
+    return occupants
+
+
 def timed_event_conflicts_lesson(
     branch,
     room,

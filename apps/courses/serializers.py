@@ -467,49 +467,6 @@ class LessonSerializer(serializers.ModelSerializer):
     def get_room_capacity(self, obj):
         """Get room capacity for this lesson"""
         return obj.room.capacity if obj.room else None
-    
-    def validate(self, data):
-        """Studio overlap is a warning in the CRM; instructor overlap still blocks."""
-        course = data.get('course') or (self.instance.course if self.instance else None)
-        if 'instructor' in data:
-            instructor = data.get('instructor')
-        elif self.instance:
-            instructor = self.instance.instructor
-        else:
-            instructor = course.instructor if course else None
-        day_of_week = data.get('day_of_week', self.instance.day_of_week if self.instance else None)
-        start_time = data.get('start_time', self.instance.start_time if self.instance else None)
-        end_time = data.get('end_time', self.instance.end_time if self.instance else None)
-
-        if not all([day_of_week is not None, start_time, end_time]):
-            return data
-
-        # Base query for conflicting lessons (same day and overlapping time)
-        base_conflict_query = Q(
-            day_of_week=day_of_week,
-            status='scheduled',
-        ) & ~(Q(end_time__lte=start_time) | Q(start_time__gte=end_time))
-
-        # Exclude current instance if updating
-        exclude_query = Q(pk=self.instance.pk) if self.instance else Q(pk=None)
-
-        # Studio overlap is a CRM warning only — managers can still save
-        # price/details (or keep a shared studio) when another course is booked.
-
-        # Check for instructor conflicts (if instructor is specified)
-        if instructor:
-            instructor_conflicts = Lesson.objects.filter(
-                base_conflict_query,
-                instructor=instructor,
-            ).exclude(exclude_query)
-
-            if instructor_conflicts.exists():
-                conflict = instructor_conflicts.first()
-                raise serializers.ValidationError({
-                    'instructor': f'המדריך תפוס ביום זה בין השעות {conflict.start_time.strftime("%H:%M")} - {conflict.end_time.strftime("%H:%M")}'
-                })
-
-        return data
 
 
 class LessonBundleLessonSerializer(serializers.ModelSerializer):
@@ -604,12 +561,7 @@ class LessonBundleSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'lesson_instructors': 'המדריך שנבחר אינו קיים',
                 })
-            lesson = next((l for l in selected if str(l.id) == str(lesson_id)), None)
-            if lesson is None:
-                continue
-            conflict_message = self._instructor_busy_message(lesson, instructor)
-            if conflict_message:
-                raise serializers.ValidationError({'lesson_instructors': conflict_message})
+            # Occupied instructors are allowed; the CRM shows a warning instead.
 
     def _validate_room_mapping(self, mapping, selected, course):
         if not mapping:

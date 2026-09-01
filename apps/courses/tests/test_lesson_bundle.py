@@ -230,7 +230,7 @@ class LessonInstructorOverrideTest(TestCase):
         detail = {str(row['id']): row for row in LessonBundleSerializer(bundle).data['lessons_detail']}
         self.assertEqual(detail[str(self.lesson_b.id)]['instructor_name'], self.instructor_b.full_name)
 
-    def test_bundle_rejects_busy_instructor(self):
+    def test_bundle_allows_busy_instructor(self):
         other_course = TestDataFactory.create_course(name='קבוצה אחרת')
         TestDataFactory.create_lesson(
             course=other_course,
@@ -248,8 +248,10 @@ class LessonInstructorOverrideTest(TestCase):
                 str(self.lesson_b.id): str(self.instructor_b.id),
             },
         })
-        self.assertFalse(serializer.is_valid())
-        self.assertIn('lesson_instructors', serializer.errors)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        self.lesson_b.refresh_from_db()
+        self.assertEqual(self.lesson_b.instructor_id, self.instructor_b.id)
 
     def test_bundle_save_assigns_per_lesson_rooms(self):
         room_b = TestDataFactory.create_room(branch=self.course.branch, name='סטודיו ב')
