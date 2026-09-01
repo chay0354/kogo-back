@@ -162,6 +162,16 @@ def is_mock_credential(value: str) -> bool:
     return (value or '').strip().lower() in MOCK_CREDENTIAL_VALUES
 
 
+def _credit_blocked_until_cancel(error: Optional[str]) -> bool:
+    """Tranzila rejects credit on unsettled (same-day) charges with this message."""
+    blob = str(error or '').lower()
+    return (
+        'operation id 2' in blob
+        or 'illegal refund' in blob
+        or 'cannot credit' in blob
+    )
+
+
 def extract_card_token(*sources: Optional[Dict]) -> str:
     """First non-empty saved-card token found across Tranzila response dicts."""
     for source in sources:
@@ -923,72 +933,144 @@ class TranzilaService:
         amount: Optional[Decimal] = None,
         currency: str = 'ILS',
         reason: str = '',
-        items: list = None
+        items: list = None,
+        prefer_cancel: bool = False,
     ) -> Dict:
-        """Refund a transaction using REST API v1."""
+        """Refund via REST. Same-day charges must be cancelled, not credited."""
         if not transaction_id:
             logger.error("Cannot refund: No transaction ID provided")
             return self._build_error_response('No transaction ID available')
-        
+
         if not authorization_number:
             logger.error("Cannot refund: No authorization number provided")
             return self._build_error_response('No authorization number available')
-        
+
         if not card_expire_month or not card_expire_year:
             logger.error("Cannot refund: Missing card expiration date")
             return self._build_error_response('Card expiration date required')
-        
+
+        try:
+            reference_txn_id = int(str(transaction_id).strip())
+        except (TypeError, ValueError):
+            logger.error("Cannot refund: transaction_id is not a Tranzila index: %s", transaction_id)
+            return self._build_error_response('מזהה עסקת טרנזילה אינו תקין')
+
+        expire_year = self._normalize_card_year(card_expire_year)
+        expire_month = int(card_expire_month)
         if not items:
             items = [{
                 'name': reason or 'Refund',
                 'type': 'I',
                 'unit_price': float(amount) if amount else 0.0,
-                'units_number': 1
+                'units_number': 1,
+                'currency_code': currency or 'ILS',
             }]
-        
+
+        if prefer_cancel:
+            cancel_result = self._refund_via_txn_type(
+                txn_type='cancel',
+                reference_txn_id=reference_txn_id,
+                authorization_number=authorization_number,
+                expire_month=expire_month,
+                expire_year=expire_year,
+                token=token,
+                items=items,
+                amount=amount,
+                currency=currency,
+                reason=reason,
+            )
+            if cancel_result.get('success'):
+                return cancel_result
+
+        credit_result = self._refund_via_txn_type(
+            txn_type='credit',
+            reference_txn_id=reference_txn_id,
+            authorization_number=authorization_number,
+            expire_month=expire_month,
+            expire_year=expire_year,
+            token=token,
+            items=items,
+            amount=amount,
+            currency=currency,
+            reason=reason,
+        )
+        if credit_result.get('success'):
+            return credit_result
+
+        if not prefer_cancel and _credit_blocked_until_cancel(credit_result.get('error')):
+            return self._refund_via_txn_type(
+                txn_type='cancel',
+                reference_txn_id=reference_txn_id,
+                authorization_number=authorization_number,
+                expire_month=expire_month,
+                expire_year=expire_year,
+                token=token,
+                items=items,
+                amount=amount,
+                currency=currency,
+                reason=reason,
+            )
+        return credit_result
+
+    def _refund_via_txn_type(
+        self,
+        *,
+        txn_type: str,
+        reference_txn_id: int,
+        authorization_number: str,
+        expire_month: int,
+        expire_year: int,
+        token: str,
+        items: list,
+        amount: Optional[Decimal],
+        currency: str,
+        reason: str,
+    ) -> Dict:
         payload = {
             'terminal_name': self.token_terminal,
-            'txn_type': 'credit',
-            'reference_txn_id': int(transaction_id),
+            'txn_type': txn_type,
+            'txn_currency_code': currency or 'ILS',
+            'reference_txn_id': reference_txn_id,
             'authorization_number': authorization_number,
-            'expire_month': card_expire_month,
-            'expire_year': card_expire_year,
+            'expire_month': expire_month,
+            'expire_year': expire_year,
             'card_number': token,
             'items': items,
-            'remarks': reason if reason else 'Refund'
+            'remarks': reason or 'Refund',
         }
-        
-        self._log_api_call("REFUND", txn_id=transaction_id, auth=authorization_number, amount=amount)
-        
+        self._log_api_call(
+            "REFUND",
+            txn_type=txn_type,
+            txn_id=reference_txn_id,
+            auth=authorization_number,
+            amount=amount,
+        )
         try:
             response = self._make_api_request(
                 params=payload,
-                endpoint='/v1/transaction/credit_card/create'
+                endpoint='/v1/transaction/credit_card/create',
             )
-            
-            error_code = response.get('error_code')
-            
-            if error_code == 0:
-                transaction_result = response.get('transaction_result', {})
-                logger.info(f"Refund successful: txn_id={transaction_id}")
+            if is_tranzila_rest_ok(response.get('error_code')):
+                transaction_result = response.get('transaction_result') or {}
+                logger.info("Refund %s succeeded for txn_id=%s", txn_type, reference_txn_id)
                 return self._build_success_response(
                     transaction_id=str(transaction_result.get('transaction_id', '')),
-                    confirmation_code=transaction_result.get('ConfirmationCode', transaction_result.get('auth_number', '')),
+                    confirmation_code=transaction_result.get(
+                        'ConfirmationCode', transaction_result.get('auth_number', '')
+                    ),
                     response_code=transaction_result.get('processor_response_code', '000'),
                     message='Refund processed successfully',
-                    raw_response=response
+                    raw_response=response,
                 )
-            else:
-                error_msg = response.get('message', 'Unknown error')
-                logger.error(f"Refund failed: {error_code} - {error_msg}")
-                return self._build_error_response(
-                    error_msg,
-                    str(error_code),
-                    f'Refund failed: {error_msg}'
-                )
-                
+            error_msg = response.get('message', 'Unknown error')
+            logger.error("Refund %s failed: %s - %s", txn_type, response.get('error_code'), error_msg)
+            return self._build_error_response(
+                error_msg,
+                str(response.get('error_code')),
+                f'Refund failed: {error_msg}',
+            )
         except Exception as e:
-            logger.error(f"Exception during refund: {str(e)}", exc_info=True)
+            logger.error("Exception during refund %s: %s", txn_type, e, exc_info=True)
             return self._build_error_response(str(e), message='Refund failed - exception')
     
     def cancel_recurring_payment(

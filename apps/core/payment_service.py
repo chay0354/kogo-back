@@ -2075,7 +2075,16 @@ class PaymentService:
             reason=reason
         )
         
-        # Call Tranzila refund
+        charged_at = payment.payment_date or payment.created_at
+        same_day = False
+        if charged_at:
+            if timezone.is_naive(charged_at):
+                charged_at = timezone.make_aware(charged_at)
+            same_day = (
+                charged_at.astimezone(JERUSALEM_TZ).date()
+                == timezone.now().astimezone(JERUSALEM_TZ).date()
+            )
+
         result = self.tranzila_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
@@ -2083,7 +2092,8 @@ class PaymentService:
             authorization_number=authorization_number,
             card_expire_month=card_expire_month,
             card_expire_year=card_expire_year,
-            token=token
+            token=token,
+            prefer_cancel=same_day,
         )
         
         if result['success']:
@@ -2249,7 +2259,12 @@ class PaymentService:
             reason=reason
         )
         
-        # Call Tranzila refund
+        issued = invoice.issue_date
+        same_day = False
+        if issued:
+            issued_date = issued.date() if hasattr(issued, 'date') else issued
+            same_day = issued_date == timezone.now().astimezone(JERUSALEM_TZ).date()
+
         result = self.tranzila_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
@@ -2258,7 +2273,8 @@ class PaymentService:
             card_expire_month=card_expire_month,
             card_expire_year=card_expire_year,
             token=token,
-            items=items
+            items=items,
+            prefer_cancel=same_day,
         )
         
         if result['success']:

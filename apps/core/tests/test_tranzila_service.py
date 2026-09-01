@@ -609,6 +609,58 @@ class TranzilaRestChargeParseTest(TestCase):
         self.assertEqual(payload['items'][0]['name'], 'קפוארה')
 
     @patch.object(TranzilaService, '_make_api_request')
+    def test_same_day_refund_sends_cancel_first(self, mock_api):
+        mock_api.return_value = {
+            'error_code': 0,
+            'message': 'ok',
+            'transaction_result': {
+                'transaction_id': 88,
+                'processor_response_code': '000',
+                'auth_number': 'C1',
+            },
+        }
+        result = self.service.refund_transaction(
+            transaction_id='41044',
+            authorization_number='AUTH1',
+            card_expire_month=12,
+            card_expire_year=30,
+            token='tok_1',
+            amount=Decimal('235.00'),
+            prefer_cancel=True,
+        )
+        self.assertTrue(result['success'])
+        payload = mock_api.call_args.kwargs['params']
+        self.assertEqual(payload['txn_type'], 'cancel')
+        self.assertEqual(payload['reference_txn_id'], 41044)
+        self.assertEqual(payload['expire_year'], 2030)
+        self.assertEqual(payload['txn_currency_code'], 'ILS')
+
+    @patch.object(TranzilaService, '_make_api_request')
+    def test_credit_illegal_operation_id_2_retries_cancel(self, mock_api):
+        mock_api.side_effect = [
+            {'error_code': 23001, 'message': 'Illegal refund operation id 2.'},
+            {
+                'error_code': 0,
+                'transaction_result': {
+                    'transaction_id': 89,
+                    'processor_response_code': '000',
+                },
+            },
+        ]
+        result = self.service.refund_transaction(
+            transaction_id='41044',
+            authorization_number='AUTH1',
+            card_expire_month=6,
+            card_expire_year=2031,
+            token='tok_b',
+            amount=Decimal('235.00'),
+        )
+        self.assertTrue(result['success'])
+        self.assertEqual(mock_api.call_count, 2)
+        self.assertEqual(mock_api.call_args_list[0].kwargs['params']['txn_type'], 'credit')
+        self.assertEqual(mock_api.call_args_list[1].kwargs['params']['txn_type'], 'cancel')
+
+    @patch.object(TranzilaService, '_make_api_request')
     def test_sync_updates_active_sto_and_inactivates_extras(self, mock_request):
         mock_request.side_effect = [
             {'error_code': 0, 'stos': [
