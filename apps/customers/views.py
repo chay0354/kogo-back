@@ -7,7 +7,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError as DRFValidationError
-from django.db.models import Q, Prefetch, Count, Value, CharField
+from django.db.models import Q, Prefetch, Count, Sum, Value, CharField
 from django.db.models.functions import Concat
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -893,7 +893,7 @@ class DiscountViewSet(viewsets.ModelViewSet):
 class PaymentLedgerPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
-    max_page_size = 200
+    max_page_size = 20
 
 
 class PaymentViewSet(viewsets.ModelViewSet):
@@ -953,11 +953,50 @@ class PaymentViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 created_at__date__gte=timezone.localdate() - timedelta(days=90)
             )
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+
+        branch_id = request.query_params.get('branch')
+        if branch_id:
+            queryset = queryset.filter(branch_id=branch_id)
+
+        kind = request.query_params.get('kind')
+        if kind == 'standing_order':
+            queryset = queryset.filter(
+                payment_type='recurring_subscription',
+                registration_fee=0,
+                trial_lesson_date__isnull=True,
+            )
+        elif kind == 'registration':
+            queryset = queryset.filter(registration_fee__gt=0)
+        elif kind == 'trial':
+            queryset = queryset.filter(trial_lesson_date__isnull=False)
+        elif kind == 'one_time':
+            queryset = queryset.filter(payment_type='one_time')
+
+        today = timezone.localdate()
+        month_total = queryset.filter(
+            status='completed',
+            created_at__year=today.year,
+            created_at__month=today.month,
+        ).aggregate(total=Sum('final_amount'))['total'] or 0
+        pending_count = queryset.filter(status__in=('pending', 'processing')).count()
+
         page = self.paginate_queryset(queryset)
         serializer = PaymentLedgerSerializer(page if page is not None else queryset, many=True)
         if page is not None:
-            return self.get_paginated_response(serializer.data)
-        return Response(serializer.data)
+            response = self.get_paginated_response(serializer.data)
+            response.data['month_total'] = float(month_total)
+            response.data['pending_count'] = pending_count
+            return response
+        return Response({
+            'results': serializer.data,
+            'count': len(serializer.data),
+            'month_total': float(month_total),
+            'pending_count': pending_count,
+        })
 
     @action(detail=False, methods=['get'], url_path='tranzila-transactions')
     def tranzila_transactions(self, request):
