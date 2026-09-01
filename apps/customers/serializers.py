@@ -715,6 +715,37 @@ class RecurringPaymentUpdateSerializer(serializers.Serializer):
     recalculate_discounts = serializers.BooleanField(default=True)
 
 
+class RecurringPaymentEditSerializer(serializers.ModelSerializer):
+    """Office edit of a standing order: monthly amount and billing dates."""
+
+    class Meta:
+        model = RecurringPayment
+        fields = ['amount', 'next_billing_date', 'end_date']
+
+    def validate_amount(self, value):
+        if value is None or value <= 0:
+            raise serializers.ValidationError('הסכום חייב להיות גדול מ-0')
+        return value
+
+    def validate(self, attrs):
+        next_billing = attrs.get(
+            'next_billing_date',
+            getattr(self.instance, 'next_billing_date', None),
+        )
+        end_date = attrs.get('end_date', getattr(self.instance, 'end_date', None))
+        if next_billing and end_date and end_date < next_billing:
+            raise serializers.ValidationError({
+                'end_date': 'תאריך הסיום לא יכול להיות לפני תאריך החיוב הבא',
+            })
+        return attrs
+
+    def update(self, instance, validated_data):
+        if 'amount' in validated_data:
+            instance.pending_amount = None
+            instance.pending_amount_effective_date = None
+        return super().update(instance, validated_data)
+
+
 class RecurringPaymentScheduleAmountSerializer(serializers.Serializer):
     """Schedule a new monthly amount effective from the next billing cycle."""
     amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))

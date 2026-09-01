@@ -23,6 +23,7 @@ from apps.customers.serializers import (
     DiscountSerializer, EarlySignupDiscountSerializer, SecondChildDiscountSerializer,
     AdditionalLessonDiscountSerializer,
     PaymentSerializer, PaymentLedgerSerializer, RecurringPaymentSerializer,
+    RecurringPaymentEditSerializer,
     PaymentInitiationRequestSerializer, PaymentInitiationResponseSerializer,
     WebhookCallbackSerializer,     RecurringPaymentUpdateSerializer, RecurringPaymentScheduleAmountSerializer,
     RecurringPaymentCancelSerializer, BusinessCustomerSerializer
@@ -1252,6 +1253,19 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
     search_fields = ['child__first_name', 'child__last_name']
     ordering_fields = ['created_at', 'next_billing_date', 'amount']
     ordering = ['-created_at']
+
+    def get_serializer_class(self):
+        if self.action in ('update', 'partial_update'):
+            return RecurringPaymentEditSerializer
+        return RecurringPaymentSerializer
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(RecurringPaymentSerializer(serializer.instance).data)
     
     def get_queryset(self):
         """Filter recurring payments by status and child"""
