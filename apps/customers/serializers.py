@@ -554,7 +554,8 @@ class PaymentSerializer(serializers.ModelSerializer):
             'id', 'child', 'child_name', 'parent', 'family', 'family_name',
             'branch', 'branch_name', 'lesson', 'lesson_name', 'lesson_course_display_id',
             'payment_type', 'status', 'base_amount', 'discount_amount',
-            'final_amount', 'description', 'payment_date', 'failure_reason',
+            'final_amount', 'registration_fee', 'trial_lesson_date',
+            'description', 'payment_date', 'failure_reason',
             'failure_code', 'discount_snapshots', 'tranzila_transaction',
             'created_at', 'updated_at'
         ]
