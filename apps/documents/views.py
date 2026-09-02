@@ -6,8 +6,9 @@ from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
 from django.core.mail import send_mail
 from django.conf import settings
+from django.http import HttpResponse
 
-from apps.core.permissions import IsManagerOrPartner
+from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.documents.models import FormalDocument
 from apps.documents.serializers import (
     FormalDocumentSerializer,
@@ -76,6 +77,45 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             local_only=local_only,
         )
         return Response(result)
+
+    @action(detail=False, methods=['get'], url_path='period-report',
+            permission_classes=[IsAuthenticated, IsManager])
+    def period_report(self, request):
+        """
+        Every document in a period, grouped, totalled, as a PDF.
+
+        GET /api/v1/documents/documents/period-report/?month=YYYY-MM&group_by=branch|business
+        (or start_date/end_date for a custom range; document_type narrows it)
+
+        Read-only: it selects rows that already exist and renders them. It
+        creates, changes and charges nothing. Managers only — this is the whole
+        business's revenue on one page, and scoped_documents() applies the
+        caller's scope before anything is counted.
+        """
+        from apps.documents.period_report import (
+            GROUP_BY_BRANCH, GROUP_BY_CHOICES, ReportInputError, build_report, parse_period,
+        )
+        from apps.documents.period_report_pdf import generate_period_report_pdf
+
+        group_by = (request.query_params.get('group_by') or GROUP_BY_BRANCH).strip()
+        if group_by not in GROUP_BY_CHOICES:
+            return Response({'error': 'קיבוץ לא נתמך'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            start, end, label = parse_period(request.query_params)
+            report = build_report(
+                request.user, start, end, label,
+                group_by=group_by,
+                document_type=(request.query_params.get('document_type') or '').strip(),
+            )
+        except ReportInputError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        pdf_bytes = generate_period_report_pdf(report)
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = (
+            f'attachment; filename="invoices-{start.isoformat()}-{end.isoformat()}-{group_by}.pdf"'
+        )
+        return response
 
     @action(detail=False, methods=['post'], url_path='create-document')
     def create_document(self, request):
