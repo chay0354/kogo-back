@@ -180,4 +180,26 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             summary['failed'] += 1
             summary['errors'].append(f'{recurring.id}: {exc}')
 
+    try:
+        from apps.documents.check_plans import issue_due_check_invoices
+        from apps.documents.models import CheckItem
+
+        if dry_run:
+            due_checks = CheckItem.objects.filter(
+                status='pending',
+                due_date__lte=today,
+                plan__status='active',
+            ).count()
+            summary['check_invoices'] = {
+                'checked': due_checks,
+                'issued': 0,
+                'errors': [],
+                'dry_run': True,
+            }
+        else:
+            summary['check_invoices'] = issue_due_check_invoices(today=today, limit=batch)
+    except Exception as exc:
+        logger.exception('Check invoice issuance failed')
+        summary['check_invoices'] = {'checked': 0, 'issued': 0, 'errors': [str(exc)]}
+
     return summary
