@@ -361,6 +361,7 @@ class DashboardViewSet(viewsets.ViewSet):
         - search_query: Search by name
         - course_id: Filter by course
         - branch_id: Filter by branch
+        - city_id: Filter by city
         - student_status: Filter by status
         - date_from: Start date (YYYY-MM-DD)
         - date_to: End date (YYYY-MM-DD)
@@ -374,6 +375,7 @@ class DashboardViewSet(viewsets.ViewSet):
         search_query = request.query_params.get('search_query', '')
         course_id = request.query_params.get('course_id', 'all')
         branch_id = request.query_params.get('branch_id', 'all')
+        city_id = request.query_params.get('city_id', 'all')
         student_status = request.query_params.get('student_status', 'all')
         quit_chart_breakdown = request.query_params.get('quit_chart_breakdown', 'course_type')
         if quit_chart_breakdown not in ('course_type', 'course'):
@@ -416,7 +418,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
         # KPIs: branch/course filters use currently active enrollments only
         children = base_children
-        if course_id != 'all' or branch_id != 'all':
+        if course_id != 'all' or branch_id != 'all' or city_id != 'all':
             filtered_enrollments = LessonEnrollment.objects.filter(status='active')
             if scoped:
                 filtered_enrollments = filtered_enrollments.filter(
@@ -426,12 +428,16 @@ class DashboardViewSet(viewsets.ViewSet):
                 filtered_enrollments = filtered_enrollments.filter(lesson__course_id=course_id)
             if branch_id != 'all':
                 filtered_enrollments = filtered_enrollments.filter(lesson__course__branch_id=branch_id)
+            if city_id != 'all':
+                filtered_enrollments = filtered_enrollments.filter(
+                    lesson__course__branch__city_id=city_id
+                )
             filtered_child_ids = filtered_enrollments.values_list('child_id', flat=True).distinct()
             children = children.filter(id__in=filtered_child_ids)
 
         # Churn scope: any enrollment in branch/course (includes kids who already quit)
         quit_scope_child_ids = None
-        if course_id != 'all' or branch_id != 'all':
+        if course_id != 'all' or branch_id != 'all' or city_id != 'all':
             quit_enrollments = LessonEnrollment.objects.all()
             if scoped:
                 quit_enrollments = quit_enrollments.filter(
@@ -441,6 +447,10 @@ class DashboardViewSet(viewsets.ViewSet):
                 quit_enrollments = quit_enrollments.filter(lesson__course_id=course_id)
             if branch_id != 'all':
                 quit_enrollments = quit_enrollments.filter(lesson__course__branch_id=branch_id)
+            if city_id != 'all':
+                quit_enrollments = quit_enrollments.filter(
+                    lesson__course__branch__city_id=city_id
+                )
             quit_scope_child_ids = base_children.filter(
                 id__in=quit_enrollments.values_list('child_id', flat=True).distinct()
             ).values_list('id', flat=True)
@@ -482,6 +492,8 @@ class DashboardViewSet(viewsets.ViewSet):
 
         if branch_id == 'all':
             branches = Branch.objects.filter(is_active=True)
+            if city_id != 'all':
+                branches = branches.filter(city_id=city_id)
             if scoped and scoped_branch_ids:
                 branches = branches.filter(id__in=scoped_branch_ids)
             for branch in branches:
@@ -582,6 +594,10 @@ class DashboardViewSet(viewsets.ViewSet):
                 enrollment_rows = enrollment_rows.filter(lesson__course_id=course_id)
             if branch_id != 'all':
                 enrollment_rows = enrollment_rows.filter(lesson__course__branch_id=branch_id)
+            if city_id != 'all':
+                enrollment_rows = enrollment_rows.filter(
+                    lesson__course__branch__city_id=city_id
+                )
             if filter_id != 'all':
                 if breakdown_by == 'course_type':
                     enrollment_rows = enrollment_rows.filter(

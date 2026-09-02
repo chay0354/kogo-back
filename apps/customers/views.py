@@ -185,6 +185,14 @@ class ChildViewSet(viewsets.ModelViewSet):
                 lesson_enrollments__status__in=['active', 'payments_problem']
             ).distinct()
         
+        # Filter by city (only children enrolled in lessons in a branch in this city)
+        city_id = self.request.query_params.get('city')
+        if city_id and city_id != 'all':
+            queryset = queryset.filter(
+                lesson_enrollments__lesson__course__branch__city_id=city_id,
+                lesson_enrollments__status__in=['active', 'payments_problem']
+            ).distinct()
+
         # Filter by course (through lesson enrollments)
         course_id = self.request.query_params.get('course')
         if course_id and course_id != 'all':
