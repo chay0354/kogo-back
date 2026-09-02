@@ -19,7 +19,9 @@ class PhoneSearchTests(APITestCase):
         other = Family.objects.create(name='משפחת לוי', phone='054-1112223', branch=branch)
         self.kid = Child.objects.create(family=fam, first_name='נועה', last_name='כהן', id_number='031972543',
                                         birth_date=date(2015, 5, 5), gender='female', status='active')
-        Parent.objects.create(family=fam, first_name='יעל', last_name='כהן', phone='050-777-8899')
+        fam.parent_id_number = '012345678'
+        fam.save(update_fields=['parent_id_number'])
+        Parent.objects.create(family=fam, first_name='יעל', last_name='כהן', phone='050-777-8899', email='yael@example.com', is_primary=True)
         Child.objects.create(family=other, first_name='דן', last_name='לוי',
                              birth_date=date(2014, 3, 3), gender='male', status='active')
         user = User.objects.create_user(username='m@test', password='pw')
@@ -103,3 +105,13 @@ class PhoneSearchTests(APITestCase):
         body = res.data
         rows = body['results'] if isinstance(body, dict) and 'results' in body else body
         self.assertTrue(all(r.get('search_match') is None for r in rows))
+
+    def test_profile_carries_parent_id_number_and_email(self):
+        row = next(r for r in self._rows('נועה') if str(r['id']) == str(self.kid.id))
+        self.assertEqual(row['parent_id_number'], '012345678')
+        self.assertEqual(row['parent_email'], 'yael@example.com')
+        # parent_id stays the parent row's key, never shown as an ID number
+        self.assertNotEqual(row['parent_id'], row['parent_id_number'])
+
+    def test_child_found_by_parent_email(self):
+        self.assertEqual(self._ids('/api/v1/customers/children/', 'yael@'), {str(self.kid.id)})

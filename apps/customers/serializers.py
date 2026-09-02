@@ -149,6 +149,10 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     
     # Only when the list is searched: the off-row field the search hit, if any.
     search_match = serializers.SerializerMethodField()
+    # The parent's ID number lives on the family; parent_id is the parent row's key.
+    parent_id_number = serializers.CharField(source='family.parent_id_number', read_only=True)
+    family_email = serializers.CharField(source='family.email', read_only=True)
+    parent_email = serializers.SerializerMethodField()
     class Meta:
         model = Child
         fields = [
@@ -156,7 +160,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'birth_date', 'gender', 'age', 'id_number', 'phone_number',
             'family_id', 'family_name', 'family_phone',
             'branch_id', 'branch_name',
-            'parent_name', 'parent_phone', 'parent_id',
+            'parent_name', 'parent_phone', 'parent_id', 'parent_id_number', 'parent_email', 'family_email',
             # NEW status fields
             'status', 'paid_until_date', 'trial_classes_attended',
             'absent_irregularly', 'is_ghost_visible',
@@ -228,6 +232,13 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             return None
         from apps.customers.phone_search import describe_search_match
         return describe_search_match(obj, term)
+
+    def get_parent_email(self, obj):
+        """Primary parent's e-mail, else the family's."""
+        parent = self._primary_parent(obj)
+        if parent and parent.email:
+            return parent.email
+        return obj.family.email or None
 
     def get_parent_id(self, obj):
         """

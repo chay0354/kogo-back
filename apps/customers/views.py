@@ -136,6 +136,7 @@ class ChildViewSet(viewsets.ModelViewSet):
         'first_name', 'last_name', 'id_number',
         'family__name', 'family__phone', 'family__parent_id_number',
         'family__parents__first_name', 'family__parents__last_name', 'family__parents__phone',
+        'family__email', 'family__parents__email',
     ]
     ordering_fields = ['first_name', 'last_name', 'created_at', 'birth_date']
     ordering = ['-created_at']
