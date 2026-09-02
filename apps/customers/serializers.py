@@ -152,6 +152,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     # The parent's ID number lives on the family; parent_id is the parent row's key.
     parent_id_number = serializers.CharField(source='family.parent_id_number', read_only=True)
     family_email = serializers.CharField(source='family.email', read_only=True)
+    family_address = serializers.CharField(source='family.address', read_only=True)
     parent_email = serializers.SerializerMethodField()
     class Meta:
         model = Child
@@ -160,7 +161,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'birth_date', 'gender', 'age', 'id_number', 'phone_number',
             'family_id', 'family_name', 'family_phone',
             'branch_id', 'branch_name',
-            'parent_name', 'parent_phone', 'parent_id', 'parent_id_number', 'parent_email', 'family_email',
+            'parent_name', 'parent_phone', 'parent_id', 'parent_id_number', 'parent_email', 'family_email', 'family_address',
             # NEW status fields
             'status', 'paid_until_date', 'trial_classes_attended',
             'absent_irregularly', 'is_ghost_visible',
