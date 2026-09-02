@@ -1,18 +1,11 @@
-"""
-A formal document rendered locally.
-
-Tranzila's PDF stays the official copy whenever one exists. This renderer is
-for the documents that never get one — drafts, credit invoices, and anything
-Tranzila failed to issue — and it prints exactly what the record stores. No
-amount is derived here: every figure is a stored column, so the page always
-reconciles with the row it came from.
-"""
+"""Locally rendered formal document PDF (drafts, credit invoices, unissued documents)."""
 from __future__ import annotations
 
 import io
 import os
 from decimal import Decimal
 
+from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -36,9 +29,7 @@ CONTENT_WIDTH = PAGE_WIDTH - 2 * SIDE_MARGIN
 RADIUS = 8
 
 TYPE_LABELS = dict(DOCUMENT_TYPE_CHOICES)
-# Allocation numbers are mandatory on tax invoices above this net amount
-# (Israel Tax Authority, from 1 June 2026). The document says whether one is
-# needed; it cannot invent one.
+# Allocation number threshold (net, before VAT) — Israel Tax Authority, from 1 June 2026.
 ALLOCATION_THRESHOLD = Decimal('5000')
 TAX_DOCUMENT_TYPES = ('tax_invoice', 'combined', 'credit_invoice')
 
@@ -127,7 +118,7 @@ def _customer_details(doc: FormalDocument) -> list[tuple[str, str]]:
 
 
 def _pairs_table(pairs: list[tuple[str, str]], styles: dict, width: float) -> Table:
-    label_w = 3.2 * cm
+    label_w = 2.6 * cm
     data = [[_p(value, styles['value']), _p(label, styles['label'])] for label, value in pairs]
     table = Table(data, colWidths=[width - label_w, label_w])
     table.setStyle(TableStyle([
@@ -141,7 +132,7 @@ def _pairs_table(pairs: list[tuple[str, str]], styles: dict, width: float) -> Ta
 def _header_card(doc: FormalDocument, styles: dict) -> Table:
     issued_at = doc.document_date.strftime('%d/%m/%Y')
     if doc.created_at:
-        issued_at += ' ' + doc.created_at.strftime('%H:%M')
+        issued_at += ' ' + timezone.localtime(doc.created_at).strftime('%H:%M')
     doc_pairs = [('מספר מסמך', doc.document_number), ('תאריך ושעה', issued_at)]
     doc_pairs += _customer_details(doc)
     if doc.due_date:
@@ -161,10 +152,12 @@ def _header_card(doc: FormalDocument, styles: dict) -> Table:
         ('כתובת', ISSUER_ADDRESS),
         ('טלפון', ISSUER_PHONE),
     ]
-    half = (CONTENT_WIDTH - 0.6 * cm) / 2
-    left = [_p('פרטי העסק', styles['section']), Spacer(1, 0.15 * cm), _pairs_table(biz_pairs, styles, half - 0.4 * cm)]
-    right = [_p('פרטי המסמך והלקוח', styles['section']), Spacer(1, 0.15 * cm), _pairs_table(doc_pairs, styles, half - 0.4 * cm)]
-    card = Table([[left, right]], colWidths=[half, half])
+    # Wide enough for the address to stay on one line (wrapped RTL text scrambles).
+    biz_w = CONTENT_WIDTH * 0.55
+    doc_w = CONTENT_WIDTH - biz_w
+    left = [_p('פרטי העסק', styles['section']), Spacer(1, 0.15 * cm), _pairs_table(biz_pairs, styles, biz_w - 0.5 * cm)]
+    right = [_p('פרטי המסמך והלקוח', styles['section']), Spacer(1, 0.15 * cm), _pairs_table(doc_pairs, styles, doc_w - 0.5 * cm)]
+    card = Table([[left, right]], colWidths=[biz_w, doc_w])
     card.setStyle(_card([('BACKGROUND', (0, 0), (-1, -1), PANEL_BG)], padding=(9, 9, 10, 10)))
     return card
 
@@ -172,13 +165,11 @@ def _header_card(doc: FormalDocument, styles: dict) -> Table:
 # --- what was sold ------------------------------------------------------------
 
 def _items_table(doc: FormalDocument, styles: dict) -> Table:
-    price_word = 'כולל מע"מ' if doc.prices_include_vat else 'לפני מע"מ'
-    # Columns run left-to-right on the page, so the description sits at the
-    # right edge by being the last column.
+    # Last column renders at the right edge.
     widths = [3.0 * cm, 3.0 * cm, 1.8 * cm, CONTENT_WIDTH - 7.8 * cm]
     header = [
-        _p('סה"כ שורה ' + price_word, styles['th']),
-        _p('מחיר יחידה ' + price_word, styles['th']),
+        _p('סה"כ שורה', styles['th']),
+        _p('מחיר יחידה', styles['th']),
         _p('כמות', styles['th']),
         _p('תיאור פריט / שירות', styles['th']),
     ]
@@ -297,7 +288,6 @@ def _notes(doc: FormalDocument, styles: dict) -> list:
 def _draw_page(doc_obj: FormalDocument):
     def on_page(canvas, document):
         canvas.saveState()
-        # Footer: the issuer's line, and the only e-mail that goes on an invoice.
         canvas.setStrokeColor(BRAND_PURPLE)
         canvas.setLineWidth(0.8)
         y = BOTTOM_MARGIN - 0.35 * cm
@@ -310,10 +300,8 @@ def _draw_page(doc_obj: FormalDocument):
         canvas.setFillColor(colors.HexColor('#8a8da3'))
         canvas.drawRightString(PAGE_WIDTH - SIDE_MARGIN, y - 0.95 * cm, _rtl(f'עמוד {document.page}'))
         if doc_obj.document_type == 'draft':
-            # A draft says so across the whole page, so a printout can never
-            # pass for the real thing.
             canvas.setFont('Heebo-Bold', 92)
-            canvas.setFillColor(colors.Color(0.55, 0.55, 0.65, alpha=0.13))
+            canvas.setFillColor(colors.Color(0.55, 0.55, 0.65, alpha=0.2))
             canvas.translate(PAGE_WIDTH / 2, PAGE_HEIGHT / 2)
             canvas.rotate(35)
             canvas.drawCentredString(0, 0, _rtl('טיוטה'))
@@ -343,7 +331,8 @@ def generate_document_pdf(doc: FormalDocument) -> bytes:
     story.append(_header_card(doc, styles))
     story.append(Spacer(1, 0.55 * cm))
 
-    story.append(_p('פירוט העסקה', styles['section']))
+    price_word = 'כולל מע"מ' if doc.prices_include_vat else 'לפני מע"מ'
+    story.append(_p(f'פירוט העסקה (מחירים {price_word})', styles['section']))
     story.append(Spacer(1, 0.15 * cm))
     story.append(_items_table(doc, styles))
     story.append(Spacer(1, 0.5 * cm))

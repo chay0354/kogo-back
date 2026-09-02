@@ -1,8 +1,4 @@
-"""
-A draft must never consume a fiscal number, and approving it must; and every
-document type must render locally, because drafts and credit invoices have
-no other PDF.
-"""
+"""Draft documents: numbering, approval, reporting, and the local PDF."""
 import os
 import re
 from datetime import date
@@ -118,7 +114,6 @@ class DraftDocumentTests(APITestCase):
             if out_dir:
                 with open(os.path.join(out_dir, f'{doc_type}.pdf'), 'wb') as fh:
                     fh.write(pdf.content)
-        # Receipt, combined and credit go through their own creators.
         receipt = self.client.post(CREATE, {
             'document_type': 'receipt', 'client_type': 'existing', 'child_id': str(self.kid.id),
             'receipt_details': {'document_date': '2026-09-02', 'payment_method': 'cash', 'amount': '424.80'},

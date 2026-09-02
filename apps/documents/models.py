@@ -9,8 +9,7 @@ DOCUMENT_TYPE_CHOICES = [
     ('combined', 'חשבונית מס/קבלה'),
     ('transaction_invoice', 'חשבונית עסקה'),
     ('credit_invoice', 'חשבונית מס זיכוי'),
-    # Work in progress. Not a tax document: no fiscal number, never sent to
-    # Tranzila, and excluded from the period report until it is approved.
+    # Not a tax document: no fiscal number, never sent to Tranzila.
     ('draft', 'טיוטה'),
 ]
 

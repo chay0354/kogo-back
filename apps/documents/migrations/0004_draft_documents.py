@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('documents', '0002_alter_documentcounter_unique_together_and_more'),
+        ('documents', '0003_check_plan'),
     ]
 
     operations = [

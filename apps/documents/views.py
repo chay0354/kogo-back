@@ -160,7 +160,7 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
     def finalize(self, request, pk=None):
         """
         POST /api/v1/documents/documents/{id}/finalize/
-        Approve a draft: it becomes a real document and takes a fiscal number.
+        Approve a draft: it becomes its target type and takes the next fiscal number.
         """
         doc = self.get_object()
         try:
@@ -173,9 +173,7 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
     def pdf(self, request, pk=None):
         """
         GET /api/v1/documents/documents/{id}/pdf/
-        The document rendered locally. Tranzila's PDF stays the official copy
-        when one exists; this is for drafts, credit invoices, and anything
-        Tranzila never issued.
+        Locally rendered PDF — for drafts, credit invoices, and documents Tranzila did not issue.
         """
         from apps.documents.document_pdf import generate_document_pdf
         doc = self.get_object()

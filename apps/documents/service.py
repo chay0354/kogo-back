@@ -15,17 +15,11 @@ VAT_RATE = Decimal('0.18')
 
 
 DRAFT_TYPE = 'draft'
-# Types a draft may be approved into. A receipt records money that arrived,
-# so it is issued when the money does, never drafted first.
 DRAFT_TARGET_TYPES = ('tax_invoice', 'transaction_invoice')
 
 
 def _generate_draft_number() -> str:
-    """
-    A draft is not a tax document, so it must not draw from the fiscal
-    sequence: a deleted draft would leave a gap in the invoice numbering.
-    The prefix keeps it unmistakable next to a real number.
-    """
+    """Drafts never take a fiscal number, so a discarded draft leaves no gap."""
     return f"D-{uuid.uuid4().hex[:8].upper()}"
 
 
@@ -99,11 +93,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
 
 @transaction.atomic
 def create_draft(data: dict) -> FormalDocument:
-    """
-    Save an invoice as a draft: same lines and totals, no fiscal number, and
-    nothing sent to Tranzila. Approval (finalize_draft) turns it into the
-    real document and only then consumes a number.
-    """
+    """Save an invoice as a draft: no fiscal number, nothing sent to Tranzila."""
     target = data.get('draft_target_type') or 'tax_invoice'
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'לא ניתן לשמור טיוטה לסוג {target}')
