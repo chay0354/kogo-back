@@ -71,6 +71,13 @@ class PeriodReportTests(APITestCase):
         self.credit = make_document(
             '2026-0004', self.kid_s, self.south, date(2026, 8, 25), '100.00', doc_type='credit_invoice',
         )
+        # A receipt settling the north invoice — the same money a second time —
+        # and a transaction invoice, which is a demand for payment, not a tax
+        # document. Neither may inflate revenue.
+        self.receipt = make_document('2026-0005', self.kid_n, self.north, date(2026, 8, 6), '260.00', doc_type='receipt')
+        self.proforma = make_document(
+            '2026-0006', self.kid_n, self.north, date(2026, 8, 7), '500.00', doc_type='transaction_invoice',
+        )
 
         self.manager = make_user('manager-report@test', role=UserProfile.ROLE_MANAGER)
         self.partner = make_user('partner-report@test', role=UserProfile.ROLE_PARTNER)
@@ -133,16 +140,16 @@ class PeriodReportTests(APITestCase):
         report = build_report(self.manager, start, end, label)
 
         in_month = FormalDocument.objects.filter(document_date__range=(start, end))
-        self.assertEqual(in_month.count(), 3)
+        self.assertEqual(in_month.count(), 5)
         # The document outside the month never reaches the report.
         all_numbers = {row.document_number for g in report.groups for row in g.rows}
         self.assertNotIn(self.outside.document_number, all_numbers)
-        self.assertEqual(all_numbers, {'2026-0001', '2026-0002', '2026-0004'})
+        self.assertEqual(all_numbers, {'2026-0001', '2026-0002', '2026-0004', '2026-0005', '2026-0006'})
 
         # Every document lands in exactly one group.
         placed = [row.document_number for g in report.groups for row in g.rows]
         self.assertEqual(len(placed), len(set(placed)))
-        self.assertEqual(len(placed), 3)
+        self.assertEqual(len(placed), 5)
 
         # A group's summary is what a reader gets by adding the rows above it,
         # credits carrying their sign: south is 360 charged minus 100 credited.
@@ -154,7 +161,24 @@ class PeriodReportTests(APITestCase):
         self.assertEqual(south.totals.credits_total, Decimal('118.00'))
         # And the period's bottom line agrees with itself.
         self.assertEqual(report.totals.total_amount, report.totals.net_of_credits)
-        self.assertEqual(report.totals.total_amount, Decimal('306.80') + Decimal('306.80'))
+
+        # Three figures, not one. Revenue is the tax invoices less the credit:
+        # 306.80 + 424.80 - 118.00. The receipt is the north invoice's money
+        # arriving, so it counts as collected and not as a second sale; the
+        # transaction invoice is neither.
+        self.assertEqual(report.revenue_total, Decimal('613.60'))
+        self.assertEqual(report.collected_total, Decimal('306.80'))
+        self.assertEqual(report.non_fiscal_total, Decimal('590.00'))
+
+        # Inside a group the rows are sectioned by type, in reading order,
+        # each section summing only its own rows.
+        north = next(g for g in report.groups if 'צפון' in g.title)
+        self.assertEqual([sec.document_type for sec in north.sections],
+                         ['tax_invoice', 'receipt', 'transaction_invoice'])
+        self.assertEqual(north.sections[0].totals.total_amount, Decimal('306.80'))
+        self.assertEqual(north.sections[1].totals.count, 1)
+        south_types = [sec.document_type for sec in south.sections]
+        self.assertEqual(south_types, ['tax_invoice', 'credit_invoice'])
 
     def test_empty_month_still_renders(self):
         self.client.force_authenticate(self.manager)

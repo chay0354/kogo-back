@@ -40,6 +40,19 @@ CREDIT_TYPE = 'credit_invoice'
 
 DOCUMENT_TYPE_LABELS = dict(DOCUMENT_TYPE_CHOICES)
 
+# The order an accountant reads them in: what was charged, what was collected,
+# what is only a demand for payment, and what was taken back.
+TYPE_ORDER = ('tax_invoice', 'combined', 'receipt', 'transaction_invoice', CREDIT_TYPE)
+
+# A tax invoice and the receipt that settles it are two documents for one sum,
+# so the period is described by three figures rather than one grand total:
+# revenue recognised (tax documents, credits deducted), cash collected
+# (receipts, and the invoice-receipt which is both), and demands for payment
+# that are not tax documents at all.
+REVENUE_TYPES = ('tax_invoice', 'combined')
+COLLECTION_TYPES = ('receipt', 'combined')
+NON_FISCAL_TYPES = ('transaction_invoice',)
+
 HEBREW_MONTHS = [
     'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
     'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר',
@@ -266,6 +279,15 @@ class Totals:
 
 
 @dataclass
+class TypeSection:
+    """One document type's rows inside a group, with its own subtotal."""
+    document_type: str
+    label: str
+    rows: list = field(default_factory=list)
+    totals: Totals = field(default_factory=Totals)
+
+
+@dataclass
 class ReportGroup:
     key: object
     title: str
@@ -273,6 +295,20 @@ class ReportGroup:
     totals: Totals = field(default_factory=Totals)
     # True for the catch-all bucket, so the PDF can say why those rows are there.
     is_unassigned: bool = False
+
+    @property
+    def sections(self) -> list:
+        """Rows split by document type, in reading order, each with a subtotal."""
+        by_type: dict = {}
+        for row in self.rows:
+            section = by_type.get(row.document_type)
+            if section is None:
+                section = TypeSection(row.document_type, row.document_type_label)
+                by_type[row.document_type] = section
+            section.rows.append(row)
+            section.totals.add(row)
+        rank = {code: index for index, code in enumerate(TYPE_ORDER)}
+        return sorted(by_type.values(), key=lambda sec: rank.get(sec.document_type, len(rank)))
 
 
 @dataclass
@@ -287,6 +323,27 @@ class PeriodReport:
     document_type: str = ''
     scope_label: str = ''
     currencies: set = field(default_factory=set)
+
+    def _sum_types(self, codes, credits: bool = False) -> Decimal:
+        total = sum((self.type_totals[c].total_amount for c in codes if c in self.type_totals), Decimal('0.00'))
+        if credits and CREDIT_TYPE in self.type_totals:
+            total -= self.type_totals[CREDIT_TYPE].credits_total
+        return total
+
+    @property
+    def revenue_total(self) -> Decimal:
+        """Tax invoices and invoice-receipts, less credit invoices."""
+        return self._sum_types(REVENUE_TYPES, credits=True)
+
+    @property
+    def collected_total(self) -> Decimal:
+        """Receipts and invoice-receipts — money that actually arrived."""
+        return self._sum_types(COLLECTION_TYPES)
+
+    @property
+    def non_fiscal_total(self) -> Decimal:
+        """Transaction invoices: a demand for payment, not a tax document."""
+        return self._sum_types(NON_FISCAL_TYPES)
 
     @property
     def is_empty(self) -> bool:
@@ -360,7 +417,7 @@ def build_report(
         group.totals.add(row)
         overall.add(row)
 
-        bucket = type_totals.setdefault(row.document_type_label, Totals())
+        bucket = type_totals.setdefault(row.document_type, Totals())
         bucket.add(row)
 
     # Named groups first, alphabetically; the catch-all bucket last so a reader

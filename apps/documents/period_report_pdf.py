@@ -36,6 +36,8 @@ from reportlab.platypus import (
 )
 
 from apps.documents.period_report import (
+    DOCUMENT_TYPE_LABELS,
+    TYPE_ORDER,
     GROUP_BY_BRANCH,
     PeriodReport,
     ReportGroup,
@@ -118,6 +120,16 @@ def _styles() -> dict:
         'sub': ParagraphStyle(
             'RepSub', fontName='Heebo-Bold', fontSize=8.5,
             textColor=BRAND_NAVY, alignment=TA_CENTER, leading=11,
+        ),
+        # A section band names the document type its rows belong to; the
+        # subsection line is that type's own subtotal, quieter than the group's.
+        'section': ParagraphStyle(
+            'RepSection', fontName='Heebo-Bold', fontSize=9,
+            textColor=BRAND_NAVY, alignment=TA_RIGHT, leading=12,
+        ),
+        'subsection': ParagraphStyle(
+            'RepSubSection', fontName='Heebo-Bold', fontSize=8.5,
+            textColor=BRAND_PURPLE, alignment=TA_CENTER, leading=11,
         ),
         'label': ParagraphStyle(
             'RepLabel', fontName='Heebo-Bold', fontSize=10,
@@ -252,6 +264,31 @@ class NumberedCanvas(canvas_module.Canvas):
         self.restoreState()
 
 
+CARD_RADIUS = 7
+SECTION_BG = colors.HexColor('#f1effa')
+SUBTOTAL_BG = colors.HexColor('#e8e5f7')
+CREDIT_BG = colors.HexColor('#fdeee8')
+
+
+def _card(extra=None, padding=(4, 4, 4, 4)) -> TableStyle:
+    """
+    The base look every table shares: a rounded card with hairlines between
+    rows and no vertical rules. A grid on a rounded shape leaves lines poking
+    out of the corners, so separation is by row only.
+    """
+    top, bottom, left, right = padding
+    style = [
+        ('ROUNDEDCORNERS', [CARD_RADIUS] * 4),
+        ('LINEBELOW', (0, 0), (-1, -2), 0.35, BORDER),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), top),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), bottom),
+        ('LEFTPADDING', (0, 0), (-1, -1), left),
+        ('RIGHTPADDING', (0, 0), (-1, -1), right),
+    ]
+    return TableStyle(style + list(extra or []))
+
+
 def _group_header(group: ReportGroup, styles: dict) -> Table:
     count_label = f'{group.totals.count} מסמכים' if group.totals.count != 1 else 'מסמך אחד'
     bar = Table(
@@ -264,67 +301,80 @@ def _group_header(group: ReportGroup, styles: dict) -> Table:
         colWidths=[12.0 * cm, sum(COL_WIDTHS) - 12.0 * cm],
         hAlign='RIGHT',
     )
-    bar.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), BRAND_NAVY),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 7),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
-        ('LEFTPADDING', (0, 0), (-1, -1), 8),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-    ]))
+    bar.setStyle(_card([('BACKGROUND', (0, 0), (-1, -1), BRAND_NAVY)], padding=(7, 7, 8, 8)))
     return bar
 
 
+def _summary_row(label: str, totals, styles: dict, style_key: str = 'sub') -> list:
+    st = styles[style_key]
+    return [
+        _rtl_cell(label, st, COL_WIDTHS[0]),
+        _rtl_cell('', st, COL_WIDTHS[1]),
+        _rtl_cell('', st, COL_WIDTHS[2]),
+        _rtl_cell(f'{totals.count} שורות', st, COL_WIDTHS[3]),
+        _rtl_cell(_money(totals.net_amount), st, COL_WIDTHS[4]),
+        _rtl_cell(_money(totals.vat_amount), st, COL_WIDTHS[5]),
+        _rtl_cell(_money(totals.total_amount), st, COL_WIDTHS[6]),
+    ]
+
+
 def _group_table(group: ReportGroup, styles: dict) -> Table:
+    """
+    A group's rows, split into one section per document type.
+
+    Each section carries its own subtotal so a tax invoice and the receipt that
+    paid it are never silently summed as if they were two sales; the group
+    total below them is the plain column sum, credits carrying their sign.
+    """
     header = [
         _rtl_cell(text, styles['th'], width)
         for text, width in zip(COLUMN_HEADERS, COL_WIDTHS)
     ]
     data = [header]
-    credit_rows = []
+    band_rows, credit_rows, subtotal_rows = [], [], []
 
-    for index, row in enumerate(group.rows, start=1):
-        if row.is_credit:
-            credit_rows.append(index)
-        amount_style = styles['td_credit'] if row.is_credit else styles['td_num']
+    for section in group.sections:
+        band_rows.append(len(data))
         data.append([
-            _rtl_cell(row.customer, styles['td'], COL_WIDTHS[0]),
-            _rtl_cell(row.document_number, styles['td_num'], COL_WIDTHS[1]),
-            _rtl_cell(row.document_type_label, styles['td_num'], COL_WIDTHS[2]),
-            _rtl_cell(row.document_date.strftime('%d/%m/%Y'), styles['td_num'], COL_WIDTHS[3]),
-            _rtl_cell(_signed_money(row.net_amount, row.is_credit), amount_style, COL_WIDTHS[4]),
-            _rtl_cell(_signed_money(row.vat_amount, row.is_credit), amount_style, COL_WIDTHS[5]),
-            _rtl_cell(_signed_money(row.total_amount, row.is_credit), amount_style, COL_WIDTHS[6]),
+            _rtl_cell(section.label, styles['section'], sum(COL_WIDTHS)),
+            *['' for _ in COL_WIDTHS[1:]],
         ])
+        for row in section.rows:
+            if row.is_credit:
+                credit_rows.append(len(data))
+            amount_style = styles['td_credit'] if row.is_credit else styles['td_num']
+            data.append([
+                _rtl_cell(row.customer, styles['td'], COL_WIDTHS[0]),
+                _rtl_cell(row.document_number, styles['td_num'], COL_WIDTHS[1]),
+                _rtl_cell(row.document_type_label, styles['td_num'], COL_WIDTHS[2]),
+                _rtl_cell(row.document_date.strftime('%d/%m/%Y'), styles['td_num'], COL_WIDTHS[3]),
+                _rtl_cell(_signed_money(row.net_amount, row.is_credit), amount_style, COL_WIDTHS[4]),
+                _rtl_cell(_signed_money(row.vat_amount, row.is_credit), amount_style, COL_WIDTHS[5]),
+                _rtl_cell(_signed_money(row.total_amount, row.is_credit), amount_style, COL_WIDTHS[6]),
+            ])
+        if len(group.sections) > 1:
+            subtotal_rows.append(len(data))
+            data.append(_summary_row(f'סה"כ {section.label}', section.totals, styles, 'subsection'))
 
-    totals = group.totals
-    data.append([
-        _rtl_cell(f'סיכום — {group.title}', styles['sub'], COL_WIDTHS[0]),
-        _rtl_cell('', styles['sub'], COL_WIDTHS[1]),
-        _rtl_cell('', styles['sub'], COL_WIDTHS[2]),
-        _rtl_cell(f'{totals.count} שורות', styles['sub'], COL_WIDTHS[3]),
-        _rtl_cell(_money(totals.net_amount), styles['sub'], COL_WIDTHS[4]),
-        _rtl_cell(_money(totals.vat_amount), styles['sub'], COL_WIDTHS[5]),
-        _rtl_cell(_money(totals.total_amount), styles['sub'], COL_WIDTHS[6]),
-    ])
+    data.append(_summary_row(f'סיכום — {group.title}', group.totals, styles))
 
     # repeatRows=1 is what carries the column headers onto pages 2..N.
     table = Table(data, colWidths=COL_WIDTHS, hAlign='RIGHT', repeatRows=1)
     style = [
         ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
         ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
-        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#e8e5f7')),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
-        ('GRID', (0, 0), (-1, -1), 0.4, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
     ]
+    for index in band_rows:
+        style.append(('SPAN', (0, index), (-1, index)))
+        style.append(('BACKGROUND', (0, index), (-1, index), SECTION_BG))
+    for index in subtotal_rows:
+        style.append(('BACKGROUND', (0, index), (-1, index), colors.HexColor('#f6f4fc')))
+        style.append(('LINEABOVE', (0, index), (-1, index), 0.6, BRAND_PURPLE))
     for index in credit_rows:
-        style.append(('BACKGROUND', (0, index), (-1, index), colors.HexColor('#fdeee8')))
-    table.setStyle(style)
+        style.append(('BACKGROUND', (0, index), (-1, index), CREDIT_BG))
+    table.setStyle(_card(style))
     return table
 
 
@@ -339,6 +389,12 @@ def _totals_panel(report: PeriodReport, styles: dict):
     if totals.credits_total > 0:
         rows.append(['מזה חיובים', _money(totals.charges_total)])
         rows.append(['מזה זיכויים', f'-{_money(totals.credits_total)}'])
+    # Three figures rather than one: a receipt that settles an invoice is not
+    # a second sale, and a transaction invoice is not a tax document.
+    rows.append(['הכנסות — חשבוניות מס ומס/קבלה, בניכוי זיכויים', _money(report.revenue_total)])
+    rows.append(['תקבולים — קבלות וחשבוניות מס/קבלה', _money(report.collected_total)])
+    if report.non_fiscal_total:
+        rows.append(['חשבונות עסקה (אינם מסמכי מס)', _money(report.non_fiscal_total)])
 
     data = [
         [_rtl_cell(label, styles['label'], 8.0 * cm),
@@ -352,18 +408,11 @@ def _totals_panel(report: PeriodReport, styles: dict):
     ])
 
     table = Table(data, colWidths=[8.0 * cm, 4.5 * cm], hAlign='RIGHT')
-    table.setStyle(TableStyle([
+    table.setStyle(_card([
         ('BACKGROUND', (0, 0), (-1, -2), PANEL_BG),
-        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#e8e5f7')),
-        ('BOX', (0, 0), (-1, -1), 1, BRAND_PURPLE),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
-        ('INNERGRID', (0, 0), (-1, -1), 0.4, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 10),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-    ]))
+    ], padding=(6, 6, 10, 10)))
     return table
 
 
@@ -385,8 +434,10 @@ def _type_breakdown(report: PeriodReport, styles: dict):
         _rtl_cell('סה"כ', styles['th'], 2.5 * cm),
     ]
     data = [header]
-    for label in sorted(report.type_totals):
-        bucket = report.type_totals[label]
+    rank = {code: index for index, code in enumerate(TYPE_ORDER)}
+    for code in sorted(report.type_totals, key=lambda c: rank.get(c, len(rank))):
+        bucket = report.type_totals[code]
+        label = DOCUMENT_TYPE_LABELS.get(code, code)
         data.append([
             _rtl_cell(label, styles['td'], 6.0 * cm),
             _rtl_cell(str(bucket.count), styles['td_num'], 2.0 * cm),
@@ -396,16 +447,10 @@ def _type_breakdown(report: PeriodReport, styles: dict):
         ])
     widths = [6.0 * cm, 2.0 * cm, 2.5 * cm, 2.2 * cm, 2.5 * cm]
     table = Table(data, colWidths=widths, hAlign='RIGHT', repeatRows=1)
-    table.setStyle(TableStyle([
+    table.setStyle(_card([
         ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, PANEL_BG]),
-        ('GRID', (0, 0), (-1, -1), 0.4, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-        ('LEFTPADDING', (0, 0), (-1, -1), 5),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 5),
-    ]))
+    ], padding=(5, 5, 5, 5)))
     return [
         Paragraph(_rtl('פילוח לפי סוג מסמך'), styles['label']),
         Spacer(1, 0.15 * cm),
@@ -443,18 +488,12 @@ def _group_totals_summary(report: PeriodReport, styles: dict):
         _rtl_cell(_money(report.totals.total_amount), styles['sub'], widths[4]),
     ])
     table = Table(data, colWidths=widths, hAlign='RIGHT', repeatRows=1)
-    table.setStyle(TableStyle([
+    table.setStyle(_card([
         ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
         ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
-        ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#e8e5f7')),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
-        ('GRID', (0, 0), (-1, -1), 0.4, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-        ('LEFTPADDING', (0, 0), (-1, -1), 5),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 5),
-    ]))
+    ], padding=(5, 5, 5, 5)))
     return [
         Paragraph(_rtl(f'סיכום לפי {group_word}'), styles['label']),
         Spacer(1, 0.15 * cm),
