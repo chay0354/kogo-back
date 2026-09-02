@@ -523,8 +523,6 @@ def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, br
     def branch_name(bid):
         return branch_names.get(bid, UNTAGGED_LABEL)
 
-    for bid, amount in lesson.get('by_business', {}).items():
-        pass  # tagged courses are added per category below
     for (bid, cid), amount in lesson.get('by_category', {}).items():
         add(bid, lesson['by_business_name'][bid], cid or None, lesson['by_category_name'][(bid, cid)], amount)
     for bid, amount in lesson.get('by_branch_untagged', {}).items():
