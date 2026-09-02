@@ -140,6 +140,12 @@ class ChildViewSet(viewsets.ModelViewSet):
     ordering_fields = ['first_name', 'last_name', 'created_at', 'birth_date']
     ordering = ['-created_at']
     
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if self.action == 'list':
+            context['search_term'] = (self.request.query_params.get('search') or '').strip()
+        return context
+
     def get_serializer_class(self):
         """
         USAGE: Returns appropriate serializer based on action

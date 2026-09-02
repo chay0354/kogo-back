@@ -66,3 +66,25 @@ class PhoneSearchTests(APITestCase):
         # merely looks unrelated on screen.
         self.assertEqual(self._ids('/api/v1/customers/children/', '97254'), {str(self.kid.id)})
         self.assertEqual(self._ids('/api/v1/customers/children/', '46469'), set())
+
+    def _rows(self, search):
+        res = self.client.get('/api/v1/customers/children/', {'search': search})
+        body = res.data
+        return body['results'] if isinstance(body, dict) and 'results' in body else body
+
+    def test_row_says_what_matched_when_it_is_not_on_the_row(self):
+        row = next(r for r in self._rows('יעל') if str(r['id']) == str(self.kid.id))
+        self.assertEqual(row['search_match'], {'label': 'שם הורה', 'value': 'יעל כהן'})
+        row = next(r for r in self._rows('031972543') if str(r['id']) == str(self.kid.id))
+        self.assertEqual(row['search_match'], {'label': 'ת.ז. ילד', 'value': '031972543'})
+        # The parent's phone is what the row shows, so a hit on it needs no label.
+        row = next(r for r in self._rows('9725077788') if str(r['id']) == str(self.kid.id))
+        self.assertIsNone(row['search_match'])
+        row = next(r for r in self._rows('נועה') if str(r['id']) == str(self.kid.id))
+        self.assertIsNone(row['search_match'])
+
+    def test_no_search_no_match_field_value(self):
+        res = self.client.get('/api/v1/customers/children/')
+        body = res.data
+        rows = body['results'] if isinstance(body, dict) and 'results' in body else body
+        self.assertTrue(all(r.get('search_match') is None for r in rows))

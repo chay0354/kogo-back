@@ -147,6 +147,8 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     attendance_rate = serializers.SerializerMethodField()
     is_ghost_visible = serializers.SerializerMethodField()
     
+    # Only when the list is searched: the off-row field the search hit, if any.
+    search_match = serializers.SerializerMethodField()
     class Meta:
         model = Child
         fields = [
@@ -161,7 +163,8 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             # Subscription dates (kept for reference)
             'subscription_start_date', 'subscription_end_date',
             'enrollments', 'trial_enrollment', 'attendance_rate',
-            'created_at'
+            'created_at',
+            'search_match',
         ]
 
     def _partner_branch_ids(self):
@@ -219,6 +222,13 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             return parent.phone
         return obj.family.phone
     
+    def get_search_match(self, obj):
+        term = self.context.get('search_term')
+        if not term:
+            return None
+        from apps.customers.phone_search import describe_search_match
+        return describe_search_match(obj, term)
+
     def get_parent_id(self, obj):
         """
         מזהה הורה ראשי
