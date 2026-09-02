@@ -59,6 +59,10 @@ class CheckPlanServiceTests(TestCase):
         self.assertIsNotNone(due.tax_invoice_id)
         self.assertEqual(due.tax_invoice.document_type, 'tax_invoice')
         self.assertEqual(due.tax_invoice.total_amount, Decimal('350.00'))
+        # The check is the gross amount; VAT sits inside it.
+        self.assertFalse(due.tax_invoice.vat_exempt)
+        self.assertEqual(due.tax_invoice.vat_amount, Decimal('53.39'))
+        self.assertEqual(due.tax_invoice.subtotal, Decimal('296.61'))
         self.assertEqual(later.status, 'pending')
         self.assertIsNone(later.tax_invoice_id)
 

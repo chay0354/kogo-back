@@ -129,7 +129,8 @@ def _issue_item_invoice(item: CheckItem) -> None:
         'invoice_details': {
             'document_date': str(item.due_date),
             'description': line,
-            'vat_exempt': True,
+            # A check is a gross amount: VAT is taken out of it, never added on top.
+            'prices_include_vat': True,
             'line_items': [{
                 'description': line,
                 'quantity': 1,

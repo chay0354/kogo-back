@@ -30,12 +30,19 @@ def _generate_document_number(document_type: str) -> str:
 
 
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,
-                    vat_exempt: bool, round_total: bool) -> dict:
+                    vat_exempt: bool, round_total: bool, prices_include_vat: bool = False) -> dict:
     subtotal = sum(Decimal(str(i['quantity'])) * Decimal(str(i['price'])) for i in line_items)
     effective_discount = discount_amount if discount_amount > 0 else (subtotal * discount_percent / 100)
     base = subtotal - effective_discount
-    vat = Decimal('0') if vat_exempt else (base * VAT_RATE).quantize(Decimal('0.01'))
-    total = base + vat
+    if prices_include_vat and not vat_exempt:
+        # The prices are gross: the total is what was paid, VAT is taken out of it.
+        net = (base / (1 + VAT_RATE)).quantize(Decimal('0.01'))
+        vat = base - net
+        total = base
+        subtotal = subtotal - vat
+    else:
+        vat = Decimal('0') if vat_exempt else (base * VAT_RATE).quantize(Decimal('0.01'))
+        total = base + vat
     if round_total:
         total = total.quantize(Decimal('1'))
     return {
@@ -56,6 +63,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         Decimal(str(invoice_data.get('discount_percent', 0))),
         invoice_data.get('vat_exempt', False),
         invoice_data.get('round_total', False),
+        invoice_data.get('prices_include_vat', False),
     )
 
     doc = FormalDocument.objects.create(
@@ -105,6 +113,7 @@ def create_draft(data: dict) -> FormalDocument:
         Decimal(str(invoice_data.get('discount_percent', 0))),
         vat_exempt,
         invoice_data.get('round_total', False),
+        invoice_data.get('prices_include_vat', False),
     )
     doc = FormalDocument.objects.create(
         document_number=_generate_draft_number(),
@@ -163,6 +172,7 @@ def create_combined(data: dict) -> FormalDocument:
         Decimal(str(invoice_data.get('discount_percent', 0))),
         invoice_data.get('vat_exempt', False),
         invoice_data.get('round_total', False),
+        invoice_data.get('prices_include_vat', False),
     )
 
     doc = FormalDocument.objects.create(
