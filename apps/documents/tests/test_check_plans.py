@@ -85,6 +85,20 @@ class CheckPlanServiceTests(TestCase):
         self.assertEqual(item.tax_invoice.document_type, 'tax_invoice')
         self.assertEqual(plan.status, 'completed')
 
+    def test_running_the_cron_twice_does_not_invoice_a_check_twice(self):
+        today = date.today()
+        plan = register_check_plan(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+            checks=[{'date': today.isoformat(), 'check_number': '2001', 'amount': '300.00'}],
+        )
+        first = plan.items.get()
+        self.assertEqual(first.status, 'invoiced')
+        invoices_before = FormalDocument.objects.filter(document_type='tax_invoice').count()
+        summary = issue_due_check_invoices(today=today, plan=plan)
+        self.assertEqual(summary['issued'], 0)
+        self.assertEqual(FormalDocument.objects.filter(document_type='tax_invoice').count(), invoices_before)
+
     def test_register_rejects_empty_checks(self):
         with self.assertRaises(ValueError):
             register_check_plan(child_id=str(self.child.id), checks=[{'amount': 0}])

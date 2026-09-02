@@ -24,7 +24,7 @@ from apps.store.invoice_pdf import (
 PAGE_WIDTH, PAGE_HEIGHT = A4
 SIDE_MARGIN = 1.6 * cm
 TOP_MARGIN = 1.2 * cm
-BOTTOM_MARGIN = 2.2 * cm
+BOTTOM_MARGIN = 2.8 * cm
 CONTENT_WIDTH = PAGE_WIDTH - 2 * SIDE_MARGIN
 RADIUS = 8
 
@@ -292,13 +292,14 @@ def _draw_page(doc_obj: FormalDocument):
         canvas.setLineWidth(0.8)
         y = BOTTOM_MARGIN - 0.35 * cm
         canvas.line(SIDE_MARGIN, y, PAGE_WIDTH - SIDE_MARGIN, y)
-        canvas.setFont('Heebo', 8.5)
         canvas.setFillColor(BRAND_NAVY)
-        footer = f'{ISSUER_NAME} · {ISSUER_ADDRESS} · {ISSUER_PHONE} · {ISSUER_EMAIL}'
-        canvas.drawCentredString(PAGE_WIDTH / 2, y - 0.45 * cm, _rtl(footer))
+        canvas.setFont('Heebo-Bold', 11)
+        canvas.drawCentredString(PAGE_WIDTH / 2, y - 0.55 * cm, _rtl(f'{ISSUER_NAME} · ח.פ. {ISSUER_COMPANY_NUMBER}'))
+        canvas.setFont('Heebo', 10)
+        canvas.drawCentredString(PAGE_WIDTH / 2, y - 1.05 * cm, _rtl(f'{ISSUER_ADDRESS} · {ISSUER_PHONE} · {ISSUER_EMAIL}'))
         canvas.setFont('Heebo', 7.5)
         canvas.setFillColor(colors.HexColor('#8a8da3'))
-        canvas.drawRightString(PAGE_WIDTH - SIDE_MARGIN, y - 0.95 * cm, _rtl(f'עמוד {document.page}'))
+        canvas.drawRightString(PAGE_WIDTH - SIDE_MARGIN, y - 1.5 * cm, _rtl(f'עמוד {document.page}'))
         if doc_obj.document_type == 'draft':
             canvas.setFont('Heebo-Bold', 92)
             canvas.setFillColor(colors.Color(0.55, 0.55, 0.65, alpha=0.2))
@@ -316,7 +317,7 @@ def generate_document_pdf(doc: FormalDocument) -> bytes:
 
     story = []
     if os.path.isfile(_LOGO_IMAGE):
-        logo_w = 3.4 * cm
+        logo_w = 4.8 * cm
         logo = Image(_LOGO_IMAGE, width=logo_w, height=logo_w * LOGO_RATIO)
         logo.hAlign = 'CENTER'
         story += [logo, Spacer(1, 0.4 * cm)]
