@@ -5,14 +5,18 @@ from django.db.models import F, Q, Value
 from django.db.models.functions import Replace
 from rest_framework import filters
 
-PHONE_MIN_DIGITS = 7
+NUMBER_MIN_DIGITS = 3
 _NON_DIGITS = re.compile(r'\D+')
 
 
 def phone_query_digits(term: str) -> str:
-    """'+972 52-265-9322' -> '0522659322'; anything that is not a phone -> ''."""
+    """
+    '+972 52-265-9322' -> '0522659322', and a partial '97254' -> '054' — the
+    prefix a reader types instead of the leading zero. Anything with letters
+    is not a number term and returns ''.
+    """
     digits = _NON_DIGITS.sub('', term)
-    if len(digits) < PHONE_MIN_DIGITS or digits != term.replace('+', '').replace('-', '').replace(' ', ''):
+    if len(digits) < NUMBER_MIN_DIGITS or digits != term.replace('+', '').replace('-', '').replace(' ', ''):
         return ''
     if digits.startswith('972'):
         digits = '0' + digits[3:]

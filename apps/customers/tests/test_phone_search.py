@@ -33,7 +33,10 @@ class PhoneSearchTests(APITestCase):
         self.assertEqual(phone_query_digits('+972 52-265-9322'), '0522659322')
         self.assertEqual(phone_query_digits('052-2659322'), '0522659322')
         self.assertEqual(phone_query_digits('נועה'), '')
-        self.assertEqual(phone_query_digits('123'), '')
+        self.assertEqual(phone_query_digits('12'), '')
+        # A partial number with the country code is the prefix the reader means.
+        self.assertEqual(phone_query_digits('97254'), '054')
+        self.assertEqual(phone_query_digits('9725'), '05')
 
     def _ids(self, url, search):
         res = self.client.get(url, {'search': search})
@@ -60,12 +63,24 @@ class PhoneSearchTests(APITestCase):
         self.assertEqual(self._ids('/api/v1/customers/children/', '9725077788'), {str(self.kid.id)})
         self.assertEqual(self._ids('/api/v1/customers/children/', '031972543'), {str(self.kid.id)})
 
-    def test_short_digits_match_id_numbers_not_phones(self):
-        # "97254" is too short to be a phone: it is searched as text, and the
-        # only field holding it is the child's ID number — never a phone that
-        # merely looks unrelated on screen.
-        self.assertEqual(self._ids('/api/v1/customers/children/', '97254'), {str(self.kid.id)})
-        self.assertEqual(self._ids('/api/v1/customers/children/', '46469'), set())
+    def test_partial_972_prefix_finds_phones_by_the_exact_digit_run(self):
+        # '97254' means the 054- prefix; only phones actually starting 054 match,
+        # and an ID number is matched only if it holds the digits as typed.
+        Family.objects.create(name='משפחת 054', phone='054-646-9155', branch=self.kid.family.branch)
+        kid054 = Child.objects.create(family=Family.objects.get(name='משפחת 054'), first_name='רום', last_name='ב',
+                                      birth_date=date(2014, 1, 1), gender='male', status='active')
+        # Every 054 phone answers to the prefix — the other family is 054 too —
+        # and so does an ID number that holds the digits as typed (031972543).
+        found = self._ids('/api/v1/customers/children/', '97254')
+        self.assertIn(str(kid054.id), found)
+        self.assertNotIn(str(kid054.id), self._ids('/api/v1/customers/children/', '97255'))
+        self.assertEqual(self._ids('/api/v1/customers/children/', '972546469'), {str(kid054.id)})
+        # '46469' is inside that phone; '46479' is not — nothing approximate.
+        self.assertEqual(self._ids('/api/v1/customers/children/', '46469'), {str(kid054.id)})
+        self.assertEqual(self._ids('/api/v1/customers/children/', '46479'), set())
+        # An ID number is a raw digit run: '97254' is in 031972543, '97256' is not.
+        self.assertIn(str(self.kid.id), self._ids('/api/v1/customers/children/', '97254'))
+        self.assertNotIn(str(self.kid.id), self._ids('/api/v1/customers/children/', '97256'))
 
     def _rows(self, search):
         res = self.client.get('/api/v1/customers/children/', {'search': search})
