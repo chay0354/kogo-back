@@ -4,6 +4,10 @@
     {
       "path": "/api/v1/customers/cron/recurring-billing/",
       "schedule": "0 5,6,7,8,9,10,11,12 * * *"
+    },
+    {
+      "path": "/api/v1/core/ping/",
+      "schedule": "*/5 5-19 * * *"
     }
   ]
 }

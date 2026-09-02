@@ -1,8 +1,9 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Count, Q, Prefetch
 from django.utils import timezone
 from decimal import Decimal
@@ -307,3 +308,15 @@ class BusinessCategoryViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         if business_id:
             qs = qs.filter(business_id=business_id)
         return qs
+
+
+class PingView(APIView):
+    """
+    USAGE: Registered at /api/v1/core/ping/
+    USAGE: Hit by a Vercel cron through the day so the function stays warm for the instructors' register
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        return Response({'ok': True})

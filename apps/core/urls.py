@@ -23,6 +23,7 @@ router.register(r'whatsapp', WhatsAppViewSet, basename='whatsapp')
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('ping/', views.PingView.as_view(), name='ping'),
     path('auth/', include('apps.core.auth_urls')),
     path('registration-terms/', RegistrationTermsView.as_view(), name='registration-terms'),
     path('credit-cards/charge/', CreditCardChargeView.as_view(), name='credit-card-charge'),
