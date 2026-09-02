@@ -51,12 +51,15 @@ class FormalDocumentListSerializer(serializers.ModelSerializer):
     document_type_display = serializers.CharField(source='get_document_type_display', read_only=True)
     customer_name = serializers.SerializerMethodField()
 
+    business_name = serializers.CharField(source='business.name', read_only=True, default='')
+    business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
     class Meta:
         model = FormalDocument
         fields = [
             'id', 'document_number', 'document_type', 'document_type_display',
             'document_date', 'total_amount', 'currency', 'tranzila_issued', 'pdf_url',
             'customer_name', 'tranzila_doc_id',
+            'business_name', 'business_category_name',
         ]
 
     def get_customer_name(self, obj):
