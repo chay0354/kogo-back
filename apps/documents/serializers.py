@@ -28,7 +28,7 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = FormalDocument
         fields = [
-            'id', 'document_number', 'document_type', 'document_type_display',
+            'id', 'document_number', 'document_type', 'document_type_display', 'draft_target_type',
             'client_type', 'child', 'business_customer',
             'document_date', 'due_date', 'description', 'currency',
             'prices_include_vat', 'payment_terms',
@@ -124,8 +124,12 @@ class CreditInvoiceInputSerializer(serializers.Serializer):
 class CreateDocumentSerializer(serializers.Serializer):
     """Top-level create payload for all document types."""
     document_type = serializers.ChoiceField(choices=[
-        'tax_invoice', 'receipt', 'combined', 'transaction_invoice', 'credit_invoice'
+        'tax_invoice', 'receipt', 'combined', 'transaction_invoice', 'credit_invoice', 'draft'
     ])
+    # Only for drafts: what the document becomes when approved.
+    draft_target_type = serializers.ChoiceField(
+        choices=['tax_invoice', 'transaction_invoice'], required=False, allow_blank=True,
+    )
     client_type = serializers.ChoiceField(choices=['business', 'existing'])
     child_id = serializers.UUIDField(required=False, allow_null=True)
     business_customer_id = serializers.UUIDField(required=False, allow_null=True)

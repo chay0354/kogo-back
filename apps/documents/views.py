@@ -139,6 +139,8 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 doc = service.create_receipt(data)
             elif doc_type == 'credit_invoice':
                 doc = service.create_credit_invoice(data)
+            elif doc_type == 'draft':
+                doc = service.create_draft(data)
             else:
                 return Response({'error': f'סוג מסמך לא נתמך: {doc_type}'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -148,6 +150,35 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             logger.error(f"Document creation failed: {e}", exc_info=True)
             return Response({'error': f'שגיאה ביצירת המסמך: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'], url_path='finalize',
+            permission_classes=[IsAuthenticated, IsManager])
+    def finalize(self, request, pk=None):
+        """
+        POST /api/v1/documents/documents/{id}/finalize/
+        Approve a draft: it becomes a real document and takes a fiscal number.
+        """
+        doc = self.get_object()
+        try:
+            doc = service.finalize_draft(doc)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(FormalDocumentSerializer(doc).data)
+
+    @action(detail=True, methods=['get'], url_path='pdf')
+    def pdf(self, request, pk=None):
+        """
+        GET /api/v1/documents/documents/{id}/pdf/
+        The document rendered locally. Tranzila's PDF stays the official copy
+        when one exists; this is for drafts, credit invoices, and anything
+        Tranzila never issued.
+        """
+        from apps.documents.document_pdf import generate_document_pdf
+        doc = self.get_object()
+        pdf_bytes = generate_document_pdf(doc)
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{doc.document_number}.pdf"'
+        return response
 
     @action(detail=True, methods=['post'], url_path='send-reminder')
     def send_reminder(self, request, pk=None):

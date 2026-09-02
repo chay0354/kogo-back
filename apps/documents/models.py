@@ -9,6 +9,9 @@ DOCUMENT_TYPE_CHOICES = [
     ('combined', 'חשבונית מס/קבלה'),
     ('transaction_invoice', 'חשבונית עסקה'),
     ('credit_invoice', 'חשבונית מס זיכוי'),
+    # Work in progress. Not a tax document: no fiscal number, never sent to
+    # Tranzila, and excluded from the period report until it is approved.
+    ('draft', 'טיוטה'),
 ]
 
 TRANZILA_DOCUMENT_TYPE = {
@@ -115,6 +118,8 @@ class FormalDocument(models.Model):
     # For credit invoices: manual invoice number if linked_document not resolved
     linked_document_number = models.CharField(max_length=30, blank=True, verbose_name="מספר חשבונית מקושרת")
     credit_reason = models.TextField(blank=True, verbose_name="סיבת זיכוי")
+    # For drafts: the document type it becomes when approved.
+    draft_target_type = models.CharField(max_length=30, blank=True, verbose_name="סוג מסמך לאחר אישור")
 
     # Tranzila document data
     tranzila_doc_id = models.CharField(max_length=100, blank=True, verbose_name="מזהה מסמך טרנזילה")

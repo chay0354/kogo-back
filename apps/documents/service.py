@@ -1,4 +1,5 @@
 import logging
+import uuid
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
@@ -11,6 +12,21 @@ from apps.documents.models import (
 logger = logging.getLogger(__name__)
 
 VAT_RATE = Decimal('0.18')
+
+
+DRAFT_TYPE = 'draft'
+# Types a draft may be approved into. A receipt records money that arrived,
+# so it is issued when the money does, never drafted first.
+DRAFT_TARGET_TYPES = ('tax_invoice', 'transaction_invoice')
+
+
+def _generate_draft_number() -> str:
+    """
+    A draft is not a tax document, so it must not draw from the fiscal
+    sequence: a deleted draft would leave a gap in the invoice numbering.
+    The prefix keeps it unmistakable next to a real number.
+    """
+    return f"D-{uuid.uuid4().hex[:8].upper()}"
 
 
 def _generate_document_number(document_type: str) -> str:
@@ -77,6 +93,72 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
             unit_price=Decimal(str(item.get('price', 0))),
         )
 
+    _attempt_tranzila(doc)
+    return doc
+
+
+@transaction.atomic
+def create_draft(data: dict) -> FormalDocument:
+    """
+    Save an invoice as a draft: same lines and totals, no fiscal number, and
+    nothing sent to Tranzila. Approval (finalize_draft) turns it into the
+    real document and only then consumes a number.
+    """
+    target = data.get('draft_target_type') or 'tax_invoice'
+    if target not in DRAFT_TARGET_TYPES:
+        raise ValueError(f'לא ניתן לשמור טיוטה לסוג {target}')
+    invoice_data = data['invoice_details']
+    vat_exempt = invoice_data.get('vat_exempt', False) or target == 'transaction_invoice'
+    totals = _compute_totals(
+        invoice_data['line_items'],
+        Decimal(str(invoice_data.get('discount_amount', 0))),
+        Decimal(str(invoice_data.get('discount_percent', 0))),
+        vat_exempt,
+        invoice_data.get('round_total', False),
+    )
+    doc = FormalDocument.objects.create(
+        document_number=_generate_draft_number(),
+        document_type=DRAFT_TYPE,
+        draft_target_type=target,
+        client_type=data['client_type'],
+        child_id=data.get('child_id'),
+        business_customer_id=data.get('business_customer_id'),
+        branch_id=data.get('branch_id'),
+        document_date=invoice_data['document_date'],
+        due_date=invoice_data.get('due_date') or None,
+        description=invoice_data.get('description', ''),
+        currency=invoice_data.get('currency', 'ILS'),
+        prices_include_vat=invoice_data.get('prices_include_vat', False),
+        payment_terms=invoice_data.get('payment_terms', ''),
+        vat_exempt=vat_exempt,
+        vat_percent=Decimal('18'),
+        customer_notes=invoice_data.get('customer_notes', ''),
+        internal_notes=invoice_data.get('internal_notes', ''),
+        **totals,
+    )
+    for item in invoice_data['line_items']:
+        DocumentLineItem.objects.create(
+            document=doc,
+            sku=item.get('sku', ''),
+            description=item.get('description', ''),
+            quantity=Decimal(str(item.get('quantity', 1))),
+            unit_price=Decimal(str(item.get('price', 0))),
+        )
+    return doc
+
+
+@transaction.atomic
+def finalize_draft(doc: FormalDocument) -> FormalDocument:
+    """Approve a draft: it becomes its target type and takes the next fiscal number."""
+    if doc.document_type != DRAFT_TYPE:
+        raise ValueError('המסמך אינו טיוטה')
+    target = doc.draft_target_type or 'tax_invoice'
+    if target not in DRAFT_TARGET_TYPES:
+        raise ValueError(f'סוג יעד לא נתמך: {target}')
+    doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
+    doc.document_type = target
+    doc.document_number = _generate_document_number(target)
+    doc.save(update_fields=['document_type', 'document_number', 'updated_at'])
     _attempt_tranzila(doc)
     return doc
 

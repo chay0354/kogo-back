@@ -142,6 +142,8 @@ def scoped_documents(user, start: date, end: date, document_type: str = '') -> t
             'child', 'child__family', 'child__family__branch',
         )
     )
+    # A draft is not a tax document; it never counts.
+    qs = qs.exclude(document_type='draft')
     if document_type:
         qs = qs.filter(document_type=document_type)
 

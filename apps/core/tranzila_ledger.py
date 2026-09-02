@@ -48,6 +48,7 @@ LOCAL_DOC_TYPE_LABELS = {
     'combined': 'חשבונית מס/קבלה',
     'transaction_invoice': 'חשבונית עסקה',
     'credit_invoice': 'חשבונית מס זיכוי',
+    'draft': 'טיוטה',
 }
 
 PAYMENT_METHOD_LABELS = {
@@ -193,7 +194,10 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
         amount = _parse_amount(doc.total_amount)
         is_credit = doc.document_type == 'credit_invoice'
         is_receipt = doc.document_type in ('receipt', 'combined')
-        status = 'refunded' if is_credit else ('completed' if is_receipt or doc.tranzila_issued else 'pending')
+        is_draft = doc.document_type == 'draft'
+        status = 'draft' if is_draft else (
+            'refunded' if is_credit else ('completed' if is_receipt or doc.tranzila_issued else 'pending')
+        )
         paid = amount if status == 'completed' else 0.0
         rows.append({
             'id': str(doc.id),
@@ -204,7 +208,7 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'document_type_code': doc.document_type,
             'total_amount': amount,
             'amount_paid': paid,
-            'open_balance': 0.0 if status == 'completed' else amount,
+            'open_balance': 0.0 if status in ('completed', 'draft') else amount,
             'status': status,
             'pdf_url': doc.pdf_url or (
                 f'{TRANZILA_PDF_PUBLIC_BASE}/{doc.tranzila_retrieval_key}'
@@ -212,6 +216,8 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             ),
             'tranzila_doc_id': doc.tranzila_doc_id,
             'source': 'tranzila' if doc.tranzila_issued else 'local',
+            'tranzila_issued': doc.tranzila_issued,
+            'is_draft': doc.document_type == 'draft',
             'branch': doc.branch.name if doc.branch_id else '',
             'branch_id': str(doc.branch_id) if doc.branch_id else None,
         })
