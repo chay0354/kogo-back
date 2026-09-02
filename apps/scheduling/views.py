@@ -1,6 +1,7 @@
 from datetime import date as date_cls, timedelta
 
 import logging
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db.models import Count, Prefetch, Q
@@ -109,9 +110,16 @@ class LessonViewSet(viewsets.ModelViewSet):
                     distinct=True,
                 )
             )
-        else:
-            # The detail serializer reads child fields off every enrolment, so a
-            # bare prefetch costs one more query per child on the roster.
+        elif self.action in ('cancel', 'restore'):
+            # These two hand a lesson straight to the detail serializer, which
+            # reads child fields off every enrolment — without this that is one
+            # more query per child on the roster.
+            #
+            # Only these two. Every other detail action either builds the roster
+            # itself, per occurrence and filtered by status, or never looks at
+            # it at all; there the prefetch is a second full read of the roster
+            # whose result is thrown away, and the register is the screen an
+            # instructor opens in front of a waiting class.
             qs = qs.prefetch_related(
                 Prefetch('enrollments', queryset=LessonEnrollment.objects.select_related('child'))
             )
@@ -689,6 +697,10 @@ class LessonViewSet(viewsets.ModelViewSet):
         and the enrolment is 'inactive', which keeps it out of capacity and pay.
         It shows for a few occurrences and then stops on its own.
 
+        They come back already marked present — someone the instructor is adding
+        mid-lesson is standing in front of them — and the mark travels in this
+        response so the screen never has to ask for the register again.
+
         Reachable only for lessons this user can already open: get_object() runs
         the same scoping as the rest of the ViewSet.
         """
@@ -730,9 +742,51 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'trial_lesson_date': None,
                 'is_trial': False,
                 'created': created,
+                'attendance_status': 'present',
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=['delete'], url_path='walkin/(?P<enrollment_id>[^/.]+)')
+    def remove_walkin(self, request, pk=None, enrollment_id=None):
+        """
+        Remove a walk-in the instructor added by mistake.
+
+        Walk-ins only. A registered child is the office's record and no amount
+        of tapping on this screen may delete one, so the check is here and not
+        only in the UI: anything that is not a ghost on this lesson is refused
+        and nothing is touched.
+
+        Reachable only for lessons this user can already open — get_object()
+        runs the same scoping as the rest of the ViewSet, so a linked colleague
+        reaches exactly the registers they could already read and mark, and no
+        others.
+        """
+        lesson = self.get_object()
+
+        try:
+            enrollment = (
+                LessonEnrollment.objects
+                .filter(lesson=lesson, id=enrollment_id)
+                .select_related('child', 'child__family')
+                .first()
+            )
+        except (ValueError, DjangoValidationError):
+            # An id that is not even an id names nothing on this lesson.
+            enrollment = None
+        if enrollment is None:
+            return Response({'error': 'התלמיד לא נמצא בשיעור הזה'}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.enrollments.ghost_students import delete_ghost_enrollment, is_ghost_enrollment
+
+        if not is_ghost_enrollment(enrollment):
+            return Response(
+                {'error': 'אפשר להסיר רק תלמיד שנוסף ידנית בשיעור'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        delete_ghost_enrollment(enrollment=enrollment)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ScheduleEventViewSet(viewsets.ModelViewSet):
