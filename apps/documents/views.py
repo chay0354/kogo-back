@@ -9,13 +9,17 @@ from django.conf import settings
 from django.http import HttpResponse
 
 from apps.core.permissions import IsManager, IsManagerOrPartner
-from apps.documents.models import FormalDocument
+from apps.customers.models import Child
+from apps.documents.models import FormalDocument, CheckPlan
 from apps.documents.serializers import (
     FormalDocumentSerializer,
     FormalDocumentListSerializer,
     CreateDocumentSerializer,
+    CheckPlanSerializer,
+    CreateCheckPlanSerializer,
 )
 from apps.documents import service
+from apps.documents.check_plans import register_check_plan
 
 logger = logging.getLogger(__name__)
 
@@ -191,3 +195,75 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'send_failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         return Response({'sent': True})
+
+
+class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
+    """Office check series: list existing plans and register a new one with a receipt."""
+
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    serializer_class = CheckPlanSerializer
+    pagination_class = None
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = [
+        'description',
+        'child__first_name',
+        'child__last_name',
+        'items__check_number',
+    ]
+    ordering_fields = ['created_at']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        qs = (
+            CheckPlan.objects
+            .select_related('child', 'lesson', 'lesson__course', 'branch', 'receipt')
+            .prefetch_related('items', 'items__tax_invoice')
+        )
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        child_id = self.request.query_params.get('child_id')
+        if child_id:
+            qs = qs.filter(child_id=child_id)
+        branch_id = self.request.query_params.get('branch')
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+        return qs
+
+    def create(self, request):
+        serializer = CreateCheckPlanSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        try:
+            plan = register_check_plan(
+                child_id=str(data['child_id']),
+                checks=data['checks'],
+                description=data.get('description') or '',
+                lesson_id=str(data['lesson_id']) if data.get('lesson_id') else None,
+            )
+        except Child.DoesNotExist:
+            return Response({'error': 'הילד לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.error('Check plan registration failed: %s', exc, exc_info=True)
+            return Response(
+                {'error': f'שגיאה ברישום הצ׳קים: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        plan = self.get_queryset().get(pk=plan.pk)
+        return Response(CheckPlanSerializer(plan).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        plan = self.get_object()
+        if plan.status == 'cancelled':
+            return Response(CheckPlanSerializer(plan).data)
+        plan.status = 'cancelled'
+        plan.save(update_fields=['status', 'updated_at'])
+        plan.items.filter(status='pending').update(status='cancelled')
+        plan = self.get_queryset().get(pk=plan.pk)
+        return Response(CheckPlanSerializer(plan).data)

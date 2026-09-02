@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.documents.models import FormalDocument, DocumentLineItem, DocumentPayment
+from apps.documents.models import FormalDocument, DocumentLineItem, DocumentPayment, CheckPlan, CheckItem
 
 
 class DocumentLineItemSerializer(serializers.ModelSerializer):
@@ -135,3 +135,54 @@ class CreateDocumentSerializer(serializers.Serializer):
     invoice_details = InvoiceDetailsInputSerializer(required=False)
     receipt_details = ReceiptDetailsInputSerializer(required=False)
     credit_invoice_details = CreditInvoiceInputSerializer(required=False)
+
+
+class CheckItemSerializer(serializers.ModelSerializer):
+    tax_invoice_number = serializers.CharField(source='tax_invoice.document_number', read_only=True, allow_null=True)
+
+    class Meta:
+        model = CheckItem
+        fields = [
+            'id', 'due_date', 'amount', 'bank', 'bank_branch', 'account_number',
+            'check_number', 'status', 'tax_invoice', 'tax_invoice_number', 'invoiced_at',
+        ]
+        read_only_fields = fields
+
+
+class CheckPlanSerializer(serializers.ModelSerializer):
+    child_name = serializers.CharField(source='child.full_name', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+    lesson_name = serializers.SerializerMethodField()
+    receipt_number = serializers.CharField(source='receipt.document_number', read_only=True, allow_null=True)
+    items = CheckItemSerializer(many=True, read_only=True)
+    total_amount = serializers.SerializerMethodField()
+    next_due_date = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CheckPlan
+        fields = [
+            'id', 'child', 'child_name', 'lesson', 'lesson_name', 'description',
+            'status', 'receipt', 'receipt_number', 'branch', 'branch_name',
+            'items', 'total_amount', 'next_due_date', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_lesson_name(self, obj):
+        if obj.lesson_id and obj.lesson:
+            course = getattr(obj.lesson, 'course', None)
+            return course.name if course else str(obj.lesson)
+        return None
+
+    def get_total_amount(self, obj):
+        return sum((item.amount for item in obj.items.all()), start=0)
+
+    def get_next_due_date(self, obj):
+        pending = [item.due_date for item in obj.items.all() if item.status == 'pending']
+        return min(pending) if pending else None
+
+
+class CreateCheckPlanSerializer(serializers.Serializer):
+    child_id = serializers.UUIDField()
+    lesson_id = serializers.UUIDField(required=False, allow_null=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+    checks = serializers.ListField(child=serializers.DictField(), allow_empty=False)

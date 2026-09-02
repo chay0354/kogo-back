@@ -193,3 +193,102 @@ class DocumentPayment(models.Model):
         db_table = 'document_payments'
         verbose_name = "תשלום במסמך"
         verbose_name_plural = "תשלומים במסמך"
+
+
+class CheckPlan(models.Model):
+    """Office check series for a child who cannot pay by card."""
+
+    STATUS_CHOICES = [
+        ('active', 'פעיל'),
+        ('completed', 'הושלם'),
+        ('cancelled', 'בוטל'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    child = models.ForeignKey(
+        'customers.Child',
+        on_delete=models.CASCADE,
+        related_name='check_plans',
+        verbose_name="ילד",
+    )
+    lesson = models.ForeignKey(
+        'courses.Lesson',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='check_plans',
+        verbose_name="שיעור",
+    )
+    description = models.CharField(max_length=300, blank=True, verbose_name="תיאור")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active', verbose_name="סטטוס")
+    receipt = models.ForeignKey(
+        FormalDocument,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='check_plan_receipts',
+        verbose_name="קבלה",
+    )
+    branch = models.ForeignKey(
+        'core.Branch',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='check_plans',
+        verbose_name="סניף",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'check_plans'
+        verbose_name = "תוכנית צ'קים"
+        verbose_name_plural = "תוכניות צ'קים"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"צ'קים {self.child_id} — {self.get_status_display()}"
+
+
+class CheckItem(models.Model):
+    """One post-dated check in a CheckPlan."""
+
+    STATUS_CHOICES = [
+        ('pending', 'ממתין'),
+        ('invoiced', 'הופקה חשבונית'),
+        ('cancelled', 'בוטל'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(
+        CheckPlan,
+        on_delete=models.CASCADE,
+        related_name='items',
+        verbose_name="תוכנית",
+    )
+    due_date = models.DateField(verbose_name="תאריך צ'ק")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="סכום")
+    bank = models.CharField(max_length=100, blank=True, verbose_name="בנק")
+    bank_branch = models.CharField(max_length=50, blank=True, verbose_name="סניף בנק")
+    account_number = models.CharField(max_length=50, blank=True, verbose_name="מספר חשבון")
+    check_number = models.CharField(max_length=50, blank=True, verbose_name="מספר צ'ק")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name="סטטוס")
+    tax_invoice = models.ForeignKey(
+        FormalDocument,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='check_item_invoices',
+        verbose_name="חשבונית מס",
+    )
+    invoiced_at = models.DateTimeField(null=True, blank=True, verbose_name="תאריך הפקת חשבונית")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+
+    class Meta:
+        db_table = 'check_items'
+        verbose_name = "צ'ק"
+        verbose_name_plural = "צ'קים"
+        ordering = ['due_date', 'created_at']
+
+    def __str__(self):
+        return f"צ'ק {self.check_number or self.id} ₪{self.amount}"
