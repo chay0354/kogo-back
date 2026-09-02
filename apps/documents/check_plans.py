@@ -106,7 +106,7 @@ def register_check_plan(
 def _issue_item_invoice(item: CheckItem) -> None:
     # Locked and re-checked: the hourly cron and beat can overlap, and a check
     # must never get two invoices.
-    item = CheckItem.objects.select_for_update(skip_locked=True).select_related(
+    item = CheckItem.objects.select_for_update(of=('self',), skip_locked=True).select_related(
         'plan', 'plan__child', 'plan__lesson', 'plan__lesson__course', 'plan__branch'
     ).filter(pk=item.pk, status='pending').first()
     if item is None:
