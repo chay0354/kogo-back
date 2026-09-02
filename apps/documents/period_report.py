@@ -28,7 +28,11 @@ from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
 
 GROUP_BY_BRANCH = 'branch'
 GROUP_BY_BUSINESS = 'business'
-GROUP_BY_CHOICES = (GROUP_BY_BRANCH, GROUP_BY_BUSINESS)
+GROUP_BY_UNIT = 'business_unit'
+GROUP_BY_CATEGORY = 'business_category'
+GROUP_BY_CHOICES = (GROUP_BY_BRANCH, GROUP_BY_BUSINESS, GROUP_BY_UNIT, GROUP_BY_CATEGORY)
+UNTAGGED_BUSINESS_LABEL = 'ללא שיוך לעסק'
+UNTAGGED_CATEGORY_LABEL = 'ללא קטגוריה'
 
 # A document that reaches neither a branch nor a business customer still has to
 # appear somewhere, so each grouping has a named bucket for it. Dropping such a
@@ -397,6 +401,17 @@ def build_report(
 
         if group_by == GROUP_BY_BRANCH:
             key, title, _source = resolve_branch(doc, enrollment_map)
+            unassigned = key is None
+        elif group_by == GROUP_BY_UNIT:
+            key = doc.business_id
+            title = doc.business.name if doc.business_id else UNTAGGED_BUSINESS_LABEL
+            unassigned = key is None
+        elif group_by == GROUP_BY_CATEGORY:
+            key = doc.business_category_id
+            if doc.business_category_id:
+                title = f'{doc.business.name} · {doc.business_category.name}'
+            else:
+                title = UNTAGGED_CATEGORY_LABEL
             unassigned = key is None
         else:
             if doc.business_customer_id:

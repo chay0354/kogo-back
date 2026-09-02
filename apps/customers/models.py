@@ -721,6 +721,14 @@ class BusinessCustomer(models.Model):
     address = models.TextField(blank=True, verbose_name="כתובת")
     business_type = models.CharField(max_length=100, blank=True, verbose_name="שיוך לעסק")
     category = models.CharField(max_length=100, blank=True, verbose_name="קטגוריה")
+    business = models.ForeignKey(
+        'core.Business', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='business_customers', verbose_name="עסק",
+    )
+    business_category = models.ForeignKey(
+        'core.BusinessCategory', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='business_customers', verbose_name="קטגוריה בעסק",
+    )
     branch = models.ForeignKey(
         'core.Branch',
         on_delete=models.SET_NULL,

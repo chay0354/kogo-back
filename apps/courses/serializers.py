@@ -284,6 +284,8 @@ class CourseTypeDetailsSerializer(serializers.ModelSerializer):
 class CourseSerializer(serializers.ModelSerializer):
     """Basic Course serializer for CRUD operations"""
     course_type_name = serializers.CharField(source='course_type.name', read_only=True, allow_null=True)
+    business_name = serializers.CharField(source='business.name', read_only=True, default='')
+    business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     lessons_count = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
@@ -303,7 +305,8 @@ class CourseSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Course
-        fields = ['id', 'display_id', 'course_type', 'course_type_name', 'name', 'description',
+        fields = ['id', 'display_id', 'course_type', 'course_type_name',
+                  'business', 'business_name', 'business_category', 'business_category_name', 'name', 'description',
                   'price', 'capacity', 'branch', 'branch_name',
                   'min_age', 'max_age', 'is_active', 'show_in_widget', 'is_adult', 'must_attend_all_lessons',
                   'trial_lesson_is_paid', 'trial_lesson_price',

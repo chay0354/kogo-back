@@ -36,6 +36,8 @@ from reportlab.platypus import (
 )
 
 from apps.documents.period_report import (
+    GROUP_BY_CATEGORY,
+    GROUP_BY_UNIT,
     DOCUMENT_TYPE_LABELS,
     TYPE_ORDER,
     GROUP_BY_BRANCH,
@@ -69,6 +71,8 @@ _LOGO_IMAGE = os.path.join(
 GROUP_BY_TITLES = {
     GROUP_BY_BRANCH: 'לפי סניפים',
     'business': 'לפי לקוחות עסקיים',
+    GROUP_BY_UNIT: 'לפי עסק',
+    GROUP_BY_CATEGORY: 'לפי קטגוריה',
 }
 
 # Column widths sum to the printable width (A4 minus both margins).
@@ -462,7 +466,7 @@ def _group_totals_summary(report: PeriodReport, styles: dict):
     """Per-group totals in one place, so the final page answers 'how much per branch'."""
     if not report.groups:
         return []
-    group_word = 'סניף' if report.group_by == GROUP_BY_BRANCH else 'לקוח עסקי'
+    group_word = {GROUP_BY_BRANCH: 'סניף', GROUP_BY_UNIT: 'עסק', GROUP_BY_CATEGORY: 'קטגוריה'}.get(report.group_by, 'לקוח עסקי')
     widths = [7.0 * cm, 2.0 * cm, 2.6 * cm, 2.2 * cm, 2.6 * cm]
     header = [
         _rtl_cell(group_word, styles['th'], widths[0]),
@@ -545,12 +549,14 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
         for group in report.groups:
             note = []
             if group.is_unassigned:
-                explanation = (
-                    'מסמכים שלא ניתן היה לשייך לסניף — לא דרך הסניף במסמך, '
-                    'לא דרך הלקוח העסקי, ולא דרך המשפחה או ההרשמה של הילד.'
-                    if report.group_by == GROUP_BY_BRANCH else
-                    'מסמכים שהופקו ללקוחות רשומים ולא ללקוח עסקי.'
-                )
+                explanation = {
+                    GROUP_BY_BRANCH: (
+                        'מסמכים שלא ניתן היה לשייך לסניף — לא דרך הסניף במסמך, '
+                        'לא דרך הלקוח העסקי, ולא דרך המשפחה או ההרשמה של הילד.'
+                    ),
+                    GROUP_BY_UNIT: 'מסמכים שלא שויכו לעסק.',
+                    GROUP_BY_CATEGORY: 'מסמכים שלא שויכו לקטגוריה.',
+                }.get(report.group_by, 'מסמכים שהופקו ללקוחות רשומים ולא ללקוח עסקי.')
                 note = [Spacer(1, 0.1 * cm), Paragraph(_rtl(explanation), styles['note'])]
             # Keep a group's bar attached to its header row; the table itself is
             # free to break across pages and carries its headers with it.

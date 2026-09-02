@@ -23,6 +23,19 @@ def _generate_draft_number() -> str:
     return f"D-{uuid.uuid4().hex[:8].upper()}"
 
 
+def _income_tags(data: dict) -> dict:
+    """The business and category a document's income belongs to: as given, else the business customer's."""
+    business_id = data.get('business_id')
+    category_id = data.get('business_category_id')
+    if not business_id and data.get('business_customer_id'):
+        from apps.customers.models import BusinessCustomer
+        customer = BusinessCustomer.objects.filter(pk=data['business_customer_id']).only('business_id', 'business_category_id').first()
+        if customer:
+            business_id = customer.business_id
+            category_id = category_id or customer.business_category_id
+    return {'business_id': business_id, 'business_category_id': category_id}
+
+
 def _generate_document_number(document_type: str) -> str:
     year = timezone.now().year
     seq = DocumentCounter.next_number(year)
@@ -72,6 +85,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        **_income_tags(data),
         branch_id=data.get('branch_id'),
         document_date=invoice_data['document_date'],
         due_date=invoice_data.get('due_date') or None,
@@ -122,6 +136,7 @@ def create_draft(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        **_income_tags(data),
         branch_id=data.get('branch_id'),
         document_date=invoice_data['document_date'],
         due_date=invoice_data.get('due_date') or None,
@@ -181,6 +196,7 @@ def create_combined(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        **_income_tags(data),
         branch_id=data.get('branch_id'),
         document_date=invoice_data['document_date'],
         due_date=invoice_data.get('due_date') or None,
@@ -228,6 +244,7 @@ def create_receipt(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        **_income_tags(data),
         branch_id=data.get('branch_id'),
         document_date=data.get('document_date', str(timezone.now().date())),
         currency='ILS',
@@ -309,6 +326,7 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
+        **_income_tags(data),
         branch_id=data.get('branch_id'),
         document_date=credit['document_date'],
         vat_exempt=vat_exempt,

@@ -7,8 +7,9 @@ from django.db.models import Count, Q, Prefetch
 from django.utils import timezone
 from decimal import Decimal
 from datetime import timedelta
-from apps.core.models import City, Branch, Room, BranchFile
+from apps.core.models import Business, BusinessCategory, City, Branch, Room, BranchFile
 from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
+from apps.core.serializers import BusinessCategorySerializer, BusinessSerializer
 from apps.core.scoping import scope_branches, scope_cities
 from apps.core.serializers import (
     CitySerializer, BranchSerializer, BranchListSerializer, 
@@ -279,3 +280,30 @@ class BranchFileViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         instance.delete()
         
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class BusinessViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
+    """
+    USAGE: Registered at /api/v1/core/businesses/
+    USAGE: The businesses income (and later expenses) is tagged to, with their categories
+    """
+    queryset = Business.objects.prefetch_related('categories')
+    serializer_class = BusinessSerializer
+    pagination_class = None
+
+
+class BusinessCategoryViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
+    """
+    USAGE: Registered at /api/v1/core/business-categories/
+    USAGE: ?business=<id> narrows to one business
+    """
+    queryset = BusinessCategory.objects.select_related('business')
+    serializer_class = BusinessCategorySerializer
+    pagination_class = None
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        business_id = self.request.query_params.get('business')
+        if business_id:
+            qs = qs.filter(business_id=business_id)
+        return qs

@@ -10,7 +10,7 @@ from apps.customers.models import (
 )
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
-from apps.core.models import Branch
+from apps.core.models import Branch, Business, BusinessCategory
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 
 
@@ -787,13 +787,22 @@ class BusinessCustomerSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
+    business_id = serializers.PrimaryKeyRelatedField(
+        source='business', queryset=Business.objects.all(), required=False, allow_null=True,
+    )
+    business_name = serializers.CharField(source='business.name', read_only=True, default='')
+    business_category_id = serializers.PrimaryKeyRelatedField(
+        source='business_category', queryset=BusinessCategory.objects.all(), required=False, allow_null=True,
+    )
+    business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
 
     class Meta:
         model = BusinessCustomer
         fields = [
             'id', 'first_name', 'last_name', 'full_name',
             'email', 'phone', 'id_number', 'company_number', 'address',
-            'business_type', 'category', 'branch_id', 'branch_name', 'notes',
+            'business_type', 'category', 'business_id', 'business_name',
+            'business_category_id', 'business_category_name', 'branch_id', 'branch_name', 'notes',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'full_name', 'branch_name', 'created_at', 'updated_at']

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.core.models import City, Branch, Room, BranchFile
+from apps.core.models import Business, BusinessCategory, City, Branch, Room, BranchFile
 
 
 class CitySerializer(serializers.ModelSerializer):
@@ -160,3 +160,31 @@ class BranchFileSerializer(serializers.ModelSerializer):
                 validated_data['file_type'] = 'document'
         
         return super().create(validated_data)
+
+
+class BusinessCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BusinessCategory
+        fields = ['id', 'business', 'name', 'is_active', 'sort_order', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('יש להזין שם קטגוריה')
+        return name
+
+
+class BusinessSerializer(serializers.ModelSerializer):
+    categories = BusinessCategorySerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Business
+        fields = ['id', 'name', 'is_active', 'sort_order', 'categories', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'categories', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('יש להזין שם עסק')
+        return name

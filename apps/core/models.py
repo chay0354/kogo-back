@@ -404,3 +404,42 @@ class RegistrationTerms(models.Model):
     def __str__(self):
         return "תקנון רישום"
 
+
+class Business(models.Model):
+    """עסק — יחידה עסקית שאליה משויכות הכנסות (ובהמשך הוצאות)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100, unique=True, verbose_name="שם העסק")
+    is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="סדר")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'businesses'
+        verbose_name = "עסק"
+        verbose_name_plural = "עסקים"
+        ordering = ['sort_order', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+class BusinessCategory(models.Model):
+    """קטגוריה בתוך עסק."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='categories', verbose_name="עסק")
+    name = models.CharField(max_length=100, verbose_name="שם הקטגוריה")
+    is_active = models.BooleanField(default=True, verbose_name="פעיל")
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="סדר")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'business_categories'
+        verbose_name = "קטגוריית עסק"
+        verbose_name_plural = "קטגוריות עסק"
+        unique_together = ('business', 'name')
+        ordering = ['business', 'sort_order', 'name']
+
+    def __str__(self):
+        return f"{self.business.name} · {self.name}"

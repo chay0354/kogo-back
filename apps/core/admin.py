@@ -1,7 +1,9 @@
 from django.contrib import admin
 from .models import (
     City, Branch, Room,
-    InstructorMonthlySnapshot, LessonMonthlySnapshot, BranchMonthlySnapshot
+    InstructorMonthlySnapshot, LessonMonthlySnapshot, BranchMonthlySnapshot,
+    Business,
+    BusinessCategory,
 )
 
 
@@ -44,3 +46,16 @@ class BranchMonthlySnapshotAdmin(admin.ModelAdmin):
     list_display = ['branch', 'month', 'total_students', 'total_revenue', 'instructor_costs', 'profit', 'active_courses_count']
     list_filter = ['month', 'branch']
 
+
+@admin.register(Business)
+class BusinessAdmin(admin.ModelAdmin):
+    list_display = ['name', 'is_active', 'sort_order']
+    list_editable = ['is_active', 'sort_order']
+    search_fields = ['name']
+
+
+@admin.register(BusinessCategory)
+class BusinessCategoryAdmin(admin.ModelAdmin):
+    list_display = ['name', 'business', 'is_active', 'sort_order']
+    list_filter = ['business', 'is_active']
+    search_fields = ['name']

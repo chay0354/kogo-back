@@ -97,6 +97,26 @@ def aggregate_lesson_registration_revenue(
             f"{row['lesson__instructor__first_name']} {row['lesson__instructor__last_name']}"
         )
 
+    # Lesson income carries the course's business and category. Untagged
+    # courses fall into one named bucket rather than vanishing from the sum.
+    by_business: dict[str, Decimal] = defaultdict(lambda: Decimal('0.00'))
+    by_business_name: dict[str, str] = {}
+    by_category: dict[tuple, Decimal] = defaultdict(lambda: Decimal('0.00'))
+    by_category_name: dict[tuple, str] = {}
+    for row in qs.values(
+        'lesson__course__business_id',
+        'lesson__course__business__name',
+        'lesson__course__business_category_id',
+        'lesson__course__business_category__name',
+    ).annotate(amount=Sum('final_amount')):
+        amount = row['amount'] or Decimal('0.00')
+        bid = str(row['lesson__course__business_id']) if row['lesson__course__business_id'] else ''
+        cid = str(row['lesson__course__business_category_id']) if row['lesson__course__business_category_id'] else ''
+        by_business[bid] += amount
+        by_business_name[bid] = row['lesson__course__business__name'] or 'ללא שיוך לעסק'
+        by_category[(bid, cid)] += amount
+        by_category_name[(bid, cid)] = row['lesson__course__business_category__name'] or 'ללא קטגוריה'
+
     return {
         'total': total,
         'registration_fees': registration_fees,
@@ -104,6 +124,10 @@ def aggregate_lesson_registration_revenue(
         'by_month': dict(by_month),
         'by_instructor_id': dict(by_instructor_id),
         'by_instructor_name': by_instructor_name,
+        'by_business': dict(by_business),
+        'by_business_name': by_business_name,
+        'by_category': dict(by_category),
+        'by_category_name': by_category_name,
     }
 
 

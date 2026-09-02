@@ -12,6 +12,8 @@ from .devops_views import DatabaseBackupView, EnvInfoView
 router = DefaultRouter()
 router.register(r'cities', views.CityViewSet, basename='city')
 router.register(r'branches', views.BranchViewSet, basename='branch')
+router.register(r'businesses', views.BusinessViewSet, basename='business')
+router.register(r'business-categories', views.BusinessCategoryViewSet, basename='business-category')
 router.register(r'rooms', views.RoomViewSet, basename='room')
 router.register(r'branch-files', views.BranchFileViewSet, basename='branch-file')
 router.register(r'users', auth_views.UserViewSet, basename='user')

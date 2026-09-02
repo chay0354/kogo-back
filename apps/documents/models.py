@@ -120,6 +120,15 @@ class FormalDocument(models.Model):
     # For drafts: the document type it becomes when approved.
     draft_target_type = models.CharField(max_length=30, blank=True, verbose_name="סוג מסמך לאחר אישור")
 
+    # Income tagging: explicit, or inherited from the business customer.
+    business = models.ForeignKey(
+        'core.Business', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='documents', verbose_name="עסק",
+    )
+    business_category = models.ForeignKey(
+        'core.BusinessCategory', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='documents', verbose_name="קטגוריה בעסק",
+    )
     # Tranzila document data
     tranzila_doc_id = models.CharField(max_length=100, blank=True, verbose_name="מזהה מסמך טרנזילה")
     tranzila_retrieval_key = models.CharField(max_length=100, blank=True, verbose_name="מפתח אחזור טרנזילה")

@@ -1,0 +1,115 @@
+"""Businesses and categories: managed by managers, and carried by customers, courses and documents."""
+from datetime import date
+from decimal import Decimal
+
+from django.contrib.auth import get_user_model
+from rest_framework import status
+from rest_framework.test import APITestCase
+
+from apps.core.models import Branch, Business, BusinessCategory, City, UserProfile
+from apps.customers.models import BusinessCustomer, Child, Family
+from apps.documents.models import FormalDocument
+
+User = get_user_model()
+
+
+def make_user(username, role):
+    user = User.objects.create_user(username=username, password='pw-for-tests')
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    profile.role = role
+    profile.save(update_fields=['role'])
+    return User.objects.get(pk=user.pk)
+
+
+class BusinessTaxonomyTests(APITestCase):
+    def setUp(self):
+        self.manager = make_user('manager-biz@test', UserProfile.ROLE_MANAGER)
+        self.worker = make_user('worker-biz@test', UserProfile.ROLE_WORKER)
+        self.partner = make_user('partner-biz@test', UserProfile.ROLE_PARTNER)
+        city = City.objects.create(name='עיר')
+        self.branch = Branch.objects.create(name='סניף', city=city)
+
+    def test_seeded_vocabulary_exists(self):
+        names = set(Business.objects.values_list('name', flat=True))
+        self.assertTrue({'לקוחות', 'סוחרים', 'ספקים', 'חוגים', 'מותג קוגומלו', 'מותג געגע'} <= names)
+
+    def test_manager_manages_businesses_and_categories(self):
+        self.client.force_authenticate(self.manager)
+        res = self.client.post('/api/v1/core/businesses/', {'name': 'הופעות'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        business_id = res.data['id']
+        res = self.client.post('/api/v1/core/business-categories/', {'business': business_id, 'name': 'יום הולדת'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        res = self.client.get('/api/v1/core/businesses/')
+        row = next(b for b in res.data if b['id'] == business_id)
+        self.assertEqual([c['name'] for c in row['categories']], ['יום הולדת'])
+        res = self.client.post('/api/v1/core/businesses/', {'name': '  '}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_partner_may_read_but_not_write(self):
+        self.client.force_authenticate(self.partner)
+        self.assertEqual(self.client.get('/api/v1/core/businesses/').status_code, status.HTTP_200_OK)
+        res = self.client.post('/api/v1/core/businesses/', {'name': 'X'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(self.worker)
+        self.assertEqual(self.client.get('/api/v1/core/businesses/').status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_document_inherits_the_business_customers_tags(self):
+        business = Business.objects.get(name='חוגים')
+        category = BusinessCategory.objects.create(business=business, name='קפוארה')
+        self.client.force_authenticate(self.manager)
+        res = self.client.post('/api/v1/customers/business-customers/', {
+            'first_name': 'בית ספר', 'last_name': 'ניצנים', 'business_id': str(business.id),
+            'business_category_id': str(category.id),
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(res.data['business_name'], 'חוגים')
+        self.assertEqual(res.data['business_category_name'], 'קפוארה')
+        customer_id = res.data['id']
+
+        res = self.client.post('/api/v1/documents/documents/create-document/', {
+            'document_type': 'tax_invoice', 'client_type': 'business', 'business_customer_id': customer_id,
+            'invoice_details': {'document_date': '2026-09-02',
+                                'line_items': [{'description': 'סדנה', 'quantity': 1, 'price': '1000'}]},
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        doc = FormalDocument.objects.get(pk=res.data['id'])
+        self.assertEqual(doc.business_id, business.id)
+        self.assertEqual(doc.business_category_id, category.id)
+        self.assertEqual(res.data['business_name'], 'חוגים')
+
+        # An explicit tag on the document wins over the customer's.
+        other = Business.objects.get(name='מותג קוגומלו')
+        res = self.client.post('/api/v1/documents/documents/create-document/', {
+            'document_type': 'tax_invoice', 'client_type': 'business', 'business_customer_id': customer_id,
+            'business_id': str(other.id),
+            'invoice_details': {'document_date': '2026-09-02',
+                                'line_items': [{'description': 'מיתוג', 'quantity': 1, 'price': '500'}]},
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(FormalDocument.objects.get(pk=res.data['id']).business_id, other.id)
+
+    def test_period_report_groups_by_business_and_category(self):
+        from apps.documents.period_report import build_report, parse_period
+        business = Business.objects.get(name='חוגים')
+        category = BusinessCategory.objects.create(business=business, name='קפוארה')
+        fam = Family.objects.create(name='משפחה', branch=self.branch)
+        kid = Child.objects.create(family=fam, first_name='נועה', last_name='כהן',
+                                   birth_date=date(2015, 5, 5), gender='female', status='active')
+        for number, tags in (('2026-0001', {'business': business, 'business_category': category}), ('2026-0002', {})):
+            FormalDocument.objects.create(
+                document_number=number, document_type='tax_invoice', client_type='existing', child=kid,
+                branch=self.branch, document_date=date(2026, 9, 2), subtotal=Decimal('100'),
+                vat_percent=Decimal('18'), vat_amount=Decimal('18'), total_amount=Decimal('118'), **tags,
+            )
+        start, end, label = parse_period({'month': '2026-09'})
+        report = build_report(self.manager, start, end, label, group_by='business_unit')
+        self.assertEqual([g.title for g in report.groups], ['חוגים', 'ללא שיוך לעסק'])
+        report = build_report(self.manager, start, end, label, group_by='business_category')
+        self.assertEqual([g.title for g in report.groups], ['חוגים · קפוארה', 'ללא קטגוריה'])
+
+    def test_financial_dashboard_reports_revenue_by_business(self):
+        self.client.force_authenticate(self.manager)
+        res = self.client.get('/api/v1/core/dashboard/financial/', {'date_from': '2026-09-01', 'date_to': '2026-09-30'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK, getattr(res, 'data', res.content[:200]))
+        self.assertIn('revenue_by_business', res.data)

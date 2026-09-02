@@ -186,6 +186,26 @@ class DashboardViewSet(viewsets.ViewSet):
                 'profit': float(revenue - expenses),
             })
 
+        revenue_by_business = []
+        for bid, amount in sorted(lesson_revenue.get('by_business', {}).items(), key=lambda kv: kv[1], reverse=True):
+            categories = [
+                {
+                    'category_id': cid or None,
+                    'category_name': lesson_revenue['by_category_name'][(b, cid)],
+                    'revenue': float(cat_amount),
+                }
+                for (b, cid), cat_amount in sorted(
+                    lesson_revenue.get('by_category', {}).items(), key=lambda kv: kv[1], reverse=True
+                )
+                if b == bid
+            ]
+            revenue_by_business.append({
+                'business_id': bid or None,
+                'business_name': lesson_revenue['by_business_name'][bid],
+                'revenue': float(amount),
+                'categories': categories,
+            })
+
         monthly_expenses = {
             row['month']: row['expenses'] or Decimal('0.00')
             for row in snapshots.values('month').annotate(expenses=Sum('instructor_costs'))
@@ -259,6 +279,7 @@ class DashboardViewSet(viewsets.ViewSet):
                 'total': float(total_expenses)
             },
             'revenue_by_branch': revenue_by_branch,
+            'revenue_by_business': revenue_by_business,
             'monthly_trends': monthly_trends,
             'revenue_by_instructor': revenue_by_instructor
         })

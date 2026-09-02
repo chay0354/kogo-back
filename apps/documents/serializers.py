@@ -25,11 +25,14 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
     payments = DocumentPaymentSerializer(many=True, read_only=True)
     document_type_display = serializers.CharField(source='get_document_type_display', read_only=True)
 
+    business_name = serializers.CharField(source='business.name', read_only=True, default='')
+    business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
     class Meta:
         model = FormalDocument
         fields = [
             'id', 'document_number', 'document_type', 'document_type_display', 'draft_target_type',
             'client_type', 'child', 'business_customer',
+            'business', 'business_name', 'business_category', 'business_category_name',
             'document_date', 'due_date', 'description', 'currency',
             'prices_include_vat', 'payment_terms',
             'vat_exempt', 'vat_percent',
@@ -126,6 +129,9 @@ class CreateDocumentSerializer(serializers.Serializer):
     document_type = serializers.ChoiceField(choices=[
         'tax_invoice', 'receipt', 'combined', 'transaction_invoice', 'credit_invoice', 'draft'
     ])
+    # Income tagging; defaults to the business customer's own when omitted.
+    business_id = serializers.UUIDField(required=False, allow_null=True)
+    business_category_id = serializers.UUIDField(required=False, allow_null=True)
     # Only for drafts: what the document becomes when approved.
     draft_target_type = serializers.ChoiceField(
         choices=['tax_invoice', 'transaction_invoice'], required=False, allow_blank=True,

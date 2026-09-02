@@ -47,6 +47,14 @@ class Course(models.Model):
         help_text="מספר סידורי קצר לזיהוי הקבוצה (לא מפתח ראשי), מוצג לצד שם הקבוצה בממשק.",
     )
     course_type = models.ForeignKey(CourseType, on_delete=models.CASCADE, related_name='courses', null=True, blank=True, verbose_name="תחום")
+    business = models.ForeignKey(
+        'core.Business', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='courses', verbose_name="עסק",
+    )
+    business_category = models.ForeignKey(
+        'core.BusinessCategory', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='courses', verbose_name="קטגוריה בעסק",
+    )
     name = models.CharField(max_length=200, verbose_name="שם החוג")
     description = models.TextField(blank=True, verbose_name="תיאור")
     price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="מחיר")
