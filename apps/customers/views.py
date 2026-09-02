@@ -14,6 +14,7 @@ from django.utils.decorators import method_decorator
 from datetime import datetime, date, timedelta
 from django.conf import settings
 from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer, CronHeartbeat
+from apps.customers.phone_search import PhoneAwareSearchFilter
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
 from apps.customers.serializers import (
@@ -54,7 +55,7 @@ class FamilyViewSet(viewsets.ModelViewSet):
     queryset = Family.objects.all().prefetch_related('parents', 'children')
     serializer_class = FamilySerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
     search_fields = ['name', 'phone', 'email']
     ordering_fields = ['name', 'created_at']
     ordering = ['-created_at']
@@ -85,7 +86,7 @@ class ParentViewSet(viewsets.ModelViewSet):
     queryset = Parent.objects.all().select_related('family')
     serializer_class = ParentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'phone', 'email']
     ordering_fields = ['last_name', 'created_at']
 
@@ -130,7 +131,7 @@ class ChildViewSet(viewsets.ModelViewSet):
         ),
     )
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'family__name', 'family__phone', 'id_number']
     ordering_fields = ['first_name', 'last_name', 'created_at', 'birth_date']
     ordering = ['-created_at']
