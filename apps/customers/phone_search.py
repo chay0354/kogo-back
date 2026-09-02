@@ -44,6 +44,7 @@ class PhoneAwareSearchFilter(filters.SearchFilter):
             terms = [raw]
 
         phone_fields = [f for f in search_fields if f.split('__')[-1].startswith('phone')]
+        id_fields = [f for f in search_fields if f.split('__')[-1].endswith('id_number')]
         annotations = {f'_digits_{i}': _digits_only(f) for i, f in enumerate(phone_fields)}
         if annotations:
             queryset = queryset.annotate(**annotations)
@@ -56,6 +57,10 @@ class PhoneAwareSearchFilter(filters.SearchFilter):
                     cond |= Q(**{f'{alias}__icontains': digits})
                     # A stored 972 number is the same phone.
                     cond |= Q(**{f'{alias}__icontains': '972' + digits[1:]})
+                # A long run of digits may just as well be an ID number.
+                raw_digits = _NON_DIGITS.sub('', term)
+                for field in id_fields:
+                    cond |= Q(**{f'{field}__icontains': raw_digits})
             else:
                 cond = Q()
                 for field in search_fields:

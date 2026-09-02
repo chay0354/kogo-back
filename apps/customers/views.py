@@ -56,7 +56,7 @@ class FamilyViewSet(viewsets.ModelViewSet):
     serializer_class = FamilySerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
-    search_fields = ['name', 'phone', 'email']
+    search_fields = ['name', 'phone', 'email', 'parent_id_number', 'parents__first_name', 'parents__last_name', 'parents__phone']
     ordering_fields = ['name', 'created_at']
     ordering = ['-created_at']
 
@@ -132,7 +132,11 @@ class ChildViewSet(viewsets.ModelViewSet):
     )
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
-    search_fields = ['first_name', 'last_name', 'family__name', 'family__phone', 'id_number']
+    search_fields = [
+        'first_name', 'last_name', 'id_number',
+        'family__name', 'family__phone', 'family__parent_id_number',
+        'family__parents__first_name', 'family__parents__last_name', 'family__parents__phone',
+    ]
     ordering_fields = ['first_name', 'last_name', 'created_at', 'birth_date']
     ordering = ['-created_at']
     

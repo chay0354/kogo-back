@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
 from apps.core.models import Branch, City, UserProfile
-from apps.customers.models import Child, Family
+from apps.customers.models import Child, Family, Parent
 from apps.customers.phone_search import phone_query_digits
 
 User = get_user_model()
@@ -17,8 +17,9 @@ class PhoneSearchTests(APITestCase):
         branch = Branch.objects.create(name='סניף', city=city)
         fam = Family.objects.create(name='משפחת כהן', phone='052-265-9322', branch=branch)
         other = Family.objects.create(name='משפחת לוי', phone='054-1112223', branch=branch)
-        self.kid = Child.objects.create(family=fam, first_name='נועה', last_name='כהן',
+        self.kid = Child.objects.create(family=fam, first_name='נועה', last_name='כהן', id_number='031972543',
                                         birth_date=date(2015, 5, 5), gender='female', status='active')
+        Parent.objects.create(family=fam, first_name='יעל', last_name='כהן', phone='050-777-8899')
         Child.objects.create(family=other, first_name='דן', last_name='לוי',
                              birth_date=date(2014, 3, 3), gender='male', status='active')
         user = User.objects.create_user(username='m@test', password='pw')
@@ -53,3 +54,15 @@ class PhoneSearchTests(APITestCase):
     def test_name_search_still_works(self):
         ids = self._ids('/api/v1/customers/children/', 'נועה')
         self.assertEqual(ids, {str(self.kid.id)})
+
+    def test_child_found_by_parent_name_phone_and_id(self):
+        self.assertEqual(self._ids('/api/v1/customers/children/', 'יעל'), {str(self.kid.id)})
+        self.assertEqual(self._ids('/api/v1/customers/children/', '9725077788'), {str(self.kid.id)})
+        self.assertEqual(self._ids('/api/v1/customers/children/', '031972543'), {str(self.kid.id)})
+
+    def test_short_digits_match_id_numbers_not_phones(self):
+        # "97254" is too short to be a phone: it is searched as text, and the
+        # only field holding it is the child's ID number — never a phone that
+        # merely looks unrelated on screen.
+        self.assertEqual(self._ids('/api/v1/customers/children/', '97254'), {str(self.kid.id)})
+        self.assertEqual(self._ids('/api/v1/customers/children/', '46469'), set())
