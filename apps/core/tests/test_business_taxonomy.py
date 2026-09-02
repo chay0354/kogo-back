@@ -113,3 +113,37 @@ class BusinessTaxonomyTests(APITestCase):
         res = self.client.get('/api/v1/core/dashboard/financial/', {'date_from': '2026-09-01', 'date_to': '2026-09-30'})
         self.assertEqual(res.status_code, status.HTTP_200_OK, getattr(res, 'data', res.content[:200]))
         self.assertIn('revenue_by_business', res.data)
+
+
+class IncomeAttributionTests(APITestCase):
+    def test_every_source_lands_under_its_business(self):
+        from apps.core.revenue_service import _combine_income
+        lesson = {
+            'by_business': {'b1': Decimal('300')}, 'by_business_name': {'b1': 'חוגים'},
+            'by_category': {('b1', 'c1'): Decimal('300')}, 'by_category_name': {('b1', 'c1'): 'קפוארה'},
+            'by_branch_untagged': {'br1': Decimal('1000')},
+        }
+        rows = _combine_income(
+            lesson,
+            rental_by_branch={'br1': Decimal('400'), 'br2': Decimal('50')},
+            store_by_branch={'br2': Decimal('200'), '__online__': Decimal('120')},
+            document_rows=[{'business_id': 'b1', 'business_name': 'חוגים', 'category_id': 'c1', 'category_name': 'קפוארה', 'amount': Decimal('1180')},
+                           {'business_id': 'b1', 'business_name': 'חוגים', 'category_id': 'c1', 'category_name': 'קפוארה', 'amount': Decimal('-180')}],
+            branch_names={'br1': 'פלורנטין', 'br2': 'רמת אביב'},
+        )
+        by_name = {r['business_name']: r for r in rows}
+        # private-customer courses, rentals and pickup sales: the branch
+        branches = by_name['סניפים']
+        self.assertEqual(branches['revenue'], 1650.0)
+        self.assertEqual({c['category_name']: c['revenue'] for c in branches['categories']}, {'פלורנטין': 1400.0, 'רמת אביב': 250.0})
+        # website deliveries: the brand
+        self.assertEqual(by_name['מותג קוגומלו']['categories'][0]['category_name'], 'משלוחים')
+        self.assertEqual(by_name['מותג קוגומלו']['revenue'], 120.0)
+        # business customers and tagged courses: their own business, credits deducted
+        self.assertEqual(by_name['חוגים']['revenue'], 1300.0)
+        self.assertEqual(rows[0]['business_name'], 'סניפים')
+
+    def test_live_aggregation_runs_on_an_empty_period(self):
+        from apps.core.revenue_service import aggregate_income_by_business
+        from datetime import date
+        self.assertEqual(aggregate_income_by_business(date(2026, 1, 1), date(2026, 1, 31)), [])

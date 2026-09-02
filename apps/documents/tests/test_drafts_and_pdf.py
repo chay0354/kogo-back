@@ -49,6 +49,11 @@ class DraftDocumentTests(APITestCase):
         body.update(extra)
         return body
 
+    def test_private_document_takes_the_familys_branch(self):
+        res = self.client.post(CREATE, self.payload('tax_invoice'), format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(str(FormalDocument.objects.get(pk=res.data['id']).branch_id), str(self.branch.id))
+
     def test_a_document_can_carry_its_branch(self):
         res = self.client.post(CREATE, self.payload('tax_invoice', branch_id=str(self.branch.id)), format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)

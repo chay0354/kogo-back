@@ -186,25 +186,13 @@ class DashboardViewSet(viewsets.ViewSet):
                 'profit': float(revenue - expenses),
             })
 
-        revenue_by_business = []
-        for bid, amount in sorted(lesson_revenue.get('by_business', {}).items(), key=lambda kv: kv[1], reverse=True):
-            categories = [
-                {
-                    'category_id': cid or None,
-                    'category_name': lesson_revenue['by_category_name'][(b, cid)],
-                    'revenue': float(cat_amount),
-                }
-                for (b, cid), cat_amount in sorted(
-                    lesson_revenue.get('by_category', {}).items(), key=lambda kv: kv[1], reverse=True
-                )
-                if b == bid
-            ]
-            revenue_by_business.append({
-                'business_id': bid or None,
-                'business_name': lesson_revenue['by_business_name'][bid],
-                'revenue': float(amount),
-                'categories': categories,
-            })
+        from apps.core.revenue_service import aggregate_income_by_business
+        revenue_by_business = aggregate_income_by_business(
+            date_from,
+            date_to,
+            branch_id if branch_id and branch_id != 'all' else None,
+            branch_ids=scoped_branch_ids if scoped else None,
+        )
 
         monthly_expenses = {
             row['month']: row['expenses'] or Decimal('0.00')

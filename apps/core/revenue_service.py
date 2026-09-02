@@ -103,17 +103,23 @@ def aggregate_lesson_registration_revenue(
     by_business_name: dict[str, str] = {}
     by_category: dict[tuple, Decimal] = defaultdict(lambda: Decimal('0.00'))
     by_category_name: dict[tuple, str] = {}
+    by_branch_untagged: dict[str, Decimal] = defaultdict(lambda: Decimal('0.00'))
     for row in qs.values(
+        'branch_id',
         'lesson__course__business_id',
         'lesson__course__business__name',
         'lesson__course__business_category_id',
         'lesson__course__business_category__name',
     ).annotate(amount=Sum('final_amount')):
         amount = row['amount'] or Decimal('0.00')
-        bid = str(row['lesson__course__business_id']) if row['lesson__course__business_id'] else ''
+        if not row['lesson__course__business_id']:
+            # A course without tags is the branch's income.
+            by_branch_untagged[str(row['branch_id']) if row['branch_id'] else ''] += amount
+            continue
+        bid = str(row['lesson__course__business_id'])
         cid = str(row['lesson__course__business_category_id']) if row['lesson__course__business_category_id'] else ''
         by_business[bid] += amount
-        by_business_name[bid] = row['lesson__course__business__name'] or 'ללא שיוך לעסק'
+        by_business_name[bid] = row['lesson__course__business__name']
         by_category[(bid, cid)] += amount
         by_category_name[(bid, cid)] = row['lesson__course__business_category__name'] or 'ללא קטגוריה'
 
@@ -128,6 +134,7 @@ def aggregate_lesson_registration_revenue(
         'by_business_name': by_business_name,
         'by_category': dict(by_category),
         'by_category_name': by_category_name,
+        'by_branch_untagged': dict(by_branch_untagged),
     }
 
 
@@ -484,3 +491,98 @@ class RevenueService:
                 'fixed_price': float(metrics['fixed_price_total'] or 0)
             }
         }
+
+
+BRANCHES_BUSINESS_KEY = 'branches'
+BRANCHES_BUSINESS_LABEL = 'סניפים'
+DELIVERY_BUSINESS_LABEL = 'מותג קוגומלו'
+DELIVERY_CATEGORY_LABEL = 'משלוחים'
+UNTAGGED_LABEL = 'ללא שיוך'
+
+
+def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, branch_names, delivery_business=None):
+    """
+    Fold every income source into business → category buckets.
+
+    The rule set by the owner: a private customer's course, a studio rental
+    and a pickup sale belong to their branch, so branches are one business
+    with a category per branch; a website delivery belongs to the brand; a
+    business customer's document belongs to the business and category on
+    it; a course carrying its own tags goes under those.
+    """
+    buckets: dict = {}
+
+    def add(business_key, business_name, category_key, category_name, amount):
+        if not amount:
+            return
+        bucket = buckets.setdefault(business_key, {'business_id': business_key, 'business_name': business_name, 'revenue': Decimal('0.00'), 'categories': {}})
+        bucket['revenue'] += amount
+        cat = bucket['categories'].setdefault(category_key, {'category_id': category_key, 'category_name': category_name, 'revenue': Decimal('0.00')})
+        cat['revenue'] += amount
+
+    def branch_name(bid):
+        return branch_names.get(bid, UNTAGGED_LABEL)
+
+    for bid, amount in lesson.get('by_business', {}).items():
+        pass  # tagged courses are added per category below
+    for (bid, cid), amount in lesson.get('by_category', {}).items():
+        add(bid, lesson['by_business_name'][bid], cid or None, lesson['by_category_name'][(bid, cid)], amount)
+    for bid, amount in lesson.get('by_branch_untagged', {}).items():
+        add(BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL, bid or None, branch_name(bid), amount)
+    for bid, amount in rental_by_branch.items():
+        add(BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL, bid or None, branch_name(bid), amount)
+    for bid, amount in store_by_branch.items():
+        if bid == '__online__':
+            key = str(delivery_business.id) if delivery_business else 'delivery'
+            add(key, DELIVERY_BUSINESS_LABEL, 'delivery', DELIVERY_CATEGORY_LABEL, amount)
+        else:
+            add(BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL, bid or None, branch_name(bid), amount)
+    for row in document_rows:
+        add(row['business_id'] or '', row['business_name'] or UNTAGGED_LABEL,
+            row['category_id'] or None, row['category_name'] or 'ללא קטגוריה', row['amount'])
+
+    out = []
+    for bucket in sorted(buckets.values(), key=lambda b: b['revenue'], reverse=True):
+        categories = sorted(bucket['categories'].values(), key=lambda c: c['revenue'], reverse=True)
+        out.append({
+            'business_id': bucket['business_id'] or None,
+            'business_name': bucket['business_name'],
+            'revenue': float(bucket['revenue']),
+            'categories': [{**c, 'revenue': float(c['revenue'])} for c in categories],
+        })
+    return out
+
+
+def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=None) -> list:
+    """Lesson, rental, store and business-customer income, each under its business and category."""
+    from apps.core.models import Branch, Business
+    from apps.documents.models import FormalDocument
+    from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
+    from apps.store.store_finance import aggregate_store_revenue
+
+    lesson = aggregate_lesson_registration_revenue(date_from, date_to, branch_id, branch_ids=branch_ids)
+    rental = aggregate_studio_rental_revenue(date_from, date_to, branch_id=branch_id, branch_ids=branch_ids)
+    store = aggregate_store_revenue(date_from, date_to, branch_id=branch_id, branch_ids=branch_ids)
+
+    docs = FormalDocument.objects.filter(
+        client_type='business',
+        document_type__in=('tax_invoice', 'combined', 'credit_invoice'),
+        document_date__gte=date_from,
+        document_date__lte=date_to,
+    ).select_related('business', 'business_category')
+    if branch_id and branch_id != 'all':
+        docs = docs.filter(branch_id=branch_id)
+    elif branch_ids is not None:
+        docs = docs.filter(branch_id__in=branch_ids)
+    document_rows = [{
+        'business_id': str(d.business_id) if d.business_id else '',
+        'business_name': d.business.name if d.business_id else '',
+        'category_id': str(d.business_category_id) if d.business_category_id else '',
+        'category_name': d.business_category.name if d.business_category_id else '',
+        'amount': -d.total_amount if d.document_type == 'credit_invoice' else d.total_amount,
+    } for d in docs]
+
+    branch_keys = set(lesson.get('by_branch_untagged', {})) | set(rental['by_branch_id']) | set(store['by_branch_id'])
+    branch_names = {str(b.id): b.name for b in Branch.objects.filter(pk__in=[k for k in branch_keys if k and k != '__online__'])}
+    delivery_business = Business.objects.filter(name=DELIVERY_BUSINESS_LABEL).first()
+    return _combine_income(lesson, rental['by_branch_id'], store['by_branch_id'], document_rows, branch_names, delivery_business)
