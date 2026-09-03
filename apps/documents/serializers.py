@@ -149,6 +149,35 @@ class CreateDocumentSerializer(serializers.Serializer):
     receipt_details = ReceiptDetailsInputSerializer(required=False)
     credit_invoice_details = CreditInvoiceInputSerializer(required=False)
 
+    # Which section each type is built from. Optional above because a receipt
+    # carries no invoice section and an invoice carries no receipt one.
+    _SECTIONS_BY_TYPE = {
+        'tax_invoice': ('invoice_details',),
+        'transaction_invoice': ('invoice_details',),
+        'draft': ('invoice_details',),
+        # A combined document is built from the invoice section alone; how it
+        # was paid comes from invoice_details.payment_methods.
+        'combined': ('invoice_details',),
+        'receipt': ('receipt_details',),
+        'credit_invoice': ('credit_invoice_details',),
+    }
+    _SECTION_LABELS = {
+        'invoice_details': 'פרטי החשבונית',
+        'receipt_details': 'פרטי הקבלה',
+        'credit_invoice_details': 'פרטי הזיכוי',
+    }
+
+    def validate(self, attrs):
+        """Say which section is missing, instead of failing deep inside the service."""
+        missing = {
+            section: [f'{self._SECTION_LABELS[section]} חסרים למסמך מסוג זה']
+            for section in self._SECTIONS_BY_TYPE.get(attrs.get('document_type'), ())
+            if section not in attrs
+        }
+        if missing:
+            raise serializers.ValidationError(missing)
+        return attrs
+
 
 class CheckItemSerializer(serializers.ModelSerializer):
     tax_invoice_number = serializers.CharField(source='tax_invoice.document_number', read_only=True, allow_null=True)

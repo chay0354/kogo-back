@@ -79,11 +79,14 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
 def create_invoice(data: dict, document_type: str) -> FormalDocument:
     """Create a tax invoice or transaction invoice."""
     invoice_data = data['invoice_details']
+    # A חשבונית עסקה is not a tax document and carries no VAT — the same rule
+    # the draft path applies, so approving a draft and issuing directly agree.
+    vat_exempt = invoice_data.get('vat_exempt', False) or document_type == 'transaction_invoice'
     totals = _compute_totals(
         invoice_data['line_items'],
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
-        invoice_data.get('vat_exempt', False),
+        vat_exempt,
         invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
@@ -102,7 +105,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         currency=invoice_data.get('currency', 'ILS'),
         prices_include_vat=invoice_data.get('prices_include_vat', False),
         payment_terms=invoice_data.get('payment_terms', ''),
-        vat_exempt=invoice_data.get('vat_exempt', False),
+        vat_exempt=vat_exempt,
         vat_percent=Decimal('18'),
         customer_notes=invoice_data.get('customer_notes', ''),
         internal_notes=invoice_data.get('internal_notes', ''),

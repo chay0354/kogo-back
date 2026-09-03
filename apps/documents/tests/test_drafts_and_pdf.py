@@ -72,6 +72,34 @@ class DraftDocumentTests(APITestCase):
         self.assertFalse(doc.tranzila_issued)
         self.assertEqual(doc.total_amount, Decimal('424.80'))
 
+    def test_a_missing_details_section_is_answered_before_it_reaches_the_service(self):
+        body = self.payload('tax_invoice')
+        body.pop('invoice_details')
+        res = self.client.post(CREATE, body, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, res.data)
+        self.assertIn('invoice_details', res.data)
+
+    def test_a_combined_document_needs_only_the_invoice_section(self):
+        res = self.client.post(CREATE, self.payload('combined'), format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+
+    def test_a_transaction_invoice_carries_no_vat_however_it_was_issued(self):
+        direct = self.client.post(CREATE, self.payload('transaction_invoice'), format='json')
+        self.assertEqual(direct.status_code, status.HTTP_201_CREATED, direct.data)
+        issued = FormalDocument.objects.get(pk=direct.data['id'])
+        self.assertTrue(issued.vat_exempt)
+        self.assertEqual(issued.vat_amount, Decimal('0.00'))
+        self.assertEqual(issued.total_amount, Decimal('360.00'))
+
+        drafted = self.client.post(
+            CREATE, self.payload('draft', draft_target_type='transaction_invoice'), format='json',
+        )
+        approved = self.client.post(f"/api/v1/documents/documents/{drafted.data['id']}/finalize/")
+        self.assertEqual(approved.status_code, status.HTTP_200_OK, approved.data)
+        self.assertEqual(
+            FormalDocument.objects.get(pk=drafted.data['id']).total_amount, issued.total_amount,
+        )
+
     def test_finalize_gives_the_next_fiscal_number_and_the_target_type(self):
         real = self.client.post(CREATE, self.payload('tax_invoice'), format='json')
         self.assertEqual(real.status_code, 201, real.data)
