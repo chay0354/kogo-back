@@ -352,14 +352,16 @@ class LessonViewSet(viewsets.ModelViewSet):
 
             def occurrence_counts(lesson_id, occurrence_date, marked):
                 """
-                enrollment_count, student_count, trial_student_count and whether
-                the register is finished, in one pass over the roster.
+                enrollment_count, student_count, active_student_count,
+                trial_student_count and whether the register is finished, in one
+                pass over the roster.
 
                 marked is None when the occurrence cannot be complete (cancelled,
                 or no date at all), otherwise the children already marked on it.
                 """
                 capacity = 0
                 roster = 0
+                actives = 0
                 trials = 0
                 complete = marked is not None
                 for enr in enrollments_by_lesson.get(lesson_id, ()):
@@ -373,9 +375,11 @@ class LessonViewSet(viewsets.ModelViewSet):
                         and enr.child.status in TRIAL_CHILD_STATUSES
                     ):
                         trials += 1
+                    else:
+                        actives += 1
                     if complete and enr.child_id not in marked:
                         complete = False
-                return capacity, roster, trials, complete and roster > 0
+                return capacity, roster, actives, trials, complete and roster > 0
 
             expanded = []
             for lesson in lessons_list:
@@ -389,6 +393,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     (
                         data['enrollment_count'],
                         data['student_count'],
+                        data['active_student_count'],
                         data['trial_student_count'],
                         data['attendance_complete'],
                     ) = occurrence_counts(lesson.id, occ, marked)
@@ -413,6 +418,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     (
                         data['enrollment_count'],
                         data['student_count'],
+                        data['active_student_count'],
                         data['trial_student_count'],
                         attendance_done,
                     ) = occurrence_counts(lesson.id, occ, marked)

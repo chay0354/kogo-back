@@ -199,6 +199,7 @@ class WalkInReachesNoMoneyAndNoMessagingTests(WalkInTestBase):
         # alone.
         self.assertEqual(row['enrollment_count'], 1)
         self.assertEqual(row['student_count'], 1)
+        self.assertEqual(row['active_student_count'], 1)
         self.assertEqual(row['trial_student_count'], 0)
 
 

@@ -104,6 +104,8 @@ class PayingEnrollmentCountTest(TestCase):
         row = next(item for item in res.data if item['id'] == str(self.lesson.id))
         self.assertEqual(row['enrollment_count'], 2)
         self.assertEqual(row['student_count'], 2)
+        # The instructor card shows these two apart: one paying, one on trial.
+        self.assertEqual(row['active_student_count'], 1)
         self.assertEqual(row['trial_student_count'], 1)
 
     def test_course_enrollment_count_same_across_lessons_includes_trial(self):
