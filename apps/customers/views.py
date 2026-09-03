@@ -1248,18 +1248,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 'error': result.get('error', 'שגיאה בזיכוי התשלום')
             }, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['post'], url_path='action-1')
-    def action_1(self, request):
-        """One-off: refund Luna Shoker's duplicate charges and issue a credit invoice."""
-        from apps.core.luna_duplicate_refund import run_luna_duplicate_refund
-
-        try:
-            result = run_luna_duplicate_refund()
-        except Exception as exc:
-            logger.exception('Luna duplicate refund failed')
-            return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(result)
-
 
 class RecurringPaymentViewSet(viewsets.ModelViewSet):
     """
