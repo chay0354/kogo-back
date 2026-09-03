@@ -546,6 +546,17 @@ def _expiry_and_token_from_tranzila_payload(payment):
     return month, year, token
 
 
+def terminal_for_payment_refund(payment):
+    """Terminal that took the original charge — refunds must use the same one."""
+    txn = getattr(payment, 'tranzila_transaction', None)
+    data = getattr(txn, 'response_data', None) if txn else None
+    if not isinstance(data, dict):
+        return None
+    original = data.get('original_request') if isinstance(data.get('original_request'), dict) else {}
+    name = (original.get('terminal_name') or '').strip()
+    return name or None
+
+
 def card_details_for_payment_refund(payment):
     """Card token + expiry to refund this Payment via Tranzila.
 
@@ -2131,6 +2142,7 @@ class PaymentService:
             card_expire_year=card_expire_year,
             token=token,
             prefer_cancel=same_day,
+            terminal_name=terminal_for_payment_refund(payment),
         )
         
         if result['success']:

@@ -24,14 +24,12 @@ REFUND_PAYMENTS = (
     ('707e50cf-ec84-4223-a9f5-3eb3dc8e18e6', Decimal('225.00'), 'זיכוי חיוב כפול — מנוי ספטמבר'),
 )
 CREDIT_NOTE_MARKER = 'Luna Shoker widget double signup'
+CREDIT_NOTE_MARKER_REG = 'Luna Shoker widget double signup — registration 7be016ca'
 
 
 def run_luna_duplicate_refund() -> dict:
     from apps.core.payment_service import PaymentService
-    from apps.customers.financial_models import Invoice
     from apps.customers.models import Payment, RecurringPayment
-    from apps.documents.models import DocumentLineItem, FormalDocument
-    from apps.documents.service import create_credit_invoice
 
     keep_sto = RecurringPayment.objects.get(id=KEEP_STO_ID)
     cancel_sto = RecurringPayment.objects.get(id=CANCEL_STO_ID)
@@ -95,67 +93,26 @@ def run_luna_duplicate_refund() -> dict:
     if keep_sto.status != 'active':
         raise ValueError('הוראת הקבע התקינה בוטלה בטעות — בדוק מייד')
 
-    existing = FormalDocument.objects.filter(
-        child_id=CHILD_ID,
-        document_type='credit_invoice',
-        internal_notes__contains=CREDIT_NOTE_MARKER,
-    ).order_by('-created_at').first()
+    credits = []
+    monthly_ok = any(row['payment_id'] == REFUND_PAYMENTS[1][0] and row['success'] for row in refunds)
+    registration_ok = any(row['payment_id'] == REFUND_PAYMENTS[0][0] and row['success'] for row in refunds)
 
-    credit = None
-    if existing:
-        credit = {
-            'id': str(existing.id),
-            'document_number': existing.document_number,
-            'total_amount': float(existing.total_amount),
-            'already_existed': True,
-        }
-    elif refunded_total > 0:
-        before_vat, _vat, _gross = split_vat_inclusive(refunded_total)
-        doc = create_credit_invoice({
-            'client_type': 'existing',
-            'child_id': CHILD_ID,
-            'credit_invoice_details': {
-                'document_date': date.today(),
-                'linked_invoice_id': 'INV-20260901-707E50CF',
-                'credit_reason': (
-                    'חיוב כפול עקב הרשמה כפולה בטופס. '
-                    'זיכוי דמי רישום INV-20260830-FAM-7BE016CA (₪120) '
-                    'ומנוי ספטמבר INV-20260901-707E50CF (₪225). '
-                    'החשבוניות התקינות נשארות בתוקף.'
-                ),
-                'credit_amount_before_vat': str(before_vat),
-                'customer_notes': 'זיכוי חיוב כפול — דמי רישום ומנוי ספטמבר. החשבוניות המקוריות התקינות נשארות בתוקף.',
-                'internal_notes': CREDIT_NOTE_MARKER,
-            },
-        })
-        doc.description = 'זיכוי חיוב כפול — דמי רישום ומנוי ספטמבר — לונה שוקר'
-        doc.save(update_fields=['description'])
-        if any(row['payment_id'] == REFUND_PAYMENTS[0][0] and row['success'] for row in refunds):
-            DocumentLineItem.objects.create(
-                document=doc,
-                description='זיכוי דמי רישום כפול — מחול גיל רך 4.5-6 — לונה שוקר',
-                quantity=1,
-                unit_price=split_vat_inclusive(Decimal('120.00'))[0],
-            )
-        if any(row['payment_id'] == REFUND_PAYMENTS[1][0] and row['success'] for row in refunds):
-            DocumentLineItem.objects.create(
-                document=doc,
-                description='זיכוי מנוי חודשי כפול ספטמבר — מחול גיל רך 4.5-6 — לונה שוקר',
-                quantity=1,
-                unit_price=split_vat_inclusive(Decimal('225.00'))[0],
-            )
-        note = f'זוכה בחשבונית זיכוי {doc.document_number}'
-        for number in ('INV-20260830-FAM-7BE016CA', 'INV-20260901-707E50CF'):
-            inv = Invoice.objects.filter(invoice_number=number).first()
-            if inv and CREDIT_NOTE_MARKER not in (inv.admin_notes or ''):
-                inv.admin_notes = ((inv.admin_notes or '') + '\n' + note).strip()
-                inv.save(update_fields=['admin_notes', 'updated_at'])
-        credit = {
-            'id': str(doc.id),
-            'document_number': doc.document_number,
-            'total_amount': float(doc.total_amount),
-            'already_existed': False,
-        }
+    if monthly_ok:
+        credits.append(_ensure_credit_invoice(
+            amount=Decimal('225.00'),
+            marker=CREDIT_NOTE_MARKER,
+            linked_invoice='INV-20260901-707E50CF',
+            description='זיכוי מנוי חודשי כפול ספטמבר — מחול גיל רך 4.5-6 — לונה שוקר',
+            reason='זיכוי מנוי ספטמבר הכפול. החשבונית התקינה נשארת בתוקף.',
+        ))
+    if registration_ok:
+        credits.append(_ensure_credit_invoice(
+            amount=Decimal('120.00'),
+            marker=CREDIT_NOTE_MARKER_REG,
+            linked_invoice='INV-20260830-FAM-7BE016CA',
+            description='זיכוי דמי רישום כפול — מחול גיל רך 4.5-6 — לונה שוקר',
+            reason='זיכוי דמי רישום כפול. החשבונית התקינה מ-19.8 נשארת בתוקף.',
+        ))
 
     return {
         'success': all(row['success'] for row in refunds) and refunded_total > 0,
@@ -164,11 +121,64 @@ def run_luna_duplicate_refund() -> dict:
         'duplicate_sto_cancelled': True,
         'keep_sto_id': KEEP_STO_ID,
         'keep_sto_next_billing_date': str(keep_sto.next_billing_date or ''),
-        'credit_invoice': credit,
+        'credit_invoice': credits[-1] if credits else None,
+        'credit_invoices': credits,
+    }
+
+
+def _ensure_credit_invoice(*, amount, marker, linked_invoice, description, reason):
+    from apps.customers.financial_models import Invoice
+    from apps.documents.models import DocumentLineItem, FormalDocument
+    from apps.documents.service import create_credit_invoice
+
+    existing = FormalDocument.objects.filter(
+        child_id=CHILD_ID,
+        document_type='credit_invoice',
+        internal_notes=marker,
+    ).order_by('-created_at').first()
+    if existing:
+        return {
+            'id': str(existing.id),
+            'document_number': existing.document_number,
+            'total_amount': float(existing.total_amount),
+            'already_existed': True,
+        }
+
+    before_vat, _vat, _gross = split_vat_inclusive(amount)
+    doc = create_credit_invoice({
+        'client_type': 'existing',
+        'child_id': CHILD_ID,
+        'credit_invoice_details': {
+            'document_date': date.today(),
+            'linked_invoice_id': linked_invoice,
+            'credit_reason': reason,
+            'credit_amount_before_vat': str(before_vat),
+            'customer_notes': reason,
+            'internal_notes': marker,
+        },
+    })
+    doc.description = description
+    doc.save(update_fields=['description'])
+    DocumentLineItem.objects.create(
+        document=doc,
+        description=description,
+        quantity=1,
+        unit_price=before_vat,
+    )
+    inv = Invoice.objects.filter(invoice_number=linked_invoice).first()
+    if inv and marker not in (inv.admin_notes or ''):
+        inv.admin_notes = ((inv.admin_notes or '') + f'\nזוכה בחשבונית זיכוי {doc.document_number}').strip()
+        inv.save(update_fields=['admin_notes', 'updated_at'])
+    return {
+        'id': str(doc.id),
+        'document_number': doc.document_number,
+        'total_amount': float(doc.total_amount),
+        'already_existed': False,
     }
 
 
 def _retry_with_keep_card(svc, payment, keep_sto, reason: str) -> dict:
+    from apps.core.payment_service import terminal_for_payment_refund
     from apps.customers.models import TranzilaTransaction
 
     txn = payment.tranzila_transaction
@@ -183,6 +193,7 @@ def _retry_with_keep_card(svc, payment, keep_sto, reason: str) -> dict:
         card_expire_year=keep_sto.card_expire_year,
         token=keep_sto.tranzila_token,
         prefer_cancel=False,
+        terminal_name=terminal_for_payment_refund(payment),
     )
     if not retry.get('success'):
         return retry

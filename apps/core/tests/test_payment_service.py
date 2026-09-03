@@ -1154,6 +1154,7 @@ class PaymentRefundTokenTest(TestCase):
         self.assertEqual(kwargs['token'], 'token_course_b')
         self.assertEqual(kwargs['card_expire_month'], 6)
         self.assertEqual(kwargs['transaction_id'], 'TRX_MONTH_B')
+        self.assertIsNone(kwargs['terminal_name'])
         self.monthly_b.refresh_from_db()
         self.assertEqual(self.monthly_b.status, 'refunded')
 
@@ -1198,3 +1199,13 @@ class PaymentRefundTokenTest(TestCase):
         self.assertEqual(token, 'Y0payloadtoken')
         self.assertEqual(month, 2)
         self.assertEqual(year, 2032)
+
+    def test_refund_reads_original_iframe_terminal(self):
+        from apps.core.payment_service import terminal_for_payment_refund
+
+        txn = self.monthly_b.tranzila_transaction
+        txn.response_data = {
+            'original_request': {'terminal_name': 'fxpmichalweb'},
+        }
+        txn.save(update_fields=['response_data'])
+        self.assertEqual(terminal_for_payment_refund(self.monthly_b), 'fxpmichalweb')

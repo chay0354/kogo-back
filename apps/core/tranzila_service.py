@@ -935,8 +935,14 @@ class TranzilaService:
         reason: str = '',
         items: list = None,
         prefer_cancel: bool = False,
+        terminal_name: Optional[str] = None,
     ) -> Dict:
-        """Refund via REST. Same-day charges must be cancelled, not credited."""
+        """Refund via REST. Same-day charges must be cancelled, not credited.
+
+        Refunds must hit the same terminal that took the original charge.
+        Widget registration fees sit on the iframe terminal; monthly token
+        charges sit on the token terminal.
+        """
         if not transaction_id:
             logger.error("Cannot refund: No transaction ID provided")
             return self._build_error_response('No transaction ID available')
@@ -966,6 +972,8 @@ class TranzilaService:
                 'currency_code': currency or 'ILS',
             }]
 
+        refund_terminal = (terminal_name or '').strip() or self.token_terminal
+
         if prefer_cancel:
             cancel_result = self._refund_via_txn_type(
                 txn_type='cancel',
@@ -978,6 +986,7 @@ class TranzilaService:
                 amount=amount,
                 currency=currency,
                 reason=reason,
+                terminal_name=refund_terminal,
             )
             if cancel_result.get('success'):
                 return cancel_result
@@ -993,6 +1002,7 @@ class TranzilaService:
             amount=amount,
             currency=currency,
             reason=reason,
+            terminal_name=refund_terminal,
         )
         if credit_result.get('success'):
             return credit_result
@@ -1009,6 +1019,7 @@ class TranzilaService:
                 amount=amount,
                 currency=currency,
                 reason=reason,
+                terminal_name=refund_terminal,
             )
         return credit_result
 
@@ -1025,9 +1036,10 @@ class TranzilaService:
         amount: Optional[Decimal],
         currency: str,
         reason: str,
+        terminal_name: Optional[str] = None,
     ) -> Dict:
         payload = {
-            'terminal_name': self.token_terminal,
+            'terminal_name': (terminal_name or '').strip() or self.token_terminal,
             'txn_type': txn_type,
             'txn_currency_code': currency or 'ILS',
             'reference_txn_id': reference_txn_id,

@@ -661,6 +661,35 @@ class TranzilaRestChargeParseTest(TestCase):
         self.assertEqual(mock_api.call_args_list[1].kwargs['params']['txn_type'], 'cancel')
 
     @patch.object(TranzilaService, '_make_api_request')
+    def test_refund_uses_original_charge_terminal(self, mock_api):
+        mock_api.return_value = {
+            'error_code': 0,
+            'transaction_result': {
+                'transaction_id': 90,
+                'processor_response_code': '000',
+            },
+        }
+        service = TranzilaService(
+            terminal='iframe_terminal',
+            token_terminal='prod_token_terminal',
+            public_key='pk',
+            secret_key='sk',
+        )
+        result = service.refund_transaction(
+            transaction_id='464904',
+            authorization_number='0915645',
+            card_expire_month=7,
+            card_expire_year=2030,
+            token='tok_1',
+            amount=Decimal('120.00'),
+            terminal_name='fxpmichalweb',
+        )
+        self.assertTrue(result['success'])
+        payload = mock_api.call_args.kwargs['params']
+        self.assertEqual(payload['terminal_name'], 'fxpmichalweb')
+        self.assertNotEqual(payload['terminal_name'], 'prod_token_terminal')
+
+    @patch.object(TranzilaService, '_make_api_request')
     def test_sync_updates_active_sto_and_inactivates_extras(self, mock_request):
         mock_request.side_effect = [
             {'error_code': 0, 'stos': [
