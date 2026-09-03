@@ -1424,6 +1424,32 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                 'error': f'שגיאה בביטול מנוי: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=True, methods=['post'], url_path='send-card-update')
+    def send_card_update(self, request, pk=None):
+        """Send the ManyChat card-update link for one standing order."""
+        from apps.customers.card_update import send_card_update_whatsapp
+
+        recurring = self.get_object()
+        if recurring.status == 'cancelled':
+            return Response(
+                {'error': 'לא ניתן לשלוח קישור להוראת קבע מבוטלת'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        result = send_card_update_whatsapp(recurring)
+        if not result.get('sent'):
+            return Response(result, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result)
+
+    @action(detail=False, methods=['post'], url_path='send-card-update-failed')
+    def send_card_update_failed(self, request):
+        """Send card-update WhatsApp to failed standing orders (optional ids)."""
+        from apps.customers.card_update import send_card_update_for_failed
+
+        ids = request.data.get('ids') if isinstance(request.data, dict) else None
+        if ids is not None and not isinstance(ids, list):
+            return Response({'error': 'ids חייב להיות מערך'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(send_card_update_for_failed(ids=ids))
+
 
 def _cron_allowed_secrets():
     expected = (getattr(settings, 'CRON_TOKEN', '') or '').strip()

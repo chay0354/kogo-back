@@ -312,6 +312,9 @@ MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS = config('MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS', 
 TRIAL_AFTER_TEST_HOURS = int(config('TRIAL_AFTER_TEST_HOURS', default=2))
 # When Tranzila webhook returns Response != 000 for a subscription enrollment payment.
 MANYCHAT_PAYMENT_FAILED_FLOW_NS = config('MANYCHAT_PAYMENT_FAILED_FLOW_NS', default='')
+# Failed standing-order charge — WhatsApp template with a card-update link.
+# Create a ManyChat automation named exactly "card-update" (or set the flow ns here).
+MANYCHAT_CARD_UPDATE_FLOW_NS = config('MANYCHAT_CARD_UPDATE_FLOW_NS', default='')
 # After 3 consecutive non-present attendance marks (didnt_arrive automation).
 MANYCHAT_DIDNT_ARRIVE_FLOW_NS = config('MANYCHAT_DIDNT_ARRIVE_FLOW_NS', default='')
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))

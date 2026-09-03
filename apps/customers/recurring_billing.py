@@ -138,6 +138,12 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             recurring.save(update_fields=['status', 'updated_at'])
             child.status = 'payment_problem'
             child.save(update_fields=['status', 'updated_at'])
+            try:
+                from apps.customers.card_update import send_card_update_whatsapp
+
+                send_card_update_whatsapp(recurring)
+            except Exception:
+                logger.exception('Card-update WhatsApp failed for recurring %s', recurring.id)
             summary['failed'] += 1
             summary['errors'].append(f'{recurring.id}: {payment.failure_reason}')
             continue

@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
+from .card_update_views import CardUpdateChargeView, CardUpdatePreviewView
 from .widget_views import (
     WidgetLookupView,
     WidgetRegisterView,
@@ -39,6 +40,8 @@ urlpatterns = [
     path('widget/branches/', WidgetBranchesView.as_view(), name='widget-branches'),
     path('widget/lesson-occurrences/', WidgetLessonOccurrencesView.as_view(), name='widget-lesson-occurrences'),
     path('widget/terms/', WidgetTermsView.as_view(), name='widget-terms'),
+    path('card-update/<str:token>/', CardUpdatePreviewView.as_view(), name='card-update-preview'),
+    path('card-update/<str:token>/charge/', CardUpdateChargeView.as_view(), name='card-update-charge'),
     path('cron/recurring-billing/', cron_recurring_billing, name='cron-recurring-billing'),
     path('cron/recurring-billing/status/', cron_recurring_billing_status, name='cron-recurring-billing-status'),
 ]

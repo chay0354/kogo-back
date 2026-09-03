@@ -123,6 +123,28 @@ class NotifyRegistrationFieldOrderTests(SimpleTestCase):
         self.assertEqual(fields['kogo_lesson_time'], '18:15-19:00')
         self.assertEqual(fields['kogo_location'], 'רחוב יהודה הלוי 10')
         mock_sleep.assert_called_once()
+
+    @patch('apps.core.manychat_service.time.sleep')
+    def test_writes_extra_card_update_fields(self, mock_sleep):
+        svc = self._svc()
+        svc.set_custom_fields = MagicMock(return_value={'status': 'success'})
+
+        result = svc.notify_registration(
+            **self._kwargs(
+                kind=ManyChatService.REGISTRATION_KIND_CARD_UPDATE,
+                extra_fields={
+                    'kogo_card_update_url': 'https://kogo-front.vercel.app/update-card/tok',
+                    'kogo_card_update_token': 'tok',
+                    'kogo_amount': '250',
+                },
+            )
+        )
+
+        self.assertEqual(result['method'], 'flow')
+        fields = svc.set_custom_fields.call_args[0][1]
+        self.assertEqual(fields['kogo_amount'], '250')
+        self.assertEqual(fields['kogo_card_update_token'], 'tok')
+        self.assertIn('update-card/tok', fields['kogo_card_update_url'])
         svc.send_flow.assert_called_once_with(99, 'content123_flow')
         svc.send_whatsapp_text.assert_not_called()
 

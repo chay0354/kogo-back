@@ -366,6 +366,7 @@ class ManyChatService:
             'test-lesson-regitser',
         ),
         'MANYCHAT_PAYMENT_FAILED_FLOW_NS': ('payment-failed',),
+        'MANYCHAT_CARD_UPDATE_FLOW_NS': ('card-update', 'card update', 'update-card'),
         'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
         'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS': ('after-test', 'after test'),
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
@@ -403,6 +404,7 @@ class ManyChatService:
     REGISTRATION_KIND_TRIAL_10AM = 'trial_10am'
     REGISTRATION_KIND_TRIAL_AFTER_TEST = 'trial_after_test'
     REGISTRATION_KIND_PAYMENT_FAILED = 'payment_failed'
+    REGISTRATION_KIND_CARD_UPDATE = 'card_update'
     REGISTRATION_KIND_DIDNT_ARRIVE = 'didnt_arrive'
 
     _REGISTRATION_KINDS = {
@@ -454,6 +456,15 @@ class ManyChatService:
                 'ניתן לנסות שנית דרך מערכת Kogo או לפנות אלינו.'
             ),
         },
+        # Failed standing-order charge — link to replace the card and fix the token.
+        REGISTRATION_KIND_CARD_UPDATE: {
+            'flow_setting': 'MANYCHAT_CARD_UPDATE_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'החיוב החודשי עבור {child_name} בחוג {course_name} על סך ₪{amount} לא עבר.\n'
+                'לעדכון כרטיס אשראי ותיקון הוראת הקבע: {card_update_url}'
+            ),
+        },
         # 3 consecutive times not marked present (didnt_arrive automation).
         REGISTRATION_KIND_DIDNT_ARRIVE: {
             'flow_setting': 'MANYCHAT_DIDNT_ARRIVE_FLOW_NS',
@@ -473,6 +484,7 @@ class ManyChatService:
         REGISTRATION_KIND_TRIAL_10AM: 'תזכורת שיעור ניסיון (10:00)',
         REGISTRATION_KIND_TRIAL_AFTER_TEST: 'אחרי שיעור ניסיון',
         REGISTRATION_KIND_PAYMENT_FAILED: 'תשלום נכשל',
+        REGISTRATION_KIND_CARD_UPDATE: 'עדכון כרטיס (הוראת קבע נכשלה)',
         REGISTRATION_KIND_DIDNT_ARRIVE: 'לא הגיע (3 פעמים)',
     }
 
@@ -603,6 +615,7 @@ class ManyChatService:
         lookup_names: list[str] | None = None,
         trial_date: str = '',
         location: str = '',
+        extra_fields: dict[str, str] | None = None,
     ) -> dict:
         """
         Send a course-registration / trial confirmation to the parent on WhatsApp.
@@ -648,6 +661,11 @@ class ManyChatService:
         }
         if trial_date:
             custom_fields['kogo_trial_date'] = trial_date
+        if extra_fields:
+            for key, value in extra_fields.items():
+                text = str(value or '').strip()
+                if key and text:
+                    custom_fields[key] = text
         fields_ok = self._set_custom_fields_with_retry(sid, custom_fields)
 
         flow_ns = self.resolve_flow_ns(config_entry['flow_setting'])
@@ -684,6 +702,7 @@ class ManyChatService:
             )
 
         # Fallback (only delivers if user is within 24h customer-service window).
+        extras = extra_fields or {}
         text = config_entry['fallback_template'].format(
             parent_name=parent_name,
             child_name=child_name,
@@ -691,6 +710,8 @@ class ManyChatService:
             branch_name=branch_name,
             day_name=day_name,
             time_range=time_range,
+            card_update_url=extras.get('kogo_card_update_url', ''),
+            amount=extras.get('kogo_amount', ''),
         )
         try:
             self.send_whatsapp_text(sid, text)
