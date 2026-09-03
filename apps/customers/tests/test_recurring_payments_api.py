@@ -130,6 +130,21 @@ class RecurringPaymentEditAPITests(TestCase):
         self.assertEqual(self.recurring.amount, Decimal('250.00'))
         self.assertIsNone(self.recurring.pending_amount)
 
+    def test_schedule_amount_applies_from_next_cycle(self):
+        res = self.client.post(
+            f'/api/v1/customers/recurring-payments/{self.recurring.id}/schedule-amount/',
+            {'amount': '200.00'},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        body = res.json()
+        self.assertEqual(body['amount'], '275.00')
+        self.assertEqual(body['pending_amount'], '200.00')
+        self.assertEqual(body['pending_amount_effective_date'], '2026-10-01')
+        self.recurring.refresh_from_db()
+        self.assertEqual(self.recurring.amount, Decimal('275.00'))
+        self.assertEqual(self.recurring.pending_amount, Decimal('200.00'))
+
     def test_patch_rejects_end_date_before_next_billing(self):
         res = self.client.patch(
             f'/api/v1/customers/recurring-payments/{self.recurring.id}/',
