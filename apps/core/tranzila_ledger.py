@@ -214,6 +214,9 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
                 f'{TRANZILA_PDF_PUBLIC_BASE}/{doc.tranzila_retrieval_key}'
                 if doc.tranzila_retrieval_key else ''
             ),
+            # מועד התשלום שסוכם (שוטף+30 וכדומה) — לפיו נמדד האיחור בדף הגבייה
+            'due_date': _iso_date(doc.due_date) if doc.due_date else '',
+            'payment_terms': doc.payment_terms or '',
             'tranzila_doc_id': doc.tranzila_doc_id,
             'source': 'tranzila' if doc.tranzila_issued else 'local',
             'tranzila_issued': doc.tranzila_issued,
