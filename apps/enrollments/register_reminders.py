@@ -4,7 +4,9 @@ Registers nobody read.
 A lesson is taught, the roster stays blank, and by the end of the week nobody
 remembers who was there. Three things happen here, in this order:
 
-* soon after the lesson ends, the instructor is asked to finish today's register;
+* five minutes after the lesson ends the instructor is asked to finish today's
+  register, and asked again every hour while it is still open (up to ten times
+  in the day);
 * at 08:00 the next morning, one message lists whatever is still open from
   yesterday, with the link that takes them straight into the app;
 * from two days on it stops being a message and becomes a line the office sees
@@ -34,9 +36,16 @@ logger = logging.getLogger(__name__)
 # A mark the instructor actually made. 'not_marked' is a row the system wrote.
 MARKED_STATUSES = ('present', 'absent')
 
-# How long after the lesson ends the first reminder waits — long enough that an
-# instructor still packing up is not chased, short enough to be the same evening.
-LESSON_REMINDER_DELAY_MINUTES = 45
+# How long after the lesson ends the first reminder waits.
+LESSON_REMINDER_DELAY_MINUTES = 5
+
+# And how long before it is said again, while the register is still open. The
+# owner's rule: keep asking through the day rather than say it once and hope.
+LESSON_REMINDER_REPEAT_MINUTES = 60
+
+# Where the asking stops for that lesson. The morning summary carries whatever
+# is still open after that.
+LESSON_REMINDER_MAX_PER_DAY = 10
 
 # The morning summary goes out at this local hour, whatever hour the cron ran.
 MORNING_SUMMARY_HOUR = 8
@@ -254,11 +263,11 @@ def _send(kind_setting: str, *, instructor, fields: dict) -> dict:
     return {'sent': True, 'flow_ns': flow_ns, 'subscriber_id': subscriber_id}
 
 
-def _record(*, instructor, lesson, day: date_cls, kind: str) -> bool:
+def _record(*, instructor, lesson, day: date_cls, kind: str, now) -> bool:
     """Write the row that says this was said. False when it already was."""
     try:
         RegisterReminder.objects.create(
-            instructor=instructor, lesson=lesson, occurrence_date=day, kind=kind,
+            instructor=instructor, lesson=lesson, occurrence_date=day, kind=kind, sent_at=now,
         )
     except IntegrityError:
         return False
@@ -269,6 +278,30 @@ def _already_sent(*, instructor, lesson, day: date_cls, kind: str) -> bool:
     return RegisterReminder.objects.filter(
         instructor=instructor, lesson=lesson, occurrence_date=day, kind=kind,
     ).exists()
+
+
+def _lesson_reminder_due(*, instructor, lesson, day: date_cls, now) -> bool:
+    """
+    Whether this lesson's register is due to be asked about again.
+
+    Not due while the last ask is still recent, and not due at all once the
+    day's quota is spent — the cron runs every few minutes, and without both
+    an instructor would get one message per run.
+    """
+    sent = list(
+        RegisterReminder.objects
+        .filter(
+            instructor=instructor, lesson=lesson, occurrence_date=day,
+            kind=RegisterReminder.KIND_LESSON,
+        )
+        .order_by('-sent_at')
+        .values_list('sent_at', flat=True)[:LESSON_REMINDER_MAX_PER_DAY]
+    )
+    if len(sent) >= LESSON_REMINDER_MAX_PER_DAY:
+        return False
+    if sent and now - sent[0] < timedelta(minutes=LESSON_REMINDER_REPEAT_MINUTES):
+        return False
+    return True
 
 
 def _lesson_ended_at(lesson, day: date_cls) -> datetime:
@@ -293,7 +326,7 @@ def send_due_register_reminders(*, dry_run: bool = False, now=None) -> dict:
         instructor = row.instructor
         if now < _lesson_ended_at(row.lesson, today) + timedelta(minutes=LESSON_REMINDER_DELAY_MINUTES):
             continue
-        if _already_sent(instructor=instructor, lesson=row.lesson, day=today, kind=RegisterReminder.KIND_LESSON):
+        if not _lesson_reminder_due(instructor=instructor, lesson=row.lesson, day=today, now=now):
             continue
         if dry_run:
             summary['lesson_sent'] += 1
@@ -311,7 +344,7 @@ def send_due_register_reminders(*, dry_run: bool = False, now=None) -> dict:
         if not result.get('sent'):
             summary['skipped' if result.get('reason') in ('manychat_not_configured', 'flow_not_configured') else 'errors'] += 1
             continue
-        if _record(instructor=instructor, lesson=row.lesson, day=today, kind=RegisterReminder.KIND_LESSON):
+        if _record(instructor=instructor, lesson=row.lesson, day=today, kind=RegisterReminder.KIND_LESSON, now=now):
             summary['lesson_sent'] += 1
 
     if now.hour >= MORNING_SUMMARY_HOUR:
@@ -338,7 +371,7 @@ def send_due_register_reminders(*, dry_run: bool = False, now=None) -> dict:
             if not result.get('sent'):
                 summary['skipped' if result.get('reason') in ('manychat_not_configured', 'flow_not_configured') else 'errors'] += 1
                 continue
-            if _record(instructor=instructor, lesson=None, day=yesterday, kind=RegisterReminder.KIND_MORNING):
+            if _record(instructor=instructor, lesson=None, day=yesterday, kind=RegisterReminder.KIND_MORNING, now=now):
                 summary['morning_sent'] += 1
 
     return summary

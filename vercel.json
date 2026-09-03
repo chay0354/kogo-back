@@ -11,7 +11,7 @@
     },
     {
       "path": "/api/v1/enrollments/cron/register-reminders/",
-      "schedule": "0 4-20 * * *"
+      "schedule": "*/5 4-20 * * *"
     }
   ]
 }

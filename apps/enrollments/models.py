@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.utils import timezone
 from apps.courses.models import Course, Lesson, LessonBundle
 from apps.customers.models import Child
 
@@ -155,9 +156,10 @@ class RegisterReminder(models.Model):
     """
     A nudge already sent to an instructor about a register nobody read.
 
-    One row per thing said, so a cron that runs every hour — or twice, from two
-    schedulers — never says it twice: the lesson reminder is keyed by the lesson
-    occurrence, the morning summary by the instructor and the day it covers.
+    One row per thing said. The lesson reminder repeats through the day while the
+    register is still open, so those rows accumulate — how often and how many
+    times is decided in register_reminders, from the rows already here. The
+    morning summary is said once, and the table itself holds that.
     """
     KIND_LESSON = 'lesson'
     KIND_MORNING = 'morning'
@@ -178,7 +180,9 @@ class RegisterReminder(models.Model):
     )
     occurrence_date = models.DateField(verbose_name="תאריך המופע")
     kind = models.CharField(max_length=20, choices=KIND_CHOICES, verbose_name="סוג")
-    sent_at = models.DateTimeField(auto_now_add=True, verbose_name="מועד שליחה")
+    # Written by the job from the clock it is working against, not by the
+    # database — that is what "an hour since the last one" is measured from.
+    sent_at = models.DateTimeField(default=timezone.now, verbose_name="מועד שליחה")
 
     class Meta:
         db_table = 'register_reminders'
@@ -187,15 +191,13 @@ class RegisterReminder(models.Model):
         ordering = ['-sent_at']
         constraints = [
             models.UniqueConstraint(
-                fields=['lesson', 'occurrence_date', 'kind'],
-                condition=models.Q(lesson__isnull=False),
-                name='uniq_register_reminder_per_lesson',
-            ),
-            models.UniqueConstraint(
                 fields=['instructor', 'occurrence_date', 'kind'],
                 condition=models.Q(lesson__isnull=True),
                 name='uniq_register_reminder_per_day',
             ),
+        ]
+        indexes = [
+            models.Index(fields=['lesson', 'occurrence_date', 'kind', '-sent_at']),
         ]
 
     def __str__(self):

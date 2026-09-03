@@ -9,6 +9,7 @@ from apps.courses.models import Course, CourseType, Lesson
 from apps.customers.models import Child, Family
 from apps.enrollments.models import LessonAttendance, LessonEnrollment, RegisterReminder
 from apps.enrollments.register_reminders import (
+    LESSON_REMINDER_MAX_PER_DAY,
     instructor_register_gaps,
     missing_registers,
     send_due_register_reminders,
@@ -126,19 +127,55 @@ class ReminderSendingTests(RegisterReminderTestBase):
         send.assert_not_called()
         self.assertEqual(summary['lesson_sent'], 0)
 
-    def test_the_lesson_reminder_goes_once_after_the_lesson(self):
+    def test_the_reminder_goes_five_minutes_after_the_lesson(self):
         self.enrol()
         with patch('apps.enrollments.register_reminders._send', return_value={'sent': True}) as send:
-            first = send_due_register_reminders(now=self._now(18, 0))
-            second = send_due_register_reminders(now=self._now(19, 0))
-        self.assertEqual(first['lesson_sent'], 1)
-        self.assertEqual(second['lesson_sent'], 0)
-        self.assertEqual(send.call_count, 1)
-        self.assertEqual(
-            RegisterReminder.objects.filter(kind=RegisterReminder.KIND_LESSON).count(), 1
-        )
+            too_soon = send_due_register_reminders(now=self._now(16, 48))
+            due = send_due_register_reminders(now=self._now(16, 51))
+        self.assertEqual(too_soon['lesson_sent'], 0)
+        self.assertEqual(due['lesson_sent'], 1)
         fields = send.call_args.kwargs['fields']
         self.assertIn('קפוארה ואקרובטיקה', fields['kogo_lesson_name'])
+
+    def test_it_is_said_again_every_hour_while_the_register_is_open(self):
+        self.enrol()
+        with patch('apps.enrollments.register_reminders._send', return_value={'sent': True}) as send:
+            send_due_register_reminders(now=self._now(16, 51))
+            same_hour = send_due_register_reminders(now=self._now(17, 20))
+            next_hour = send_due_register_reminders(now=self._now(17, 55))
+        self.assertEqual(same_hour['lesson_sent'], 0)
+        self.assertEqual(next_hour['lesson_sent'], 1)
+        self.assertEqual(send.call_count, 2)
+
+    def test_the_asking_stops_when_the_day_quota_is_spent(self):
+        self.enrol()
+        # Every ten minutes from the moment it is due until the day is over —
+        # far more runs than the quota, which is the point of the quota. The
+        # quota is lowered here so the test is about the rule and not about how
+        # many hours happen to be left after a 16:45 lesson.
+        with patch('apps.enrollments.register_reminders.LESSON_REMINDER_MAX_PER_DAY', 3), \
+             patch('apps.enrollments.register_reminders._send', return_value={'sent': True}) as send:
+            for minutes in range(0, 7 * 60, 10):
+                send_due_register_reminders(now=self._now(16, 51) + timedelta(minutes=minutes))
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(RegisterReminder.objects.filter(kind=RegisterReminder.KIND_LESSON).count(), 3)
+
+    def test_an_afternoon_lesson_is_asked_about_once_an_hour_until_the_day_ends(self):
+        self.enrol()
+        with patch('apps.enrollments.register_reminders._send', return_value={'sent': True}) as send:
+            for minutes in range(0, 7 * 60, 10):
+                send_due_register_reminders(now=self._now(16, 51) + timedelta(minutes=minutes))
+        # 16:51 through 23:51 — one an hour, and never more than the day's quota.
+        self.assertEqual(send.call_count, 7)
+        self.assertLessEqual(send.call_count, LESSON_REMINDER_MAX_PER_DAY)
+
+    def test_marking_the_register_stops_the_asking(self):
+        enrollment = self.enrol()
+        with patch('apps.enrollments.register_reminders._send', return_value={'sent': True}) as send:
+            send_due_register_reminders(now=self._now(16, 51))
+            self.mark(enrollment.child)
+            send_due_register_reminders(now=self._now(18, 0))
+        self.assertEqual(send.call_count, 1)
 
     def test_a_register_finished_in_time_gets_no_reminder(self):
         enrollment = self.enrol()
