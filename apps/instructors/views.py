@@ -16,7 +16,8 @@ import hashlib
 import logging
 import requests
 
-from apps.instructors.models import Instructor, InstructorBonus
+from apps.instructors.models import Instructor, InstructorBonus, InstructorPairPhoto
+from apps.instructors.pair_photos import partners_for_instructor
 from apps.instructors.serializers import (
     InstructorListSerializer, InstructorDetailSerializer,
     InstructorCreateUpdateSerializer, InstructorBonusSerializer,
@@ -825,6 +826,12 @@ def _instructor_photo_object_name(instructor_id, content_type):
     return f'{instructor_id}.{extension}'
 
 
+def _pair_photo_object_name(first_id, second_id, content_type):
+    """Named after the pair in its stored order, so either side writes the same object."""
+    extension = 'png' if content_type == 'image/png' else 'jpg'
+    return f'pair/{first_id}__{second_id}.{extension}'
+
+
 def _storage_key():
     """
     The service-role key, from the environment or from what a manager stored.
@@ -1003,6 +1010,103 @@ class InstructorPhotoView(APIView):
                 '[INSTRUCTOR PHOTO] storage rejected delete for %s: %s',
                 instructor_id, removed.status_code,
             )
+
+
+class InstructorPairPhotoView(APIView):
+    """
+    The photo of two instructors who teach a combined track together.
+
+    GET    /api/v1/instructors/{id}/pair-photos/               — partners and their photo
+    POST   /api/v1/instructors/{id}/pair-photos/               — "partner_id" + "photo"
+    DELETE /api/v1/instructors/{id}/pair-photos/?partner_id=   — remove it
+
+    Stored once per pair, so the same picture answers from either instructor's
+    page and from the widget — there is no second copy to drift.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request, instructor_id):
+        instructor = Instructor.objects.filter(id=instructor_id).first()
+        if instructor is None:
+            return Response({'error': 'מדריך לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'partners': partners_for_instructor(instructor)})
+
+    def post(self, request, instructor_id):
+        instructor, partner, error = self._resolve_pair(instructor_id, request.data.get('partner_id'))
+        if error:
+            return error
+
+        if not _storage_is_configured():
+            logger.error('[PAIR PHOTO] storage credentials are not configured')
+            return Response(
+                {'error': 'אחסון התמונות אינו מוגדר בשרת. פנו למנהל המערכת.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        image_bytes, content_type, prepare_error = _prepare_instructor_photo(request.FILES.get('photo'))
+        if prepare_error:
+            return Response({'error': prepare_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        first, second = InstructorPairPhoto.ordered_pair(instructor, partner)
+        object_name = _pair_photo_object_name(first.id, second.id, content_type)
+        try:
+            upload = _put_instructor_photo(object_name, image_bytes, content_type)
+        except requests.RequestException:
+            logger.exception('[PAIR PHOTO] upload failed for %s + %s', first.id, second.id)
+            return Response({'error': 'שמירת התמונה נכשלה. נסה שוב.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        if upload.status_code >= 400:
+            logger.error('[PAIR PHOTO] storage rejected upload: %s', upload.status_code)
+            return Response({'error': 'שמירת התמונה נכשלה. נסה שוב.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        version = hashlib.sha256(image_bytes).hexdigest()[:16]
+        photo_url = _instructor_photo_public_url(object_name, version)
+        stored, _created = InstructorPairPhoto.objects.update_or_create(
+            first_instructor=first,
+            second_instructor=second,
+            defaults={'photo_url': photo_url},
+        )
+        return Response({'partner_id': str(partner.id), 'photo_url': stored.photo_url})
+
+    def delete(self, request, instructor_id):
+        partner_id = request.query_params.get('partner_id') or request.data.get('partner_id')
+        instructor, partner, error = self._resolve_pair(instructor_id, partner_id)
+        if error:
+            return error
+
+        first, second = InstructorPairPhoto.ordered_pair(instructor, partner)
+        stored = InstructorPairPhoto.objects.filter(
+            first_instructor=first, second_instructor=second,
+        ).first()
+        if stored is None:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        path = urlparse(stored.photo_url).path
+        marker = f'/{INSTRUCTOR_PHOTO_BUCKET}/'
+        if marker in path:
+            InstructorPhotoView._discard_object(path.split(marker, 1)[1], f'{first.id}+{second.id}')
+        stored.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _resolve_pair(instructor_id, partner_id):
+        instructor = Instructor.objects.filter(id=instructor_id).first()
+        if instructor is None:
+            return None, None, Response({'error': 'מדריך לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+        partner = Instructor.objects.filter(id=(partner_id or '')).first() if partner_id else None
+        if partner is None:
+            return None, None, Response(
+                {'error': 'יש לבחור מדריך שני'}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(partner.id) == str(instructor.id):
+            return None, None, Response(
+                {'error': 'תמונה משותפת היא של שני מדריכים שונים'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return instructor, partner, None
 
 
 class MyBranchesView(APIView):

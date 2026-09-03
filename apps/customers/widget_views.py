@@ -22,6 +22,7 @@ from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.core.models import City, Branch
+from apps.instructors.pair_photos import pair_photo_for_lessons, pair_photo_map
 from apps.core.payment_service import (
     ALREADY_REGISTERED_LESSON_ERROR,
     PaymentService,
@@ -221,7 +222,7 @@ def _widget_instructor_photo_url(instructor):
     return (instructor.photo_url or None) if instructor else None
 
 
-def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
+def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None):
     bundle_lessons = list(bundle.lessons.all())
     lesson_payloads = []
     bundle_full = False
@@ -245,6 +246,9 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course):
         'max_age': bundle.max_age,
         'lessons': lesson_payloads,
         'is_full': bundle_full,
+        # Two instructors teaching one track have one circle between them, and
+        # it is the picture of the two of them or nothing.
+        'pair_photo_url': pair_photo_for_lessons(bundle_lessons, photo_map),
     }
 
 
@@ -1401,6 +1405,7 @@ class WidgetCoursesView(APIView):
             for bundle in course.lesson_bundles.all():
                 all_lesson_ids.extend(bl.id for bl in bundle.lessons.all())
         enrolled_counts = _batch_paying_enrollment_counts(all_lesson_ids)
+        photo_map = pair_photo_map()
 
         result = []
         for course in courses:
@@ -1432,7 +1437,9 @@ class WidgetCoursesView(APIView):
                     })
 
             bundles = [
-                _serialize_widget_bundle(bundle, enrolled_counts=enrolled_counts, course=course)
+                _serialize_widget_bundle(
+                    bundle, enrolled_counts=enrolled_counts, course=course, photo_map=photo_map,
+                )
                 for bundle in _widget_bundles_for_course(course)
             ]
 

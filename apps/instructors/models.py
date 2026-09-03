@@ -112,3 +112,57 @@ class InstructorBonus(models.Model):
     def __str__(self):
         return f"{self.instructor.full_name} - ₪{self.amount} - {self.bonus_date.strftime('%m/%Y')}"
 
+
+
+class InstructorPairPhoto(models.Model):
+    """
+    One photo for two instructors who teach a combined track together.
+
+    A twice-a-week track can be Monday with one instructor and Thursday with
+    another. A single circle beside the track cannot be one of their faces, so
+    until now it stayed empty. This is the picture of the two of them, and it is
+    stored once for the pair: opening either instructor shows the same photo,
+    because there is only one row to find.
+
+    The pair is kept in a fixed order (by id) so that A+B and B+A are the same
+    row, and the unique constraint means it.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    first_instructor = models.ForeignKey(
+        Instructor, on_delete=models.CASCADE,
+        related_name='pair_photos_as_first', verbose_name="מדריך א",
+    )
+    second_instructor = models.ForeignKey(
+        Instructor, on_delete=models.CASCADE,
+        related_name='pair_photos_as_second', verbose_name="מדריך ב",
+    )
+    photo_url = models.CharField(max_length=500, verbose_name="קישור לתמונה")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'instructor_pair_photos'
+        verbose_name = "תמונה משותפת למדריכים"
+        verbose_name_plural = "תמונות משותפות למדריכים"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['first_instructor', 'second_instructor'],
+                name='uniq_instructor_pair_photo',
+            ),
+        ]
+
+    @staticmethod
+    def ordered_pair(instructor_a, instructor_b):
+        """The pair as it is stored — smaller id first, so lookup is one query."""
+        first, second = instructor_a, instructor_b
+        if str(first.id if hasattr(first, 'id') else first) > str(second.id if hasattr(second, 'id') else second):
+            first, second = second, first
+        return first, second
+
+    @classmethod
+    def for_pair(cls, instructor_a, instructor_b):
+        first, second = cls.ordered_pair(instructor_a, instructor_b)
+        return cls.objects.filter(first_instructor=first, second_instructor=second).first()
+
+    def __str__(self):
+        return f"{self.first_instructor} + {self.second_instructor}"
