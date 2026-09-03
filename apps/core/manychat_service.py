@@ -370,6 +370,8 @@ class ManyChatService:
         'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
         'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS': ('after-test', 'after test'),
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
+        'MANYCHAT_REGISTER_LESSON_FLOW_NS': ('register-missing', 'register missing'),
+        'MANYCHAT_REGISTER_MORNING_FLOW_NS': ('register-morning', 'register morning'),
     }
 
     def resolve_flow_ns(self, setting_name: str) -> str:

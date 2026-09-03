@@ -149,3 +149,54 @@ class ChildAbsence(models.Model):
     def __str__(self):
         return f"{self.child.full_name} - {self.lesson} - {self.occurrence_date}"
 
+
+
+class RegisterReminder(models.Model):
+    """
+    A nudge already sent to an instructor about a register nobody read.
+
+    One row per thing said, so a cron that runs every hour — or twice, from two
+    schedulers — never says it twice: the lesson reminder is keyed by the lesson
+    occurrence, the morning summary by the instructor and the day it covers.
+    """
+    KIND_LESSON = 'lesson'
+    KIND_MORNING = 'morning'
+    KIND_CHOICES = [
+        (KIND_LESSON, 'תזכורת אחרי השיעור'),
+        (KIND_MORNING, 'סיכום בוקר על אתמול'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    instructor = models.ForeignKey(
+        'instructors.Instructor', on_delete=models.CASCADE,
+        related_name='register_reminders', verbose_name="מדריך",
+    )
+    lesson = models.ForeignKey(
+        Lesson, on_delete=models.CASCADE, null=True, blank=True,
+        related_name='register_reminders', verbose_name="שיעור",
+        help_text="ריק בסיכום הבוקר, שמדבר על כל שיעורי היום הקודם.",
+    )
+    occurrence_date = models.DateField(verbose_name="תאריך המופע")
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, verbose_name="סוג")
+    sent_at = models.DateTimeField(auto_now_add=True, verbose_name="מועד שליחה")
+
+    class Meta:
+        db_table = 'register_reminders'
+        verbose_name = "תזכורת הקראת נוכחות"
+        verbose_name_plural = "תזכורות הקראת נוכחות"
+        ordering = ['-sent_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['lesson', 'occurrence_date', 'kind'],
+                condition=models.Q(lesson__isnull=False),
+                name='uniq_register_reminder_per_lesson',
+            ),
+            models.UniqueConstraint(
+                fields=['instructor', 'occurrence_date', 'kind'],
+                condition=models.Q(lesson__isnull=True),
+                name='uniq_register_reminder_per_day',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.instructor} - {self.occurrence_date} - {self.get_kind_display()}"

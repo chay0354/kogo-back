@@ -317,6 +317,12 @@ MANYCHAT_PAYMENT_FAILED_FLOW_NS = config('MANYCHAT_PAYMENT_FAILED_FLOW_NS', defa
 MANYCHAT_CARD_UPDATE_FLOW_NS = config('MANYCHAT_CARD_UPDATE_FLOW_NS', default='')
 # After 3 consecutive non-present attendance marks (didnt_arrive automation).
 MANYCHAT_DIDNT_ARRIVE_FLOW_NS = config('MANYCHAT_DIDNT_ARRIVE_FLOW_NS', default='')
+# To the instructor, after a lesson whose register was left open (register-missing).
+MANYCHAT_REGISTER_LESSON_FLOW_NS = config('MANYCHAT_REGISTER_LESSON_FLOW_NS', default='')
+# To the instructor at 08:00, listing yesterday's open registers (register-morning).
+# Both are silent until the automation exists in ManyChat — there is no free-text
+# fallback for a message the office has not written.
+MANYCHAT_REGISTER_MORNING_FLOW_NS = config('MANYCHAT_REGISTER_MORNING_FLOW_NS', default='')
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))
 # Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
 TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))

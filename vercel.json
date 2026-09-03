@@ -8,6 +8,10 @@
     {
       "path": "/api/v1/core/ping/",
       "schedule": "*/5 5-19 * * *"
+    },
+    {
+      "path": "/api/v1/enrollments/cron/register-reminders/",
+      "schedule": "0 4-20 * * *"
     }
   ]
 }
