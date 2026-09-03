@@ -24,21 +24,18 @@ from typing import Iterable
 
 from django.db import transaction
 
+from apps.enrollments.person_match import normalise_name, normalise_phone
+
 GHOST_STATUS = 'ghost'
 
 # How many future occurrences of the lesson a walk-in stays visible for.
 GHOST_OCCURRENCES = 3
 
 
-def _normalise_phone(raw: str | None) -> str:
-    """Digits only, so 050-123-4567 and 0501234567 compare equal."""
-    if not raw:
-        return ''
-    return ''.join(ch for ch in str(raw) if ch.isdigit())
-
-
-def _normalise_name(raw: str | None) -> str:
-    return ' '.join(str(raw or '').split()).strip().casefold()
+# The same rules the duplicate check uses, so a walk-in and a registration are
+# never judged to be the same person by two different definitions.
+_normalise_phone = normalise_phone
+_normalise_name = normalise_name
 
 
 def _mark_present(*, lesson, child, occurrence_date, child_is_new=False):

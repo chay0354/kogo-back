@@ -5,7 +5,15 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from apps.enrollments.duplicate_students import duplicate_person_on_lesson, duplicate_roster_rows
 from apps.enrollments.models import Enrollment, LessonEnrollment
+from apps.enrollments.person_match import contact_phone
+from apps.enrollments.register_reminders import (
+    GAP_ALERT_AFTER_DAYS,
+    GAP_WINDOW_DAYS,
+    instructor_register_gaps,
+    send_due_register_reminders,
+)
 from apps.enrollments.serializers import EnrollmentSerializer, LessonEnrollmentSerializer
 from apps.enrollments.trial_reminders import (
     iter_upcoming_lesson_occurrences,
@@ -101,6 +109,22 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             enrollment = existing
             status_code = status.HTTP_200_OK
         else:
+            duplicate = duplicate_person_on_lesson(
+                lesson,
+                first_name=child.first_name,
+                last_name=child.last_name,
+                phone=contact_phone(child),
+                exclude_child_id=child.id,
+            )
+            if duplicate is not None:
+                return Response(
+                    {
+                        'error': f'{child.first_name} {child.last_name} כבר רשום לשיעור הזה עם אותו טלפון',
+                        'existing_child_id': str(duplicate.child_id),
+                        'existing_enrollment_id': str(duplicate.id),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             enrollment = serializer.save()
             status_code = status.HTTP_201_CREATED
 
@@ -126,6 +150,12 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
 
         headers = self.get_success_headers(data)
         return Response(data, status=status_code, headers=headers)
+
+    @action(detail=False, methods=['get'], url_path='duplicates')
+    def duplicates(self, request):
+        """Registers holding the same person twice — same full name and phone."""
+        rows = duplicate_roster_rows()
+        return Response({'count': len(rows), 'duplicates': rows})
 
     @action(detail=True, methods=['get'], url_path='trial-dates')
     def trial_dates(self, request, pk=None):
@@ -289,6 +319,55 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             'cancelled_recurring_ids': result['cancelled_recurring_ids'],
             'child_status': result['child_status'],
         })
+
+
+def _cron_token_ok(request) -> bool:
+    """
+    The same door the billing cron uses — X-Cron-Token, ?token=, or the Bearer
+    header Vercel Cron sends. Imported where it is used: apps.customers.views
+    pulls in this module.
+    """
+    from apps.customers.views import _cron_request_authorized
+
+    return _cron_request_authorized(request)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def cron_register_reminders(request):
+    """
+    Nudge instructors whose register is still open.
+
+    Safe to run every hour of the teaching day: what is due is decided from the
+    clock, and every message sent is written down, so a second run in the same
+    hour sends nothing.
+    """
+    if not _cron_token_ok(request):
+        return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    dry_run = str(request.query_params.get('dry_run', '')).lower() in ('1', 'true', 'yes')
+    summary = send_due_register_reminders(dry_run=dry_run)
+    return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsManagerOrPartner])
+def register_gaps(request):
+    """Registers still open, by instructor — what the office sees."""
+    try:
+        days = int(request.query_params.get('days') or GAP_WINDOW_DAYS)
+    except (TypeError, ValueError):
+        days = GAP_WINDOW_DAYS
+    days = max(1, min(days, 60))
+    instructor_id = (request.query_params.get('instructor_id') or '').strip() or None
+    rows = instructor_register_gaps(days=days, instructor_id=instructor_id)
+    return Response({
+        'days': days,
+        'alert_after_days': GAP_ALERT_AFTER_DAYS,
+        'open_count': sum(row['open_count'] for row in rows),
+        'needs_attention_count': sum(1 for row in rows if row['needs_attention']),
+        'instructors': rows,
+    })
 
 
 @api_view(['GET', 'POST'])

@@ -9,5 +9,7 @@ router.register(r'lesson-enrollments', views.LessonEnrollmentViewSet, basename='
 urlpatterns = [
     path('', include(router.urls)),
     path('cron/trial-reminders/', views.cron_trial_reminders, name='cron-trial-reminders'),
+    path('cron/register-reminders/', views.cron_register_reminders, name='cron-register-reminders'),
+    path('register-gaps/', views.register_gaps, name='register-gaps'),
 ]
 
