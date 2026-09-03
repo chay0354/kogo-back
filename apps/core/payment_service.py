@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.db.utils import OperationalError
 from django.utils import timezone
 
@@ -45,6 +46,7 @@ from apps.store.pricing import line_charge_amount, sale_unit_and_total, tranzila
 logger = logging.getLogger(__name__)
 
 BILLING_ENROLLMENT_STATUSES = ("active", "payments_problem")
+ALREADY_REGISTERED_LESSON_ERROR = 'הילד כבר רשום לחוג זה'
 
 
 def parse_store_cart_notes(notes: Optional[str]) -> Optional[list]:
@@ -291,9 +293,74 @@ def heal_missing_bundle_enrollments() -> dict:
     }
 
 
-def should_create_recurring_for_payment(*, child, bundle, monthly_amount: Decimal) -> bool:
-    """One standing order per twice/thrice-a-week bundle, at the full widget price."""
+def lessons_covered_by_selection(*, lesson=None, bundle=None):
+    """Lessons a widget/CRM signup will enroll: the picked lesson plus bundle members."""
+    members = list(bundle.lessons.all()) if bundle is not None else []
+    if lesson is not None and lesson not in members:
+        members = [lesson] + members
+    return members
+
+
+def child_has_standing_order_for_lessons(child, lessons) -> bool:
+    """True when an active/paused standing order already bills any of these lessons."""
+    lesson_ids = [getattr(item, 'id', item) for item in lessons if item is not None]
+    if not child or not lesson_ids:
+        return False
+    return RecurringPayment.objects.filter(
+        child=child,
+        status__in=('active', 'paused'),
+    ).filter(
+        Q(initial_payment__lesson_id__in=lesson_ids)
+        | Q(initial_payment__bundle__lessons__id__in=lesson_ids)
+    ).exists()
+
+
+def child_already_registered_for_lessons(child, lessons) -> bool:
+    """True when this child is already a paying student or has an STO for any lesson."""
+    lesson_ids = [getattr(item, 'id', item) for item in lessons if item is not None]
+    if not child or not lesson_ids:
+        return False
+    if paying_enrollments(
+        LessonEnrollment.objects.filter(child=child, lesson_id__in=lesson_ids)
+    ).exists():
+        return True
+    return child_has_standing_order_for_lessons(child, lesson_ids)
+
+
+def enrolled_or_billed_lesson_ids(child) -> list[str]:
+    """Lesson UUIDs this child already pays for (roster or standing order)."""
+    if child is None:
+        return []
+    ids = {
+        str(lesson_id)
+        for lesson_id in paying_enrollments(
+            LessonEnrollment.objects.filter(child=child)
+        ).values_list('lesson_id', flat=True)
+    }
+    stos = (
+        RecurringPayment.objects
+        .filter(child=child, status__in=('active', 'paused'))
+        .select_related('initial_payment')
+        .prefetch_related('initial_payment__bundle__lessons')
+    )
+    for recurring in stos:
+        payment = recurring.initial_payment
+        if payment is None:
+            continue
+        if payment.lesson_id:
+            ids.add(str(payment.lesson_id))
+        bundle = payment.bundle
+        if bundle is not None:
+            ids.update(str(lesson_id) for lesson_id in bundle.lessons.values_list('id', flat=True))
+    return list(ids)
+
+
+def should_create_recurring_for_payment(*, child, bundle, monthly_amount: Decimal, lesson=None) -> bool:
+    """One standing order per lesson (or twice/thrice-a-week bundle), at the full widget price."""
     if monthly_amount <= 0:
+        return False
+    covered = lessons_covered_by_selection(lesson=lesson, bundle=bundle)
+    if child_has_standing_order_for_lessons(child, covered):
         return False
     if bundle is None:
         return True
@@ -685,6 +752,11 @@ class PaymentService:
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
             child, lesson, bundle_id, price_option_id
         )
+        if child_already_registered_for_lessons(
+            child,
+            lessons_covered_by_selection(lesson=lesson, bundle=bundle),
+        ):
+            raise ValueError(ALREADY_REGISTERED_LESSON_ERROR)
         if not include_monthly_amount:
             base_price = Decimal('0.00')
         elif not base_price:
@@ -955,6 +1027,7 @@ class PaymentService:
                     child=payment.child,
                     bundle=payment.bundle,
                     monthly_amount=full_monthly_amount,
+                    lesson=payment.lesson,
                 ):
                     discount_details = []
                     for snapshot in payment.discount_snapshots.all():
@@ -1144,6 +1217,11 @@ class PaymentService:
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
             child, lesson, bundle_id, price_option_id
         )
+        if child_already_registered_for_lessons(
+            child,
+            lessons_covered_by_selection(lesson=lesson, bundle=bundle),
+        ):
+            raise ValueError(ALREADY_REGISTERED_LESSON_ERROR)
         if not include_monthly_amount:
             base_price = Decimal('0.00')
         elif not base_price:
@@ -1318,6 +1396,7 @@ class PaymentService:
                     child=child,
                     bundle=bundle,
                     monthly_amount=full_monthly_amount_c,
+                    lesson=lesson,
                 ):
                     RecurringPayment.objects.create(
                         child=child,

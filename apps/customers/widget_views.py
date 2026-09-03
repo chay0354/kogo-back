@@ -22,7 +22,13 @@ from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
 from apps.core.models import City, Branch
-from apps.core.payment_service import PaymentService
+from apps.core.payment_service import (
+    ALREADY_REGISTERED_LESSON_ERROR,
+    PaymentService,
+    child_already_registered_for_lessons,
+    enrolled_or_billed_lesson_ids,
+    lessons_covered_by_selection,
+)
 
 
 WIDGET_STALE_PROCESSING_SECONDS = 90
@@ -102,6 +108,7 @@ def _ensure_recurring_payment_for_widget_charge(
         child=child,
         bundle=payment.bundle,
         monthly_amount=monthly_amount,
+        lesson=lesson,
     ):
         return False
     try:
@@ -268,6 +275,26 @@ def _resolve_widget_bundle(*, course, bundle_id: str):
     return resolve_registration_bundle(course=course, bundle_id=bundle_id)
 
 
+def _lookup_requested_lessons(data) -> list:
+    """Lessons the parent is trying to sign this child up for (lookup body)."""
+    lesson_id = (data.get('lesson_id') or '').strip()
+    bundle_id = (data.get('bundle_id') or '').strip()
+    lesson = None
+    bundle = None
+    if lesson_id:
+        lesson = Lesson.objects.filter(id=lesson_id).first()
+    if bundle_id:
+        bundle = LessonBundle.objects.filter(id=bundle_id).prefetch_related('lessons').first()
+    return lessons_covered_by_selection(lesson=lesson, bundle=bundle)
+
+
+def _already_registered_response(child, *, lesson=None, bundle=None):
+    covered = lessons_covered_by_selection(lesson=lesson, bundle=bundle)
+    if child_already_registered_for_lessons(child, covered):
+        return Response({'error': ALREADY_REGISTERED_LESSON_ERROR}, status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 def _resolve_family_and_child(data, branch):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
@@ -406,6 +433,8 @@ class WidgetLookupView(APIView):
                 'child_status': 'new',
                 'discount_type': None,
                 'discount_question': None,
+                'enrolled_lesson_ids': [],
+                'already_registered': False,
             })
 
         # Family exists — same child (any status) vs a sibling
@@ -416,6 +445,8 @@ class WidgetLookupView(APIView):
         )
 
         if existing_child and existing_child.status == 'active':
+            enrolled_ids = enrolled_or_billed_lesson_ids(existing_child)
+            requested = {str(lesson.id) for lesson in _lookup_requested_lessons(request.data)}
             return Response({
                 'family_status': 'existing',
                 'child_status': 'active',
@@ -425,16 +456,22 @@ class WidgetLookupView(APIView):
                     'זיהינו שהילד כבר מתאמן אצלנו. '
                     'האם מדובר בהרשמה לשיעור נוסף עבור אותו ילד?'
                 ),
+                'enrolled_lesson_ids': enrolled_ids,
+                'already_registered': bool(requested and requested.intersection(enrolled_ids)),
             })
 
         if existing_child:
             # Abandoned signup / trial retry — reuse this card, not a sibling.
+            enrolled_ids = enrolled_or_billed_lesson_ids(existing_child)
+            requested = {str(lesson.id) for lesson in _lookup_requested_lessons(request.data)}
             return Response({
                 'family_status': 'existing',
                 'child_status': 'new',
                 'child_id': str(existing_child.id),
                 'discount_type': None,
                 'discount_question': None,
+                'enrolled_lesson_ids': enrolled_ids,
+                'already_registered': bool(requested and requested.intersection(enrolled_ids)),
             })
 
         # Family exists but this name is new → sibling
@@ -446,6 +483,8 @@ class WidgetLookupView(APIView):
                 'זיהינו שמשפחתכם כבר רשומה אצלנו. '
                 'האם מדובר באח/אחות של ילד אחר שמתאמן אצלנו?'
             ),
+            'enrolled_lesson_ids': [],
+            'already_registered': False,
         })
 
 
@@ -546,6 +585,10 @@ class WidgetRegisterView(APIView):
                 {'error': f'שגיאה ביצירת הרשומה: {exc}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        already = _already_registered_response(child, lesson=lesson, bundle=bundle)
+        if already:
+            return already
 
         # ── 3. Initiate payment (pricing + pending Payment record) ───────
         try:
@@ -702,6 +745,9 @@ class WidgetTrialRegisterView(APIView):
             try:
                 with transaction.atomic():
                     family, child = _resolve_family_and_child(data, lesson.course.branch)
+                    already = _already_registered_response(child, lesson=lesson)
+                    if already:
+                        return already
                     payment = Payment.objects.create(
                         child=child,
                         family=child.family,
@@ -736,6 +782,9 @@ class WidgetTrialRegisterView(APIView):
         try:
             with transaction.atomic():
                 family, child = _resolve_family_and_child(data, lesson.course.branch)
+                already = _already_registered_response(child, lesson=lesson)
+                if already:
+                    return already
                 enrollment, _created = LessonEnrollment.objects.get_or_create(
                     child=child,
                     lesson=lesson,

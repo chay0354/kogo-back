@@ -8,8 +8,9 @@ from rest_framework.test import APIClient
 from apps.core.payment_service import PaymentService, get_child_lesson_index_for_billing
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.customers.financial_models import Discount
-from apps.customers.models import Payment
+from apps.customers.models import Payment, RecurringPayment
 from apps.courses.models import LessonBundle
+from apps.enrollments.models import LessonEnrollment
 
 
 def _register_payload(**overrides):
@@ -244,4 +245,150 @@ class WidgetRegisterReusesExistingChildTest(TestCase):
         self.assertEqual(body['family_status'], 'existing')
         self.assertIsNone(body['discount_type'])
         self.assertEqual(body['child_id'], str(pending.id))
+        self.assertFalse(body['already_registered'])
+
+
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
+class WidgetRejectsDuplicateLessonSignupTest(TestCase):
+    """A paying child cannot register again for the same lesson (Luna-style double STO)."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.course = TestDataFactory.create_course(price=Decimal('225.00'))
+        self.lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=2)
+        self.other_lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=4)
+        self.family = TestDataFactory.create_family(parent_id_number='123456782')
+        TestDataFactory.create_parent(family=self.family)
+        self.child = TestDataFactory.create_child(
+            family=self.family,
+            first_name='Kid',
+            last_name='Parent',
+            status='active',
+        )
+        LessonEnrollment.objects.create(child=self.child, lesson=self.lesson, status='active')
+
+    def test_lookup_flags_same_lesson_as_already_registered(self):
+        response = self.client.post(
+            '/api/v1/customers/widget/lookup/',
+            {
+                'parent_id_number': '123456782',
+                'child_first_name': 'Kid',
+                'child_last_name': 'Parent',
+                'lesson_id': str(self.lesson.id),
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertTrue(body['already_registered'])
+        self.assertIn(str(self.lesson.id), body['enrolled_lesson_ids'])
+
+    def test_lookup_allows_a_different_lesson(self):
+        response = self.client.post(
+            '/api/v1/customers/widget/lookup/',
+            {
+                'parent_id_number': '123456782',
+                'child_first_name': 'Kid',
+                'child_last_name': 'Parent',
+                'lesson_id': str(self.other_lesson.id),
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(response.json()['already_registered'])
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
+    @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment')
+    def test_register_rejects_same_lesson(self, mock_discount, _mock_tranzila):
+        from apps.customers.discount_service import DiscountCalculation
+
+        mock_discount.side_effect = lambda **kwargs: DiscountCalculation(
+            applicable_discounts=[],
+            total_discount_amount=Decimal('0.00'),
+            final_price=kwargs['base_price'],
+            base_price=kwargs['base_price'],
+        )
+        response = self.client.post(
+            '/api/v1/customers/widget/register/',
+            _register_payload(
+                course_id=str(self.course.id),
+                lesson_id=str(self.lesson.id),
+                existing_child_id=str(self.child.id),
+            ),
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('כבר רשום', response.json()['error'])
+        self.assertFalse(
+            Payment.objects.filter(child=self.child, lesson=self.lesson, status='pending').exists()
+        )
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
+    @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment')
+    def test_register_allows_another_lesson(self, mock_discount, _mock_tranzila):
+        from apps.customers.discount_service import DiscountCalculation
+
+        mock_discount.side_effect = lambda **kwargs: DiscountCalculation(
+            applicable_discounts=[],
+            total_discount_amount=Decimal('0.00'),
+            final_price=kwargs['base_price'],
+            base_price=kwargs['base_price'],
+        )
+        response = self.client.post(
+            '/api/v1/customers/widget/register/',
+            _register_payload(
+                course_id=str(self.course.id),
+                lesson_id=str(self.other_lesson.id),
+                existing_child_id=str(self.child.id),
+            ),
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
+    @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment')
+    def test_register_rejects_when_only_standing_order_covers_lesson(self, mock_discount, _mock_tranzila):
+        from datetime import date
+        from apps.customers.discount_service import DiscountCalculation
+
+        mock_discount.side_effect = lambda **kwargs: DiscountCalculation(
+            applicable_discounts=[],
+            total_discount_amount=Decimal('0.00'),
+            final_price=kwargs['base_price'],
+            base_price=kwargs['base_price'],
+        )
+        LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson).delete()
+        payment = Payment.objects.create(
+            child=self.child,
+            family=self.family,
+            lesson=self.lesson,
+            branch=self.lesson.course.branch,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('225.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('225.00'),
+        )
+        RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=payment,
+            tranzila_token='tok',
+            status='active',
+            base_amount=Decimal('225.00'),
+            amount=Decimal('225.00'),
+            billing_day=1,
+            start_date=date.today(),
+            next_billing_date=date.today(),
+        )
+        response = self.client.post(
+            '/api/v1/customers/widget/register/',
+            _register_payload(
+                course_id=str(self.course.id),
+                lesson_id=str(self.lesson.id),
+                existing_child_id=str(self.child.id),
+            ),
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('כבר רשום', response.json()['error'])
 

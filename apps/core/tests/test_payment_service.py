@@ -331,6 +331,78 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         self.assertEqual(second['course_index'], 2)
         self.assertEqual(second['base_amount'], 250.00)
 
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_rejects_same_lesson_when_child_already_enrolled(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+        self.child.status = 'active'
+        self.child.save(update_fields=['status'])
+        LessonEnrollment.objects.create(child=self.child, lesson=self.lesson, status='active')
+
+        with self.assertRaises(ValueError) as ctx:
+            self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+            )
+        self.assertIn('כבר רשום', str(ctx.exception))
+        self.assertFalse(Payment.objects.filter(child=self.child).exists())
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_rejects_same_lesson_when_standing_order_exists(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+        payment = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            lesson=self.lesson,
+            branch=self.lesson.course.branch,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('350.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('350.00'),
+        )
+        RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=payment,
+            tranzila_token='tok',
+            status='active',
+            base_amount=Decimal('350.00'),
+            amount=Decimal('350.00'),
+            billing_day=1,
+            start_date=date.today(),
+            next_billing_date=date.today(),
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            self.service.initiate_subscription_payment(
+                child_id=str(self.child.id),
+                lesson_id=str(self.lesson.id),
+            )
+        self.assertIn('כבר רשום', str(ctx.exception))
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_allows_paid_conversion_after_trial_on_same_lesson(self, mock_discount, mock_tranzila):
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+        self.child.status = 'trial_signed'
+        self.child.save(update_fields=['status'])
+        LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=self.lesson,
+            status='active',
+            trial_lesson_date=date.today(),
+        )
+
+        result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+        self.assertIn('payment_id', result)
+
 
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class PaymentServiceLessonBundleTest(TestCase):
