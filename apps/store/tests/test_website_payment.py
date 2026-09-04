@@ -190,6 +190,44 @@ class WebsitePickupPaymentTest(TestCase):
         )
         self.product.recalculate_total_stock()
 
+    def test_a_product_with_no_size_rows_draws_on_one_pool_either_way(self):
+        """
+        The branch split lives in the size rows. A product that carries a single
+        total has nowhere else to draw from, so pickup and delivery read the
+        same number — worth pinning, because it looks like a branch was ignored.
+        """
+        flat = StoreProduct.objects.create(
+            name='בובה', category='מתנות', sale_price=Decimal('50.00'),
+            cost_price=Decimal('10.00'), delivery_price=Decimal('20.00'),
+            stock_quantity=3, website_legacy_id=4600, is_active=True,
+        )
+        self.assertFalse(flat.has_per_size_stock())
+
+        for method in ('delivery', 'pickup'):
+            res = self.client.post(
+                '/api/v1/store/widget/stock-check/',
+                {'items': [{'legacy_id': 4600, 'quantity': 3}], 'delivery_method': method},
+                format='json',
+                **self.headers,
+            )
+            self.assertEqual(res.status_code, 200, res.content)
+            self.assertEqual(res.json()['items'][0]['available'], 3, method)
+
+    def test_pickup_is_refused_when_the_branch_has_no_row_for_that_size(self):
+        """Stock sitting only on the delivery row is not available for pickup."""
+        self.pickup_row.delete()
+        self.product.recalculate_total_stock()
+
+        res = self.client.post(
+            '/api/v1/store/widget/stock-check/',
+            {'items': [{'legacy_id': 4500, 'quantity': 1, 'variant': 'M'}], 'delivery_method': 'pickup'},
+            format='json',
+            **self.headers,
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertFalse(res.json()['items'][0]['ok'])
+        self.assertEqual(res.json()['items'][0]['available'], 0)
+
     def test_stock_check_uses_pickup_branch_not_delivery(self):
         delivery = self.client.post(
             '/api/v1/store/widget/stock-check/',
