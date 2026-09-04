@@ -72,7 +72,9 @@ def _normalize_size_stocks(value):
 
     Rules:
     - Each entry must be {size: str, stock_quantity: int >= 0, branch?: uuid|null}.
-    - Sizes are stripped; empty sizes are dropped.
+    - Sizes are stripped. An empty size is kept and means "the product itself at
+      this location" — that is how a product without sizes holds stock per
+      branch instead of one number for everywhere.
     - Same (size, branch) repeated → last one wins (branch None = משלוח).
     - sort_order is filled in from the input order if not provided.
     - branch: omit, null, '', or 'delivery' → None; otherwise must be a valid Branch id.
@@ -89,8 +91,6 @@ def _normalize_size_stocks(value):
                 "כל פריט מידה חייב להיות אובייקט עם size ו-stock_quantity"
             )
         size_label = str(entry.get('size', '')).strip()
-        if not size_label:
-            continue
         try:
             qty = int(entry.get('stock_quantity', 0) or 0)
         except (TypeError, ValueError):
@@ -109,7 +109,8 @@ def _normalize_size_stocks(value):
         if sid:
             if not Branch.objects.filter(id=sid).exists():
                 raise serializers.ValidationError(
-                    f'סניף לא תקף למידה "{size_label}"'
+                    f'סניף לא תקף למידה "{size_label}"' if size_label
+                    else 'סניף לא תקף בשורת המלאי'
                 )
             branch_id = sid
 

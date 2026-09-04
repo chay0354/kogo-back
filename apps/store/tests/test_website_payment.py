@@ -234,6 +234,18 @@ class WebsitePickupPaymentTest(TestCase):
         flat.refresh_from_db()
         self.assertEqual(flat.stock_quantity, 6)
 
+    def test_a_stock_row_may_carry_a_location_without_a_size(self):
+        """The write path has to keep such a row — it used to drop it silently."""
+        from apps.store.serializers import _normalize_size_stocks
+
+        rows = _normalize_size_stocks([
+            {'size': '', 'stock_quantity': 4, 'branch': None},
+            {'size': '', 'stock_quantity': 2, 'branch': str(self.branch.id)},
+        ])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r['stock_quantity'] for r in rows}, {4, 2})
+        self.assertEqual({r['branch'] for r in rows}, {None, str(self.branch.id)})
+
     def test_a_product_with_no_size_rows_draws_on_one_pool_either_way(self):
         """
         The branch split lives in the size rows. A product that carries a single
