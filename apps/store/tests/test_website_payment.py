@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 
 from apps.core.models import Branch
 from apps.core.payment_service import PaymentService, parse_store_cart_notes
+from apps.store.stock_utils import decrement_product_stock
 from apps.store.models import StoreInvoice, StoreProduct, StoreProductSize, StoreSale
 
 
@@ -189,6 +190,49 @@ class WebsitePickupPaymentTest(TestCase):
             branch=self.branch,
         )
         self.product.recalculate_total_stock()
+
+    def test_a_product_without_sizes_can_still_hold_stock_per_location(self):
+        """
+        Most of the catalog has no sizes, and until now that meant one number
+        for every location — "pickup" drew on the delivery pool. A product can
+        now keep a row per place with no size at all, and the two are separate.
+        """
+        flat = StoreProduct.objects.create(
+            name='ספר', category='מתנות', sale_price=Decimal('50.00'),
+            cost_price=Decimal('10.00'), delivery_price=Decimal('20.00'),
+            stock_quantity=0, website_legacy_id=4700, is_active=True,
+        )
+        StoreProductSize.objects.create(
+            product=flat, size='', stock_quantity=6, sort_order=0, branch=None,
+        )
+        branch_row = StoreProductSize.objects.create(
+            product=flat, size='', stock_quantity=1, sort_order=1, branch=self.branch,
+        )
+        flat.recalculate_total_stock()
+
+        delivery = self.client.post(
+            '/api/v1/store/widget/stock-check/',
+            {'items': [{'legacy_id': 4700, 'quantity': 6}], 'delivery_method': 'delivery'},
+            format='json',
+            **self.headers,
+        )
+        self.assertEqual(delivery.json()['items'][0]['available'], 6)
+
+        pickup = self.client.post(
+            '/api/v1/store/widget/stock-check/',
+            {'items': [{'legacy_id': 4700, 'quantity': 2}], 'delivery_method': 'pickup'},
+            format='json',
+            **self.headers,
+        )
+        self.assertFalse(pickup.json()['items'][0]['ok'])
+        self.assertEqual(pickup.json()['items'][0]['available'], 1)
+
+        # And a pickup sale comes off the branch row, not the delivery one.
+        decrement_product_stock(flat, {'quantity': 1, 'branch': str(self.branch.id)})
+        branch_row.refresh_from_db()
+        self.assertEqual(branch_row.stock_quantity, 0)
+        flat.refresh_from_db()
+        self.assertEqual(flat.stock_quantity, 6)
 
     def test_a_product_with_no_size_rows_draws_on_one_pool_either_way(self):
         """

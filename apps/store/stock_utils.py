@@ -32,9 +32,12 @@ def _size_row_qs(product: StoreProduct, item: Mapping, *, for_update: bool = Fal
         return qs.filter(pk=size_stock_id)
 
     size = (item.get('size') or '').strip()
-    if not size:
-        return qs.none()
-    return qs.filter(size=size)
+    if size:
+        return qs.filter(size=size)
+    # A product without sizes still keeps its stock per location: one row per
+    # place, with an empty size. Without this the line fell back to the single
+    # product total, and "pickup" quietly drew on the delivery pool.
+    return qs.filter(size='')
 
 
 def peek_size_row(product: StoreProduct, item: Mapping) -> StoreProductSize | None:
@@ -68,10 +71,20 @@ def _match_size_row(qs, item: Mapping) -> StoreProductSize | None:
     return qs.order_by('sort_order').first()
 
 
+def tracks_stock_by_location(product: StoreProduct) -> bool:
+    """
+    Whether this product's stock is held in location rows.
+
+    True as soon as the product has any row — with sizes or without. A product
+    with no rows at all is the old shape, where a single number stands for
+    every location; it is answered from that number until its stock is placed.
+    """
+    return product.has_per_size_stock()
+
+
 def available_stock_for_item(product: StoreProduct, item: Mapping) -> int:
     """Units available for this line at the requested location (delivery vs branch)."""
-    size = (item.get('size') or '').strip()
-    if (size or item.get('size_stock_id')) and product.has_per_size_stock():
+    if tracks_stock_by_location(product):
         row = peek_size_row(product, item)
         if row is None:
             return 0
@@ -104,7 +117,7 @@ def decrement_product_stock(product: StoreProduct, item: Mapping) -> None:
     size = (item.get('size') or '').strip()
 
     with transaction.atomic():
-        if (size or item.get('size_stock_id')) and product.has_per_size_stock():
+        if tracks_stock_by_location(product):
             size_row = _resolve_size_row(product, item)
             if size_row is None:
                 logger.warning(
