@@ -48,7 +48,6 @@ def is_paying_enrollment(enrollment: LessonEnrollment) -> bool:
     return (
         enrollment.status == 'active'
         and enrollment.child.status not in TRIAL_CHILD_STATUSES
-        and not enrollment.trial_lesson_date
     )
 
 
@@ -60,14 +59,11 @@ def counts_toward_capacity(
     """
     Whether an enrollment occupies a seat for schedule capacity / max students.
 
-    Paying students always count. Trial students count only on their trial_lesson_date.
+    Only paying students take a seat. Trial signups stay on the roster but
+    never fill the class, including on their trial day.
     """
     if enrollment.status != 'active':
         return False
-    if enrollment.trial_lesson_date:
-        if occurrence_date is None:
-            return False
-        return enrollment.trial_lesson_date == occurrence_date
     return enrollment.child.status not in TRIAL_CHILD_STATUSES
 
 

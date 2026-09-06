@@ -499,6 +499,29 @@ class PaymentServiceLessonBundleTest(TestCase):
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_bundle_registration_ignores_trial_signups_for_capacity(self, mock_discount, mock_tranzila):
+        mock_discount.side_effect = self.passthrough_discount
+        mock_tranzila.return_value = "https://tranzila.test/payment"
+
+        self.lesson_b.room.capacity = 1
+        self.lesson_b.room.save()
+        trial = TestDataFactory.create_child(first_name="ניסיון", status='trial_signed')
+        LessonEnrollment.objects.create(
+            child=trial,
+            lesson=self.lesson_b,
+            status='active',
+            trial_lesson_date=date.today(),
+        )
+
+        result = self.service.initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson_a.id),
+            bundle_id=str(self.bundle.id),
+        )
+        self.assertIn('payment_id', result)
+
+    @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
     def test_inactive_must_attend_bundle_still_bills(self, mock_discount, mock_tranzila):
         mock_discount.side_effect = self.passthrough_discount
         mock_tranzila.return_value = "https://tranzila.test/payment"
