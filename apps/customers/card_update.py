@@ -136,6 +136,7 @@ def send_card_update_whatsapp(recurring: RecurringPayment) -> dict:
         'kogo_card_update_url': f'{crm_frontend_url()}/update-card/{token}',
         'kogo_card_update_token': token,
         'kogo_amount': format_sto_amount(recurring.amount),
+        'kogo_support_phone': '050-9424755',
     }
     return ManyChatService().notify_registration(
         kind=ManyChatService.REGISTRATION_KIND_CARD_UPDATE,

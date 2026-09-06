@@ -171,5 +171,6 @@ class CardUpdateWhatsAppTests(TestCase):
         self.assertEqual(extra['kogo_amount'], '350')
         self.assertTrue(extra['kogo_card_update_url'].startswith('https://kogo-front.vercel.app/update-card/'))
         self.assertTrue(extra['kogo_card_update_token'])
+        self.assertEqual(extra['kogo_support_phone'], '050-9424755')
         preview = preview_payload(recurring)
         self.assertEqual(preview['course_name'], recurring.initial_payment.lesson.course.name)

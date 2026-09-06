@@ -34,7 +34,7 @@ from apps.core.card_validation import validate_card_details
 from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc
 from apps.courses.models import Lesson, LessonBundle, LessonPriceOption
 from apps.enrollments.models import LessonEnrollment
-from apps.enrollments.enrollment_counts import paying_enrollments
+from apps.enrollments.enrollment_counts import count_capacity_enrollments, paying_enrollments
 from apps.instructors.utils import get_lesson_price_for_course_index
 from apps.store.stock_utils import (
     decrement_product_stock as _decrement_product_stock,
@@ -521,13 +521,21 @@ def validate_bundle_capacity(bundle: 'LessonBundle') -> None:
     Raise ValueError naming the first lesson without capacity. Called before any
     charge is made for a bundle registration so the whole registration fails
     fast rather than leaving the family charged for only some of the lessons.
+
+    Seat count matches the office roster and widget catalog: only paying
+    students occupy a place. Trial signups never fill the class.
     """
     for lesson in bundle.lessons.select_related('room', 'course').all():
         if not lesson.room:
             raise ValueError(f"לא ניתן להירשם למסלול — לשיעור {lesson} אין חדר מוגדר")
-        active_count = LessonEnrollment.objects.filter(lesson=lesson, status='active').count()
-        if active_count >= lesson.room.capacity:
-            raise ValueError(f"השיעור {lesson} מלא - קיבולת מקסימלית: {lesson.room.capacity} תלמידים")
+        caps = []
+        if lesson.course and lesson.course.capacity:
+            caps.append(int(lesson.course.capacity))
+        if lesson.room.capacity:
+            caps.append(int(lesson.room.capacity))
+        capacity = min(caps) if caps else int(lesson.room.capacity)
+        if count_capacity_enrollments(lesson=lesson) >= capacity:
+            raise ValueError(f"השיעור {lesson} מלא - קיבולת מקסימלית: {capacity} תלמידים")
 
 
 def resolve_billing_price(

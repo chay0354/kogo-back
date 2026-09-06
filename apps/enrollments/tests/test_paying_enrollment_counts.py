@@ -1,5 +1,5 @@
 """Tests for paying vs trial enrollment counts."""
-from datetime import date
+from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -77,21 +77,35 @@ class PayingEnrollmentCountTest(TestCase):
         self.trial_child.save(update_fields=['status'])
         self.assertEqual(count_paying_enrollments(lesson=self.lesson), 2)
 
-    def test_count_capacity_includes_trial_on_trial_date_only(self):
-        trial_date = date(2026, 6, 10)
+    def test_trial_never_counts_toward_capacity(self):
+        trial_date = date.today() + timedelta(days=7)
+        LessonEnrollment.objects.filter(child=self.trial_child).update(trial_lesson_date=trial_date)
         self.assertEqual(
             count_capacity_enrollments(lesson=self.lesson, occurrence_date=trial_date),
-            2,
-        )
-        self.assertEqual(
-            count_capacity_enrollments(lesson=self.lesson, occurrence_date=date(2026, 6, 17)),
             1,
         )
         self.assertEqual(count_capacity_enrollments(lesson=self.lesson), 1)
 
+    def test_finished_trial_does_not_count_toward_capacity(self):
+        past_trial = date(2026, 6, 10)
+        LessonEnrollment.objects.filter(child=self.trial_child).update(trial_lesson_date=past_trial)
+        self.assertEqual(
+            count_capacity_enrollments(lesson=self.lesson, occurrence_date=past_trial),
+            1,
+        )
+        self.trial_child.status = 'trial_completed'
+        self.trial_child.save(update_fields=['status'])
+        self.assertEqual(count_capacity_enrollments(lesson=self.lesson), 1)
+        self.assertEqual(
+            count_capacity_enrollments(lesson=self.lesson, occurrence_date=past_trial),
+            1,
+        )
+
     def test_schedule_occurrence_returns_roster_and_trial_counts(self):
-        trial_date = date(2026, 6, 10)
-        # Wednesday: matches the requested occurrence, independent of today's date.
+        trial_date = date.today() + timedelta(days=1)
+        while trial_date.weekday() != 2:  # Wednesday
+            trial_date += timedelta(days=1)
+        LessonEnrollment.objects.filter(child=self.trial_child).update(trial_lesson_date=trial_date)
         self.lesson.day_of_week = 3
         self.lesson.save(update_fields=['day_of_week'])
 
@@ -102,7 +116,7 @@ class PayingEnrollmentCountTest(TestCase):
 
         self.assertEqual(res.status_code, 200, res.data)
         row = next(item for item in res.data if item['id'] == str(self.lesson.id))
-        self.assertEqual(row['enrollment_count'], 2)
+        self.assertEqual(row['enrollment_count'], 1)
         self.assertEqual(row['student_count'], 2)
         # The instructor card shows these two apart: one paying, one on trial.
         self.assertEqual(row['active_student_count'], 1)
