@@ -642,7 +642,12 @@ def _undocumented_group_table(group, group_by: str, styles: dict) -> Table:
             else:
                 detail = row.detail
                 amount = _money(row.amount)
-            fifth = SHORT_SOURCE_LABELS.get(row.source, '') if group_by == GROUP_BY_BRANCH else row.branch_name
+            if group_by == GROUP_BY_BRANCH:
+                fifth = SHORT_SOURCE_LABELS.get(row.source, '')
+            else:
+                # A delivery has no branch by design; "unassigned" under a
+                # header that files it under the brand would read as an error.
+                fifth = 'משלוח' if row.is_delivery else row.branch_name
             data.append([
                 _rtl_cell(row.customer, styles['td'], UNDOC_WIDTHS[0]),
                 _rtl_cell(row.reference, styles['td'], UNDOC_WIDTHS[1]),
