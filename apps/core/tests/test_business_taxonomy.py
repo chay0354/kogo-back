@@ -137,7 +137,7 @@ class IncomeAttributionTests(APITestCase):
         self.assertEqual(branches['revenue'], 1650.0)
         self.assertEqual({c['category_name']: c['revenue'] for c in branches['categories']}, {'פלורנטין': 1400.0, 'רמת אביב': 250.0})
         # website deliveries: the brand
-        self.assertEqual(by_name['מותג קוגומלו']['categories'][0]['category_name'], 'משלוחים')
+        self.assertEqual(by_name['מותג קוגומלו']['categories'][0]['category_name'], 'מרצנדייס משלוחים')
         self.assertEqual(by_name['מותג קוגומלו']['revenue'], 120.0)
         # business customers and tagged courses: their own business, credits deducted
         self.assertEqual(by_name['חוגים']['revenue'], 1300.0)

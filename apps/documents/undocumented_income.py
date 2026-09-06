@@ -25,6 +25,12 @@ from decimal import Decimal
 
 from django.db.models import Q
 
+from apps.core.revenue_service import (
+    BRANCHES_BUSINESS_KEY,
+    BRANCHES_BUSINESS_LABEL,
+    DELIVERY_BUSINESS_LABEL,
+    DELIVERY_CATEGORY_LABEL,
+)
 from apps.core.scoping import is_scoped_partner, partner_branch_ids
 from apps.documents.period_report import (
     GROUP_BY_BRANCH,
@@ -73,6 +79,12 @@ _STORE_METHOD_LABELS = {
 }
 
 UNASSIGNED_BRANCH_LABEL = 'ללא שיוך לסניף'
+DELIVERY_KEY = 'delivery'
+DELIVERY_TITLE = f'{DELIVERY_BUSINESS_LABEL} · {DELIVERY_CATEGORY_LABEL}'
+
+# Reading order inside a grouping: the branches, then the brand's deliveries,
+# then whatever could not be placed.
+RANK_NAMED, RANK_DELIVERY, RANK_UNASSIGNED = 0, 1, 2
 
 
 @dataclass
@@ -91,6 +103,9 @@ class UndocumentedRow:
     business_name: str = ''
     category_id: object = None
     category_name: str = ''
+    # A website order shipped to the customer. It has no branch by design,
+    # and the owner files it under the brand rather than under "unassigned".
+    is_delivery: bool = False
     # Whose money this was, used only to find an issued document for the same
     # sum. Never printed.
     child_ids: list = field(default_factory=list)
@@ -133,6 +148,7 @@ class UndocumentedGroup:
     title: str
     rows: list = field(default_factory=list)
     is_unassigned: bool = False
+    rank: int = RANK_NAMED
 
     @property
     def counted(self) -> list:
@@ -170,25 +186,38 @@ class UndocumentedGroup:
 
 def _group_key(row: UndocumentedRow, group_by: str) -> tuple:
     """
-    (key, title, is_unassigned) — the same bucket the report files a document
-    under, so a branch with both kinds of income lands on one line rather than
-    two, and the untagged buckets share their names with the document side.
+    (key, title, rank) — the bucket the owner files this money under.
+
+    The rule is the one the dashboard already follows: a charge or a pickup
+    sale belongs to its branch, so under a business grouping the branches are
+    one business with a category per branch; a website delivery belongs to
+    the brand; a course carrying its own tags goes under those. The keys match
+    the document side where a real row exists, so a tagged document and a
+    charge for the same business land on one line in the closing table.
     """
     if group_by == GROUP_BY_UNIT:
         if row.business_id is not None:
-            return row.business_id, row.business_name, False
-        return UNTAGGED_BUSINESS_LABEL, UNTAGGED_BUSINESS_LABEL, True
+            return row.business_id, row.business_name, RANK_DELIVERY if row.is_delivery else RANK_NAMED
+        if row.branch_id is not None:
+            return BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL, RANK_NAMED
+        return UNTAGGED_BUSINESS_LABEL, UNTAGGED_BUSINESS_LABEL, RANK_UNASSIGNED
     if group_by == GROUP_BY_CATEGORY:
         if row.category_id is not None:
-            return row.category_id, f'{row.business_name} · {row.category_name}', False
-        return UNTAGGED_CATEGORY_LABEL, UNTAGGED_CATEGORY_LABEL, True
+            return (row.category_id, f'{row.business_name} · {row.category_name}',
+                    RANK_DELIVERY if row.is_delivery else RANK_NAMED)
+        if row.branch_id is not None:
+            return (f'{BRANCHES_BUSINESS_KEY}:{row.branch_id}',
+                    f'{BRANCHES_BUSINESS_LABEL} · {row.branch_name}', RANK_NAMED)
+        return UNTAGGED_CATEGORY_LABEL, UNTAGGED_CATEGORY_LABEL, RANK_UNASSIGNED
     if group_by == GROUP_BY_BRANCH:
         if row.branch_id is not None:
-            return row.branch_id, row.branch_name, False
-        return UNASSIGNED_BRANCH_LABEL, UNASSIGNED_BRANCH_LABEL, True
+            return row.branch_id, row.branch_name, RANK_NAMED
+        if row.is_delivery:
+            return DELIVERY_KEY, DELIVERY_TITLE, RANK_DELIVERY
+        return UNASSIGNED_BRANCH_LABEL, UNASSIGNED_BRANCH_LABEL, RANK_UNASSIGNED
     # Grouping by business customer: a charge is never one, so they all sit in
     # the same private bucket the document side uses.
-    return PRIVATE_CUSTOMERS_LABEL, PRIVATE_CUSTOMERS_LABEL, True
+    return PRIVATE_CUSTOMERS_LABEL, PRIVATE_CUSTOMERS_LABEL, RANK_UNASSIGNED
 
 
 @dataclass
@@ -224,13 +253,14 @@ class UndocumentedIncome:
         groups: dict = {}
         for section in self.sections:
             for row in section.rows:
-                key, title, unassigned = _group_key(row, group_by)
+                key, title, rank = _group_key(row, group_by)
                 group = groups.get(key)
                 if group is None:
-                    group = UndocumentedGroup(key=key, title=title, is_unassigned=unassigned)
+                    group = UndocumentedGroup(key=key, title=title, rank=rank,
+                                              is_unassigned=rank == RANK_UNASSIGNED)
                     groups[key] = group
                 group.rows.append(row)
-        return sorted(groups.values(), key=lambda g: (1 if g.is_unassigned else 0, g.title))
+        return sorted(groups.values(), key=lambda g: (g.rank, g.title))
 
     def by_group(self, group_by: str = GROUP_BY_BRANCH) -> dict:
         """group key -> (title, amount), counting only what was not merged."""
@@ -308,7 +338,7 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
     return rows
 
 
-def _store_rows(branch_ids, start: date, end: date) -> list:
+def _store_rows(branch_ids, start: date, end: date, delivery: dict) -> list:
     from apps.store.models import StoreInvoice
 
     qs = (
@@ -338,8 +368,34 @@ def _store_rows(branch_ids, start: date, end: date) -> list:
             branch_id=branch_id,
             branch_name=branch_name,
             amount=invoice.total_amount,
+            **(delivery if invoice.branch_id is None else {}),
         ))
     return rows
+
+
+def _delivery_tags() -> dict:
+    """
+    The brand and its deliveries category, as real rows when they exist.
+
+    Both are seeded by migration, so normally they do; the string keys are a
+    fallback that still groups deliveries together on a database that has not
+    run it yet, rather than scattering them into "unassigned".
+    """
+    from apps.core.models import Business
+
+    tags = {
+        'is_delivery': True,
+        'business_id': DELIVERY_KEY, 'business_name': DELIVERY_BUSINESS_LABEL,
+        'category_id': DELIVERY_KEY, 'category_name': DELIVERY_CATEGORY_LABEL,
+    }
+    business = Business.objects.filter(name=DELIVERY_BUSINESS_LABEL).first()
+    if business is None:
+        return tags
+    tags['business_id'] = business.id
+    category = business.categories.filter(name=DELIVERY_CATEGORY_LABEL).first()
+    if category is not None:
+        tags['category_id'] = category.id
+    return tags
 
 
 def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
@@ -458,9 +514,10 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
             return UndocumentedIncome(sections=[])
 
     sections = []
+    delivery = _delivery_tags()
     for source, rows in (
         (SOURCE_LESSONS, _lesson_rows(branch_ids, start, end)),
-        (SOURCE_STORE, _store_rows(branch_ids, start, end)),
+        (SOURCE_STORE, _store_rows(branch_ids, start, end, delivery)),
         (SOURCE_ORPHAN_CHARGES, _orphan_charge_rows(branch_ids, start, end)),
     ):
         if rows:

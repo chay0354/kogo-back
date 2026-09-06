@@ -496,11 +496,12 @@ class RevenueService:
 BRANCHES_BUSINESS_KEY = 'branches'
 BRANCHES_BUSINESS_LABEL = 'סניפים'
 DELIVERY_BUSINESS_LABEL = 'מותג קוגומלו'
-DELIVERY_CATEGORY_LABEL = 'משלוחים'
+DELIVERY_CATEGORY_LABEL = 'מרצנדייס משלוחים'
 UNTAGGED_LABEL = 'ללא שיוך'
 
 
-def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, branch_names, delivery_business=None):
+def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, branch_names,
+                    delivery_business=None, delivery_category=None):
     """
     Fold every income source into business → category buckets.
 
@@ -532,7 +533,8 @@ def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, br
     for bid, amount in store_by_branch.items():
         if bid == '__online__':
             key = str(delivery_business.id) if delivery_business else 'delivery'
-            add(key, DELIVERY_BUSINESS_LABEL, 'delivery', DELIVERY_CATEGORY_LABEL, amount)
+            cat_key = str(delivery_category.id) if delivery_category else 'delivery'
+            add(key, DELIVERY_BUSINESS_LABEL, cat_key, DELIVERY_CATEGORY_LABEL, amount)
         else:
             add(BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL, bid or None, branch_name(bid), amount)
     for row in document_rows:
@@ -583,4 +585,8 @@ def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=
     branch_keys = set(lesson.get('by_branch_untagged', {})) | set(rental['by_branch_id']) | set(store['by_branch_id'])
     branch_names = {str(b.id): b.name for b in Branch.objects.filter(pk__in=[k for k in branch_keys if k and k != '__online__'])}
     delivery_business = Business.objects.filter(name=DELIVERY_BUSINESS_LABEL).first()
-    return _combine_income(lesson, rental['by_branch_id'], store['by_branch_id'], document_rows, branch_names, delivery_business)
+    delivery_category = None
+    if delivery_business:
+        delivery_category = delivery_business.categories.filter(name=DELIVERY_CATEGORY_LABEL).first()
+    return _combine_income(lesson, rental['by_branch_id'], store['by_branch_id'], document_rows,
+                           branch_names, delivery_business, delivery_category)

@@ -723,6 +723,11 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
                 _rtl(f'חיובים שלא ניתן לשייך ל{group_word} — חסר שיוך ברשומה שלהם.'),
                 styles['note'],
             )]
+        elif group.rank == 1:
+            note = [Paragraph(
+                _rtl('הזמנות מהאתר שנשלחו ללקוח — אינן שייכות לסניף, ונרשמות תחת המותג.'),
+                styles['note'],
+            )]
         out.append(KeepTogether([_undocumented_group_header(group, styles), *note]))
         out.append(Spacer(1, 0.15 * cm))
         out.append(_undocumented_group_table(group, report.group_by, styles))

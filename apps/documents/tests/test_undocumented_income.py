@@ -359,12 +359,18 @@ class GroupingTests(TestCase):
 
     def test_a_row_without_a_branch_lands_in_the_catch_all_last(self):
         make_lesson_invoice('INV-N1', self.fam_n, self.north, 5, '300.00')
-        make_store_invoice('ST-WEB', None, 6, '120.00')
+        # A charge with no branch on it or on its family is the real
+        # catch-all case; a delivery is not — it has a home of its own.
+        homeless = Family.objects.create(name='משפחה ללא סניף', branch=None)
+        make_lesson_invoice('INV-NOWHERE', homeless, None, 6, '200.00')
+        make_store_invoice('ST-WEB', None, 7, '120.00')
 
         groups = collect_undocumented(self.manager, *AUG).grouped('branch')
 
-        self.assertEqual(groups[-1].title, 'ללא שיוך לסניף')
+        self.assertEqual([g.title for g in groups],
+                         ['סניף צפון', 'מותג קוגומלו · מרצנדייס משלוחים', 'ללא שיוך לסניף'])
         self.assertTrue(groups[-1].is_unassigned)
+        self.assertFalse(groups[1].is_unassigned)
 
     def test_grouping_by_business_reads_the_tag_off_the_course(self):
         tagged = make_lesson_invoice('INV-TAGGED', self.fam_n, self.north, 5, '300.00')
@@ -373,7 +379,9 @@ class GroupingTests(TestCase):
 
         groups = collect_undocumented(self.manager, *AUG).grouped('business_unit')
 
-        self.assertEqual([g.title for g in groups], ['גאגא', 'ללא שיוך לעסק'])
+        # The untagged charge has a branch, so it files under the branches
+        # business — the owner's rule, and the dashboard's — not "untagged".
+        self.assertEqual([g.title for g in groups], ['גאגא', 'סניפים'])
         self.assertEqual(groups[0].total, Decimal('300.00'))
         self.assertEqual(groups[1].total, Decimal('450.00'))
 
@@ -395,3 +403,50 @@ class GroupingTests(TestCase):
         self.assertEqual(north.count, 0)
         self.assertEqual(north.total, Decimal('0.00'))
         self.assertEqual(north.merged_total, Decimal('320.00'))
+
+
+class StoreAttributionTests(TestCase):
+    """
+    The owner's rule for the shop: a pickup belongs to its branch; a website
+    delivery has no branch by design and belongs to the brand, under its
+    merchandise-deliveries category — a real row, seeded by migration, so a
+    document tagged the same way meets it on one line.
+    """
+
+    def setUp(self):
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=self.city)
+        self.manager = make_user('manager-store@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = type(self.manager).objects.get(pk=self.manager.pk)
+        make_store_invoice('ST-PICKUP', self.north, 5, '80.00')
+        web = make_store_invoice('ST-WEB', None, 6, '120.00', payment_status='pending')
+        StoreInvoice.objects.filter(pk=web.pk).update(website_order_number='W-1')
+
+    def test_the_category_is_seeded_as_a_real_row(self):
+        from apps.core.models import BusinessCategory
+
+        category = BusinessCategory.objects.get(business__name='מותג קוגומלו', name='מרצנדייס משלוחים')
+        self.assertIsNotNone(category)
+
+    def test_by_branch_a_delivery_is_the_brand_not_unassigned(self):
+        groups = collect_undocumented(self.manager, *AUG).grouped('branch')
+
+        self.assertEqual([g.title for g in groups], ['סניף צפון', 'מותג קוגומלו · מרצנדייס משלוחים'])
+        self.assertFalse(groups[1].is_unassigned)
+        self.assertEqual(groups[1].total, Decimal('120.00'))
+
+    def test_by_business_a_pickup_is_the_branches_and_a_delivery_is_the_brand(self):
+        from apps.core.models import Business
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('business_unit')
+
+        self.assertEqual([g.title for g in groups], ['סניפים', 'מותג קוגומלו'])
+        self.assertEqual(groups[1].key, Business.objects.get(name='מותג קוגומלו').id)
+
+    def test_by_category_the_delivery_row_is_the_seeded_category(self):
+        from apps.core.models import BusinessCategory
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('business_category')
+
+        self.assertEqual([g.title for g in groups], ['סניפים · סניף צפון', 'מותג קוגומלו · מרצנדייס משלוחים'])
+        self.assertEqual(groups[1].key, BusinessCategory.objects.get(name='מרצנדייס משלוחים').id)
