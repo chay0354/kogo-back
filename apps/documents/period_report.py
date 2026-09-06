@@ -328,6 +328,8 @@ class PeriodReport:
     document_type: str = ''
     scope_label: str = ''
     currencies: set = field(default_factory=set)
+    # מה שטרנזילה מדווחת לאותה תקופה מול מה שיש אצלנו. None = לא נבדק.
+    reconciliation: dict = None
 
     def _sum_types(self, codes, credits: bool = False) -> Decimal:
         total = sum((self.type_totals[c].total_amount for c in codes if c in self.type_totals), Decimal('0.00'))

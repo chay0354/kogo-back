@@ -8,6 +8,8 @@ import os
 from datetime import date
 from decimal import Decimal
 
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.db.models import Sum
 from rest_framework import status
@@ -179,6 +181,73 @@ class PeriodReportTests(APITestCase):
         self.assertEqual(north.sections[1].totals.count, 1)
         south_types = [sec.document_type for sec in south.sections]
         self.assertEqual(south_types, ['tax_invoice', 'credit_invoice'])
+
+    def test_the_verification_block_says_which_of_the_three_states_it_is_in(self):
+        from apps.documents.period_report_pdf import _reconciliation_block, _rtl, _styles
+        from apps.documents.period_report import build_report, parse_period
+
+        styles = _styles()
+        start, end, label = parse_period({'month': '2026-08'})
+        report = build_report(self.manager, start, end, label, group_by='branch')
+
+        report.reconciliation = None
+        self.assertEqual(_reconciliation_block(report, styles), [])
+
+        report.reconciliation = {'reachable': False, 'error': 'timeout'}
+        unreachable = ' '.join(str(p) for p in _reconciliation_block(report, styles))
+        # ‎_rtl הוא מה שהמנוע מקבל, ולכן ההשוואה נעשית דרכו ולא מול המחרוזת הישרה
+        self.assertIn(_rtl('לא בוצע אימות'), unreachable)
+
+        report.reconciliation = {
+            'reachable': True, 'agrees': True,
+            'tranzila': {'count': 3, 'total': 300.0},
+            'local': {'count': 3, 'total': 300.0},
+            'only_in_tranzila': [], 'only_in_crm': [], 'unmatchable': [],
+        }
+        agreeing = ' '.join(str(p) for p in _reconciliation_block(report, styles))
+        self.assertIn(_rtl('אין פער'), agreeing)
+
+        report.reconciliation = {
+            'reachable': True, 'agrees': False,
+            'tranzila': {'count': 3, 'total': 300.0},
+            'local': {'count': 2, 'total': 200.0},
+            'only_in_tranzila': [{'document_number': '2026-0009'}],
+            'only_in_crm': [], 'unmatchable': [],
+        }
+        differing = ' '.join(str(p) for p in _reconciliation_block(report, styles))
+        self.assertIn('2026-0009', differing)
+        self.assertNotIn(_rtl('אין פער'), differing)
+
+    def test_the_report_is_verified_against_tranzila(self):
+        """The whole point of the section: it reports the comparison, not a guess."""
+        self.client.force_authenticate(self.manager)
+        with patch('apps.core.tranzila_ledger.reconcile_period') as recon:
+            recon.return_value = {
+                'reachable': True, 'error': None,
+                'tranzila': {'count': 2, 'total': 200.0},
+                'local': {'count': 2, 'total': 200.0},
+                'only_in_tranzila': [], 'only_in_crm': [], 'unmatchable': [],
+                'agrees': True,
+            }
+            res = self.client.get(URL, {'month': '2026-08'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        recon.assert_called_once()
+        self.assertTrue(res.content.startswith(b'%PDF'))
+
+    def test_verification_can_be_skipped(self):
+        self.client.force_authenticate(self.manager)
+        with patch('apps.core.tranzila_ledger.reconcile_period') as recon:
+            res = self.client.get(URL, {'month': '2026-08', 'verify': '0'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        recon.assert_not_called()
+
+    def test_a_failing_verification_still_produces_the_report(self):
+        """A report that cannot be verified is better than no report at all."""
+        self.client.force_authenticate(self.manager)
+        with patch('apps.core.tranzila_ledger.reconcile_period', side_effect=RuntimeError('down')):
+            res = self.client.get(URL, {'month': '2026-08'})
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.content.startswith(b'%PDF'))
 
     def test_empty_month_still_renders(self):
         self.client.force_authenticate(self.manager)

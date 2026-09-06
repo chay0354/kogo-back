@@ -114,6 +114,18 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         except ReportInputError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+        # אימות מול טרנזילה, אלא אם ביקשו במפורש לוותר עליו (verify=0). נכשל
+        # בשקט אם הקריאה נופלת: דוח שלא מצליח לאמת עדיף על דוח שלא מופק, והעמוד
+        # עצמו אומר שלא בוצע אימות.
+        if (request.query_params.get('verify') or '1').strip() not in ('0', 'false', 'no'):
+            from apps.core.tranzila_ledger import reconcile_period
+
+            try:
+                report.reconciliation = reconcile_period(start, end)
+            except Exception:
+                logger.exception('Period report reconciliation failed')
+                report.reconciliation = {'reachable': False, 'error': 'שגיאה בעת האימות'}
+
         pdf_bytes = generate_period_report_pdf(report)
         response = HttpResponse(pdf_bytes, content_type='application/pdf')
         response['Content-Disposition'] = (

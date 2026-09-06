@@ -489,3 +489,80 @@ def list_ledger_payments(start_date: Optional[date] = None, end_date: Optional[d
         'start_date': start.isoformat(),
         'end_date': end.isoformat(),
     }
+
+
+def reconcile_period(start_date: date, end_date: date) -> dict:
+    """
+    What Tranzila holds for the period against what we hold, document by document.
+
+    Read-only, and it goes through Tranzila's documents API with the terminal
+    credentials already configured on the server — nobody signs in anywhere.
+
+    The comparison is by the two identifiers a document can carry: Tranzila's own
+    id and the document number. A row that carries neither cannot be matched and
+    is reported as unmatchable rather than quietly counted as agreeing.
+
+    Returns counts and totals for each side, the documents that appear on only
+    one of them, and — when Tranzila did not answer — says so instead of
+    presenting a local-only count as a reconciliation.
+    """
+    start, end = _default_range(start_date, end_date)
+    local_rows = _local_formal_rows(start, end)
+    tranzila_rows: list[dict] = []
+    reachable = False
+    error = None
+
+    try:
+        service = _tranzila_client()
+        result = service.list_documents(start, end)
+        if result.get('success'):
+            reachable = True
+            for raw in result.get('documents') or []:
+                tranzila_rows.append(normalize_tranzila_document(raw))
+        else:
+            error = result.get('error')
+    except Exception as exc:  # pragma: no cover - network shape varies
+        error = str(exc)
+        logger.exception('Tranzila reconciliation failed')
+
+    def keys_of(row):
+        return {
+            key for key in (
+                f"doc|{row.get('tranzila_doc_id')}" if row.get('tranzila_doc_id') else None,
+                f"num|{row.get('document_number')}" if row.get('document_number') else None,
+            ) if key
+        }
+
+    tranzila_keys = set()
+    for row in tranzila_rows:
+        tranzila_keys |= keys_of(row)
+
+    only_local = []
+    unmatchable = []
+    for row in local_rows:
+        keys = keys_of(row)
+        if not keys:
+            unmatchable.append(row)
+        elif not (keys & tranzila_keys):
+            only_local.append(row)
+
+    local_keys = set()
+    for row in local_rows:
+        local_keys |= keys_of(row)
+    only_tranzila = [row for row in tranzila_rows if not (keys_of(row) & local_keys)]
+
+    def total_of(rows):
+        return sum((_parse_amount(row.get('total_amount')) for row in rows), 0.0)
+
+    return {
+        'reachable': reachable,
+        'error': error,
+        'start_date': start.isoformat(),
+        'end_date': end.isoformat(),
+        'tranzila': {'count': len(tranzila_rows), 'total': round(total_of(tranzila_rows), 2)},
+        'local': {'count': len(local_rows), 'total': round(total_of(local_rows), 2)},
+        'only_in_tranzila': only_tranzila,
+        'only_in_crm': only_local,
+        'unmatchable': unmatchable,
+        'agrees': reachable and not only_tranzila and not only_local and not unmatchable,
+    }

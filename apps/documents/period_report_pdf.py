@@ -505,6 +505,74 @@ def _group_totals_summary(report: PeriodReport, styles: dict):
     ]
 
 
+def _reconciliation_block(report: PeriodReport, styles) -> list:
+    """
+    האם מה שבדוח מסתדר מול טרנזילה.
+
+    הבדיקה נעשית דרך ה-API של טרנזילה עם מפתחות המסוף שכבר מוגדרים בשרת.
+    כשטרנזילה לא ענתה — נאמר כאן שלא נבדק, ולא מוצג מספר מקומי כאילו הוא
+    מאומת. זה ההבדל בין דוח שאפשר לסמוך עליו לבין דוח שנראה כאילו אפשר.
+    """
+    recon = report.reconciliation
+    if not recon:
+        return []
+
+    out = [
+        Spacer(1, 0.7 * cm),
+        Paragraph(_rtl('אימות מול טרנזילה'), styles['label']),
+        Spacer(1, 0.15 * cm),
+    ]
+
+    if not recon.get('reachable'):
+        reason = recon.get('error') or 'לא התקבלה תשובה'
+        out.append(Paragraph(
+            _rtl(f'לא בוצע אימות: טרנזילה לא הייתה זמינה בעת הפקת הדוח ({reason}). '
+                 f'המספרים בדוח הם של המערכת בלבד.'),
+            styles['note'],
+        ))
+        return out
+
+    tz = recon.get('tranzila') or {}
+    local = recon.get('local') or {}
+    only_tz = recon.get('only_in_tranzila') or []
+    only_crm = recon.get('only_in_crm') or []
+    unmatchable = recon.get('unmatchable') or []
+
+    out.append(Paragraph(
+        _rtl(f'טרנזילה מדווחת {tz.get("count", 0)} מסמכים בסך '
+             f'{_money(Decimal(str(tz.get("total", 0))))} · '
+             f'במערכת {local.get("count", 0)} מסמכים בסך '
+             f'{_money(Decimal(str(local.get("total", 0))))}.'),
+        styles['subtitle'],
+    ))
+
+    if recon.get('agrees'):
+        out.append(Paragraph(
+            _rtl('כל מסמך שטרנזילה מכירה נמצא גם במערכת, ולהפך. אין פער.'),
+            styles['note'],
+        ))
+        return out
+
+    def _listing(title, rows):
+        listed = ', '.join(
+            str(row.get('document_number') or row.get('tranzila_doc_id') or '—')
+            for row in rows[:12]
+        )
+        more = f' (ועוד {len(rows) - 12})' if len(rows) > 12 else ''
+        return Paragraph(_rtl(f'{title}: {listed}{more}'), styles['note'])
+
+    if only_tz:
+        out.append(_listing(f'קיימים בטרנזילה ולא במערכת ({len(only_tz)})', only_tz))
+    if only_crm:
+        out.append(_listing(f'קיימים במערכת ולא בטרנזילה ({len(only_crm)})', only_crm))
+    if unmatchable:
+        out.append(_listing(
+            f'ללא מספר מסמך או מזהה טרנזילה, ולכן לא ניתן להשוות ({len(unmatchable)})',
+            unmatchable,
+        ))
+    return out
+
+
 def generate_period_report_pdf(report: PeriodReport) -> bytes:
     _ensure_fonts_registered()
     styles = _styles()
@@ -528,8 +596,23 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
         Paragraph(_rtl('דוח חשבוניות לתקופה'), styles['title']),
         Paragraph(_rtl(f'קוגומלו · {report.period_label}'), styles['subtitle']),
         Paragraph(_rtl(f'קיבוץ {grouping_title} · {report.scope_label}'), styles['subtitle']),
-        Spacer(1, 0.5 * cm),
     ]
+
+    # מה הדוח מכסה — נאמר במפורש. דוח שסונן לסוג אחד נראה בדיוק כמו דוח מלא,
+    # וקורא שלא ידע שסוננו עבורו מסמכים יסיק מהסכום מסקנה שגויה.
+    if report.document_type:
+        story.append(Paragraph(
+            _rtl('הדוח כולל סוג מסמך אחד בלבד: '
+                 + DOCUMENT_TYPE_LABELS.get(report.document_type, report.document_type)),
+            styles['subtitle'],
+        ))
+    else:
+        story.append(Paragraph(
+            _rtl('הדוח כולל את כל סוגי המסמכים שהופקו בתקופה (טיוטות אינן נכללות — אינן מסמך).'),
+            styles['subtitle'],
+        ))
+
+    story.append(Spacer(1, 0.5 * cm))
 
     if report.is_empty:
         # An empty period is a valid answer, not an error. Say so on the page
@@ -586,6 +669,8 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
                     styles['note'],
                 ),
             ])
+
+    story.extend(_reconciliation_block(report, styles))
 
     context = {
         'header': header_line,
