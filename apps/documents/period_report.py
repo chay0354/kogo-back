@@ -330,6 +330,8 @@ class PeriodReport:
     currencies: set = field(default_factory=set)
     # מה שטרנזילה מדווחת לאותה תקופה מול מה שיש אצלנו. None = לא נבדק.
     reconciliation: dict = None
+    # תקבולים בתקופה שלא הופק להם מסמך פורמלי. None = לא נאסף.
+    undocumented: object = None
 
     def _sum_types(self, codes, credits: bool = False) -> Decimal:
         total = sum((self.type_totals[c].total_amount for c in codes if c in self.type_totals), Decimal('0.00'))
@@ -355,6 +357,25 @@ class PeriodReport:
     @property
     def is_empty(self) -> bool:
         return self.totals.count == 0
+
+    @property
+    def undocumented_total(self) -> Decimal:
+        """Money taken in the period with no document behind it — 0 when not collected."""
+        if self.undocumented is None:
+            return Decimal('0.00')
+        return self.undocumented.total
+
+    @property
+    def all_income_total(self) -> Decimal:
+        """
+        Everything that came in: documented collection plus undocumented charges.
+
+        Kept apart from `collected_total` on purpose. A document issued by hand
+        for a charge that also has an Invoice row would be counted twice here,
+        and there is no field linking the two, so the report prints this figure
+        with that caveat rather than quietly replacing the documented total.
+        """
+        return self.collected_total + self.undocumented_total
 
 
 def _row_from(doc) -> ReportRow:

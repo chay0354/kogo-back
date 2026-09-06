@@ -114,6 +114,17 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         except ReportInputError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+        # תקבולים שאין מאחוריהם מסמך — חיובי חוגים ומכירות חנות שהמסמך שלהן
+        # נכשל. נאסף תמיד, אלא אם ביקשו דוח של סוג מסמך יחיד: שם הקורא מבקש
+        # חתך של מסמכים, וסעיף בלי מסמך אינו שייך אליו.
+        if not (request.query_params.get('document_type') or '').strip():
+            from apps.documents.undocumented_income import collect_undocumented
+
+            try:
+                report.undocumented = collect_undocumented(request.user, start, end)
+            except Exception:
+                logger.exception('Period report undocumented income failed')
+
         # אימות מול טרנזילה, אלא אם ביקשו במפורש לוותר עליו (verify=0). נכשל
         # בשקט אם הקריאה נופלת: דוח שלא מצליח לאמת עדיף על דוח שלא מופק, והעמוד
         # עצמו אומר שלא בוצע אימות.

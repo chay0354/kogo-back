@@ -573,6 +573,93 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
     return out
 
 
+UNDOC_WIDTHS = [4.4 * cm, 4.2 * cm, 2.0 * cm, 2.6 * cm, 3.4 * cm, 2.4 * cm]
+UNDOC_HEADERS = ['שם לקוח', 'אסמכתה', 'תאריך', 'פירוט', 'סניף', 'סכום']
+
+
+def _undocumented_block(report: PeriodReport, styles: dict) -> list:
+    """
+    תקבולים בתקופה שלא הופק להם מסמך פורמלי.
+
+    הסעיף הזה מופרד מהמסמכים ולא מחובר לסכומיהם. חיוב חוגים שולח להורה PDF
+    שהמערכת מייצרת בעצמה — הוא אינו מסמך שהופק בטרנזילה ואין לו מספר מהמונה,
+    ולכן אי אפשר להציג אותו בשורה אחת עם חשבונית. להשמיט אותו לגמרי גרם לדוח
+    להיראות קטן מהחודש שהוא מתאר, וזו הסיבה שהוא מופיע כאן בנפרד.
+    """
+    undoc = getattr(report, 'undocumented', None)
+    if undoc is None or undoc.is_empty:
+        return []
+
+    out = [
+        Spacer(1, 0.7 * cm),
+        Paragraph(_rtl('תקבולים ללא מסמך פורמלי'), styles['label']),
+        Spacer(1, 0.15 * cm),
+        Paragraph(
+            _rtl('הסכומים הבאים נגבו בתקופה ולא הופק עבורם מסמך במערכת. '
+                 'הם אינם מחוברים לסכומי המסמכים שלמעלה.'),
+            styles['note'],
+        ),
+        Spacer(1, 0.25 * cm),
+    ]
+
+    for section in undoc.sections:
+        data = [[
+            _rtl_cell(head, styles['th'], width)
+            for head, width in zip(UNDOC_HEADERS, UNDOC_WIDTHS)
+        ]]
+        for row in section.rows:
+            data.append([
+                _rtl_cell(row.customer, styles['td'], UNDOC_WIDTHS[0]),
+                _rtl_cell(row.reference, styles['td'], UNDOC_WIDTHS[1]),
+                _rtl_cell(row.row_date.strftime('%d/%m/%Y'), styles['td'], UNDOC_WIDTHS[2]),
+                _rtl_cell(row.detail, styles['td'], UNDOC_WIDTHS[3]),
+                _rtl_cell(row.branch_name, styles['td'], UNDOC_WIDTHS[4]),
+                _rtl_cell(_money(row.amount), styles['td_num'], UNDOC_WIDTHS[5]),
+            ])
+        data.append([
+            # The label already stands above the table; the spanned cell only
+            # needs to say how many rows it is summing.
+            _rtl_cell(f'סה"כ ({section.count})', styles['sub'], sum(UNDOC_WIDTHS[:5])),
+            '', '', '', '',
+            _rtl_cell(_money(section.total), styles['sub'], UNDOC_WIDTHS[5]),
+        ])
+
+        table = Table(data, colWidths=UNDOC_WIDTHS, hAlign='RIGHT', repeatRows=1)
+        table.setStyle(_card([
+            ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
+            ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+            ('SPAN', (0, -1), (4, -1)),
+        ], padding=(5, 5, 5, 5)))
+        out.append(Paragraph(_rtl(section.label), styles['subtitle']))
+        out.append(Spacer(1, 0.12 * cm))
+        out.append(table)
+        out.append(Spacer(1, 0.4 * cm))
+
+    grand = [
+        [_rtl_cell('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', styles['label'], 8.0 * cm),
+         _rtl_cell(_money(report.collected_total), styles['value'], 4.5 * cm)],
+        [_rtl_cell('תקבולים ללא מסמך', styles['label'], 8.0 * cm),
+         _rtl_cell(_money(undoc.total), styles['value'], 4.5 * cm)],
+        [_rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('AllInc', parent=styles['grand']), 8.0 * cm),
+         _rtl_cell(_money(report.all_income_total), styles['grand'], 4.5 * cm)],
+    ]
+    panel = Table(grand, colWidths=[8.0 * cm, 4.5 * cm], hAlign='RIGHT')
+    panel.setStyle(_card([
+        ('BACKGROUND', (0, 0), (-1, -2), PANEL_BG),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
+    ], padding=(6, 6, 10, 10)))
+    out.append(panel)
+    out.append(Spacer(1, 0.2 * cm))
+    out.append(Paragraph(
+        _rtl('שים לב: אם הופק ידנית מסמך עבור חיוב שמופיע גם כאן, הוא נספר פעמיים '
+             'בשורה האחרונה — אין במערכת קישור בין חיוב למסמך שהופק עבורו.'),
+        styles['note'],
+    ))
+    return out
+
+
 def generate_period_report_pdf(report: PeriodReport) -> bytes:
     _ensure_fonts_registered()
     styles = _styles()
@@ -670,6 +757,7 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
                 ),
             ])
 
+    story.extend(_undocumented_block(report, styles))
     story.extend(_reconciliation_block(report, styles))
 
     context = {
