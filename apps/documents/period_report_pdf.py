@@ -585,105 +585,202 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
     return out
 
 
-UNDOC_WIDTHS = [4.4 * cm, 4.2 * cm, 2.0 * cm, 2.6 * cm, 3.4 * cm, 2.4 * cm]
-UNDOC_HEADERS = ['שם לקוח', 'אסמכתה', 'תאריך', 'פירוט', 'סניף', 'סכום']
+# Six columns: the fifth names the branch when the report is grouped by
+# something else, and the kind of charge when the branch is already the header.
+UNDOC_WIDTHS = [4.6 * cm, 4.2 * cm, 2.0 * cm, 2.6 * cm, 3.2 * cm, 2.4 * cm]
+
+SHORT_SOURCE_LABELS = {
+    'lessons': 'חוג',
+    'store': 'חנות',
+    'orphan_charges': 'חיוב ללא חשבונית',
+}
+
+GROUP_WORD = {GROUP_BY_BRANCH: 'סניף', GROUP_BY_UNIT: 'עסק', GROUP_BY_CATEGORY: 'קטגוריה'}
 
 
-def _undocumented_block(report: PeriodReport, styles: dict) -> list:
+def _undocumented_group_header(group, styles: dict) -> Table:
+    count_label = f'{group.count} חיובים' if group.count != 1 else 'חיוב אחד'
+    bar = Table(
+        [[
+            _rtl_cell(group.title, styles['group'], 11.0 * cm),
+            _rtl_cell(count_label, ParagraphStyle(
+                'UndocCount', parent=styles['group'], fontSize=9.5, alignment=TA_CENTER,
+            ), 4.0 * cm),
+        ]],
+        colWidths=[12.0 * cm, sum(UNDOC_WIDTHS) - 12.0 * cm],
+        hAlign='RIGHT',
+    )
+    bar.setStyle(_card([('BACKGROUND', (0, 0), (-1, -1), BRAND_NAVY)], padding=(7, 7, 8, 8)))
+    return bar
+
+
+def _undocumented_group_table(group, group_by: str, styles: dict) -> Table:
     """
-    תקבולים בתקופה שלא הופק להם מסמך פורמלי.
-
-    הסעיף הזה מופרד מהמסמכים ולא מחובר לסכומיהם. חיוב חוגים שולח להורה PDF
-    שהמערכת מייצרת בעצמה — הוא אינו מסמך שהופק בטרנזילה ואין לו מספר מהמונה,
-    ולכן אי אפשר להציג אותו בשורה אחת עם חשבונית. להשמיט אותו לגמרי גרם לדוח
-    להיראות קטן מהחודש שהוא מתאר, וזו הסיבה שהוא מופיע כאן בנפרד.
+    One group's charges, banded by source, ending in the group's subtotal —
+    the same shape as a group of documents, so the two halves of the report
+    read alike. A merged row stays on the page in grey with its amount in
+    brackets, so the reader can check the match by eye; it is left out of
+    every subtotal.
     """
-    undoc = getattr(report, 'undocumented', None)
-    if undoc is None or undoc.is_empty:
-        return []
+    fifth_header = 'סוג' if group_by == GROUP_BY_BRANCH else 'סניף'
+    headers = ['שם לקוח', 'אסמכתה', 'תאריך', 'פירוט', fifth_header, 'סכום']
+    data = [[_rtl_cell(h, styles['th'], w) for h, w in zip(headers, UNDOC_WIDTHS)]]
+    band_rows, subtotal_rows, merged_rows = [], [], []
 
-    out = [
-        Spacer(1, 0.7 * cm),
-        Paragraph(_rtl('תקבולים ללא מסמך פורמלי'), styles['label']),
-        Spacer(1, 0.15 * cm),
-        Paragraph(
-            _rtl('הסכומים הבאים נגבו בתקופה ולא הופק עבורם מסמך במערכת. '
-                 'הם אינם מחוברים לסכומי המסמכים שלמעלה.'),
-            styles['note'],
-        ),
-        Spacer(1, 0.25 * cm),
-    ]
-
-    for section in undoc.sections:
-        data = [[
-            _rtl_cell(head, styles['th'], width)
-            for head, width in zip(UNDOC_HEADERS, UNDOC_WIDTHS)
-        ]]
-        merged_rows = []
+    sections = group.sections
+    for section in sections:
+        band_rows.append(len(data))
+        data.append([
+            _rtl_cell(section.label, styles['section'], sum(UNDOC_WIDTHS)),
+            *['' for _ in UNDOC_WIDTHS[1:]],
+        ])
         for row in section.rows:
             if row.merged_document:
-                # Shown, with its amount in brackets, so the reader can see the
-                # duplicate that was folded away and check the match by eye.
                 merged_rows.append(len(data))
                 detail = f'מוזג עם מסמך {row.merged_document}'
                 amount = f'({_money(row.amount)})'
             else:
                 detail = row.detail
                 amount = _money(row.amount)
+            fifth = SHORT_SOURCE_LABELS.get(row.source, '') if group_by == GROUP_BY_BRANCH else row.branch_name
             data.append([
                 _rtl_cell(row.customer, styles['td'], UNDOC_WIDTHS[0]),
                 _rtl_cell(row.reference, styles['td'], UNDOC_WIDTHS[1]),
                 _rtl_cell(row.row_date.strftime('%d/%m/%Y'), styles['td'], UNDOC_WIDTHS[2]),
                 _rtl_cell(detail, styles['td'], UNDOC_WIDTHS[3]),
-                _rtl_cell(row.branch_name, styles['td'], UNDOC_WIDTHS[4]),
+                _rtl_cell(fifth, styles['td'], UNDOC_WIDTHS[4]),
                 _rtl_cell(amount, styles['td_num'], UNDOC_WIDTHS[5]),
             ])
-        data.append([
-            # The label already stands above the table; the spanned cell only
-            # needs to say how many rows it is summing.
-            _rtl_cell(f'סה"כ ({section.count})', styles['sub'], sum(UNDOC_WIDTHS[:5])),
-            '', '', '', '',
-            _rtl_cell(_money(section.total), styles['sub'], UNDOC_WIDTHS[5]),
-        ])
+        if len(sections) > 1:
+            subtotal_rows.append(len(data))
+            data.append([
+                _rtl_cell(f'סה"כ {section.label} ({section.count})', styles['subsection'],
+                          sum(UNDOC_WIDTHS[:5])),
+                '', '', '', '',
+                _rtl_cell(_money(section.total), styles['subsection'], UNDOC_WIDTHS[5]),
+            ])
 
-        table = Table(data, colWidths=UNDOC_WIDTHS, hAlign='RIGHT', repeatRows=1)
-        table.setStyle(_card([
-            ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
-            ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
-            ('SPAN', (0, -1), (4, -1)),
-        ] + [('TEXTCOLOR', (0, r), (-1, r), MUTED) for r in merged_rows],
-            padding=(5, 5, 5, 5)))
-        # Kept together so a short section never leaves its header and
-        # subtotal stranded on a page of their own.
-        block = [
-            Paragraph(_rtl(section.label), styles['subtitle']),
-            Spacer(1, 0.12 * cm),
-            table,
-        ]
-        if section.merged:
-            count = len(section.merged)
-            opening = (
-                'שורה אחת בסוגריים אוחדה' if count == 1
-                else f'{count} שורות בסוגריים אוחדו'
-            )
-            block.append(Spacer(1, 0.12 * cm))
-            block.append(Paragraph(
+    data.append([
+        _rtl_cell(f'סיכום — {group.title} ({group.count} חיובים)', styles['sub'], sum(UNDOC_WIDTHS[:5])),
+        '', '', '', '',
+        _rtl_cell(_money(group.total), styles['sub'], UNDOC_WIDTHS[5]),
+    ])
+
+    table = Table(data, colWidths=UNDOC_WIDTHS, hAlign='RIGHT', repeatRows=1)
+    style = [
+        ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
+        ('SPAN', (0, -1), (4, -1)),
+    ]
+    for index in band_rows:
+        style.append(('SPAN', (0, index), (-1, index)))
+        style.append(('BACKGROUND', (0, index), (-1, index), SECTION_BG))
+    for index in subtotal_rows:
+        style.append(('SPAN', (0, index), (4, index)))
+        style.append(('BACKGROUND', (0, index), (-1, index), colors.HexColor('#f6f4fc')))
+        style.append(('LINEABOVE', (0, index), (-1, index), 0.6, BRAND_PURPLE))
+    for index in merged_rows:
+        style.append(('TEXTCOLOR', (0, index), (-1, index), MUTED))
+    table.setStyle(_card(style, padding=(5, 5, 5, 5)))
+    return table
+
+
+def _undocumented_block(report: PeriodReport, styles: dict) -> list:
+    """
+    תקבולים בתקופה שלא הופק להם מסמך פורמלי, מקובצים כמו המסמכים.
+
+    הסעיף הזה מופרד מהמסמכים ולא מחובר לסכומיהם. חיוב חוגים שולח להורה PDF
+    שהמערכת מייצרת בעצמה — הוא אינו מסמך שהופק בטרנזילה ואין לו מספר מהמונה,
+    ולכן אי אפשר להציג אותו בשורה אחת עם חשבונית. להשמיט אותו לגמרי גרם לדוח
+    להיראות קטן מהחודש שהוא מתאר, וזו הסיבה שהוא מופיע כאן — סניף אחר סניף,
+    עם הפירוט והסיכום של כל אחד, כדי שהקורא ימצא את הסניף שלו באותה דרך שהוא
+    מוצא אותו למעלה.
+    """
+    undoc = getattr(report, 'undocumented', None)
+    if undoc is None or undoc.is_empty:
+        return []
+
+    groups = undoc.grouped(report.group_by)
+    group_word = GROUP_WORD.get(report.group_by, 'קבוצה')
+    out = [
+        Spacer(1, 0.7 * cm),
+        Paragraph(_rtl(f'תקבולים ללא מסמך פורמלי — לפי {group_word}'), styles['label']),
+        Spacer(1, 0.15 * cm),
+        Paragraph(
+            _rtl('הסכומים הבאים נגבו בתקופה ולא הופק עבורם מסמך במערכת. '
+                 'הם אינם מחוברים לסכומי המסמכים שלמעלה.'),
+            styles['note'],
+        ),
+        Spacer(1, 0.35 * cm),
+    ]
+
+    for group in groups:
+        note = []
+        if group.is_unassigned:
+            note = [Paragraph(
+                _rtl(f'חיובים שלא ניתן לשייך ל{group_word} — חסר שיוך ברשומה שלהם.'),
+                styles['note'],
+            )]
+        out.append(KeepTogether([_undocumented_group_header(group, styles), *note]))
+        out.append(Spacer(1, 0.15 * cm))
+        out.append(_undocumented_group_table(group, report.group_by, styles))
+        if group.merged:
+            count = len(group.merged)
+            opening = 'שורה אחת בסוגריים אוחדה' if count == 1 else f'{count} שורות בסוגריים אוחדו'
+            out.append(Spacer(1, 0.12 * cm))
+            out.append(Paragraph(
                 _rtl(f'{opening} עם מסמך שהופק לאותו לקוח ולאותו סכום '
-                     f'({_money(section.merged_total)}) ואינן נספרות כאן.'),
+                     f'({_money(group.merged_total)}) ואינן נספרות בסיכום.'),
                 styles['note'],
             ))
-        out.append(KeepTogether(block))
-        out.append(Spacer(1, 0.4 * cm))
+        out.append(Spacer(1, 0.55 * cm))
+
+    # Per-group totals in one place, then the two halves of the period side by side.
+    summary = [[
+        _rtl_cell(group_word, styles['th'], 9.0 * cm),
+        _rtl_cell('חיובים', styles['th'], 3.0 * cm),
+        _rtl_cell('סה"כ', styles['th'], 6.8 * cm),
+    ]]
+    for group in groups:
+        summary.append([
+            _rtl_cell(group.title, styles['td'], 9.0 * cm),
+            _rtl_cell(str(group.count), styles['td_num'], 3.0 * cm),
+            _rtl_cell(_money(group.total), styles['td_num'], 6.8 * cm),
+        ])
+    summary.append([
+        _rtl_cell('סה"כ ללא מסמך', styles['sub'], 9.0 * cm),
+        _rtl_cell(str(undoc.count), styles['sub'], 3.0 * cm),
+        _rtl_cell(_money(undoc.total), styles['sub'], 6.8 * cm),
+    ])
+    summary_table = Table(summary, colWidths=[9.0 * cm, 3.0 * cm, 6.8 * cm], hAlign='RIGHT', repeatRows=1)
+    summary_table.setStyle(_card([
+        ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
+    ], padding=(5, 5, 5, 5)))
+    out.append(Paragraph(_rtl(f'סיכום ללא מסמך לפי {group_word}'), styles['label']))
+    out.append(Spacer(1, 0.15 * cm))
+    out.append(summary_table)
+    out.append(Spacer(1, 0.5 * cm))
 
     grand = [
         [_rtl_cell('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', styles['label'], 8.0 * cm),
          _rtl_cell(_money(report.collected_total), styles['value'], 4.5 * cm)],
         [_rtl_cell('תקבולים ללא מסמך', styles['label'], 8.0 * cm),
          _rtl_cell(_money(undoc.total), styles['value'], 4.5 * cm)],
-        [_rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('AllInc', parent=styles['grand']), 8.0 * cm),
-         _rtl_cell(_money(report.all_income_total), styles['grand'], 4.5 * cm)],
     ]
+    if report.totals.credits_total:
+        grand.append([
+            _rtl_cell('זיכויים', styles['label'], 8.0 * cm),
+            _rtl_cell(f'-{_money(report.totals.credits_total)}', styles['value'], 4.5 * cm),
+        ])
+    grand.append([
+        _rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('AllInc', parent=styles['grand']), 8.0 * cm),
+        _rtl_cell(_money(report.all_income_total), styles['grand'], 4.5 * cm),
+    ])
     panel = Table(grand, colWidths=[8.0 * cm, 4.5 * cm], hAlign='RIGHT')
     panel.setStyle(_card([
         ('BACKGROUND', (0, 0), (-1, -2), PANEL_BG),
@@ -693,35 +790,34 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
     out.append(panel)
     out.append(Spacer(1, 0.2 * cm))
     out.append(Paragraph(
-        _rtl('שים לב: אם הופק ידנית מסמך עבור חיוב שמופיע גם כאן, הוא נספר פעמיים '
-             'בשורה האחרונה — אין במערכת קישור בין חיוב למסמך שהופק עבורו.'),
+        _rtl('שים לב: אם הופק ידנית מסמך עבור חיוב שמופיע גם כאן ולא זוהה כמיזוג, '
+             'הוא נספר פעמיים בשורה האחרונה — אין במערכת קישור בין חיוב למסמך שהופק עבורו.'),
         styles['note'],
     ))
     return out
 
 
 INCOME_WIDTHS = [5.2 * cm, 3.5 * cm, 3.5 * cm, 3.3 * cm, 3.5 * cm]
-INCOME_HEADERS = ['סניף', 'עם מסמך', 'ללא מסמך', 'זיכויים', 'סה"כ נכנס']
 
 
-def _income_by_branch_block(report: PeriodReport, styles: dict) -> list:
+def _income_by_group_block(report: PeriodReport, styles: dict) -> list:
     """
-    The last word on how much each branch actually took in.
+    The last word on how much each branch (or business) actually took in.
 
     Documents and charges are counted in the same row here because the reader's
     question is not which of the two a shekel arrived through. The left column
     is receipts only — a tax invoice and the receipt that settles it would
     otherwise show the branch as having taken the same money twice.
     """
-    if report.group_by != GROUP_BY_BRANCH:
-        return []
     entries = report.income_by_group()
     if not entries:
         return []
+    group_word = GROUP_WORD.get(report.group_by, 'לקוח עסקי')
+    headers = [group_word, 'עם מסמך', 'ללא מסמך', 'זיכויים', 'סה"כ נכנס']
 
     data = [[
         _rtl_cell(head, styles['th'], width)
-        for head, width in zip(INCOME_HEADERS, INCOME_WIDTHS)
+        for head, width in zip(headers, INCOME_WIDTHS)
     ]]
     def credit_cell(amount, style):
         return _rtl_cell(f'-{_money(amount)}' if amount else _money(amount), style, INCOME_WIDTHS[3])
@@ -750,17 +846,21 @@ def _income_by_branch_block(report: PeriodReport, styles: dict) -> list:
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
     ], padding=(6, 6, 6, 6)))
 
+    # The one table the owner reads first; a page break through it would
+    # separate a branch from its total.
     return [
         Spacer(1, 0.7 * cm),
-        Paragraph(_rtl('סיכום סופי לפי סניף — כמה כסף נכנס'), styles['label']),
-        Spacer(1, 0.15 * cm),
-        table,
-        Spacer(1, 0.2 * cm),
-        Paragraph(
-            _rtl('"עם מסמך" — קבלות וחשבוניות מס/קבלה בלבד, בניכוי זיכויים. '
-                 'חשבונית מס שטרם נגבתה אינה כאן, כדי שלא ייספר אותו כסף פעמיים.'),
-            styles['note'],
-        ),
+        KeepTogether([
+            Paragraph(_rtl(f'סיכום סופי לפי {group_word} — כמה כסף נכנס'), styles['label']),
+            Spacer(1, 0.15 * cm),
+            table,
+            Spacer(1, 0.2 * cm),
+            Paragraph(
+                _rtl('"עם מסמך" — קבלות וחשבוניות מס/קבלה בלבד, בניכוי זיכויים. '
+                     'חשבונית מס שטרם נגבתה אינה כאן, כדי שלא ייספר אותו כסף פעמיים.'),
+                styles['note'],
+            ),
+        ]),
     ]
 
 
@@ -862,7 +962,7 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
             ])
 
     story.extend(_undocumented_block(report, styles))
-    story.extend(_income_by_branch_block(report, styles))
+    story.extend(_income_by_group_block(report, styles))
     story.extend(_reconciliation_block(report, styles))
 
     context = {

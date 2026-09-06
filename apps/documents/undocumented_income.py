@@ -26,6 +26,14 @@ from decimal import Decimal
 from django.db.models import Q
 
 from apps.core.scoping import is_scoped_partner, partner_branch_ids
+from apps.documents.period_report import (
+    GROUP_BY_BRANCH,
+    GROUP_BY_CATEGORY,
+    GROUP_BY_UNIT,
+    PRIVATE_CUSTOMERS_LABEL,
+    UNTAGGED_BUSINESS_LABEL,
+    UNTAGGED_CATEGORY_LABEL,
+)
 
 SOURCE_LESSONS = 'lessons'
 SOURCE_STORE = 'store'
@@ -36,6 +44,9 @@ SOURCE_LABELS = {
     SOURCE_STORE: 'מכירות חנות — הפקת המסמך בטרנזילה נכשלה',
     SOURCE_ORPHAN_CHARGES: 'חיובים שנגבו ואין להם אפילו רשומת חשבונית',
 }
+# The order the sources read in inside a group: the regular thing first, the
+# store next, the oddity last.
+SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_ORPHAN_CHARGES)
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
 # completed charges plus confirmed website orders whose stock was already taken.
@@ -74,6 +85,12 @@ class UndocumentedRow:
     branch_id: object
     branch_name: str
     amount: Decimal
+    # Income tags, read off the course the charge was for. A store sale has
+    # none, and a charge whose course was never tagged has none either.
+    business_id: object = None
+    business_name: str = ''
+    category_id: object = None
+    category_name: str = ''
     # Whose money this was, used only to find an issued document for the same
     # sum. Never printed.
     child_ids: list = field(default_factory=list)
@@ -110,6 +127,71 @@ class SourceSection:
 
 
 @dataclass
+class UndocumentedGroup:
+    """One branch (or business, or category) worth of charges, with its subtotal."""
+    key: object
+    title: str
+    rows: list = field(default_factory=list)
+    is_unassigned: bool = False
+
+    @property
+    def counted(self) -> list:
+        return [row for row in self.rows if not row.merged_document]
+
+    @property
+    def merged(self) -> list:
+        return [row for row in self.rows if row.merged_document]
+
+    @property
+    def count(self) -> int:
+        return len(self.counted)
+
+    @property
+    def total(self) -> Decimal:
+        return sum((row.amount for row in self.counted), Decimal('0.00'))
+
+    @property
+    def merged_total(self) -> Decimal:
+        return sum((row.amount for row in self.merged), Decimal('0.00'))
+
+    @property
+    def sections(self) -> list:
+        """Rows split by source, in reading order, each with its own subtotal."""
+        by_source: dict = {}
+        for row in self.rows:
+            section = by_source.get(row.source)
+            if section is None:
+                section = SourceSection(row.source, SOURCE_LABELS[row.source])
+                by_source[row.source] = section
+            section.rows.append(row)
+        rank = {code: index for index, code in enumerate(SOURCE_ORDER)}
+        return sorted(by_source.values(), key=lambda sec: rank.get(sec.source, len(rank)))
+
+
+def _group_key(row: UndocumentedRow, group_by: str) -> tuple:
+    """
+    (key, title, is_unassigned) — the same bucket the report files a document
+    under, so a branch with both kinds of income lands on one line rather than
+    two, and the untagged buckets share their names with the document side.
+    """
+    if group_by == GROUP_BY_UNIT:
+        if row.business_id is not None:
+            return row.business_id, row.business_name, False
+        return UNTAGGED_BUSINESS_LABEL, UNTAGGED_BUSINESS_LABEL, True
+    if group_by == GROUP_BY_CATEGORY:
+        if row.category_id is not None:
+            return row.category_id, f'{row.business_name} · {row.category_name}', False
+        return UNTAGGED_CATEGORY_LABEL, UNTAGGED_CATEGORY_LABEL, True
+    if group_by == GROUP_BY_BRANCH:
+        if row.branch_id is not None:
+            return row.branch_id, row.branch_name, False
+        return UNASSIGNED_BRANCH_LABEL, UNASSIGNED_BRANCH_LABEL, True
+    # Grouping by business customer: a charge is never one, so they all sit in
+    # the same private bucket the document side uses.
+    return PRIVATE_CUSTOMERS_LABEL, PRIVATE_CUSTOMERS_LABEL, True
+
+
+@dataclass
 class UndocumentedIncome:
     sections: list = field(default_factory=list)
 
@@ -133,17 +215,43 @@ class UndocumentedIncome:
     def is_empty(self) -> bool:
         return self.count == 0 and self.merged_count == 0
 
-    def by_branch(self) -> dict:
-        """branch key -> (name, amount), counting only what was not merged."""
-        out: dict = {}
+    def grouped(self, group_by: str = GROUP_BY_BRANCH) -> list:
+        """
+        Every row filed under exactly one group, named groups first in
+        alphabetical order and the catch-all bucket last — the order the
+        document side of the report uses, so the two read the same way.
+        """
+        groups: dict = {}
         for section in self.sections:
-            for row in section.counted:
-                # Same key the report groups branches by, so a branch with both
-                # kinds of income lands on one line rather than two.
-                key = row.branch_id if row.branch_id is not None else row.branch_name
-                name, amount = out.get(key, (row.branch_name, Decimal('0.00')))
-                out[key] = (name, amount + row.amount)
-        return out
+            for row in section.rows:
+                key, title, unassigned = _group_key(row, group_by)
+                group = groups.get(key)
+                if group is None:
+                    group = UndocumentedGroup(key=key, title=title, is_unassigned=unassigned)
+                    groups[key] = group
+                group.rows.append(row)
+        return sorted(groups.values(), key=lambda g: (1 if g.is_unassigned else 0, g.title))
+
+    def by_group(self, group_by: str = GROUP_BY_BRANCH) -> dict:
+        """group key -> (title, amount), counting only what was not merged."""
+        return {group.key: (group.title, group.total) for group in self.grouped(group_by)}
+
+    def by_branch(self) -> dict:
+        return self.by_group(GROUP_BY_BRANCH)
+
+
+def _income_tags(course) -> dict:
+    """The business and category a course is tagged with, or nothing."""
+    if course is None:
+        return {}
+    tags = {}
+    if course.business_id:
+        tags['business_id'] = course.business_id
+        tags['business_name'] = course.business.name
+    if course.business_category_id:
+        tags['category_id'] = course.business_category_id
+        tags['category_name'] = course.business_category.name
+    return tags
 
 
 def _branch_of(branch, fallback_branch=None) -> tuple:
@@ -162,7 +270,8 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
         Invoice.objects
         .filter(status='paid', invoice_date__date__gte=start, invoice_date__date__lte=end)
         .select_related('family', 'family__branch', 'branch')
-        .prefetch_related('children__child')
+        .prefetch_related('children__child', 'children__course__business',
+                          'children__course__business_category')
         .order_by('invoice_date', 'invoice_number')
     )
     if branch_ids is not None:
@@ -179,6 +288,10 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
         branch_id, branch_name = _branch_of(
             invoice.branch, invoice.family.branch if invoice.family_id else None,
         )
+        # One charge may cover two children in two courses; the first course
+        # that carries a tag names the business, which is how the invoice
+        # page tags a document for the same family.
+        course = next((link.course for link in links if link.course_id), None)
         row = UndocumentedRow(
             source=SOURCE_LESSONS,
             customer=customer,
@@ -189,6 +302,7 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
             branch_name=branch_name,
             amount=invoice.amount,
             child_ids=[link.child_id for link in links if link.child_id],
+            **_income_tags(course),
         )
         rows.append(row)
     return rows
@@ -246,7 +360,8 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
     qs = (
         Payment.objects
         .filter(dated, status='completed', invoices__isnull=True, final_amount__gt=0)
-        .select_related('child', 'family', 'family__branch', 'branch')
+        .select_related('child', 'family', 'family__branch', 'branch',
+                        'lesson__course__business', 'lesson__course__business_category')
         .order_by('payment_date', 'created_at')
     )
     if branch_ids is not None:
@@ -274,6 +389,7 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
             branch_name=branch_name,
             amount=payment.final_amount,
             child_ids=[payment.child_id] if payment.child_id else [],
+            **_income_tags(payment.lesson.course if payment.lesson_id else None),
         )
         rows.append(row)
     return rows

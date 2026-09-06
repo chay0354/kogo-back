@@ -382,6 +382,7 @@ class PeriodReport:
         """
         rows: dict = {}
         for group in self.groups:
+            # The catch-all bucket has no id; its title is the key both sides use.
             key = group.key if group.key is not None else group.title
             rows[key] = {
                 'title': group.title,
@@ -390,7 +391,7 @@ class PeriodReport:
                 'undocumented': Decimal('0.00'),
             }
         if self.undocumented is not None:
-            for key, (name, amount) in self.undocumented.by_branch().items():
+            for key, (name, amount) in self.undocumented.by_group(self.group_by).items():
                 entry = rows.get(key)
                 if entry is None:
                     # A branch that took money in but issued no document at all

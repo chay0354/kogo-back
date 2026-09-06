@@ -312,3 +312,86 @@ class MergeAgainstDocumentsTests(TestCase):
 
         self.assertEqual(result.merged_count, 0)
         self.assertEqual(result.total, Decimal('320.00'))
+
+
+class GroupingTests(TestCase):
+    """
+    The owner reads the report branch by branch, so the charges have to file
+    under the same buckets the documents do — and under a business when the
+    report is grouped that way, read off the course the charge was for.
+    """
+
+    def setUp(self):
+        from apps.core.models import Business, BusinessCategory
+        from apps.courses.models import Course
+
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=self.city)
+        self.south = Branch.objects.create(name='סניף דרום', city=self.city)
+        self.fam_n = Family.objects.create(name='משפחה צפון', branch=self.north)
+        self.fam_s = Family.objects.create(name='משפחה דרום', branch=self.south)
+        self.kid_n = Child.objects.create(
+            family=self.fam_n, first_name='נועה', last_name='צפוני',
+            birth_date=date(2015, 5, 5), gender='female', status='active',
+        )
+        self.gaga = Business.objects.create(name='גאגא')
+        self.dance = BusinessCategory.objects.create(business=self.gaga, name='ריקוד')
+        self.course = Course.objects.create(
+            name='היפ הופ', branch=self.north, price=Decimal('300.00'), capacity=20,
+            business=self.gaga, business_category=self.dance,
+        )
+        self.manager = make_user('manager-group@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = type(self.manager).objects.get(pk=self.manager.pk)
+
+    def test_rows_file_under_their_branch_with_a_subtotal_each(self):
+        make_lesson_invoice('INV-N1', self.fam_n, self.north, 5, '300.00')
+        make_lesson_invoice('INV-N2', self.fam_n, self.north, 9, '200.00')
+        make_lesson_invoice('INV-S1', self.fam_s, self.south, 6, '450.00')
+        make_store_invoice('ST-N', self.north, 7, '80.00')
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('branch')
+
+        self.assertEqual([g.title for g in groups], ['סניף דרום', 'סניף צפון'])
+        north = next(g for g in groups if g.title == 'סניף צפון')
+        self.assertEqual(north.total, Decimal('580.00'))
+        self.assertEqual([s.source for s in north.sections], [SOURCE_LESSONS, SOURCE_STORE])
+        self.assertEqual(north.sections[0].total, Decimal('500.00'))
+
+    def test_a_row_without_a_branch_lands_in_the_catch_all_last(self):
+        make_lesson_invoice('INV-N1', self.fam_n, self.north, 5, '300.00')
+        make_store_invoice('ST-WEB', None, 6, '120.00')
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('branch')
+
+        self.assertEqual(groups[-1].title, 'ללא שיוך לסניף')
+        self.assertTrue(groups[-1].is_unassigned)
+
+    def test_grouping_by_business_reads_the_tag_off_the_course(self):
+        tagged = make_lesson_invoice('INV-TAGGED', self.fam_n, self.north, 5, '300.00')
+        tagged.children.create(child=self.kid_n, course=self.course)
+        make_lesson_invoice('INV-PLAIN', self.fam_s, self.south, 6, '450.00')
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('business_unit')
+
+        self.assertEqual([g.title for g in groups], ['גאגא', 'ללא שיוך לעסק'])
+        self.assertEqual(groups[0].total, Decimal('300.00'))
+        self.assertEqual(groups[1].total, Decimal('450.00'))
+
+        by_cat = collect_undocumented(self.manager, *AUG).grouped('business_category')
+        self.assertEqual(by_cat[0].title, 'גאגא · ריקוד')
+
+    def test_merged_rows_stay_in_their_group_but_not_in_its_total(self):
+        charge = make_lesson_invoice('INV-DUP', self.fam_n, self.north, 5, '320.00')
+        charge.children.create(child=self.kid_n)
+        FormalDocument.objects.create(
+            document_number='2026-0100', document_type='receipt', client_type='existing',
+            child=self.kid_n, branch=self.north, document_date=date(2026, 8, 6),
+            subtotal=Decimal('320.00'), total_amount=Decimal('320.00'),
+        )
+
+        north = collect_undocumented(self.manager, *AUG).grouped('branch')[0]
+
+        self.assertEqual(len(north.rows), 1)
+        self.assertEqual(north.count, 0)
+        self.assertEqual(north.total, Decimal('0.00'))
+        self.assertEqual(north.merged_total, Decimal('320.00'))
