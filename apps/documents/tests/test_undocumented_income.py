@@ -12,10 +12,11 @@ from django.test import TestCase
 
 from apps.core.models import Branch, City, UserProfile
 from apps.customers.financial_models import Invoice
-from apps.customers.models import Child, Family
+from apps.customers.models import Child, Family, Payment
 from apps.documents.tests.test_period_report import make_user
 from apps.documents.undocumented_income import (
     SOURCE_LESSONS,
+    SOURCE_ORPHAN_CHARGES,
     SOURCE_STORE,
     collect_undocumented,
 )
@@ -162,3 +163,67 @@ class UndocumentedIncomeTests(TestCase):
         result = collect_undocumented(self.manager, *AUG)
 
         self.assertEqual(result.sections[0].rows[0].customer, 'נועה צפוני')
+
+
+class OrphanChargeTests(TestCase):
+    """
+    A charge whose Invoice row was never written still took the customer's
+    money. The report has to say so, and must not say it twice for a charge
+    that did get an invoice.
+    """
+
+    def setUp(self):
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=self.city)
+        self.fam = Family.objects.create(name='משפחה צפון', branch=self.north)
+        self.kid = Child.objects.create(
+            family=self.fam, first_name='איתי', last_name='צפוני',
+            birth_date=date(2016, 2, 2), gender='male', status='active',
+        )
+        self.manager = make_user('manager-orphan@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = type(self.manager).objects.get(pk=self.manager.pk)
+
+    def make_payment(self, day, amount, status='completed'):
+        return Payment.objects.create(
+            child=self.kid,
+            family=self.fam,
+            branch=self.north,
+            payment_type='recurring_subscription',
+            status=status,
+            base_amount=Decimal(amount),
+            final_amount=Decimal(amount),
+            payment_date=at(day),
+        )
+
+    def test_completed_charge_without_an_invoice_is_reported(self):
+        self.make_payment(5, '275.00')
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual([s.source for s in result.sections], [SOURCE_ORPHAN_CHARGES])
+        self.assertEqual(result.total, Decimal('275.00'))
+
+    def test_charge_that_has_an_invoice_is_counted_once(self):
+        payment = self.make_payment(5, '275.00')
+        invoice = make_lesson_invoice('INV-LINKED', self.fam, self.north, 5, '275.00')
+        Invoice.objects.filter(pk=invoice.pk).update(payment=payment)
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual([s.source for s in result.sections], [SOURCE_LESSONS])
+        self.assertEqual(result.total, Decimal('275.00'))
+
+    def test_failed_and_zero_charges_are_left_out(self):
+        self.make_payment(5, '275.00', status='failed')
+        self.make_payment(6, '0.00')
+
+        self.assertTrue(collect_undocumented(self.manager, *AUG).is_empty)
+
+    def test_undated_charge_falls_back_to_when_it_was_created(self):
+        payment = self.make_payment(5, '275.00')
+        Payment.objects.filter(pk=payment.pk).update(payment_date=None, created_at=at(7))
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.total, Decimal('275.00'))
+        self.assertEqual(result.sections[0].rows[0].row_date, date(2026, 8, 7))

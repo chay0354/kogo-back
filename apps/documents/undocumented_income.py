@@ -29,10 +29,12 @@ from apps.core.scoping import is_scoped_partner, partner_branch_ids
 
 SOURCE_LESSONS = 'lessons'
 SOURCE_STORE = 'store'
+SOURCE_ORPHAN_CHARGES = 'orphan_charges'
 
 SOURCE_LABELS = {
     SOURCE_LESSONS: 'חיובי חוגים — נשלח מייל, לא הופק מסמך',
     SOURCE_STORE: 'מכירות חנות — הפקת המסמך בטרנזילה נכשלה',
+    SOURCE_ORPHAN_CHARGES: 'חיובים שנגבו ואין להם אפילו רשומת חשבונית',
 }
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
@@ -45,6 +47,12 @@ _PAYMENT_TYPE_LABELS = {
     'recurring': 'מנוי חוזר',
     'one_time': 'חד-פעמי',
     'manual': 'ידני',
+}
+
+# Payment names the same two things differently from Invoice.
+_CHARGE_TYPE_LABELS = {
+    'recurring_subscription': 'מנוי חוזר',
+    'one_time': 'חד-פעמי',
 }
 
 _STORE_METHOD_LABELS = {
@@ -174,6 +182,51 @@ def _store_rows(branch_ids, start: date, end: date) -> list:
     return rows
 
 
+def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
+    """
+    Completed charges that never got even an Invoice row.
+
+    Writing the Invoice is wrapped in try/except at every call site, so a
+    charge can succeed on Tranzila and leave nothing behind but the Payment.
+    Those shekels are in the bank either way, and a report of everything that
+    came in cannot be the one place they are missing.
+    """
+    from apps.customers.models import Payment
+
+    dated = (
+        Q(payment_date__date__gte=start, payment_date__date__lte=end)
+        | Q(payment_date__isnull=True, created_at__date__gte=start, created_at__date__lte=end)
+    )
+    qs = (
+        Payment.objects
+        .filter(dated, status='completed', invoices__isnull=True, final_amount__gt=0)
+        .select_related('child', 'family', 'family__branch', 'branch')
+        .order_by('payment_date', 'created_at')
+    )
+    if branch_ids is not None:
+        qs = qs.filter(Q(branch_id__in=branch_ids)
+                       | Q(branch__isnull=True, family__branch_id__in=branch_ids))
+
+    rows = []
+    for payment in qs:
+        when = payment.payment_date or payment.created_at
+        customer = (
+            (payment.child.full_name if payment.child_id and payment.child else '')
+            or (payment.family.name if payment.family_id else '')
+            or 'ללא שם'
+        )
+        rows.append(UndocumentedRow(
+            source=SOURCE_ORPHAN_CHARGES,
+            customer=customer,
+            reference=str(payment.id)[:8].upper(),
+            row_date=when.date(),
+            detail=_CHARGE_TYPE_LABELS.get(payment.payment_type, payment.payment_type or ''),
+            branch_name=_branch_name(payment.branch, payment.family.branch if payment.family_id else None),
+            amount=payment.final_amount,
+        ))
+    return rows
+
+
 def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
     """
     Paid income in the period with no FormalDocument behind it.
@@ -191,6 +244,7 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
     for source, rows in (
         (SOURCE_LESSONS, _lesson_rows(branch_ids, start, end)),
         (SOURCE_STORE, _store_rows(branch_ids, start, end)),
+        (SOURCE_ORPHAN_CHARGES, _orphan_charge_rows(branch_ids, start, end)),
     ):
         if rows:
             sections.append(SourceSection(source=source, label=SOURCE_LABELS[source], rows=rows))
