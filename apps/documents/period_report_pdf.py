@@ -549,6 +549,16 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
     ))
 
     if recon.get('agrees'):
+        # Two empty sides agree, and saying only that would read as an all-clear
+        # on a period that took money in and issued nothing for it.
+        if not tz.get('count') and not local.get('count') and report.undocumented_total:
+            out.append(Paragraph(
+                _rtl(f'לא הופק ולו מסמך אחד בתקופה — לא במערכת ולא בטרנזילה — '
+                     f'בעוד שנכנסו {_money(report.undocumented_total)}. '
+                     f'שני הצדדים ריקים ולכן הם מסכימים, אך אין כאן אישור לדבר.'),
+                styles['note'],
+            ))
+            return out
         out.append(Paragraph(
             _rtl('כל מסמך שטרנזילה מכירה נמצא גם במערכת, ולהפך. אין פער.'),
             styles['note'],

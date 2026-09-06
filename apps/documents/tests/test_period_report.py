@@ -19,6 +19,7 @@ from rest_framework.test import APITestCase
 from apps.core.models import Branch, City, UserProfile
 from apps.customers.models import Child, Family
 from apps.documents.models import FormalDocument
+from apps.store.invoice_pdf import _rtl
 
 User = get_user_model()
 
@@ -352,3 +353,51 @@ class BranchIncomeSummaryTests(TestCase):
             sum(entry['total'] for entry in rows),
             report.all_income_total,
         )
+
+
+class EmptyReconciliationWordingTests(TestCase):
+    """
+    Nothing issued on either side is agreement in the arithmetic sense only.
+    Printed as "no gap" on a month that took money in, it reads as an
+    all-clear on the exact thing that went wrong.
+    """
+
+    def setUp(self):
+        from apps.customers.financial_models import Invoice
+
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.branch = Branch.objects.create(name='סניף צפון', city=self.city)
+        family = Family.objects.create(name='משפחה', branch=self.branch)
+        Invoice.objects.create(
+            invoice_number='INV-ONLY', family=family, branch=self.branch,
+            amount=Decimal('500.00'), status='paid', payment_method='credit_card',
+            payment_type='recurring', payer_name=family.name,
+            invoice_date=datetime(2026, 8, 9, 12, tzinfo=dt_timezone.utc),
+        )
+        self.manager = User.objects.get(pk=make_user('manager-recon@test', role=UserProfile.ROLE_MANAGER).pk)
+
+    def render(self):
+        from apps.documents.period_report import build_report
+        from apps.documents.period_report_pdf import generate_period_report_pdf
+        from apps.documents.undocumented_income import collect_undocumented
+
+        start, end = date(2026, 8, 1), date(2026, 8, 31)
+        report = build_report(self.manager, start, end, 'אוגוסט 2026')
+        report.undocumented = collect_undocumented(self.manager, start, end)
+        report.reconciliation = {
+            'reachable': True, 'agrees': True,
+            'tranzila': {'count': 0, 'total': 0}, 'local': {'count': 0, 'total': 0},
+        }
+        return report, generate_period_report_pdf(report)
+
+    def test_it_says_nothing_was_issued_rather_than_no_gap(self):
+        from apps.documents.period_report_pdf import _reconciliation_block, _styles
+
+        report, pdf = self.render()
+        self.assertTrue(pdf.startswith(b'%PDF'))
+        text = ' '.join(
+            para.text for para in _reconciliation_block(report, _styles())
+            if hasattr(para, 'text')
+        )
+        self.assertIn(_rtl('לא הופק ולו מסמך אחד בתקופה'), text)
+        self.assertNotIn(_rtl('אין פער'), text)
