@@ -464,7 +464,8 @@ class ManyChatService:
             'fallback_template': (
                 'שלום {parent_name}!\n'
                 'החיוב החודשי עבור {child_name} בחוג {course_name} על סך ₪{amount} לא עבר.\n'
-                'לעדכון כרטיס אשראי ותיקון הוראת הקבע: {card_update_url}'
+                'לעדכון כרטיס אשראי ותיקון הוראת הקבע: {card_update_url}\n'
+                'אם לא מסתדר, אפשר לפנות לצוות קוגומלו ב-050-9424755.'
             ),
         },
         # 3 consecutive times not marked present (didnt_arrive automation).
