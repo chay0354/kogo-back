@@ -269,6 +269,8 @@ class NumberedCanvas(canvas_module.Canvas):
 
 
 CARD_RADIUS = 7
+# Grey enough to read as "listed, not counted" without vanishing on print.
+MUTED = colors.HexColor('#8a8aa3')
 SECTION_BG = colors.HexColor('#f1effa')
 SUBTOTAL_BG = colors.HexColor('#e8e5f7')
 CREDIT_BG = colors.HexColor('#fdeee8')
@@ -607,14 +609,24 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
             _rtl_cell(head, styles['th'], width)
             for head, width in zip(UNDOC_HEADERS, UNDOC_WIDTHS)
         ]]
+        merged_rows = []
         for row in section.rows:
+            if row.merged_document:
+                # Shown, with its amount in brackets, so the reader can see the
+                # duplicate that was folded away and check the match by eye.
+                merged_rows.append(len(data))
+                detail = f'מוזג עם מסמך {row.merged_document}'
+                amount = f'({_money(row.amount)})'
+            else:
+                detail = row.detail
+                amount = _money(row.amount)
             data.append([
                 _rtl_cell(row.customer, styles['td'], UNDOC_WIDTHS[0]),
                 _rtl_cell(row.reference, styles['td'], UNDOC_WIDTHS[1]),
                 _rtl_cell(row.row_date.strftime('%d/%m/%Y'), styles['td'], UNDOC_WIDTHS[2]),
-                _rtl_cell(row.detail, styles['td'], UNDOC_WIDTHS[3]),
+                _rtl_cell(detail, styles['td'], UNDOC_WIDTHS[3]),
                 _rtl_cell(row.branch_name, styles['td'], UNDOC_WIDTHS[4]),
-                _rtl_cell(_money(row.amount), styles['td_num'], UNDOC_WIDTHS[5]),
+                _rtl_cell(amount, styles['td_num'], UNDOC_WIDTHS[5]),
             ])
         data.append([
             # The label already stands above the table; the spanned cell only
@@ -630,10 +642,28 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
             ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
             ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
             ('SPAN', (0, -1), (4, -1)),
-        ], padding=(5, 5, 5, 5)))
-        out.append(Paragraph(_rtl(section.label), styles['subtitle']))
-        out.append(Spacer(1, 0.12 * cm))
-        out.append(table)
+        ] + [('TEXTCOLOR', (0, r), (-1, r), MUTED) for r in merged_rows],
+            padding=(5, 5, 5, 5)))
+        # Kept together so a short section never leaves its header and
+        # subtotal stranded on a page of their own.
+        block = [
+            Paragraph(_rtl(section.label), styles['subtitle']),
+            Spacer(1, 0.12 * cm),
+            table,
+        ]
+        if section.merged:
+            count = len(section.merged)
+            opening = (
+                'שורה אחת בסוגריים אוחדה' if count == 1
+                else f'{count} שורות בסוגריים אוחדו'
+            )
+            block.append(Spacer(1, 0.12 * cm))
+            block.append(Paragraph(
+                _rtl(f'{opening} עם מסמך שהופק לאותו לקוח ולאותו סכום '
+                     f'({_money(section.merged_total)}) ואינן נספרות כאן.'),
+                styles['note'],
+            ))
+        out.append(KeepTogether(block))
         out.append(Spacer(1, 0.4 * cm))
 
     grand = [
@@ -658,6 +688,70 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
         styles['note'],
     ))
     return out
+
+
+INCOME_WIDTHS = [5.2 * cm, 3.5 * cm, 3.5 * cm, 3.3 * cm, 3.5 * cm]
+INCOME_HEADERS = ['סניף', 'עם מסמך', 'ללא מסמך', 'זיכויים', 'סה"כ נכנס']
+
+
+def _income_by_branch_block(report: PeriodReport, styles: dict) -> list:
+    """
+    The last word on how much each branch actually took in.
+
+    Documents and charges are counted in the same row here because the reader's
+    question is not which of the two a shekel arrived through. The left column
+    is receipts only — a tax invoice and the receipt that settles it would
+    otherwise show the branch as having taken the same money twice.
+    """
+    if report.group_by != GROUP_BY_BRANCH:
+        return []
+    entries = report.income_by_group()
+    if not entries:
+        return []
+
+    data = [[
+        _rtl_cell(head, styles['th'], width)
+        for head, width in zip(INCOME_HEADERS, INCOME_WIDTHS)
+    ]]
+    def credit_cell(amount, style):
+        return _rtl_cell(f'-{_money(amount)}' if amount else _money(amount), style, INCOME_WIDTHS[3])
+
+    for entry in entries:
+        data.append([
+            _rtl_cell(entry['title'], styles['td'], INCOME_WIDTHS[0]),
+            _rtl_cell(_money(entry['documented']), styles['td_num'], INCOME_WIDTHS[1]),
+            _rtl_cell(_money(entry['undocumented']), styles['td_num'], INCOME_WIDTHS[2]),
+            credit_cell(entry['credits'], styles['td_num']),
+            _rtl_cell(_money(entry['total']), styles['sub'], INCOME_WIDTHS[4]),
+        ])
+    data.append([
+        _rtl_cell('סה"כ', styles['sub'], INCOME_WIDTHS[0]),
+        _rtl_cell(_money(sum(e['documented'] for e in entries)), styles['sub'], INCOME_WIDTHS[1]),
+        _rtl_cell(_money(sum(e['undocumented'] for e in entries)), styles['sub'], INCOME_WIDTHS[2]),
+        credit_cell(sum(e['credits'] for e in entries), styles['sub']),
+        _rtl_cell(_money(sum(e['total'] for e in entries)), styles['grand'], INCOME_WIDTHS[4]),
+    ])
+
+    table = Table(data, colWidths=INCOME_WIDTHS, hAlign='RIGHT', repeatRows=1)
+    table.setStyle(_card([
+        ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
+    ], padding=(6, 6, 6, 6)))
+
+    return [
+        Spacer(1, 0.7 * cm),
+        Paragraph(_rtl('סיכום סופי לפי סניף — כמה כסף נכנס'), styles['label']),
+        Spacer(1, 0.15 * cm),
+        table,
+        Spacer(1, 0.2 * cm),
+        Paragraph(
+            _rtl('"עם מסמך" — קבלות וחשבוניות מס/קבלה בלבד, בניכוי זיכויים. '
+                 'חשבונית מס שטרם נגבתה אינה כאן, כדי שלא ייספר אותו כסף פעמיים.'),
+            styles['note'],
+        ),
+    ]
 
 
 def generate_period_report_pdf(report: PeriodReport) -> bytes:
@@ -758,6 +852,7 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
             ])
 
     story.extend(_undocumented_block(report, styles))
+    story.extend(_income_by_branch_block(report, styles))
     story.extend(_reconciliation_block(report, styles))
 
     context = {

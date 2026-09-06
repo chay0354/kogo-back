@@ -5,7 +5,7 @@ whether a partner's copy stops at their branches, and whether the totals it
 prints are the totals the database holds.
 """
 import os
-from datetime import date
+from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
 
 from unittest.mock import patch
@@ -13,6 +13,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.db.models import Sum
 from rest_framework import status
+from django.test import TestCase
 from rest_framework.test import APITestCase
 
 from apps.core.models import Branch, City, UserProfile
@@ -276,3 +277,78 @@ class PeriodReportTests(APITestCase):
         res = self.client.get(URL, {'month': '2026-08'})
         with open(out, 'wb') as fh:
             fh.write(res.content)
+
+
+class BranchIncomeSummaryTests(TestCase):
+    """
+    The owner opens the report to answer one question per branch: how much came
+    in. That figure has to hold both halves — what was documented and what was
+    only charged — and must not count a tax invoice and the receipt paying it
+    as two arrivals of the same money.
+    """
+
+    def setUp(self):
+        from apps.customers.financial_models import Invoice
+
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=self.city)
+        self.south = Branch.objects.create(name='סניף דרום', city=self.city)
+        fam_n = Family.objects.create(name='משפחה צפון', branch=self.north)
+        self.kid_n = Child.objects.create(
+            family=fam_n, first_name='נועה', last_name='צפוני',
+            birth_date=date(2015, 5, 5), gender='female', status='active',
+        )
+        # North: an invoice and the receipt that settles it — one arrival.
+        make_document('2026-1001', self.kid_n, self.north, date(2026, 8, 5), '1000.00')
+        make_document('2026-1002', self.kid_n, self.north, date(2026, 8, 6), '1000.00', doc_type='receipt')
+        # South: a charge with no document at all.
+        fam_s = Family.objects.create(name='משפחה דרום', branch=self.south)
+        Invoice.objects.create(
+            invoice_number='INV-SOUTH', family=fam_s, branch=self.south,
+            amount=Decimal('400.00'), status='paid', payment_method='credit_card',
+            payment_type='recurring', payer_name=fam_s.name,
+            invoice_date=datetime(2026, 8, 9, 12, tzinfo=dt_timezone.utc),
+        )
+        self.manager = make_user('manager-income@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = User.objects.get(pk=self.manager.pk)
+
+    def build(self):
+        from apps.documents.period_report import build_report
+        from apps.documents.undocumented_income import collect_undocumented
+
+        start, end = date(2026, 8, 1), date(2026, 8, 31)
+        report = build_report(self.manager, start, end, 'אוגוסט 2026')
+        report.undocumented = collect_undocumented(self.manager, start, end)
+        return report
+
+    def test_receipt_counts_once_and_the_invoice_behind_it_does_not(self):
+        rows = {entry['title']: entry for entry in self.build().income_by_group()}
+
+        self.assertEqual(rows['סניף צפון']['documented'], Decimal('1180.00'))
+        self.assertEqual(rows['סניף צפון']['undocumented'], Decimal('0.00'))
+        self.assertEqual(rows['סניף צפון']['total'], Decimal('1180.00'))
+
+    def test_a_branch_with_only_charges_still_gets_a_line(self):
+        rows = {entry['title']: entry for entry in self.build().income_by_group()}
+
+        self.assertEqual(rows['סניף דרום']['documented'], Decimal('0.00'))
+        self.assertEqual(rows['סניף דרום']['total'], Decimal('400.00'))
+
+    def test_a_credit_comes_off_its_branch_and_off_the_period(self):
+        make_document('2026-1003', self.kid_n, self.north, date(2026, 8, 11), '100.00',
+                      doc_type='credit_invoice')
+        report = self.build()
+        rows = {entry['title']: entry for entry in report.income_by_group()}
+
+        self.assertEqual(rows['סניף צפון']['credits'], Decimal('118.00'))
+        self.assertEqual(rows['סניף צפון']['total'], Decimal('1062.00'))
+        self.assertEqual(report.all_income_total, Decimal('1462.00'))
+
+    def test_the_branch_lines_add_up_to_the_period_total(self):
+        report = self.build()
+        rows = report.income_by_group()
+
+        self.assertEqual(
+            sum(entry['total'] for entry in rows),
+            report.all_income_total,
+        )

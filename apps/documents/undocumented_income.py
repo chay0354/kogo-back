@@ -71,8 +71,15 @@ class UndocumentedRow:
     reference: str
     row_date: date
     detail: str
+    branch_id: object
     branch_name: str
     amount: Decimal
+    # Whose money this was, used only to find an issued document for the same
+    # sum. Never printed.
+    child_ids: list = field(default_factory=list)
+    # Set when such a document was found. The row stays visible — the owner
+    # asked to see what was merged — but stops counting.
+    merged_document: str = ''
 
 
 @dataclass
@@ -82,12 +89,24 @@ class SourceSection:
     rows: list = field(default_factory=list)
 
     @property
+    def counted(self) -> list:
+        return [row for row in self.rows if not row.merged_document]
+
+    @property
+    def merged(self) -> list:
+        return [row for row in self.rows if row.merged_document]
+
+    @property
     def count(self) -> int:
-        return len(self.rows)
+        return len(self.counted)
 
     @property
     def total(self) -> Decimal:
-        return sum((row.amount for row in self.rows), Decimal('0.00'))
+        return sum((row.amount for row in self.counted), Decimal('0.00'))
+
+    @property
+    def merged_total(self) -> Decimal:
+        return sum((row.amount for row in self.merged), Decimal('0.00'))
 
 
 @dataclass
@@ -103,16 +122,37 @@ class UndocumentedIncome:
         return sum((section.total for section in self.sections), Decimal('0.00'))
 
     @property
+    def merged_count(self) -> int:
+        return sum(len(section.merged) for section in self.sections)
+
+    @property
+    def merged_total(self) -> Decimal:
+        return sum((section.merged_total for section in self.sections), Decimal('0.00'))
+
+    @property
     def is_empty(self) -> bool:
-        return self.count == 0
+        return self.count == 0 and self.merged_count == 0
+
+    def by_branch(self) -> dict:
+        """branch key -> (name, amount), counting only what was not merged."""
+        out: dict = {}
+        for section in self.sections:
+            for row in section.counted:
+                # Same key the report groups branches by, so a branch with both
+                # kinds of income lands on one line rather than two.
+                key = row.branch_id if row.branch_id is not None else row.branch_name
+                name, amount = out.get(key, (row.branch_name, Decimal('0.00')))
+                out[key] = (name, amount + row.amount)
+        return out
 
 
-def _branch_name(branch, fallback_branch=None) -> str:
+def _branch_of(branch, fallback_branch=None) -> tuple:
+    """(id, name) for the row, falling back to the family's branch."""
     if branch is not None:
-        return branch.name
+        return branch.id, branch.name
     if fallback_branch is not None:
-        return fallback_branch.name
-    return UNASSIGNED_BRANCH_LABEL
+        return fallback_branch.id, fallback_branch.name
+    return None, UNASSIGNED_BRANCH_LABEL
 
 
 def _lesson_rows(branch_ids, start: date, end: date) -> list:
@@ -133,20 +173,24 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
 
     rows = []
     for invoice in qs:
-        names = [
-            link.child.full_name for link in invoice.children.all()
-            if link.child_id and link.child
-        ]
+        links = list(invoice.children.all())
+        names = [link.child.full_name for link in links if link.child_id and link.child]
         customer = ', '.join(names) or (invoice.payer_name or invoice.family.name)
-        rows.append(UndocumentedRow(
+        branch_id, branch_name = _branch_of(
+            invoice.branch, invoice.family.branch if invoice.family_id else None,
+        )
+        row = UndocumentedRow(
             source=SOURCE_LESSONS,
             customer=customer,
             reference=invoice.invoice_number,
             row_date=invoice.invoice_date.date(),
             detail=_PAYMENT_TYPE_LABELS.get(invoice.payment_type, invoice.payment_type or ''),
-            branch_name=_branch_name(invoice.branch, invoice.family.branch if invoice.family_id else None),
+            branch_id=branch_id,
+            branch_name=branch_name,
             amount=invoice.amount,
-        ))
+            child_ids=[link.child_id for link in links if link.child_id],
+        )
+        rows.append(row)
     return rows
 
 
@@ -170,13 +214,15 @@ def _store_rows(branch_ids, start: date, end: date) -> list:
             or invoice.customer_name
             or 'לקוח מזדמן'
         )
+        branch_id, branch_name = _branch_of(invoice.branch)
         rows.append(UndocumentedRow(
             source=SOURCE_STORE,
             customer=customer,
             reference=invoice.invoice_number,
             row_date=invoice.issue_date.date(),
             detail=_STORE_METHOD_LABELS.get(invoice.payment_method, invoice.payment_method or ''),
-            branch_name=_branch_name(invoice.branch),
+            branch_id=branch_id,
+            branch_name=branch_name,
             amount=invoice.total_amount,
         ))
     return rows
@@ -215,16 +261,71 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
             or (payment.family.name if payment.family_id else '')
             or 'ללא שם'
         )
-        rows.append(UndocumentedRow(
+        branch_id, branch_name = _branch_of(
+            payment.branch, payment.family.branch if payment.family_id else None,
+        )
+        row = UndocumentedRow(
             source=SOURCE_ORPHAN_CHARGES,
             customer=customer,
             reference=str(payment.id)[:8].upper(),
             row_date=when.date(),
             detail=_CHARGE_TYPE_LABELS.get(payment.payment_type, payment.payment_type or ''),
-            branch_name=_branch_name(payment.branch, payment.family.branch if payment.family_id else None),
+            branch_id=branch_id,
+            branch_name=branch_name,
             amount=payment.final_amount,
-        ))
+            child_ids=[payment.child_id] if payment.child_id else [],
+        )
+        rows.append(row)
     return rows
+
+
+def _issued_document_index(start: date, end: date) -> dict:
+    """
+    (child, amount) -> the numbers of documents issued for that child and sum.
+
+    Only documents raised for a registered child can be matched at all, and a
+    credit is money going the other way, so neither it nor a document already
+    tied to a store invoice belongs in the index.
+    """
+    from apps.documents.models import FormalDocument
+
+    rows = (
+        FormalDocument.objects
+        .filter(document_date__gte=start, document_date__lte=end, child__isnull=False)
+        .exclude(document_type__in=('draft', 'credit_invoice'))
+        .filter(store_invoices__isnull=True)
+        .values_list('child_id', 'total_amount', 'document_number')
+        .order_by('document_date')
+    )
+    index: dict = {}
+    for child_id, total, number in rows:
+        index.setdefault((child_id, Decimal(total)), []).append(number)
+    return index
+
+
+def merge_against_documents(income: UndocumentedIncome, start: date, end: date) -> None:
+    """
+    Fold a charge into a document that was issued by hand for the same money.
+
+    There is no field linking a charge to a document, so the match is made on
+    what the two have in common: the same child, the same sum, the same period.
+    A document is consumed by the first charge that matches it, so two equal
+    charges never both hide behind one receipt.
+
+    Deliberately narrow. A wrong merge hides money the owner took in, which is
+    worse than showing a duplicate the merge note points at, and this is a
+    stopgap until a charge issues its own document and the guessing stops.
+    """
+    index = _issued_document_index(start, end)
+    if not index:
+        return
+    for section in income.sections:
+        for row in section.rows:
+            for child_id in row.child_ids:
+                numbers = index.get((child_id, row.amount))
+                if numbers:
+                    row.merged_document = numbers.pop(0)
+                    break
 
 
 def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
@@ -248,4 +349,7 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
     ):
         if rows:
             sections.append(SourceSection(source=source, label=SOURCE_LABELS[source], rows=rows))
-    return UndocumentedIncome(sections=sections)
+
+    income = UndocumentedIncome(sections=sections)
+    merge_against_documents(income, start, end)
+    return income

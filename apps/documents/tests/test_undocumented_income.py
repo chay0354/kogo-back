@@ -227,3 +227,88 @@ class OrphanChargeTests(TestCase):
 
         self.assertEqual(result.total, Decimal('275.00'))
         self.assertEqual(result.sections[0].rows[0].row_date, date(2026, 8, 7))
+
+
+class MergeAgainstDocumentsTests(TestCase):
+    """
+    Until a charge issues its own document, the only way to spot a receipt that
+    was raised by hand for that same charge is the customer, the sum and the
+    period. These hold that guess to a narrow one: it may not eat a charge it
+    cannot account for, and never twice with one document.
+    """
+
+    def setUp(self):
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=self.city)
+        self.fam = Family.objects.create(name='משפחה צפון', branch=self.north)
+        self.kid = Child.objects.create(
+            family=self.fam, first_name='נועה', last_name='צפוני',
+            birth_date=date(2015, 5, 5), gender='female', status='active',
+        )
+        self.manager = make_user('manager-merge@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = type(self.manager).objects.get(pk=self.manager.pk)
+
+    def charge(self, number, amount, day=5):
+        invoice = make_lesson_invoice(number, self.fam, self.north, day, amount)
+        invoice.children.create(child=self.kid)
+        return invoice
+
+    def document(self, number, amount, day=6, doc_type='receipt'):
+        return FormalDocument.objects.create(
+            document_number=number,
+            document_type=doc_type,
+            client_type='existing',
+            child=self.kid,
+            branch=self.north,
+            document_date=date(2026, 8, day),
+            subtotal=Decimal(amount),
+            total_amount=Decimal(amount),
+        )
+
+    def test_a_receipt_for_the_same_child_and_sum_absorbs_the_charge(self):
+        self.charge('INV-DUP', '320.00')
+        self.document('2026-0100', '320.00')
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.total, Decimal('0.00'))
+        self.assertEqual(result.merged_count, 1)
+        self.assertEqual(result.sections[0].rows[0].merged_document, '2026-0100')
+
+    def test_one_document_absorbs_only_one_of_two_equal_charges(self):
+        self.charge('INV-A', '320.00')
+        self.charge('INV-B', '320.00', day=20)
+        self.document('2026-0100', '320.00')
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.merged_count, 1)
+        self.assertEqual(result.total, Decimal('320.00'))
+
+    def test_a_different_sum_is_not_merged(self):
+        self.charge('INV-DUP', '320.00')
+        self.document('2026-0100', '450.00')
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.merged_count, 0)
+        self.assertEqual(result.total, Decimal('320.00'))
+
+    def test_a_credit_note_never_absorbs_a_charge(self):
+        self.charge('INV-DUP', '320.00')
+        self.document('2026-0100', '320.00', doc_type='credit_invoice')
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.merged_count, 0)
+        self.assertEqual(result.total, Decimal('320.00'))
+
+    def test_a_store_document_never_absorbs_a_lesson_charge(self):
+        self.charge('INV-DUP', '320.00')
+        store_doc = self.document('2026-0100', '320.00', doc_type='combined')
+        make_store_invoice('ST-LINKED', self.north, 6, '320.00', formal=store_doc)
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.merged_count, 0)
+        self.assertEqual(result.total, Decimal('320.00'))

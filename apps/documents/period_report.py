@@ -302,6 +302,22 @@ class ReportGroup:
     is_unassigned: bool = False
 
     @property
+    def collected_total(self) -> Decimal:
+        """
+        Money that arrived in this group against a document.
+
+        Receipts and invoice-receipts only. A tax invoice is left out on
+        purpose: it recognises revenue, and the receipt that settles it is the
+        same money a second time. Credits are not deducted here — the report
+        keeps them a column of their own, the way the totals panel does.
+        """
+        return sum(
+            (row.total_amount for row in self.rows
+             if not row.is_credit and row.document_type in COLLECTION_TYPES),
+            Decimal('0.00'),
+        )
+
+    @property
     def sections(self) -> list:
         """Rows split by document type, in reading order, each with a subtotal."""
         by_type: dict = {}
@@ -358,6 +374,38 @@ class PeriodReport:
     def is_empty(self) -> bool:
         return self.totals.count == 0
 
+    def income_by_group(self) -> list:
+        """
+        Per group: what came in with a document, what came in without one, and
+        the sum of the two. The report's last word on 'how much did this branch
+        actually take', which is the question the owner opens it with.
+        """
+        rows: dict = {}
+        for group in self.groups:
+            key = group.key if group.key is not None else group.title
+            rows[key] = {
+                'title': group.title,
+                'documented': group.collected_total,
+                'credits': group.totals.credits_total,
+                'undocumented': Decimal('0.00'),
+            }
+        if self.undocumented is not None:
+            for key, (name, amount) in self.undocumented.by_branch().items():
+                entry = rows.get(key)
+                if entry is None:
+                    # A branch that took money in but issued no document at all
+                    # has no group above; it still belongs in this table.
+                    entry = {'title': name, 'documented': Decimal('0.00'),
+                             'credits': Decimal('0.00'), 'undocumented': Decimal('0.00')}
+                    rows[key] = entry
+                entry['undocumented'] += amount
+        for entry in rows.values():
+            entry['total'] = entry['documented'] + entry['undocumented'] - entry['credits']
+        return sorted(
+            rows.values(),
+            key=lambda entry: (1 if entry['title'] == UNASSIGNED_BRANCH_LABEL else 0, entry['title']),
+        )
+
     @property
     def undocumented_total(self) -> Decimal:
         """Money taken in the period with no document behind it — 0 when not collected."""
@@ -370,12 +418,12 @@ class PeriodReport:
         """
         Everything that came in: documented collection plus undocumented charges.
 
-        Kept apart from `collected_total` on purpose. A document issued by hand
-        for a charge that also has an Invoice row would be counted twice here,
-        and there is no field linking the two, so the report prints this figure
-        with that caveat rather than quietly replacing the documented total.
+        Kept apart from `collected_total` on purpose: that figure is what the
+        documents say, and this one adds the charges no document was raised
+        for. Credits come off, since a period's take is not what was charged
+        but what stayed.
         """
-        return self.collected_total + self.undocumented_total
+        return self.collected_total + self.undocumented_total - self.totals.credits_total
 
 
 def _row_from(doc) -> ReportRow:
