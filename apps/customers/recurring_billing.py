@@ -97,6 +97,16 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             continue
 
         label = f'{lesson.course.name} - {child.full_name}'
+        # A month carrying a till purchase is charged as the subscription plus what
+        # was bought, so the payer sees the larger number explained rather than an
+        # unannounced rise. A manual change is not itemised: its reason is internal.
+        store_part = Decimal('0.00')
+        if override is not None:
+            store_part = min(
+                Decimal(str(override.store_amount or '0.00')).quantize(Decimal('0.01')),
+                amount,
+            )
+        lesson_part = (amount - store_part).quantize(Decimal('0.01'))
         if dry_run:
             summary['charged'] += 1
             continue
@@ -114,14 +124,27 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             discount_amount=recurring.discount_amount or Decimal('0.00'),
             final_amount=amount,
             registration_fee=Decimal('0.00'),
-            description=f'מנוי חודשי - {lesson.course.name} - {child.full_name}',
+            description=(
+                f'מנוי חודשי - {lesson.course.name} - {child.full_name}'
+                + (f' · כולל רכישה בחנות ₪{store_part:.2f}' if store_part > 0 else '')
+            ),
         )
 
         items = subscription_tranzila_items(
             label=label,
-            prorated_lesson=amount,
+            prorated_lesson=lesson_part,
             registration_fee=Decimal('0'),
         )
+        if store_part > 0:
+            items.append({
+                'name': f'רכישה בחנות - {child.full_name}',
+                'type': 'I',
+                'unit_price': float(store_part),
+                'units_number': 1,
+                'unit_type': 1,
+                'price_type': 'G',
+                'currency_code': 'ILS',
+            })
         result = tranzila.charge_with_token(
             token=recurring.tranzila_token,
             amount=amount,

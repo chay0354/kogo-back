@@ -676,9 +676,12 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
     )
     course_name = serializers.SerializerMethodField()
     branch_name = serializers.SerializerMethodField()
-    # Only months still ahead: a spent override is history, and the CRM's future
-    # charge table is the one place these are read.
+    # Months still ahead, for the future charge table.
     upcoming_overrides = serializers.SerializerMethodField()
+    # Months already charged. Kept because the whole point of writing a reason was
+    # that someone asking in six months why March cost what it did finds an answer;
+    # dropping a row the moment it is spent is exactly when the answer is needed.
+    past_overrides = serializers.SerializerMethodField()
 
     def get_upcoming_overrides(self, obj):
         from django.utils import timezone
@@ -689,6 +692,11 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
             if row.billing_month >= first_of_month and row.applied_at is None
         ]
         rows.sort(key=lambda row: row.billing_month)
+        return RecurringChargeOverrideSerializer(rows, many=True).data
+
+    def get_past_overrides(self, obj):
+        rows = [row for row in obj.amount_overrides.all() if row.applied_at is not None]
+        rows.sort(key=lambda row: row.billing_month, reverse=True)
         return RecurringChargeOverrideSerializer(rows, many=True).data
 
     def get_course_name(self, obj):
@@ -712,7 +720,7 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
             'billing_day', 'start_date', 'end_date',
             'next_billing_date', 'last_charge_date', 'cancelled_at',
             'cancellation_reason', 'created_at', 'updated_at',
-            'upcoming_overrides',
+            'upcoming_overrides', 'past_overrides',
         ]
         read_only_fields = [
             'id', 'child_name', 'initial_payment_details', 'course_name', 'branch_name',
@@ -832,7 +840,7 @@ class RecurringChargeOverrideSerializer(serializers.ModelSerializer):
         model = RecurringChargeOverride
         fields = [
             'id', 'recurring_payment', 'billing_month', 'amount', 'original_amount',
-            'reason', 'source', 'store_invoice', 'store_invoice_number',
+            'reason', 'source', 'store_amount', 'store_invoice', 'store_invoice_number',
             'created_by_name', 'applied_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields

@@ -601,6 +601,16 @@ class RecurringChargeOverride(models.Model):
         default='manual',
         verbose_name="מקור",
     )
+    # How much of `amount` came from the till. Kept apart from the total so the
+    # charge can be shown to the payer as two lines — the subscription they expect
+    # and the thing they bought — instead of one number that grew without saying why.
+    store_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name="מתוך זה רכישות בחנות",
+        help_text="החלק מהסכום שמקורו במכירות בחנות. 0 כשאין.",
+    )
     store_invoice = models.ForeignKey(
         'store.StoreInvoice',
         null=True,
