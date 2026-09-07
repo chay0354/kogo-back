@@ -541,6 +541,111 @@ class RecurringPayment(models.Model):
         return f"מנוי {self.child.full_name} - ₪{self.amount} - {self.get_status_display()}"
 
 
+class RecurringChargeOverride(models.Model):
+    """
+    חריגת סכום לחודש בודד - A one-month replacement for a recurring amount.
+
+    `RecurringPayment.amount` is the monthly figure and `pending_amount` moves it
+    permanently from the next cycle on. Neither can say "March only": a month with
+    fewer lessons, a one-off discount, or a shirt bought at the store all need the
+    charge to differ once and then go back on its own.
+
+    The monthly cron reads at most one row per (recurring payment, month) and
+    charges `amount` instead of the standing figure. `applied_at` is stamped in the
+    same atomic block that records the successful charge, so a run that charges and
+    then fails to commit leaves the override unspent for the next run, exactly like
+    every other row written there.
+
+    `reason` is internal. It is never rendered on a document or sent to a payer.
+    """
+    SOURCE_CHOICES = [
+        ('manual', 'שינוי ידני'),
+        ('store', 'רכישה בחנות'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    recurring_payment = models.ForeignKey(
+        RecurringPayment,
+        on_delete=models.CASCADE,
+        related_name='amount_overrides',
+        verbose_name="הוראת קבע",
+    )
+    # Always the first of the month; the cron matches on the month it is billing.
+    billing_month = models.DateField(
+        verbose_name="חודש החיוב",
+        help_text="ה-1 בחודש שעבורו הסכום הזה מחליף את הסכום הרגיל.",
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        verbose_name="סכום לחודש זה",
+        help_text="הסכום שייגבה באותו חודש במקום הסכום הרגיל.",
+    )
+    # What the standing order would have charged, kept so the CRM can show the
+    # difference long after the regular amount itself has moved on.
+    original_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="הסכום הרגיל",
+        help_text="הסכום שהיה נגבה ללא החריגה, כפי שהיה בזמן היצירה.",
+    )
+    reason = models.TextField(
+        verbose_name="סיבה",
+        help_text="הערה פנימית לצוות בלבד. אינה מוצגת להורה ואינה נכנסת למסמך.",
+    )
+    source = models.CharField(
+        max_length=20,
+        choices=SOURCE_CHOICES,
+        default='manual',
+        verbose_name="מקור",
+    )
+    store_invoice = models.ForeignKey(
+        'store.StoreInvoice',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='recurring_overrides',
+        verbose_name="חשבונית חנות",
+        help_text="החשבונית שהולידה את התוספת, כשהמקור הוא רכישה בחנות.",
+    )
+    created_by = models.ForeignKey(
+        'auth.User',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='recurring_amount_overrides',
+        verbose_name="נוצר על ידי",
+    )
+    applied_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="מועד הניצול",
+        help_text="נחתם כשהחיוב שהשתמש בחריגה נרשם כמוצלח. ריק = טרם נוצלה.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'recurring_charge_overrides'
+        verbose_name = "חריגת סכום לחודש"
+        verbose_name_plural = "חריגות סכום לחודש"
+        ordering = ['billing_month']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['recurring_payment', 'billing_month'],
+                name='uniq_recurring_override_per_month',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['recurring_payment', 'billing_month']),
+        ]
+
+    def __str__(self):
+        return f"{self.billing_month:%m/%Y} - ₪{self.amount} ({self.recurring_payment_id})"
+
+
 class TranzilaTransaction(models.Model):
     """
     עסקאות טרנזילה - Raw storage of Tranzila API responses

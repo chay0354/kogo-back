@@ -27,7 +27,8 @@ from apps.customers.serializers import (
     RecurringPaymentEditSerializer,
     PaymentInitiationRequestSerializer, PaymentInitiationResponseSerializer,
     WebhookCallbackSerializer,     RecurringPaymentUpdateSerializer, RecurringPaymentScheduleAmountSerializer,
-    RecurringPaymentCancelSerializer, BusinessCustomerSerializer
+    RecurringPaymentCancelSerializer, BusinessCustomerSerializer,
+    RecurringPaymentSetMonthAmountSerializer, RecurringPaymentClearMonthAmountSerializer,
 )
 from apps.customers.discount_service import DiscountService
 from apps.customers.child_identity import exclude_weaker_duplicate_children
@@ -1265,7 +1266,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         'initial_payment__lesson',
         'initial_payment__lesson__course',
         'initial_payment__branch'
-    )
+    ).prefetch_related('amount_overrides__store_invoice', 'amount_overrides__created_by')
     serializer_class = RecurringPaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
     pagination_class = None
@@ -1334,6 +1335,70 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
 
         return Response(
             RecurringPaymentSerializer(updated).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='set-month-amount')
+    def set_month_amount(self, request, pk=None):
+        """
+        Bill one month at a different amount, then go back on its own.
+
+        Unlike schedule-amount, which moves the standing figure from the next
+        cycle on, this replaces a single month and leaves every other month alone.
+        The reason is internal: it is stored for the office and never reaches a
+        document or the payer.
+
+        POST /api/v1/customers/recurring-payments/{id}/set-month-amount/
+        Body: { "billing_month": "2027-03-01", "amount": 150.00, "reason": "..." }
+        """
+        from apps.customers.recurring_amount import set_month_override
+
+        recurring = self.get_object()
+        serializer = RecurringPaymentSetMonthAmountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            set_month_override(
+                recurring,
+                billing_month=serializer.validated_data['billing_month'],
+                amount=serializer.validated_data['amount'],
+                reason=serializer.validated_data['reason'],
+                created_by=request.user if request.user.is_authenticated else None,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        recurring.refresh_from_db()
+        return Response(
+            RecurringPaymentSerializer(recurring).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='clear-month-amount')
+    def clear_month_amount(self, request, pk=None):
+        """
+        Drop a month's exceptional amount so it bills at the regular one again.
+
+        A month that has already been charged keeps its override as a record and
+        is not cleared.
+
+        POST /api/v1/customers/recurring-payments/{id}/clear-month-amount/
+        Body: { "billing_month": "2027-03-01" }
+        """
+        from apps.customers.recurring_amount import clear_month_override
+
+        recurring = self.get_object()
+        serializer = RecurringPaymentClearMonthAmountSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        clear_month_override(
+            recurring,
+            billing_month=serializer.validated_data['billing_month'],
+        )
+
+        recurring.refresh_from_db()
+        return Response(
+            RecurringPaymentSerializer(recurring).data,
             status=status.HTTP_200_OK,
         )
 
