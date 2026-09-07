@@ -5,7 +5,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from datetime import date
 from apps.customers.models import (
-    Family, Parent, Child, Payment, RecurringPayment,
+    Family, Parent, Child, Payment, RecurringPayment, RecurringChargeOverride,
     TranzilaTransaction, PaymentDiscountSnapshot, BusinessCustomer
 )
 # Store models moved to apps.store
@@ -154,6 +154,32 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     family_email = serializers.CharField(source='family.email', read_only=True)
     family_address = serializers.CharField(source='family.address', read_only=True)
     parent_email = serializers.SerializerMethodField()
+    # Brothers and sisters on the same family, so the office can move between the
+    # children of one household without going back through the search.
+    siblings = serializers.SerializerMethodField()
+
+    def get_siblings(self, obj):
+        family = obj.family
+        if not family:
+            return []
+        cached = getattr(family, '_prefetched_objects_cache', None)
+        children = (
+            family.children.all() if cached and 'children' in cached
+            else family.children.exclude(pk=obj.pk)
+        )
+        return [
+            {
+                'id': str(child.id),
+                'first_name': child.first_name,
+                'last_name': child.last_name,
+                'full_name': child.full_name,
+                'age': child.age,
+                'gender': child.gender,
+                'status': child.status,
+            }
+            for child in children
+            if child.pk != obj.pk
+        ]
     class Meta:
         model = Child
         fields = [
@@ -169,6 +195,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'subscription_start_date', 'subscription_end_date',
             'enrollments', 'trial_enrollment', 'attendance_rate',
             'created_at',
+            'siblings',
             'search_match',
         ]
 
@@ -649,6 +676,20 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
     )
     course_name = serializers.SerializerMethodField()
     branch_name = serializers.SerializerMethodField()
+    # Only months still ahead: a spent override is history, and the CRM's future
+    # charge table is the one place these are read.
+    upcoming_overrides = serializers.SerializerMethodField()
+
+    def get_upcoming_overrides(self, obj):
+        from django.utils import timezone
+
+        first_of_month = timezone.localdate().replace(day=1)
+        rows = [
+            row for row in obj.amount_overrides.all()
+            if row.billing_month >= first_of_month and row.applied_at is None
+        ]
+        rows.sort(key=lambda row: row.billing_month)
+        return RecurringChargeOverrideSerializer(rows, many=True).data
 
     def get_course_name(self, obj):
         payment = obj.initial_payment
@@ -670,7 +711,8 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
             'status', 'amount', 'pending_amount', 'pending_amount_effective_date',
             'billing_day', 'start_date', 'end_date',
             'next_billing_date', 'last_charge_date', 'cancelled_at',
-            'cancellation_reason', 'created_at', 'updated_at'
+            'cancellation_reason', 'created_at', 'updated_at',
+            'upcoming_overrides',
         ]
         read_only_fields = [
             'id', 'child_name', 'initial_payment_details', 'course_name', 'branch_name',
@@ -771,6 +813,43 @@ class RecurringPaymentEditSerializer(serializers.ModelSerializer):
 class RecurringPaymentScheduleAmountSerializer(serializers.Serializer):
     """Schedule a new monthly amount effective from the next billing cycle."""
     amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
+
+
+class RecurringChargeOverrideSerializer(serializers.ModelSerializer):
+    """חריגת סכום לחודש בודד - one month billed differently, and why."""
+    created_by_name = serializers.SerializerMethodField()
+    store_invoice_number = serializers.CharField(
+        source='store_invoice.invoice_number', read_only=True, default=''
+    )
+
+    def get_created_by_name(self, obj):
+        user = obj.created_by
+        if not user:
+            return ''
+        return (user.get_full_name() or user.username or '').strip()
+
+    class Meta:
+        model = RecurringChargeOverride
+        fields = [
+            'id', 'recurring_payment', 'billing_month', 'amount', 'original_amount',
+            'reason', 'source', 'store_invoice', 'store_invoice_number',
+            'created_by_name', 'applied_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class RecurringPaymentSetMonthAmountSerializer(serializers.Serializer):
+    """Bill one month differently. The reason stays in the CRM, never on a document."""
+    billing_month = serializers.DateField(
+        help_text='כל תאריך בתוך החודש; נשמר כ-1 בחודש.'
+    )
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
+    reason = serializers.CharField(allow_blank=False, trim_whitespace=True)
+
+
+class RecurringPaymentClearMonthAmountSerializer(serializers.Serializer):
+    """Drop a month's override so it bills at the regular amount again."""
+    billing_month = serializers.DateField()
 
 
 class RecurringPaymentCancelSerializer(serializers.Serializer):

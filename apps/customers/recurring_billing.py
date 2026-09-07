@@ -12,7 +12,7 @@ from django.utils import timezone
 from apps.core.payment_service import JERUSALEM_TZ, subscription_tranzila_items
 from apps.core.tranzila_service import TranzilaService
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
-from apps.customers.recurring_amount import apply_due_pending_recurring_amounts
+from apps.customers.recurring_amount import amount_for_charge, apply_due_pending_recurring_amounts
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,11 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
 
         child = recurring.child
         family = child.family
-        amount = Decimal(str(recurring.amount)).quantize(Decimal('0.01'))
+        # One month may be told to differ — fewer lessons, a one-off discount, a
+        # shirt from the store. `amount_for_charge` hands back the standing figure
+        # untouched when nothing is filed for this month, so a month with no
+        # override bills exactly as it did before.
+        amount, override = amount_for_charge(recurring, on_date=today)
         if amount < Decimal('1.00'):
             summary['skipped'] += 1
             continue
@@ -179,6 +183,14 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 child.status = 'active'
                 child.paid_until_date = _paid_until(charge_month)
                 child.save(update_fields=['status', 'paid_until_date', 'updated_at'])
+
+                # Spend the override here and nowhere else. A run that charges and
+                # then fails to commit rolls this back with the rest, which leaves
+                # the month's exceptional amount waiting for the next run instead
+                # of burnt on a charge the database never recorded.
+                if override is not None:
+                    override.applied_at = timezone.now()
+                    override.save(update_fields=['applied_at', 'updated_at'])
 
             summary['charged'] += 1
         except Exception as exc:

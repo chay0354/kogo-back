@@ -2082,9 +2082,24 @@ class PaymentService:
         """
         from apps.store.models import StoreProduct, StoreInvoice, StoreSale
         from apps.store.serializers import StoreInvoiceSerializer
+        from apps.customers.recurring_amount import (
+            active_recurring_for_child,
+            add_to_month_override,
+        )
         
         child = Child.objects.get(id=child_id)
-        
+
+        # Checked before any stock moves: a purchase told to ride on a standing
+        # order that does not exist would otherwise be marked paid and collected
+        # by no one, which is the exact hole this path was closing.
+        recurring = None
+        if payment_method == 'monthly_billing':
+            recurring = active_recurring_for_child(child)
+            if recurring is None:
+                raise ValueError(
+                    'לילד אין הוראת קבע פעילה, ולכן לא ניתן לגבות את הרכישה דרך הוראת קבע'
+                )
+
         # Calculate total
         total_amount = Decimal('0.00')
         for item in product_items:
@@ -2124,6 +2139,23 @@ class PaymentService:
                 )
 
                 _decrement_product_stock(product, item)
+
+            # "Standing order" used to be a label and nothing more: the invoice was
+            # marked paid, the stock came down, and no one ever collected the money.
+            # It now rides on the child's own standing order — added to the month it
+            # is next charged in, on top of whatever that month already stood at.
+            if payment_method == 'monthly_billing':
+                names = ', '.join(
+                    StoreProduct.objects.get(id=item['product_id']).name
+                    for item in product_items
+                )
+                add_to_month_override(
+                    recurring,
+                    extra=total_amount,
+                    reason=f'רכישה בחנות: {names} (חשבונית {invoice.invoice_number})',
+                    source='store',
+                    store_invoice=invoice,
+                )
 
         logger.info(f"Created {payment_method} invoice {invoice.invoice_number}")
         
