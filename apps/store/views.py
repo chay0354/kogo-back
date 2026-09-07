@@ -309,7 +309,26 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(issue_date__gte=start_date)
         if end_date:
             queryset = queryset.filter(issue_date__lte=end_date)
-        
+
+        # Free-text lookup by whoever bought. The owner's question is "who is
+        # this phone number / address / order", and the answer is the order —
+        # so everything the buyer typed at checkout is searchable, plus the
+        # product names on it.
+        search = (self.request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(invoice_number__icontains=search)
+                | Q(website_order_number__icontains=search)
+                | Q(customer_name__icontains=search)
+                | Q(customer_phone__icontains=search)
+                | Q(customer_email__icontains=search)
+                | Q(shipping_address__icontains=search)
+                | Q(customer_notes__icontains=search)
+                | Q(child__first_name__icontains=search)
+                | Q(child__last_name__icontains=search)
+                | Q(line_items__product__name__icontains=search)
+            ).distinct()
+
         return queryset.order_by('-issue_date')
     
     def create(self, request, *args, **kwargs):

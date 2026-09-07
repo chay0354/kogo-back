@@ -310,6 +310,22 @@ class StoreInvoice(models.Model):
         verbose_name="אימייל לקוח",
         help_text="For walk-in / website customers"
     )
+    # What the buyer typed at website checkout. Kept verbatim on the order so
+    # the owner can find a person by any of it later, and so the printed
+    # order carries where it went and what the customer asked for.
+    shipping_address = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        verbose_name="כתובת למשלוח",
+        help_text="As typed at website checkout; the pickup branch label for pickups"
+    )
+    customer_notes = models.TextField(
+        blank=True,
+        default='',
+        verbose_name="הערות הלקוח",
+        help_text="Free text the customer left at website checkout"
+    )
     
     # Payment details
     total_amount = models.DecimalField(

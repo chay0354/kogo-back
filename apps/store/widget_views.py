@@ -551,6 +551,8 @@ class WidgetStorePaymentInitiateView(APIView):
         name = (customer.get('name') or '').strip()
         phone = (customer.get('phone') or '').strip()
         email = (customer.get('email') or '').strip()
+        address = (customer.get('address') or customer.get('shipping_address') or '').strip()[:255]
+        customer_notes = (customer.get('notes') or '').strip()
 
         try:
             delivery_method, pickup_branch, _branch = _fulfillment_from_request(request.data)
@@ -568,6 +570,8 @@ class WidgetStorePaymentInitiateView(APIView):
                     customer_name=name,
                     customer_phone=phone,
                     customer_email=email,
+                    shipping_address=address,
+                    customer_notes=customer_notes,
                     total_amount=total,
                     payment_method='credit_card',
                     payment_status='pending',
@@ -640,6 +644,8 @@ class WidgetStoreWebsiteOrderView(APIView):
         name = (customer.get('name') or '').strip()
         phone = (customer.get('phone') or '').strip()
         email = (customer.get('email') or '').strip()
+        address = (customer.get('address') or customer.get('shipping_address') or '').strip()[:255]
+        customer_notes = (customer.get('notes') or '').strip()
 
         try:
             delivery_method, pickup_branch, _branch = _fulfillment_from_request(request.data)
@@ -662,6 +668,8 @@ class WidgetStoreWebsiteOrderView(APIView):
                     customer_name=name,
                     customer_phone=phone,
                     customer_email=email,
+                    shipping_address=address,
+                    customer_notes=customer_notes,
                     total_amount=total,
                     payment_method='credit_card',
                     # B2C checkout confirms the sale; stock is decremented immediately.

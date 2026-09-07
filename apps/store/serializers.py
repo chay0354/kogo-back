@@ -267,7 +267,8 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
         model = StoreInvoice
         fields = [
             'id', 'invoice_number',
-            'child', 'child_name', 'customer_name', 'customer_phone',
+            'child', 'child_name', 'customer_name', 'customer_phone', 'customer_email',
+            'shipping_address', 'customer_notes', 'website_order_number',
             'total_amount', 'refunded_amount', 'amount_paid', 'payment_method', 'payment_status',
             'tranzila_transaction_id', 'tranzila_confirmation_code',
             'charged_with_token',

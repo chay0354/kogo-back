@@ -184,8 +184,12 @@ def _meta_panel(invoice: StoreInvoice, styles: dict[str, ParagraphStyle]) -> Tab
         right_rows.append([Paragraph(_rtl(f'טלפון: {invoice.customer_phone}'), styles['value'])])
     if invoice.customer_email:
         right_rows.append([Paragraph(_rtl(f'אימייל: {invoice.customer_email}'), styles['value'])])
+    if invoice.shipping_address:
+        right_rows.append([Paragraph(_rtl(f'כתובת: {invoice.shipping_address}'), styles['value'])])
     if invoice.website_order_number:
         right_rows.append([Paragraph(_rtl(f'הזמנה: {invoice.website_order_number}'), styles['value'])])
+    if invoice.customer_notes:
+        right_rows.append([Paragraph(_rtl(f'הערות: {invoice.customer_notes}'), styles['value'])])
 
     panel = Table(
         [[Table(left_rows, colWidths=[7.8 * cm]), Table(right_rows, colWidths=[7.8 * cm])]],

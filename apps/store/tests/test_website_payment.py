@@ -50,6 +50,30 @@ class WebsitePaymentInitiateTest(TestCase):
         body.update(extra)
         return body
 
+    def test_initiate_keeps_the_address_and_notes_the_buyer_typed(self):
+        res = self.client.post(
+            '/api/v1/store/widget/payment/initiate/',
+            self._payload(customer={
+                'name': 'דור סער', 'email': 'doreden8@gmail.com', 'phone': '0500000000',
+                'address': 'הרצל 12, כפר סבא, 4421012', 'notes': 'להשאיר אצל השכן',
+            }),
+            format='json',
+            **self.headers,
+        )
+        self.assertEqual(res.status_code, 201, res.content)
+        invoice = StoreInvoice.objects.get(website_order_number='CG-260824-WQQ5')
+        self.assertEqual(invoice.shipping_address, 'הרצל 12, כפר סבא, 4421012')
+        self.assertEqual(invoice.customer_notes, 'להשאיר אצל השכן')
+
+    def test_initiate_without_address_leaves_the_fields_empty(self):
+        res = self.client.post(
+            '/api/v1/store/widget/payment/initiate/', self._payload(), format='json', **self.headers,
+        )
+        self.assertEqual(res.status_code, 201, res.content)
+        invoice = StoreInvoice.objects.get(website_order_number='CG-260824-WQQ5')
+        self.assertEqual(invoice.shipping_address, '')
+        self.assertEqual(invoice.customer_notes, '')
+
     def test_initiate_uses_iframe_terminal_not_production_rest_terminal(self):
         res = self.client.post(
             '/api/v1/store/widget/payment/initiate/',
