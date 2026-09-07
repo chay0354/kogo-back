@@ -32,6 +32,11 @@ def build_subscription_invoice_email(invoice: Invoice) -> tuple[str, str, str]:
     subject = f'{DOCUMENT_TITLE} {invoice.invoice_number} — קוגומלו'
     issue = timezone.localtime(invoice.invoice_date).strftime('%d/%m/%Y')
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
+    # A month that carried a till purchase says so. Without it the payer sees only a
+    # larger total than last month and no reason for it. A manual change adds no
+    # line: its reason is written for the office, not for the payer.
+    breakdown = (getattr(invoice.payment, 'description', '') or '').strip()
+    detail_line = breakdown if 'רכישה בחנות' in breakdown else ''
 
     text = (
         f'שלום,\n\n'
@@ -39,7 +44,8 @@ def build_subscription_invoice_email(invoice: Invoice) -> tuple[str, str, str]:
         f'מספר {DOCUMENT_TITLE}: {invoice.invoice_number}\n'
         f'תאריך: {issue}\n'
         f'ילד/ים: {child_names}\n'
-        f'סה"כ לפני מע"מ: ₪{before_vat:.2f}\n'
+        + (f'פירוט: {detail_line}\n' if detail_line else '')
+        + f'סה"כ לפני מע"מ: ₪{before_vat:.2f}\n'
         f'מע"מ 18%: ₪{vat_amount:.2f}\n'
         f'סה"כ כולל מע"מ: ₪{gross:.2f}\n\n'
         f'המסמך מצורף למייל בקובץ PDF.\n\n'
@@ -50,6 +56,7 @@ def build_subscription_invoice_email(invoice: Invoice) -> tuple[str, str, str]:
   <h2 style="color:#303094">{DOCUMENT_TITLE} {invoice.invoice_number}</h2>
   <p style="line-height:1.7">שלום,<br>תודה על התשלום!</p>
   <p>ילד/ים: <b>{child_names}</b></p>
+  {f'<p style="color:#555">פירוט: {detail_line}</p>' if detail_line else ''}
   <p style="line-height:1.8">
     סה"כ לפני מע"מ: <span dir="ltr">₪{before_vat:.2f}</span><br>
     מע"מ 18%: <span dir="ltr">₪{vat_amount:.2f}</span><br>

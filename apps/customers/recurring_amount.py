@@ -113,6 +113,7 @@ def set_month_override(
     amount: Decimal,
     reason: str,
     source: str = 'manual',
+    store_amount: Decimal | None = None,
     store_invoice=None,
     created_by=None,
 ) -> RecurringChargeOverride:
@@ -148,14 +149,28 @@ def set_month_override(
     if spent:
         raise ValueError('החודש הזה כבר חויב ולא ניתן לשנותו')
 
+    total = Decimal(str(amount)).quantize(Decimal('0.01'))
+    # A month may already carry purchases. Editing its total by hand does not say
+    # how the new figure splits, so the till's part is kept and only capped by the
+    # total — never letting the subscription line come out negative.
+    existing = RecurringChargeOverride.objects.filter(
+        recurring_payment=recurring, billing_month=month,
+    ).first()
+    carried_store = Decimal(str(existing.store_amount)) if existing else Decimal('0.00')
+    if store_amount is None:
+        store_part = min(carried_store, total)
+    else:
+        store_part = min(Decimal(str(store_amount)).quantize(Decimal('0.01')), total)
+
     override, _ = RecurringChargeOverride.objects.update_or_create(
         recurring_payment=recurring,
         billing_month=month,
         defaults={
-            'amount': Decimal(str(amount)).quantize(Decimal('0.01')),
+            'amount': total,
             'original_amount': Decimal(str(recurring.amount)).quantize(Decimal('0.01')),
             'reason': reason.strip(),
             'source': source,
+            'store_amount': store_part,
             'store_invoice': store_invoice,
             'created_by': created_by,
         },
@@ -207,12 +222,14 @@ def add_to_month_override(
     if existing and existing.reason:
         note = f'{existing.reason}\n{note}'
 
+    carried_store = Decimal(str(existing.store_amount)) if existing else Decimal('0.00')
     return set_month_override(
         recurring,
         billing_month=month,
         amount=combined,
         reason=note,
         source=source,
+        store_amount=(carried_store + Decimal(str(extra))).quantize(Decimal('0.01')),
         store_invoice=store_invoice or (existing.store_invoice if existing else None),
         created_by=created_by or (existing.created_by if existing else None),
     )

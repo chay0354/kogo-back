@@ -280,6 +280,96 @@ class RecurringMonthOverrideTests(TestCase):
         amount, _ = amount_for_charge(self.recurring, on_date=self.this_month)
         self.assertEqual(amount, Decimal('270.00'))
 
+    def test_the_till_part_is_tracked_apart_from_the_total(self):
+        add_to_month_override(
+            self.recurring,
+            extra=Decimal('120.00'),
+            reason='רכישה בחנות: חולצה',
+            billing_month=self.this_month,
+        )
+        add_to_month_override(
+            self.recurring,
+            extra=Decimal('80.00'),
+            reason='רכישה בחנות: מכנסיים',
+            billing_month=self.this_month,
+        )
+        override = RecurringChargeOverride.objects.get(recurring_payment=self.recurring)
+        self.assertEqual(override.amount, Decimal('475.00'))
+        self.assertEqual(override.store_amount, Decimal('200.00'))
+
+    def test_editing_a_month_by_hand_keeps_the_till_part(self):
+        add_to_month_override(
+            self.recurring,
+            extra=Decimal('120.00'),
+            reason='רכישה בחנות: חולצה',
+            billing_month=self.this_month,
+        )
+        set_month_override(
+            self.recurring,
+            billing_month=self.this_month,
+            amount=Decimal('300.00'),
+            reason='תוקן ידנית',
+        )
+        override = RecurringChargeOverride.objects.get(recurring_payment=self.recurring)
+        self.assertEqual(override.amount, Decimal('300.00'))
+        self.assertEqual(override.store_amount, Decimal('120.00'))
+
+    def test_the_till_part_never_exceeds_the_total(self):
+        add_to_month_override(
+            self.recurring,
+            extra=Decimal('120.00'),
+            reason='רכישה בחנות: חולצה',
+            billing_month=self.this_month,
+        )
+        set_month_override(
+            self.recurring,
+            billing_month=self.this_month,
+            amount=Decimal('50.00'),
+            reason='הוזל',
+        )
+        override = RecurringChargeOverride.objects.get(recurring_payment=self.recurring)
+        self.assertEqual(override.store_amount, Decimal('50.00'))
+
+    @patch('apps.customers.recurring_billing.TranzilaService')
+    def test_a_till_purchase_is_charged_as_two_lines(self, tranzila_cls):
+        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        add_to_month_override(
+            self.recurring,
+            extra=Decimal('120.00'),
+            reason='רכישה בחנות: חולצה',
+            billing_month=self.this_month,
+        )
+
+        process_due_recurring_charges()
+
+        call = tranzila_cls.production.return_value.charge_with_token.call_args
+        self.assertEqual(call.kwargs['amount'], Decimal('395.00'))
+        items = call.kwargs['items']
+        self.assertEqual(len(items), 2)
+        self.assertEqual(sum(item['unit_price'] for item in items), 395.0)
+        self.assertIn('רכישה בחנות', items[1]['name'])
+
+        payment = Payment.objects.filter(payment_type='recurring_subscription').latest('created_at')
+        self.assertIn('רכישה בחנות', payment.description)
+
+    @patch('apps.customers.recurring_billing.TranzilaService')
+    def test_a_manual_change_is_not_itemised_to_the_payer(self, tranzila_cls):
+        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        set_month_override(
+            self.recurring,
+            billing_month=self.this_month,
+            amount=Decimal('150.00'),
+            reason='סיבה פנימית שאסור שתגיע להורה',
+        )
+
+        process_due_recurring_charges()
+
+        call = tranzila_cls.production.return_value.charge_with_token.call_args
+        self.assertEqual(len(call.kwargs['items']), 1)
+        payment = Payment.objects.filter(payment_type='recurring_subscription').latest('created_at')
+        self.assertNotIn('סיבה פנימית', payment.description)
+        self.assertNotIn('רכישה בחנות', payment.description)
+
     def test_only_one_row_is_kept_per_month(self):
         for extra in (Decimal('10.00'), Decimal('20.00'), Decimal('30.00')):
             add_to_month_override(
