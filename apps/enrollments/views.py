@@ -9,8 +9,9 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from apps.enrollments.duplicate_students import duplicate_person_on_lesson, duplicate_roster_rows
-from apps.enrollments.models import Enrollment, LessonEnrollment, TrialBlockedDate
+from apps.enrollments.models import Enrollment, LessonEnrollment, TrialBlockedDate, TrialRegistrationPolicy
 from apps.enrollments.person_match import contact_phone
 from apps.enrollments.register_reminders import (
     GAP_ALERT_AFTER_DAYS,
@@ -511,3 +512,102 @@ def cron_trial_reminders(request):
     summary = send_due_trial_reminders(dry_run=dry_run)
     return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
 
+
+
+class TrialRegistrationPolicyView(APIView):
+    """
+    USAGE: GET/PUT /api/v1/enrollments/trial-registration-policy/
+    USAGE: The studio-wide rule: are trial bookings open at all.
+
+    Partners read, managers write. A lesson set open or closed by hand keeps
+    its own answer when this flips — see Lesson.trial_registration_open.
+    """
+    def get_permissions(self):
+        from rest_framework.permissions import SAFE_METHODS
+        from apps.core.permissions import IsManager, IsManagerOrPartner
+        if self.request.method in SAFE_METHODS:
+            return [IsAuthenticated(), IsManagerOrPartner()]
+        return [IsAuthenticated(), IsManager()]
+
+    def get(self, request):
+        policy = TrialRegistrationPolicy.current()
+        return Response({'trials_open': policy.trials_open, 'updated_at': policy.updated_at})
+
+    def put(self, request):
+        value = request.data.get('trials_open')
+        if not isinstance(value, bool):
+            return Response({'error': 'trials_open חייב להיות true או false'}, status=status.HTTP_400_BAD_REQUEST)
+        policy = TrialRegistrationPolicy.current()
+        policy.trials_open = value
+        policy.updated_by = request.user
+        policy.save(update_fields=['trials_open', 'updated_by', 'updated_at'])
+        return Response({'trials_open': policy.trials_open, 'updated_at': policy.updated_at})
+
+
+class TrialRegistrationLessonsView(APIView):
+    """
+    USAGE: GET /api/v1/enrollments/trial-registration/lessons/?branch=&course_type=&age=
+    USAGE: The lessons the office narrows down to — by branch, course type and
+    USAGE: age — each with its own setting and what that comes to under the rule.
+
+    The listing the settings screen drills through to find the one lesson
+    whose trial button should go. Age is a single number: a course whose
+    range holds it is shown, and a course with no range at either end is
+    shown for every age.
+    """
+    def get_permissions(self):
+        from apps.core.permissions import IsManagerOrPartner
+        return [IsAuthenticated(), IsManagerOrPartner()]
+
+    def get(self, request):
+        from django.db.models import Q
+        from apps.courses.models import Lesson
+        from apps.core.scoping import scope_courses
+        from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
+
+        qs = (
+            Lesson.objects
+            .filter(course__is_active=True, status='scheduled')
+            .select_related('course', 'course__branch', 'course__course_type', 'instructor')
+            .order_by('course__branch__name', 'course__name', 'day_of_week', 'start_time')
+        )
+        branch = (request.query_params.get('branch') or '').strip()
+        if branch:
+            qs = qs.filter(course__branch_id=branch)
+        course_type = (request.query_params.get('course_type') or '').strip()
+        if course_type:
+            qs = qs.filter(course__course_type_id=course_type)
+        age = (request.query_params.get('age') or '').strip()
+        if age:
+            try:
+                years = int(age)
+            except ValueError:
+                return Response({'error': 'גיל לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+            qs = qs.filter(
+                (Q(course__min_age__isnull=True) | Q(course__min_age__lte=years))
+                & (Q(course__max_age__isnull=True) | Q(course__max_age__gte=years))
+            )
+        qs = scope_courses(qs, request.user, course_lookup='course')
+
+        default = trials_open_by_default()
+        rows = []
+        for lesson in qs:
+            course = lesson.course
+            rows.append({
+                'lesson_id': str(lesson.id),
+                'course_id': str(course.id),
+                'course_name': course.name,
+                'course_display_id': course.display_id,
+                'course_type_name': course.course_type.name if course.course_type_id else '',
+                'branch_id': str(course.branch_id),
+                'branch_name': course.branch.name,
+                'min_age': course.min_age,
+                'max_age': course.max_age,
+                'day_of_week': lesson.day_of_week,
+                'start_time': str(lesson.start_time)[:5],
+                'end_time': str(lesson.end_time)[:5],
+                'instructor_name': lesson.instructor.full_name if lesson.instructor_id else '',
+                'override': lesson.trial_registration_open,
+                'effective': trial_registration_open_for(lesson, default=default),
+            })
+        return Response({'trials_open_by_default': default, 'results': rows})

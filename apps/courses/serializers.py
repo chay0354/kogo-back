@@ -423,6 +423,7 @@ class LessonSerializer(serializers.ModelSerializer):
                   'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
+                  'trial_registration_open',
                   'status', 'notes', 'enrolled_students_count', 'room_capacity',
                   'created_at', 'updated_at']
         read_only_fields = ['id', 'instructor_salary_override', 'created_at', 'updated_at']

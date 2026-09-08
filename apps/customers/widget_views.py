@@ -222,7 +222,10 @@ def _widget_instructor_photo_url(instructor):
     return (instructor.photo_url or None) if instructor else None
 
 
-def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None):
+def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None, trials_default=None):
+    from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
+    if trials_default is None:
+        trials_default = trials_open_by_default()
     bundle_lessons = list(bundle.lessons.all())
     lesson_payloads = []
     bundle_full = False
@@ -232,6 +235,7 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None)
             bundle_full = True
         lesson_payloads.append({
             'id': str(bl.id),
+            'trial_registration_open': trial_registration_open_for(bl, default=trials_default),
             'day_of_week': bl.day_of_week,
             'start_time': str(bl.start_time)[:5],
             'end_time': str(bl.end_time)[:5],
@@ -719,6 +723,16 @@ class WidgetTrialRegisterView(APIView):
             trial_date = date.fromisoformat(trial_date_str)
         except ValueError:
             return Response({'error': 'תאריך לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.enrollments.trial_policy import trial_registration_open_for
+
+        # The widget hides the button for a closed lesson; a request that
+        # arrives anyway (an old tab, a hand-made call) is refused the same way.
+        if not trial_registration_open_for(lesson):
+            return Response(
+                {'error': 'ההרשמה לשיעור ניסיון סגורה לשיעור זה'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             validate_trial_lesson_date(lesson, trial_date)
@@ -1408,6 +1422,8 @@ class WidgetCoursesView(APIView):
                 all_lesson_ids.extend(bl.id for bl in bundle.lessons.all())
         enrolled_counts = _batch_paying_enrollment_counts(all_lesson_ids)
         photo_map = pair_photo_map()
+        from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
+        trials_default = trials_open_by_default()
 
         result = []
         for course in courses:
@@ -1417,6 +1433,7 @@ class WidgetCoursesView(APIView):
                     cap = _lesson_widget_capacity(lesson, course, enrolled_counts)
                     lessons.append({
                         'id': str(lesson.id),
+                        'trial_registration_open': trial_registration_open_for(lesson, default=trials_default),
                         'day_of_week': lesson.day_of_week,
                         'start_time': str(lesson.start_time)[:5],
                         'end_time': str(lesson.end_time)[:5],
@@ -1441,6 +1458,7 @@ class WidgetCoursesView(APIView):
             bundles = [
                 _serialize_widget_bundle(
                     bundle, enrolled_counts=enrolled_counts, course=course, photo_map=photo_map,
+                    trials_default=trials_default,
                 )
                 for bundle in _widget_bundles_for_course(course)
             ]

@@ -199,6 +199,14 @@ class Lesson(models.Model):
     )
     instructor_salary_override = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="שכר מדריך מותאם")
     is_recurring = models.BooleanField(default=True, verbose_name="חוזר שבועית")
+    # Whether the widget may book a trial on this lesson. NULL follows the
+    # studio-wide rule (enrollments.TrialRegistrationPolicy); an explicit value
+    # is this lesson's own answer and survives the rule being flipped.
+    trial_registration_open = models.BooleanField(
+        null=True, blank=True,
+        verbose_name="הרשמה לשיעור ניסיון",
+        help_text="ריק — לפי הכלל הכללי; פתוח או סגור — החרגה לשיעור הזה בלבד",
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled', verbose_name="סטטוס")
     cancellation_reason = models.TextField(null=True, blank=True, verbose_name="סיבת ביטול")
     cancelled_at = models.DateTimeField(null=True, blank=True, verbose_name="בוטל בתאריך")

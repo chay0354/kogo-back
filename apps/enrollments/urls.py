@@ -12,5 +12,7 @@ urlpatterns = [
     path('cron/trial-reminders/', views.cron_trial_reminders, name='cron-trial-reminders'),
     path('cron/register-reminders/', views.cron_register_reminders, name='cron-register-reminders'),
     path('register-gaps/', views.register_gaps, name='register-gaps'),
+    path('trial-registration-policy/', views.TrialRegistrationPolicyView.as_view(), name='trial-registration-policy'),
+    path('trial-registration/lessons/', views.TrialRegistrationLessonsView.as_view(), name='trial-registration-lessons'),
 ]
 

@@ -290,3 +290,36 @@ class ScheduledUnitChange(models.Model):
 
     def __str__(self) -> str:
         return f'{self.child_id} → {self.target_label} ({self.effective_date})'
+
+
+class TrialRegistrationPolicy(models.Model):
+    """
+    הכלל הכללי להרשמה לשיעור ניסיון — one row for the whole studio.
+
+    Closing trials here takes the trial button off every lesson that follows
+    the rule, in one move. A lesson the office set open or closed by hand
+    (Lesson.trial_registration_open) keeps its own answer through the flip,
+    so a studio-wide close does not erase the exceptions and a reopen does
+    not reopen what was shut on purpose.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    trials_open = models.BooleanField(default=True, verbose_name="הרשמה לשיעור ניסיון פתוחה")
+    updated_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='trial_registration_policies', verbose_name="עודכן על ידי",
+    )
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן בתאריך")
+
+    class Meta:
+        db_table = 'trial_registration_policy'
+        verbose_name = "כלל הרשמה לשיעור ניסיון"
+        verbose_name_plural = "כלל הרשמה לשיעור ניסיון"
+
+    @classmethod
+    def current(cls) -> 'TrialRegistrationPolicy':
+        """The one row, created open the first time anyone asks."""
+        policy = cls.objects.order_by('updated_at').first()
+        return policy if policy is not None else cls.objects.create()
+
+    def __str__(self):
+        return 'פתוחה' if self.trials_open else 'סגורה'
