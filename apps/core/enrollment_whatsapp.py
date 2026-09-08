@@ -12,9 +12,13 @@ if TYPE_CHECKING:
 def build_enrollment_whatsapp_context(
     *,
     child: 'Child',
-    lesson: Lesson,
+    lesson: Optional[Lesson] = None,
 ) -> Optional[dict]:
-    """Build parent/lesson fields for enrollment-related WhatsApp messages."""
+    """Build parent/lesson fields for enrollment-related WhatsApp messages.
+
+    Without a lesson (a broadcast to a child who has no active enrollment) the
+    parent fields are filled and the course/day/time fields are empty.
+    """
     family = child.family if child else None
     if not family:
         return None
@@ -50,6 +54,22 @@ def build_enrollment_whatsapp_context(
     if primary_parent:
         _add_name(primary_parent.first_name)
         _add_name(primary_parent.last_name)
+
+    if lesson is None:
+        branch = family.branch if getattr(family, 'branch_id', None) else None
+        branch_name = (branch.name if branch else '') or ''
+        return {
+            'phone': parent_phone,
+            'parent_name': parent_name or family.name,
+            'lookup_names': lookup_names,
+            'child_name': f"{child.first_name} {child.last_name}".strip(),
+            'course_name': '',
+            'branch_name': branch_name,
+            'location': branch_name,
+            'day_name': '',
+            'start_time': '',
+            'end_time': '',
+        }
 
     branch = lesson.course.branch if lesson.course_id and lesson.course.branch_id else None
     branch_name = (branch.name if branch else '') or ''

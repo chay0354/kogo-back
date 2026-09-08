@@ -8,6 +8,8 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.throttling import ScopedRateThrottle
+from apps.core.manychat_service import ManyChatService
 from django.db.models import Q, Prefetch, Count, Sum, Value, CharField
 from django.db.models.functions import Concat
 from django.views.decorators.csrf import csrf_exempt
@@ -133,6 +135,8 @@ class ChildViewSet(viewsets.ModelViewSet):
         ),
     )
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    # Only the broadcast action opts into ScopedRateThrottle; the rest of the CRM is unthrottled.
+    throttle_scope = 'customers_broadcast'
     filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
     search_fields = [
         'first_name', 'last_name', 'id_number',
@@ -242,6 +246,30 @@ class ChildViewSet(viewsets.ModelViewSet):
                 lesson_enrollments__status='active'
             ).distinct()
         
+        # Filter by lesson (one slot of a course) and by weekday — the office
+        # builds a WhatsApp audience from these: "everyone in Sunday's 17:00".
+        lesson_id = self.request.query_params.get('lesson')
+        if lesson_id and lesson_id != 'all':
+            try:
+                queryset = queryset.filter(
+                    lesson_enrollments__lesson_id=uuid.UUID(str(lesson_id)),
+                    lesson_enrollments__status='active',
+                ).distinct()
+            except ValueError:
+                queryset = queryset.none()
+
+        day_of_week = self.request.query_params.get('day_of_week')
+        if day_of_week not in (None, '', 'all'):
+            try:
+                day_value = int(day_of_week)
+            except (TypeError, ValueError):
+                day_value = None
+            if day_value is not None and 0 <= day_value <= 6:
+                queryset = queryset.filter(
+                    lesson_enrollments__lesson__day_of_week=day_value,
+                    lesson_enrollments__status='active',
+                ).distinct()
+
         # Filter by age range
         age_range = self.request.query_params.get('age')
         if age_range and age_range != 'all':
@@ -280,7 +308,7 @@ class ChildViewSet(viewsets.ModelViewSet):
 
         # List/grouped views: hide leftover pending cards when the real child exists.
         # Apply via pk__in so Subquery annotations are not stacked on enrollment joins.
-        if self.action in ('list', 'by_course'):
+        if self.action in ('list', 'by_course', 'ids'):
             winner_ids = exclude_weaker_duplicate_children(
                 Child.objects.filter(pk__in=queryset.values('pk'))
             ).values('pk')
@@ -288,6 +316,99 @@ class ChildViewSet(viewsets.ModelViewSet):
 
         return queryset
     
+    @action(detail=False, methods=['get'], url_path='ids')
+    def ids(self, request):
+        """
+        Every child id matching the current filters and search — for "select all
+        N results" on the customers page, which pages 20 at a time.
+
+        Same scoped, filtered, duplicate-collapsed queryset as the list, so the
+        selection equals the count the office sees. Capped at 2000 ids.
+        """
+        cap = 2000
+        queryset = self.filter_queryset(self.get_queryset()).order_by('-created_at', 'pk')
+        ids = [str(pk) for pk in queryset.values_list('pk', flat=True)[:cap + 1]]
+        capped = len(ids) > cap
+        return Response({'ids': ids[:cap], 'count': len(ids[:cap]), 'capped': capped})
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='broadcast',
+        permission_classes=[IsAuthenticated, IsManager],
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def broadcast(self, request):
+        """
+        Send one ManyChat automation to the parents of the selected children.
+
+        Body: {child_ids: [...] (≤ BROADCAST_MAX_CHILDREN), automation_type: 'kind'|'flow',
+               automation_id, dry_run (default true), skip_phones: [...]}.
+        Manager only. Nothing is sent unless dry_run is explicitly false.
+        """
+        from apps.customers.broadcast import BROADCAST_MAX_CHILDREN, broadcast_to_children
+
+        automation_type = (request.data.get('automation_type') or '').strip()
+        automation_id = (request.data.get('automation_id') or '').strip()
+        raw_ids = request.data.get('child_ids') or []
+        raw_skip = request.data.get('skip_phones') or []
+        dry_run = request.data.get('dry_run', True)
+        if isinstance(dry_run, str):
+            dry_run = dry_run.strip().lower() not in ('false', '0', 'no')
+        dry_run = bool(dry_run)
+
+        if automation_type not in ('kind', 'flow'):
+            return Response({'error': 'נדרש automation_type (kind או flow)'}, status=status.HTTP_400_BAD_REQUEST)
+        if not automation_id:
+            return Response({'error': 'נדרש automation_id'}, status=status.HTTP_400_BAD_REQUEST)
+        if automation_type == 'kind' and automation_id not in ManyChatService._REGISTRATION_KINDS:
+            return Response({'error': 'אוטומציה לא מוכרת'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return Response({'error': 'נדרשת רשימת ילדים'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(raw_ids) > BROADCAST_MAX_CHILDREN:
+            return Response(
+                {'error': f'עד {BROADCAST_MAX_CHILDREN} ילדים בבקשה אחת'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(raw_skip, list):
+            return Response({'error': 'skip_phones חייב להיות רשימה'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ids: list = []
+        for value in raw_ids:
+            try:
+                ids.append(uuid.UUID(str(value)))
+            except ValueError:
+                return Response({'error': 'מזהה ילד לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+
+        svc = ManyChatService()
+        if not dry_run and not svc.is_configured:
+            return Response({'error': 'ManyChat לא מוגדר'}, status=status.HTTP_400_BAD_REQUEST)
+
+        by_id = {
+            child.pk: child
+            for child in Child.objects.filter(pk__in=ids)
+            .select_related('family', 'family__branch')
+            .prefetch_related(
+                'family__parents',
+                'lesson_enrollments__lesson__course__branch',
+            )
+        }
+        children = [by_id[pk] for pk in ids if pk in by_id]
+
+        payload = broadcast_to_children(
+            children,
+            automation_type=automation_type,
+            automation_id=automation_id,
+            dry_run=dry_run,
+            skip_phones=[str(p) for p in raw_skip],
+            service=svc,
+        )
+        payload['automation_label'] = (
+            ManyChatService.AUTOMATION_LABELS.get(automation_id) if automation_type == 'kind' else automation_id
+        )
+        payload['missing'] = len(ids) - len(children)
+        return Response(payload)
+
     @action(detail=False, methods=['get'])
     def by_course(self, request):
         """

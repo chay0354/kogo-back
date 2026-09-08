@@ -226,6 +226,11 @@ REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
+    # Rates for views that opt in with ScopedRateThrottle. No default throttle
+    # classes — the CRM itself is not rate-limited.
+    'DEFAULT_THROTTLE_RATES': {
+        'customers_broadcast': '30/min',
+    },
 }
 
 # Authentication backends (support login with email + password)
