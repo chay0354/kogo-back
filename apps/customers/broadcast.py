@@ -13,6 +13,7 @@ from typing import Iterable
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
 from apps.core.manychat_service import ManyChatError, ManyChatService
+from apps.core.scoping import ACTIVE_ENROLLMENT_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,30 @@ logger = logging.getLogger(__name__)
 BROADCAST_MAX_CHILDREN = 25
 
 
-def _active_lesson_for(child):
-    """The lesson whose details go into the message: the first active enrollment."""
+def _active_lesson_for(child, *, lesson_id=None, day_of_week=None):
+    """
+    The lesson whose details go into the message.
+
+    The office built the audience with a filter; when the request says which
+    lesson or weekday that was, a child in several slots gets that one. Failing
+    a match, the earliest-started active enrollment. 'payments_problem' counts
+    as active here as everywhere else in the CRM — a "payment failed" template
+    is for exactly those children.
+    """
     rows = [
         row for row in child.lesson_enrollments.all()
-        if row.status == 'active' and row.lesson_id
+        if row.status in ACTIVE_ENROLLMENT_STATUSES and row.lesson_id
     ]
     if not rows:
         return None
+    if lesson_id:
+        for row in rows:
+            if str(row.lesson_id) == str(lesson_id):
+                return row.lesson
+    if day_of_week is not None:
+        matching = [row for row in rows if row.lesson.day_of_week == day_of_week]
+        if matching:
+            rows = matching
     rows.sort(key=lambda row: (row.start_date or row.created_at.date()))
     return rows[0].lesson
 
@@ -42,6 +59,8 @@ def broadcast_to_children(
     dry_run: bool = True,
     skip_phones: Iterable[str] = (),
     service: ManyChatService | None = None,
+    lesson_id=None,
+    day_of_week=None,
 ) -> dict:
     """
     Send (or preview) one automation to the parents of ``children``.
@@ -69,7 +88,7 @@ def broadcast_to_children(
             'method': None,
             'error': None,
         }
-        lesson = _active_lesson_for(child)
+        lesson = _active_lesson_for(child, lesson_id=lesson_id, day_of_week=day_of_week)
         ctx = build_enrollment_whatsapp_context(child=child, lesson=lesson)
         if not ctx:
             row['reason'] = 'no_parent_phone'
@@ -98,10 +117,9 @@ def broadcast_to_children(
             results.append(row)
             continue
 
-        seen_phones.add(phone_key)
-        phones_used.append(phone_key)
-
         if dry_run:
+            seen_phones.add(phone_key)
+            phones_used.append(phone_key)
             row['status'] = 'preview'
             counts['preview'] += 1
             results.append(row)
@@ -134,6 +152,10 @@ def broadcast_to_children(
             outcome = {'sent': False, 'error': str(exc)}
 
         if outcome.get('sent'):
+            # Only a message that went out covers the sibling on the same phone;
+            # after a failure the sibling's row is still worth a try.
+            seen_phones.add(phone_key)
+            phones_used.append(phone_key)
             row['status'] = 'sent'
             row['method'] = outcome.get('method')
             counts['sent'] += 1

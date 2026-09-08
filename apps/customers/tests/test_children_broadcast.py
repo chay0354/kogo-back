@@ -260,3 +260,54 @@ class BroadcastServiceTest(_Studio):
                                     dry_run=False, service=Boom())
         self.assertEqual(out['failed'], 1)
         self.assertEqual(out['results'][0]['error'], 'down')
+
+
+class ReviewFixesTest(_Studio):
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+
+    def _post(self, **body):
+        payload = {'child_ids': [str(self.noa.id)], 'automation_type': 'kind', 'automation_id': 'subscription'}
+        payload.update(body)
+        return self.client.post(BROADCAST_URL, payload, format='json')
+
+    def test_only_an_explicit_false_turns_the_preview_off(self):
+        with patch('apps.customers.views.ManyChatService.is_configured', new=property(lambda self: True)), \
+             patch('apps.customers.broadcast.ManyChatService.notify_registration', return_value={'sent': True}) as send:
+            for garbage in (None, 0, '', [], 'nope'):
+                res = self._post(dry_run=garbage)
+                self.assertEqual(res.status_code, 200, res.content)
+                self.assertTrue(res.data['dry_run'], garbage)
+            send.assert_not_called()
+            self.assertFalse(self._post(dry_run=False).data['dry_run'])
+            self.assertFalse(self._post(dry_run='false').data['dry_run'])
+            self.assertEqual(send.call_count, 2)
+
+    def test_a_payments_problem_enrollment_still_gets_the_message(self):
+        LessonEnrollment.objects.filter(child=self.noa).update(status='payments_problem')
+        res = self._post(automation_id='payment_failed')
+        self.assertEqual(res.data['preview_count'], 1)
+        res = self.client.get(LIST_URL, {'lesson': str(self.sunday.id)})
+        self.assertIn('Noa', {r['first_name'] for r in res.data['results']})
+
+    def test_the_lesson_the_audience_was_filtered_by_wins(self):
+        _enroll(self.noa, self.tuesday)          # Noa is now Sunday + Tuesday
+        LessonEnrollment.objects.filter(child=self.noa, lesson=self.tuesday).update(start_date=date(2025, 1, 1))
+        with patch('apps.customers.views.ManyChatService.is_configured', new=property(lambda self: True)), \
+             patch('apps.customers.broadcast.ManyChatService.notify_registration', return_value={'sent': True}) as send:
+            self._post(dry_run=False)
+            self.assertEqual(send.call_args.kwargs['day_name'], 'שלישי')   # oldest enrollment wins by default
+            self._post(dry_run=False, lesson_id=str(self.sunday.id))
+            self.assertEqual(send.call_args.kwargs['day_name'], 'ראשון')
+            self._post(dry_run=False, day_of_week=0)
+            self.assertEqual(send.call_args.kwargs['day_name'], 'ראשון')
+
+    def test_a_failed_send_does_not_silence_the_sibling(self):
+        with patch('apps.customers.views.ManyChatService.is_configured', new=property(lambda self: True)), \
+             patch('apps.customers.broadcast.ManyChatService.notify_registration',
+                   side_effect=[{'sent': False, 'reason': 'lookup_failed'}, {'sent': True}]) as send:
+            res = self._post(child_ids=[str(self.noa.id), str(self.ido.id)], dry_run=False)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual([r['status'] for r in res.data['results']], ['failed', 'sent'])
+        self.assertEqual(res.data['phones'], ['972501111111'])

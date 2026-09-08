@@ -253,7 +253,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             try:
                 queryset = queryset.filter(
                     lesson_enrollments__lesson_id=uuid.UUID(str(lesson_id)),
-                    lesson_enrollments__status='active',
+                    lesson_enrollments__status__in=['active', 'payments_problem'],
                 ).distinct()
             except ValueError:
                 queryset = queryset.none()
@@ -267,7 +267,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             if day_value is not None and 0 <= day_value <= 6:
                 queryset = queryset.filter(
                     lesson_enrollments__lesson__day_of_week=day_value,
-                    lesson_enrollments__status='active',
+                    lesson_enrollments__status__in=['active', 'payments_problem'],
                 ).distinct()
 
         # Filter by age range
@@ -352,16 +352,27 @@ class ChildViewSet(viewsets.ModelViewSet):
         automation_id = (request.data.get('automation_id') or '').strip()
         raw_ids = request.data.get('child_ids') or []
         raw_skip = request.data.get('skip_phones') or []
-        dry_run = request.data.get('dry_run', True)
-        if isinstance(dry_run, str):
-            dry_run = dry_run.strip().lower() not in ('false', '0', 'no')
-        dry_run = bool(dry_run)
+        # Only an explicit false turns the preview off. null, 0, '' or anything
+        # else a client might send by mistake stays a dry run.
+        raw_dry_run = request.data.get('dry_run', True)
+        dry_run = not (
+            raw_dry_run is False
+            or (isinstance(raw_dry_run, str) and raw_dry_run.strip().lower() in ('false', '0', 'no'))
+        )
+        lesson_hint = str(request.data.get('lesson_id') or '').strip() or None
+        day_hint = request.data.get('day_of_week')
+        try:
+            day_hint = int(day_hint) if day_hint not in (None, '', 'all') else None
+        except (TypeError, ValueError):
+            day_hint = None
+        if day_hint is not None and not 0 <= day_hint <= 6:
+            day_hint = None
 
         if automation_type not in ('kind', 'flow'):
             return Response({'error': 'נדרש automation_type (kind או flow)'}, status=status.HTTP_400_BAD_REQUEST)
         if not automation_id:
             return Response({'error': 'נדרש automation_id'}, status=status.HTTP_400_BAD_REQUEST)
-        if automation_type == 'kind' and automation_id not in ManyChatService._REGISTRATION_KINDS:
+        if automation_type == 'kind' and automation_id not in ManyChatService.AUTOMATION_LABELS:
             return Response({'error': 'אוטומציה לא מוכרת'}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(raw_ids, list) or not raw_ids:
             return Response({'error': 'נדרשת רשימת ילדים'}, status=status.HTTP_400_BAD_REQUEST)
@@ -402,6 +413,8 @@ class ChildViewSet(viewsets.ModelViewSet):
             dry_run=dry_run,
             skip_phones=[str(p) for p in raw_skip],
             service=svc,
+            lesson_id=lesson_hint,
+            day_of_week=day_hint,
         )
         payload['automation_label'] = (
             ManyChatService.AUTOMATION_LABELS.get(automation_id) if automation_type == 'kind' else automation_id
