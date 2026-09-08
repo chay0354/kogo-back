@@ -23,6 +23,7 @@ from apps.courses.serializers import (
 from apps.instructors.models import Instructor
 from apps.core.models import LessonMonthlySnapshot
 from apps.enrollments.models import LessonEnrollment
+from apps.enrollments.enrollment_counts import paying_enrollments
 from apps.core.permissions import IsManager, IsManagerOrPartner, StaffAccessMixin
 from apps.core.scoping import (
     scope_courses,
@@ -170,6 +171,30 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
             .values_list('course_id', 'c')
         )
 
+        # Per-lesson active (paying) headcount for the course card header:
+        # "שני 14 · חמישי 16". A distinct-children total is misleading next to
+        # a per-lesson capacity, so the header lists each day on its own. Two
+        # batched queries for the whole type, no per-course work.
+        paying_by_lesson = dict(
+            paying_enrollments()
+            .filter(lesson__course_id__in=course_ids)
+            .values_list('lesson_id')
+            .annotate(c=Count('id'))
+            .values_list('lesson_id', 'c')
+        )
+        lesson_headcounts = {}
+        for row in (
+            Lesson.objects.filter(course_id__in=course_ids, status='scheduled')
+            .order_by('day_of_week', 'start_time')
+            .values('id', 'course_id', 'day_of_week', 'start_time')
+        ):
+            lesson_headcounts.setdefault(row['course_id'], []).append({
+                'lesson_id': str(row['id']),
+                'day_of_week': row['day_of_week'],
+                'start_time': row['start_time'].strftime('%H:%M'),
+                'count': paying_by_lesson.get(row['id'], 0),
+            })
+
         current_month = timezone.now().strftime('%Y-%m')
         course_financials = {
             row['course_id']: row
@@ -190,6 +215,7 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
                 **self.get_serializer_context(),
                 'course_enrollment_counts': course_enrollment_counts,
                 'lessons_counts': lessons_counts,
+                'lesson_headcounts': lesson_headcounts,
                 'course_financials': course_financials,
             },
         )

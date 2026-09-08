@@ -220,6 +220,51 @@ class CourseCatalogAPITests(TestCase):
         )
         self.assertEqual(course_with_lessons["lessons_count"], 1)
 
+    def test_course_type_details_lists_per_lesson_headcounts(self):
+        """
+        Each course carries `lesson_headcounts`: its scheduled lessons in day/time
+        order, each with the active paying headcount of that specific lesson. A
+        second day on course_1 with its own child must show its own number, not
+        the course-wide distinct-children total.
+        """
+        thursday = Lesson.objects.create(
+            course=self.course_1,
+            room=self.room_a1,
+            instructor=self.instructor_fixed,
+            day_of_week=4,
+            start_time=time(16, 0),
+            end_time=time(16, 45),
+            is_recurring=True,
+            status="scheduled",
+        )
+        second_child = Child.objects.create(
+            family=self.family,
+            first_name="Kid",
+            last_name="Two",
+            id_number="998",
+            birth_date=date(2017, 1, 1),
+            gender="male",
+            status="active",
+        )
+        # Both children on Thursday; only the first on Monday.
+        LessonEnrollment.objects.create(lesson=thursday, child=self.child, status="active")
+        LessonEnrollment.objects.create(lesson=thursday, child=second_child, status="active")
+        # Inactive and trial rows never count.
+        LessonEnrollment.objects.create(lesson=self.lesson_recurring, child=second_child, status="inactive")
+
+        resp = self.client.get(f"/api/v1/courses/types/{self.course_type.id}/details/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        course_1 = next(c for c in resp.data["courses"] if c["id"] == str(self.course_1.id))
+        self.assertEqual(course_1["course_enrollment_count"], 2)
+        self.assertEqual(
+            [(h["day_of_week"], h["start_time"], h["count"]) for h in course_1["lesson_headcounts"]],
+            [(1, "16:00", 1), (4, "16:00", 2)],
+        )
+        self.assertEqual(course_1["lesson_headcounts"][1]["lesson_id"], str(thursday.id))
+
+        course_2 = next(c for c in resp.data["courses"] if c["id"] == str(self.course_2.id))
+        self.assertEqual([h["count"] for h in course_2["lesson_headcounts"]], [0])
+
     def _lessons_detail(self, course_id):
         resp = self.client.get(f"/api/v1/courses/courses/{course_id}/lessons_detail/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
