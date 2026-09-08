@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.db.utils import OperationalError
 from django.utils import timezone
 
@@ -211,7 +211,52 @@ def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
             enrollment.start_date = today
         if bundle and not enrollment.bundle:
             enrollment.bundle = bundle
+        # A trial row reused as the paying one kept its trial date, and the roster
+        # shows a trial-dated enrollment on that one date only — so a child who
+        # trialled here and then subscribed dropped off the register the next
+        # week. The trial itself stays on record in trial_outcome, the attendance
+        # rows and Child.trial_classes_attended — stamped here, because the
+        # parent usually pays on the evening of the trial, before the cron that
+        # would have recorded it runs.
+        if enrollment.trial_lesson_date:
+            _record_trial_outcome_before_conversion(enrollment, today)
+            enrollment.trial_lesson_date = None
         enrollment.save()
+
+    # Any other trial row this child still holds from a trial that already took
+    # place is history now. Left 'active' it would start filling that lesson's
+    # capacity the moment the child's status became active, since capacity
+    # excludes children by status. A trial still booked for a coming date stays —
+    # the parent was told about it.
+    stale = LessonEnrollment.objects.filter(
+        child=child, status='active', trial_lesson_date__isnull=False, trial_lesson_date__lt=today,
+    ).exclude(lesson__in=lessons)
+    for row in stale:
+        _record_trial_outcome_before_conversion(row, today)
+        row.status = 'inactive'
+        row.end_date = row.trial_lesson_date
+        row.save(update_fields=['status', 'end_date', 'trial_outcome', 'updated_at'])
+
+
+def _record_trial_outcome_before_conversion(enrollment, today) -> None:
+    """Write הגיע / לא הגיע on a trial row the conversion is about to close.
+
+    Only for a trial that has happened: a past date, or today's date once the
+    register was marked. A trial booked for a coming date has no outcome yet.
+    """
+    from apps.enrollments.trial_reminders import _trial_outcome_for
+    from apps.customers.models import Child
+
+    if enrollment.trial_outcome or not enrollment.trial_lesson_date:
+        return
+    outcome = _trial_outcome_for(enrollment)
+    if enrollment.trial_lesson_date >= today and outcome == 'unmarked':
+        return
+    enrollment.trial_outcome = outcome
+    if outcome == 'attended':
+        Child.objects.filter(pk=enrollment.child_id).update(
+            trial_classes_attended=F('trial_classes_attended') + 1,
+        )
 
 
 def heal_missing_bundle_enrollments() -> dict:

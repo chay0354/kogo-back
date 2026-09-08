@@ -225,12 +225,13 @@ def move_trial_enrollment(*, enrollment: LessonEnrollment, new_lesson: Lesson, t
     date_changed = old_date != trial_date
     if lesson_changed or date_changed:
         row.trial_lesson_date = trial_date
+        row.trial_outcome = ''
         row.start_date = trial_date
         row.trial_10am_reminder_sent_at = None
         row.trial_followup_reminder_sent_at = None
         row.trial_evening_reminder_sent_at = None
         row.save(update_fields=[
-            'trial_lesson_date', 'start_date',
+            'trial_lesson_date', 'trial_outcome', 'start_date',
             'trial_10am_reminder_sent_at', 'trial_followup_reminder_sent_at',
             'trial_evening_reminder_sent_at', 'updated_at',
         ])

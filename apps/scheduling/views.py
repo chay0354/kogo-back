@@ -193,8 +193,14 @@ class LessonViewSet(viewsets.ModelViewSet):
             attendance_qs = attendance_qs.filter(occurrence_date__isnull=True)
         attendance_records = list(attendance_qs)
 
+        # A trial row is retired the day after its date (trial_outcome set on it);
+        # looking back at that date, the register still shows the child with the
+        # outcome instead of a hole where they sat.
+        roster_q = Q(status='active')
+        if occ_date:
+            roster_q |= Q(trial_lesson_date=occ_date, status='inactive') & ~Q(trial_outcome='')
         enrollments = list(
-            lesson.enrollments.filter(status='active').select_related('child', 'child__family')
+            lesson.enrollments.filter(roster_q).select_related('child', 'child__family')
         )
 
         # Walk-ins the instructor added from this screen. They are not 'active',
@@ -252,6 +258,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'child_phone': child_contact_phone(e.child),
                 'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
                 'is_trial': is_trial,
+                'trial_outcome': e.trial_outcome or None,
             })
         
         data['enrollments'] = visible_enrollments

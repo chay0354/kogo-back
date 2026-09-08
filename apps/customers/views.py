@@ -1,3 +1,4 @@
+import uuid
 import logging
 import os
 from decimal import Decimal
@@ -198,6 +199,17 @@ class ChildViewSet(viewsets.ModelViewSet):
                 lesson_enrollments__status__in=['active', 'payments_problem']
             ).distinct()
         
+        # Filter by family — the child card opens a sibling through this, and the
+        # list is the one endpoint that returns the full card (the detail route
+        # serves the slim serializer). A .filter() on the already-scoped queryset,
+        # so a partner cannot reach another branch's family by id.
+        family_id = self.request.query_params.get('family')
+        if family_id and family_id != 'all':
+            try:
+                queryset = queryset.filter(family_id=uuid.UUID(str(family_id)))
+            except ValueError:
+                queryset = queryset.none()
+
         # Filter by city (only children enrolled in lessons in a branch in this city)
         city_id = self.request.query_params.get('city')
         if city_id and city_id != 'all':

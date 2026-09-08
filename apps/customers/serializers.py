@@ -41,6 +41,19 @@ def _active_lesson_enrollments(child):
     return rows
 
 
+def _latest_finished_trial(child):
+    """The most recent trial row that carries an outcome, whatever its status."""
+    latest = None
+    for person in _identity_children(child):
+        for enrollment in person.lesson_enrollments.all():
+            if not enrollment.trial_outcome or not enrollment.lesson_id:
+                continue
+            key = enrollment.trial_lesson_date or enrollment.end_date or enrollment.start_date
+            if latest is None or (key and key > latest[0]):
+                latest = (key, enrollment)
+    return latest[1] if latest else None
+
+
 def _serialize_lesson_enrollment(enrollment):
     lesson = enrollment.lesson
     course = lesson.course
@@ -61,6 +74,7 @@ def _serialize_lesson_enrollment(enrollment):
             enrollment.trial_lesson_date.isoformat()
             if enrollment.trial_lesson_date else None
         ),
+        'trial_outcome': enrollment.trial_outcome or None,
     }
 
 
@@ -331,12 +345,18 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         if chosen is None and obj.status == 'trial_signed':
             chosen = fallback
         if chosen is None:
+            # The trial is over: the cron retired the row and wrote the outcome
+            # on it. The card still shows that trial — הגיע / לא הגיע — until the
+            # child books another one.
+            chosen = _latest_finished_trial(obj)
+        if chosen is None:
             return None
         lesson = chosen.lesson
         return {
             'enrollment_id': str(chosen.id),
             'lesson_id': str(lesson.id),
             'course_name': lesson.course.name,
+            'trial_outcome': chosen.trial_outcome or None,
             'trial_lesson_date': (
                 chosen.trial_lesson_date.isoformat() if chosen.trial_lesson_date else None
             ),

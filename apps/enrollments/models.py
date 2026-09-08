@@ -73,6 +73,23 @@ class LessonEnrollment(models.Model):
     )
 
     trial_lesson_date = models.DateField(null=True, blank=True, verbose_name="תאריך שיעור ניסיון")
+    # What became of the trial, read off the register when the date has passed.
+    # It lives on the enrollment and not on Child.status: `trial_completed`
+    # only ever meant "the date went by", and the child's status feeds capacity,
+    # billing, messaging and every list — widening it is not worth one label.
+    TRIAL_OUTCOME_CHOICES = [
+        ('attended', 'הגיע'),
+        ('no_show', 'לא הגיע'),
+        ('unmarked', 'לא סומן'),
+    ]
+    trial_outcome = models.CharField(
+        max_length=20,
+        choices=TRIAL_OUTCOME_CHOICES,
+        blank=True,
+        default='',
+        verbose_name="תוצאת הניסיון",
+        help_text="נקבע לפי הנוכחות שסומנה בתאריך הניסיון, ברגע שהתאריך עבר.",
+    )
     trial_evening_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת ערב נשלחה (לא בשימוש)")
     trial_10am_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת 10:00 ביום הניסיון נשלחה")
     trial_followup_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="after-test נשלח")
@@ -202,3 +219,32 @@ class RegisterReminder(models.Model):
 
     def __str__(self):
         return f"{self.instructor} - {self.occurrence_date} - {self.get_kind_display()}"
+
+
+class TrialBlockedDate(models.Model):
+    """
+    תאריך חסום לשיעורי ניסיון — a calendar day on which no trial can be booked.
+
+    The office marks holidays and closures here from the settings screen; the
+    dates join the ones configured in BLOCKED_TRIAL_LESSON_DATES and vanish
+    from the widget's date picker, are refused on submit, and cannot be set
+    from the CRM either. Blocking a date that already holds trial bookings
+    moves them to the next open occurrence (see reschedule_blocked_trial_enrollments).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    date = models.DateField(unique=True, verbose_name="תאריך")
+    reason = models.CharField(max_length=120, blank=True, verbose_name="סיבה", help_text="למשל: ראש השנה, חופשת סוכות.")
+    created_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='trial_blocked_dates', verbose_name="נוצר על ידי",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+
+    class Meta:
+        db_table = 'trial_blocked_dates'
+        verbose_name = "תאריך חסום לניסיון"
+        verbose_name_plural = "תאריכים חסומים לניסיון"
+        ordering = ['date']
+
+    def __str__(self):
+        return f"{self.date:%d/%m/%Y}{' - ' + self.reason if self.reason else ''}"
