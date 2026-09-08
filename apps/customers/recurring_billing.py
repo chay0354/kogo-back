@@ -38,6 +38,18 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
     """
     from apps.core.payment_service import PaymentService
 
+    # A downgrade scheduled from the customers page moves the child on its
+    # date, *before* the lower amount is promoted — a move that fails puts the
+    # amount back, so nobody is billed less for a unit they never left. A
+    # failure here must not stop everyone's billing.
+    scheduled = {'applied': 0, 'failed': 0, 'errors': [], 'skipped': 'dry_run'}
+    if not dry_run:
+        try:
+            from apps.enrollments.change_pricing import apply_due_scheduled_unit_changes
+            scheduled = apply_due_scheduled_unit_changes()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception('scheduled unit changes failed before billing')
+            scheduled = {'applied': 0, 'failed': 0, 'errors': [{'error': str(exc)}]}
     apply_due_pending_recurring_amounts()
     today = timezone.now().astimezone(JERUSALEM_TZ).date()
     service = PaymentService()
@@ -62,7 +74,8 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
     )
     due_rows = list(due)
 
-    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0, 'errors': []}
+    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0,
+               'errors': list(scheduled.get('errors') or []), 'scheduled_changes': scheduled}
 
     for recurring in due_rows:
         if recurring.last_charge_date and recurring.last_charge_date >= today:

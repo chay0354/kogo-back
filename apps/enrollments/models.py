@@ -248,3 +248,45 @@ class TrialBlockedDate(models.Model):
 
     def __str__(self):
         return f"{self.date:%d/%m/%Y}{' - ' + self.reason if self.reason else ''}"
+
+
+class ScheduledUnitChange(models.Model):
+    """
+    A lesson change that takes effect on a later date.
+
+    When a change lowers the monthly price (twice a week → once a week), the
+    parent has already paid for this month, so the child stays where they are
+    until the next billing cycle: on `effective_date` the cron moves the child
+    to the target lessons, and the standing order's pending amount takes over
+    on the same date. The customers page shows the row as "מתוזמן" until then.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    enrollment = models.ForeignKey(
+        'enrollments.LessonEnrollment', on_delete=models.CASCADE, related_name='scheduled_changes',
+    )
+    child = models.ForeignKey(Child, on_delete=models.CASCADE, related_name='scheduled_unit_changes')
+    target_lessons = models.ManyToManyField(Lesson, related_name='+')
+    target_bundle = models.ForeignKey(LessonBundle, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    recurring_payment = models.ForeignKey(
+        'customers.RecurringPayment', on_delete=models.SET_NULL, null=True, blank=True, related_name='scheduled_unit_changes',
+    )
+    effective_date = models.DateField()
+    old_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    new_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    target_label = models.CharField(max_length=200, blank=True)
+    created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'scheduled_unit_changes'
+        ordering = ['effective_date', 'created_at']
+
+    @property
+    def is_pending(self) -> bool:
+        return self.applied_at is None and self.cancelled_at is None
+
+    def __str__(self) -> str:
+        return f'{self.child_id} → {self.target_label} ({self.effective_date})'

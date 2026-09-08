@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -208,17 +209,84 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             ],
         })
 
+    def _resolve_change_target(self, request):
+        """(target_lessons, target_bundle) for a non-trial change body, or raise LookupError/ValueError."""
+        from apps.courses.models import Course, LessonBundle
+        from apps.enrollments.change_course import course_unit_lessons, matching_bundle
+
+        course_id = (request.data.get('course_id') or request.data.get('course') or '').strip()
+        new_lesson_id = (request.data.get('lesson_id') or request.data.get('lesson') or '').strip()
+        bundle_id = (request.data.get('bundle_id') or request.data.get('bundle') or '').strip()
+        if bundle_id:
+            bundle = (
+                LessonBundle.objects
+                .select_related('course', 'course__branch')
+                .prefetch_related('lessons', 'lessons__course', 'lessons__room')
+                .get(pk=bundle_id)
+            )
+            targets = [lesson for lesson in bundle.lessons.all() if lesson.status != 'cancelled']
+            targets.sort(key=lambda lesson: (lesson.day_of_week, str(lesson.start_time), str(lesson.id)))
+            return targets, bundle
+        if new_lesson_id:
+            lesson = Lesson.objects.select_related('course', 'course__branch', 'room').get(pk=new_lesson_id)
+            return [lesson], None
+        course = Course.objects.select_related('branch').get(pk=course_id)
+        targets = course_unit_lessons(course)
+        return targets, matching_bundle(course, targets)
+
+    @action(detail=True, methods=['post'], url_path='change-lesson/quote')
+    def change_lesson_quote(self, request, pk=None):
+        """What a change would cost — read-only; the dialog shows this before the office confirms."""
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from apps.courses.models import Course, LessonBundle
+        from apps.enrollments.change_pricing import quote_unit_change
+
+        enrollment = self.get_object()
+        if enrollment.trial_lesson_date:
+            return Response({'direction': 'no_sto', 'blocked': 'שיעור ניסיון — אין תמחור'})
+        try:
+            target_lessons, target_bundle = self._resolve_change_target(request)
+        except (Course.DoesNotExist, Lesson.DoesNotExist, LessonBundle.DoesNotExist, DjangoValidationError, TypeError):
+            return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        if not target_lessons:
+            return Response({'error': 'לא נמצאו שיעורים בחוג שנבחר'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            quote = quote_unit_change(enrollment=enrollment, target_lessons=target_lessons, target_bundle=target_bundle)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(quote)
+
+    @action(detail=True, methods=['post'], url_path='cancel-scheduled-change', permission_classes=[IsAuthenticated, IsManager])
+    def cancel_scheduled_change(self, request, pk=None):
+        from apps.enrollments.change_pricing import ChangePricingError, cancel_scheduled_change, pending_change_for
+
+        enrollment = self.get_object()
+        change = pending_change_for(enrollment)
+        if change is None:
+            return Response({'error': 'אין החלפה מתוזמנת'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            cancel_scheduled_change(change)
+        except ChangePricingError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'cancelled': True, 'id': str(change.id)})
+
     @action(detail=True, methods=['post'], url_path='change-lesson')
     def change_lesson(self, request, pk=None):
-        """Move a child to another חוג without changing what they pay.
+        """Move a child to another חוג.
 
-        Twice/thrice-a-week courses are replaced as one unit.
+        Twice/thrice-a-week courses are replaced as one unit. When the target
+        costs a different monthly amount the office must have seen the quote:
+        the body carries `expected_new_amount`; an upgrade charges the prorated
+        difference now and schedules the new amount, a downgrade schedules the
+        whole change for the next billing date.
         """
         from django.core.exceptions import ValidationError as DjangoValidationError
 
         from apps.courses.models import Course, LessonBundle
-        from apps.customers.serializers import _serialize_lesson_enrollment
+        from apps.customers.serializers import _serialize_lesson_enrollment, propagate_scheduled_change
         from apps.enrollments.change_course import move_trial_enrollment, replace_course_unit, replace_unit
+        from apps.enrollments.change_pricing import ChangePricingError, apply_unit_change
 
         enrollment = self.get_object()
         course_id = (request.data.get('course_id') or request.data.get('course') or '').strip()
@@ -269,50 +337,53 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             data['removed_enrollment_ids'] = [str(row_id) for row_id in result['removed_ids']]
             return Response(data)
 
+        raw_expected = request.data.get('expected_new_amount')
+        expected = None
+        if raw_expected not in (None, ''):
+            try:
+                expected = Decimal(str(raw_expected))
+            except (InvalidOperation, ValueError):
+                return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+            if not expected.is_finite():
+                return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            if bundle_id:
-                bundle = (
-                    LessonBundle.objects
-                    .select_related('course', 'course__branch')
-                    .prefetch_related('lessons', 'lessons__course', 'lessons__room')
-                    .get(pk=bundle_id)
-                )
-                target_lessons = [
-                    lesson for lesson in bundle.lessons.all()
-                    if lesson.status != 'cancelled'
-                ]
-                target_lessons.sort(
-                    key=lambda lesson: (lesson.day_of_week, str(lesson.start_time), str(lesson.id))
-                )
-                result = replace_unit(
+            target_lessons, target_bundle = self._resolve_change_target(request)
+            if not target_lessons:
+                return Response({'error': 'לא נמצאו שיעורים בחוג שנבחר'}, status=status.HTTP_400_BAD_REQUEST)
+            if not bundle_id and not new_lesson_id and str(target_lessons[0].course_id) == str(enrollment.lesson.course_id):
+                result = replace_course_unit(enrollment=enrollment, new_course=target_lessons[0].course)
+                result = {**result, 'applied': 'now', 'charged': None, 'quote': None}
+            else:
+                result = apply_unit_change(
                     enrollment=enrollment,
                     target_lessons=target_lessons,
-                    target_bundle=bundle,
+                    target_bundle=target_bundle,
+                    expected_new_amount=expected,
+                    created_by=request.user if request.user.is_authenticated else None,
+                    # Charging a card and rescheduling a standing order are owner-level acts.
+                    allow_pricing=IsManager().has_permission(request, self),
                 )
-            elif new_lesson_id:
-                new_lesson = (
-                    Lesson.objects
-                    .select_related('course', 'course__branch', 'room')
-                    .get(pk=new_lesson_id)
-                )
-                result = replace_unit(
-                    enrollment=enrollment,
-                    target_lessons=[new_lesson],
-                    target_bundle=None,
-                )
-            else:
-                new_course = Course.objects.select_related('branch').get(pk=course_id)
-                result = replace_course_unit(enrollment=enrollment, new_course=new_course)
         except (Course.DoesNotExist, Lesson.DoesNotExist, LessonBundle.DoesNotExist, DjangoValidationError, TypeError):
             return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        except ChangePricingError as exc:
+            code = status.HTTP_409_CONFLICT if exc.processing else status.HTTP_400_BAD_REQUEST
+            return Response({'error': str(exc), 'processing': exc.processing}, status=code)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         kept = result['kept']
         primary = next((row for row in kept if row.id == enrollment.id), kept[0])
         data = dict(self.get_serializer(primary).data)
-        data['enrollments'] = [_serialize_lesson_enrollment(row) for row in kept]
+        data['enrollments'] = propagate_scheduled_change([_serialize_lesson_enrollment(row) for row in kept])
         data['removed_enrollment_ids'] = [str(row_id) for row_id in result['removed_ids']]
+        data['applied'] = result.get('applied', 'now')
+        data['unchanged'] = bool(result.get('unchanged')) and result.get('applied') != 'scheduled'
+        data['manual_collection'] = result.get('manual_collection')
+        data['cleared_pending'] = bool(result.get('cleared_pending'))
+        data['charged'] = result.get('charged')
+        data['folded_into_next_month'] = bool(result.get('folded_into_next_month'))
+        data['scheduled_change'] = result.get('scheduled_change')
+        data['quote'] = result.get('quote')
         return Response(data)
 
     @action(detail=True, methods=['post'], url_path='drop-course')
