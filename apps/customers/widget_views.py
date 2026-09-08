@@ -801,10 +801,11 @@ class WidgetTrialRegisterView(APIView):
                 if not _created:
                     enrollment.start_date = trial_date
                     enrollment.trial_lesson_date = trial_date
+                    enrollment.trial_outcome = ''
                     enrollment.status = 'active'
                     enrollment.end_date = None
                     enrollment.save(update_fields=[
-                        'start_date', 'trial_lesson_date', 'status', 'end_date', 'updated_at',
+                        'start_date', 'trial_lesson_date', 'trial_outcome', 'status', 'end_date', 'updated_at',
                     ])
         except Exception as exc:
             return Response(
@@ -1214,10 +1215,11 @@ class WidgetChargeView(APIView):
                     if not created:
                         enrollment.start_date = trial_date
                         enrollment.trial_lesson_date = trial_date
+                        enrollment.trial_outcome = ''
                         enrollment.status = 'active'
                         enrollment.end_date = None
                         enrollment.save(update_fields=[
-                            'start_date', 'trial_lesson_date', 'status', 'end_date', 'updated_at',
+                            'start_date', 'trial_lesson_date', 'trial_outcome', 'status', 'end_date', 'updated_at',
                         ])
                     enrollment_id_for_whatsapp = str(enrollment.id)
 

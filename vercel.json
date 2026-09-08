@@ -12,6 +12,10 @@
     {
       "path": "/api/v1/enrollments/cron/register-reminders/",
       "schedule": "*/5 4-20 * * *"
+    },
+    {
+      "path": "/api/v1/enrollments/cron/trial-reminders/",
+      "schedule": "*/30 4-20 * * *"
     }
   ]
 }

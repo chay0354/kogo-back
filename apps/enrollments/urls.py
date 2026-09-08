@@ -5,6 +5,7 @@ from . import views
 router = DefaultRouter()
 router.register(r'enrollments', views.EnrollmentViewSet, basename='enrollment')
 router.register(r'lesson-enrollments', views.LessonEnrollmentViewSet, basename='lesson-enrollment')
+router.register(r'trial-blocked-dates', views.TrialBlockedDateViewSet, basename='trial-blocked-date')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -1,8 +1,9 @@
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.enrollments.enrollment_counts import count_capacity_enrollments
 from apps.enrollments.trial_reminders import compute_trial_lesson_date, iter_upcoming_lesson_occurrences
-from apps.enrollments.models import Enrollment, LessonEnrollment, ChildAbsence
+from apps.enrollments.models import Enrollment, LessonEnrollment, ChildAbsence, TrialBlockedDate
 
 
 class EnrollmentSerializer(serializers.ModelSerializer):
@@ -112,6 +113,7 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         if new_date is not serializers.empty and new_date != instance.trial_lesson_date:
             if 'start_date' not in validated_data:
                 validated_data['start_date'] = new_date
+            instance.trial_outcome = ''
             instance.trial_10am_reminder_sent_at = None
             instance.trial_followup_reminder_sent_at = None
             instance.trial_evening_reminder_sent_at = None
@@ -140,3 +142,25 @@ class AbsenceHistorySerializer(serializers.ModelSerializer):
             return f"{day_name} {time_str}".strip()
         return '-'
 
+
+class TrialBlockedDateSerializer(serializers.ModelSerializer):
+    """תאריך חסום לשיעורי ניסיון — what the settings calendar reads and writes."""
+    created_by_name = serializers.SerializerMethodField()
+
+    def get_created_by_name(self, obj):
+        user = obj.created_by
+        if not user:
+            return ''
+        return (user.get_full_name() or user.username or '').strip()
+
+    def validate_date(self, value):
+        # Blocking a day that has passed would only retire that day's trials
+        # from the rosters, one by one, for nothing.
+        if value < timezone.localdate():
+            raise serializers.ValidationError('לא ניתן לחסום תאריך שעבר')
+        return value
+
+    class Meta:
+        model = TrialBlockedDate
+        fields = ['id', 'date', 'reason', 'created_by_name', 'created_at']
+        read_only_fields = ['id', 'created_by_name', 'created_at']

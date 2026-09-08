@@ -1,12 +1,15 @@
 import logging
 
 from django.conf import settings
+from django.db import IntegrityError, transaction
+from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from apps.enrollments.duplicate_students import duplicate_person_on_lesson, duplicate_roster_rows
-from apps.enrollments.models import Enrollment, LessonEnrollment
+from apps.enrollments.models import Enrollment, LessonEnrollment, TrialBlockedDate
 from apps.enrollments.person_match import contact_phone
 from apps.enrollments.register_reminders import (
     GAP_ALERT_AFTER_DAYS,
@@ -14,13 +17,19 @@ from apps.enrollments.register_reminders import (
     instructor_register_gaps,
     send_due_register_reminders,
 )
-from apps.enrollments.serializers import EnrollmentSerializer, LessonEnrollmentSerializer
+from apps.enrollments.serializers import (
+    EnrollmentSerializer,
+    LessonEnrollmentSerializer,
+    TrialBlockedDateSerializer,
+)
 from apps.enrollments.trial_reminders import (
+    configured_blocked_trial_lesson_dates,
     iter_upcoming_lesson_occurrences,
+    reschedule_blocked_trial_enrollments,
     send_due_trial_reminders,
     stamp_and_notify_trial_enrollment,
 )
-from apps.core.permissions import IsManager, IsManagerOrPartner
+from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
 from apps.courses.models import Lesson
 from apps.customers.models import Child
 
@@ -321,6 +330,48 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         })
 
 
+class TrialBlockedDateViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
+    """
+    USAGE: Registered at /api/v1/enrollments/trial-blocked-dates/
+    USAGE: The settings calendar of days on which no trial lesson can be booked.
+
+    Partners read, managers write. Blocking a day that already holds trial
+    bookings moves them to the next open date of the same lesson and tells the
+    office how many moved and how many could not (no later slot found), so a
+    parent is never left booked on a day the studio is closed.
+    """
+    queryset = TrialBlockedDate.objects.select_related('created_by')
+    serializer_class = TrialBlockedDateSerializer
+    pagination_class = None
+
+    def perform_create(self, serializer):
+        try:
+            serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        except IntegrityError:
+            # Two managers blocked the same day at once; the unique validator
+            # only looks before the insert.
+            raise ValidationError({'date': ['התאריך כבר חסום']})
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        blocked_on = response.data.get('date')
+        # Move the trials booked on this day and report those alone — the sweep
+        # also walks the configured dates, which are not news to the office.
+        rows = [row for row in reschedule_blocked_trial_enrollments() if row.get('old_trial_date') == blocked_on]
+        response.data = {
+            **response.data,
+            'moved': sum(1 for row in rows if row.get('moved')),
+            'unmoved': sum(1 for row in rows if not row.get('moved')),
+        }
+        return response
+
+    @action(detail=False, methods=['get'], url_path='configured')
+    def configured(self, request):
+        """The dates fixed in configuration — shown read-only beside the ones the office marks."""
+        return Response({'dates': [day.isoformat() for day in sorted(configured_blocked_trial_lesson_dates())]})
+
+
 def _cron_token_ok(request) -> bool:
     """
     The same door the billing cron uses — X-Cron-Token, ?token=, or the Bearer
@@ -374,19 +425,15 @@ def register_gaps(request):
 @permission_classes([AllowAny])
 def cron_trial_reminders(request):
     """
-    Scheduler-friendly endpoint for sending due trial reminders.
+    Scheduler-friendly endpoint for sending due trial reminders — and for
+    retiring trials whose date has passed.
 
-    Auth: requires X-Cron-Token header (or ?token=) matching settings.CRON_TOKEN.
-    Vercel Cron config example (in vercel.json):
-        { "crons": [{ "path": "/api/v1/enrollments/cron/trial-reminders/?token=...", "schedule": "*/30 * * * *" }] }
+    Scheduled in vercel.json. Auth is the same door the billing and register
+    crons use (X-Cron-Token, ?token=, or the Bearer header Vercel Cron sends):
+    the earlier inline check accepted only the token header, which is not how
+    Vercel calls, so the schedule would have run and been turned away.
     """
-    expected = (getattr(settings, 'CRON_TOKEN', '') or '').strip()
-    provided = (
-        request.headers.get('X-Cron-Token')
-        or request.query_params.get('token')
-        or ''
-    ).strip()
-    if not expected or provided != expected:
+    if not _cron_token_ok(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
 
     dry_run = str(request.query_params.get('dry_run', '')).lower() in ('1', 'true', 'yes')

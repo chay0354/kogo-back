@@ -19,8 +19,10 @@ from typing import Optional
 from django.conf import settings
 from django.utils import timezone
 
+from django.db.models import F
+
 from apps.courses.models import Lesson
-from apps.enrollments.models import LessonEnrollment
+from apps.enrollments.models import LessonAttendance, LessonEnrollment, TrialBlockedDate
 
 logger = logging.getLogger(__name__)
 
@@ -31,22 +33,42 @@ TRIAL_LESSON_OCCURRENCE_LIMIT = 3
 DEFAULT_BLOCKED_TRIAL_LESSON_DATES = '2026-09-13,2026-09-20,2026-09-21'
 
 
-def blocked_trial_lesson_dates() -> frozenset[date]:
-    """Calendar dates that must not appear as trial-lesson options."""
+def configured_blocked_trial_lesson_dates() -> frozenset[date]:
+    """The dates fixed in BLOCKED_TRIAL_LESSON_DATES alone, without the office's calendar.
+
+    A malformed entry is logged and skipped rather than raised: this runs inside
+    every trial-date request and every trial submit, and one typo in an env var
+    must not turn all of them into 500s.
+    """
     raw = getattr(settings, 'BLOCKED_TRIAL_LESSON_DATES', None)
     if raw is None:
         raw = DEFAULT_BLOCKED_TRIAL_LESSON_DATES
-    if isinstance(raw, str) and not raw.strip():
-        return frozenset()
+    dates: set[date] = set()
     if isinstance(raw, (list, tuple, set, frozenset)):
         parts = [str(item).strip() for item in raw]
+    elif isinstance(raw, str) and not raw.strip():
+        parts = []
     else:
         parts = [p.strip() for p in str(raw).split(',')]
-    dates: set[date] = set()
     for part in parts:
         if not part:
             continue
-        dates.add(date.fromisoformat(part[:10]))
+        try:
+            dates.add(date.fromisoformat(part[:10]))
+        except ValueError:
+            logger.warning('BLOCKED_TRIAL_LESSON_DATES: skipping unreadable entry %r', part)
+    return frozenset(dates)
+
+
+def blocked_trial_lesson_dates() -> frozenset[date]:
+    """Calendar dates that must not appear as trial-lesson options.
+
+    The union of the configured list and the dates the office marks in the CRM
+    (TrialBlockedDate). Every enforcement point reads this one function — the
+    picker, the submit check, and the CRM date edit — so they cannot disagree.
+    """
+    dates = set(configured_blocked_trial_lesson_dates())
+    dates.update(TrialBlockedDate.objects.values_list('date', flat=True))
     return frozenset(dates)
 
 
@@ -272,10 +294,12 @@ def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]
                 enrollment.start_date = new_date
                 update_fields.append('start_date')
             enrollment.trial_lesson_date = new_date
+            enrollment.trial_outcome = ''
             enrollment.trial_10am_reminder_sent_at = None
             enrollment.trial_followup_reminder_sent_at = None
             enrollment.trial_evening_reminder_sent_at = None
             update_fields.extend([
+                'trial_outcome',
                 'trial_10am_reminder_sent_at',
                 'trial_followup_reminder_sent_at',
                 'trial_evening_reminder_sent_at',
@@ -294,15 +318,42 @@ def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]
     return moved
 
 
+def _trial_outcome_for(enrollment: LessonEnrollment) -> str:
+    """What the register said on the trial date.
+
+    present → attended, absent → no_show, and nothing marked → unmarked. The
+    third is kept apart on purpose: an unmarked register is not evidence the
+    child stayed home, and the office should see the difference.
+    """
+    mark = (
+        LessonAttendance.objects
+        .filter(
+            lesson_id=enrollment.lesson_id,
+            child_id=enrollment.child_id,
+            occurrence_date=enrollment.trial_lesson_date,
+        )
+        .values_list('status', flat=True)
+        .first()
+    )
+    if mark == 'present':
+        return 'attended'
+    if mark == 'absent':
+        return 'no_show'
+    return 'unmarked'
+
+
 def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
     """
     After the trial lesson day ends, remove the child from the lesson roster
-    (first cron run on the day after trial_lesson_date).
+    (first cron run on the day after trial_lesson_date), and record on the
+    enrollment whether the child came. A child who came also gets a tick on
+    Child.trial_classes_attended — the counter that existed and was never fed.
     """
     from apps.customers.models import Child
 
     now = timezone.localtime()
     today = now.date()
+    outcomes = {'attended': 0, 'no_show': 0, 'unmarked': 0}
 
     qs = (
         LessonEnrollment.objects
@@ -328,15 +379,31 @@ def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
             skipped += 1
             continue
 
+        outcome = _trial_outcome_for(enrollment)
+        outcomes[outcome] += 1
         if not dry_run:
-            enrollment.status = 'inactive'
-            enrollment.end_date = trial_date
-            enrollment.save(update_fields=['status', 'end_date', 'updated_at'])
+            # Conditional update: two overlapping runs (a Vercel retry, the
+            # management command beside the cron) retire the row once and tick
+            # the counter once.
+            retired = LessonEnrollment.objects.filter(pk=enrollment.pk, status='active').update(
+                status='inactive',
+                end_date=trial_date,
+                trial_outcome=outcome,
+                updated_at=timezone.now(),
+            )
+            if retired != 1:
+                skipped += 1
+                outcomes[outcome] -= 1
+                continue
             Child.objects.filter(pk=enrollment.child_id, status='trial_signed').update(status='trial_completed')
+            if outcome == 'attended':
+                Child.objects.filter(pk=enrollment.child_id).update(
+                    trial_classes_attended=F('trial_classes_attended') + 1,
+                )
 
         removed += 1
 
-    return {'removed': removed, 'skipped': skipped}
+    return {'removed': removed, 'skipped': skipped, **outcomes}
 
 
 def stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
@@ -443,6 +510,17 @@ def _send_trial_whatsapp(svc, kind: str, ctx: dict, *, dry_run: bool, enrollment
     return bool(result.get('sent')), result
 
 
+# A reminder that is due is sent from its due moment for this long; after that
+# it is history and stays unsent. Without this, the first run after a gap
+# (the schedule was missing for months) would greet every old trial parent
+# with "your trial is today".
+TRIAL_REMINDER_STALE_AFTER = timedelta(hours=24)
+
+
+def _reminder_is_fresh(now, due) -> bool:
+    return due <= now <= due + TRIAL_REMINDER_STALE_AFTER
+
+
 def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
     from apps.core.manychat_service import ManyChatService
 
@@ -470,7 +548,7 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
         ten_am_due = _trial_day_10am_send_at(enr.trial_lesson_date)
         after_test_due = _after_test_send_at(enr.trial_lesson_date, lesson.end_time)
 
-        if not enr.trial_10am_reminder_sent_at and now >= ten_am_due:
+        if not enr.trial_10am_reminder_sent_at and _reminder_is_fresh(now, ten_am_due):
             ctx = _build_send_kwargs(enr)
             if not ctx:
                 summary['skipped'] += 1
@@ -492,7 +570,7 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
                     logger.warning("10am trial reminder NOT sent for %s: %s", enr.id, result)
                     summary['errors'] += 1
 
-        if not enr.trial_followup_reminder_sent_at and now >= after_test_due:
+        if not enr.trial_followup_reminder_sent_at and _reminder_is_fresh(now, after_test_due):
             ctx = _build_send_kwargs(enr)
             if not ctx:
                 summary['skipped'] += 1
