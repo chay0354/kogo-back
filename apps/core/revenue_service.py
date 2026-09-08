@@ -582,6 +582,11 @@ def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=
         'amount': -d.total_amount if d.document_type == 'credit_invoice' else d.total_amount,
     } for d in docs]
 
+    # Payment-link money carries the link's own business and category.
+    from apps.payment_links.finance import aggregate_payment_link_revenue, card_link_one_time_rows
+    document_rows.extend(aggregate_payment_link_revenue(date_from, date_to, branch_id, branch_ids=branch_ids))
+    document_rows.extend(card_link_one_time_rows(date_from, date_to, branch_id, branch_ids=branch_ids))
+
     branch_keys = set(lesson.get('by_branch_untagged', {})) | set(rental['by_branch_id']) | set(store['by_branch_id'])
     branch_names = {str(b.id): b.name for b in Branch.objects.filter(pk__in=[k for k in branch_keys if k and k != '__online__'])}
     delivery_business = Business.objects.filter(name=DELIVERY_BUSINESS_LABEL).first()

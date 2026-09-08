@@ -593,6 +593,7 @@ SHORT_SOURCE_LABELS = {
     'lessons': 'חוג',
     'store': 'חנות',
     'orphan_charges': 'חיוב ללא חשבונית',
+    'payment_links': 'קישור',
 }
 
 GROUP_WORD = {GROUP_BY_BRANCH: 'סניף', GROUP_BY_UNIT: 'עסק', GROUP_BY_CATEGORY: 'קטגוריה'}

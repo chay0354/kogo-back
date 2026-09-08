@@ -44,15 +44,17 @@ from apps.documents.period_report import (
 SOURCE_LESSONS = 'lessons'
 SOURCE_STORE = 'store'
 SOURCE_ORPHAN_CHARGES = 'orphan_charges'
+SOURCE_PAYMENT_LINKS = 'payment_links'
 
 SOURCE_LABELS = {
     SOURCE_LESSONS: 'חיובי חוגים — נשלח מייל, לא הופק מסמך',
     SOURCE_STORE: 'מכירות חנות — הפקת המסמך בטרנזילה נכשלה',
     SOURCE_ORPHAN_CHARGES: 'חיובים שנגבו ואין להם אפילו רשומת חשבונית',
+    SOURCE_PAYMENT_LINKS: 'תשלומים בקישור — לא הופק מסמך',
 }
 # The order the sources read in inside a group: the regular thing first, the
 # store next, the oddity last.
-SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_ORPHAN_CHARGES)
+SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_ORPHAN_CHARGES, SOURCE_PAYMENT_LINKS)
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
 # completed charges plus confirmed website orders whose stock was already taken.
@@ -299,7 +301,8 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
     qs = (
         Invoice.objects
         .filter(status='paid', invoice_date__date__gte=start, invoice_date__date__lte=end)
-        .select_related('family', 'family__branch', 'branch')
+        .select_related('family', 'family__branch', 'branch',
+                        'payment__card_link__business', 'payment__card_link__business_category')
         .prefetch_related('children__child', 'children__course__business',
                           'children__course__business_category')
         .order_by('invoice_date', 'invoice_number')
@@ -322,6 +325,9 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
         # that carries a tag names the business, which is how the invoice
         # page tags a document for the same family.
         course = next((link.course for link in links if link.course_id), None)
+        tags = _income_tags(course)
+        if not tags:
+            tags = _card_link_tags(invoice)
         row = UndocumentedRow(
             source=SOURCE_LESSONS,
             customer=customer,
@@ -332,10 +338,26 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
             branch_name=branch_name,
             amount=invoice.amount,
             child_ids=[link.child_id for link in links if link.child_id],
-            **_income_tags(course),
+            **tags,
         )
         rows.append(row)
     return rows
+
+
+def _card_link_tags(invoice) -> dict:
+    """A one-time charge through a card link carries the link's tags, not a course's."""
+    payment = getattr(invoice, 'payment', None)
+    link = getattr(payment, 'card_link', None) if payment is not None else None
+    if link is None:
+        return {}
+    tags = {}
+    if link.business_id:
+        tags['business_id'] = link.business_id
+        tags['business_name'] = link.business.name
+    if link.business_category_id:
+        tags['category_id'] = link.business_category_id
+        tags['category_name'] = link.business_category.name
+    return tags
 
 
 def _store_rows(branch_ids, start: date, end: date, delivery: dict) -> list:
@@ -451,6 +473,37 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
     return rows
 
 
+def _payment_link_rows(branch_ids, start: date, end: date) -> list:
+    """Money paid through a payment link with no document behind it (child_ids empty: nothing merges by guess)."""
+    from apps.payment_links.finance import completed_link_payments
+
+    rows = []
+    qs = completed_link_payments(start, end, branch_ids=branch_ids).filter(formal_document__isnull=True)
+    for payment in qs:
+        link = payment.link
+        branch_id, branch_name = _branch_of(link.branch)
+        tags = {}
+        if link.business_id:
+            tags['business_id'] = link.business_id
+            tags['business_name'] = link.business.name
+        if link.business_category_id:
+            tags['category_id'] = link.business_category_id
+            tags['category_name'] = link.business_category.name
+        rows.append(UndocumentedRow(
+            source=SOURCE_PAYMENT_LINKS,
+            customer=payment.payer_name or 'ללא שם',
+            reference=str(payment.id)[:8].upper(),
+            row_date=(payment.paid_at or payment.created_at).date(),
+            detail=f'{link.title} · {payment.option_label}'.strip(' ·'),
+            branch_id=branch_id,
+            branch_name=branch_name,
+            amount=payment.amount,
+            child_ids=[],
+            **tags,
+        ))
+    return rows
+
+
 def _issued_document_index(start: date, end: date) -> dict:
     """
     (child, amount) -> the numbers of documents issued for that child and sum.
@@ -519,6 +572,7 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
         (SOURCE_LESSONS, _lesson_rows(branch_ids, start, end)),
         (SOURCE_STORE, _store_rows(branch_ids, start, end, delivery)),
         (SOURCE_ORPHAN_CHARGES, _orphan_charge_rows(branch_ids, start, end)),
+        (SOURCE_PAYMENT_LINKS, _payment_link_rows(branch_ids, start, end)),
     ):
         if rows:
             sections.append(SourceSection(source=source, label=SOURCE_LABELS[source], rows=rows))

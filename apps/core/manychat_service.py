@@ -408,6 +408,7 @@ class ManyChatService:
     REGISTRATION_KIND_PAYMENT_FAILED = 'payment_failed'
     REGISTRATION_KIND_CARD_UPDATE = 'card_update'
     REGISTRATION_KIND_DIDNT_ARRIVE = 'didnt_arrive'
+    REGISTRATION_KIND_CARD_LINK = 'card_link'
 
     _REGISTRATION_KINDS = {
         REGISTRATION_KIND_SUBSCRIPTION: {
@@ -468,6 +469,17 @@ class ManyChatService:
                 'אם לא מסתדר, אפשר לפנות לצוות קוגומלו ב-050-9424755.'
             ),
         },
+        # The office sends a link to enter a card (standing order or a one-time charge).
+        # Same field names as card_update, so one ManyChat flow can serve both.
+        REGISTRATION_KIND_CARD_LINK: {
+            'flow_setting': 'MANYCHAT_CARD_LINK_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'להסדרת התשלום עבור {child_name}{course_suffix} על סך ₪{amount}, '
+                'הזינו כרטיס אשראי בקישור: {card_update_url}\n'
+                'אם לא מסתדר, אפשר לפנות לצוות קוגומלו ב-050-9424755.'
+            ),
+        },
         # 3 consecutive times not marked present (didnt_arrive automation).
         REGISTRATION_KIND_DIDNT_ARRIVE: {
             'flow_setting': 'MANYCHAT_DIDNT_ARRIVE_FLOW_NS',
@@ -489,6 +501,7 @@ class ManyChatService:
         REGISTRATION_KIND_PAYMENT_FAILED: 'תשלום נכשל',
         REGISTRATION_KIND_CARD_UPDATE: 'עדכון כרטיס (הוראת קבע נכשלה)',
         REGISTRATION_KIND_DIDNT_ARRIVE: 'לא הגיע (3 פעמים)',
+        REGISTRATION_KIND_CARD_LINK: 'קישור להזנת כרטיס',
     }
 
     def list_available_automations(self) -> list[dict]:

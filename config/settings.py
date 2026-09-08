@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'apps.enrollments',
     'apps.scheduling',
     'apps.store',
+    'apps.payment_links',
 ]
 
 MIDDLEWARE = [
@@ -232,6 +233,11 @@ REST_FRAMEWORK = {
     # limit; the real guards are the per-request caps and the DB-side checks.
     'DEFAULT_THROTTLE_RATES': {
         'customers_broadcast': '30/min',
+        'payment_link_view': '60/min',
+        'payment_link_start': '30/min',
+        'payment_link_status': '120/min',
+        'card_link_view': '30/min',
+        'card_link_charge': '5/min',
     },
 }
 
