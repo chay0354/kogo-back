@@ -17,9 +17,8 @@ from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from django.conf import settings
+from django.db.models import F, Q
 from django.utils import timezone
-
-from django.db.models import F
 
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonAttendance, LessonEnrollment, TrialBlockedDate
@@ -348,8 +347,11 @@ def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
     (first cron run on the day after trial_lesson_date), and record on the
     enrollment whether the child came. A child who came also gets a tick on
     Child.trial_classes_attended — the counter that existed and was never fed.
+
+    Only rows that are still a trial are dropped. A paid conversion clears
+    trial_lesson_date, so those enrollments stay on the profile.
     """
-    from apps.customers.models import Child
+    from apps.customers.models import Child, RecurringPayment
 
     now = timezone.localtime()
     today = now.date()
@@ -360,7 +362,7 @@ def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
         .select_related('lesson', 'child')
         .filter(
             trial_lesson_date__isnull=False,
-            child__status='trial_signed',
+            trial_lesson_date__lt=today,
             status='active',
         )
     )
@@ -375,7 +377,18 @@ def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
             skipped += 1
             continue
 
-        if trial_date >= today:
+        child = enrollment.child
+        paid = RecurringPayment.objects.filter(
+            child=child,
+            status__in=('active', 'paused'),
+        ).filter(
+            Q(initial_payment__lesson_id=lesson.id)
+            | Q(initial_payment__bundle__lessons__id=lesson.id)
+        ).exists()
+        if paid:
+            if not dry_run and enrollment.trial_lesson_date:
+                enrollment.trial_lesson_date = None
+                enrollment.save(update_fields=['trial_lesson_date', 'updated_at'])
             skipped += 1
             continue
 

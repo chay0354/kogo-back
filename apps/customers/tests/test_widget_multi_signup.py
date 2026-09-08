@@ -392,3 +392,26 @@ class WidgetRejectsDuplicateLessonSignupTest(TestCase):
         self.assertEqual(response.status_code, 400, response.content)
         self.assertIn('כבר רשום', response.json()['error'])
 
+    def test_lookup_allows_same_lesson_after_trial(self):
+        from datetime import date
+
+        self.child.status = 'trial_completed'
+        self.child.save(update_fields=['status'])
+        LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson).update(
+            trial_lesson_date=date(2026, 6, 10),
+        )
+        response = self.client.post(
+            '/api/v1/customers/widget/lookup/',
+            {
+                'parent_id_number': '123456782',
+                'child_first_name': 'Kid',
+                'child_last_name': 'Parent',
+                'lesson_id': str(self.lesson.id),
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertFalse(body['already_registered'])
+        self.assertNotIn(str(self.lesson.id), body.get('enrolled_lesson_ids') or [])
+

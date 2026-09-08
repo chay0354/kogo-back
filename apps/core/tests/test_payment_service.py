@@ -403,6 +403,22 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         )
         self.assertIn('payment_id', result)
 
+    def test_paid_enrollment_clears_leftover_trial_date(self):
+        from apps.core.payment_service import enroll_child_in_paid_lessons
+
+        self.child.status = 'active'
+        self.child.save(update_fields=['status'])
+        enrollment = LessonEnrollment.objects.create(
+            child=self.child,
+            lesson=self.lesson,
+            status='active',
+            trial_lesson_date=date.today(),
+        )
+        enroll_child_in_paid_lessons(child=self.child, lesson=self.lesson)
+        enrollment.refresh_from_db()
+        self.assertIsNone(enrollment.trial_lesson_date)
+        self.assertEqual(enrollment.status, 'active')
+
 
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class PaymentServiceLessonBundleTest(TestCase):

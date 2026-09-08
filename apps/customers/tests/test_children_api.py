@@ -749,5 +749,38 @@ class ChildrenDuplicateCardsListTests(TestCase):
         )
         self.assertEqual(kinds, ['regular', 'trial'])
 
+    def test_list_hides_finished_trial_from_profile(self):
+        from datetime import time
+
+        from apps.courses.models import Lesson
+        from apps.enrollments.models import LessonEnrollment
+
+        child = create_test_child(
+            family=self.family,
+            first_name="ניסיון",
+            last_name="גמור",
+            status="trial_signed",
+        )
+        course = create_test_course(name="מחול", branch=self.family.branch)
+        lesson = Lesson.objects.create(
+            course=course,
+            day_of_week=1,
+            start_time=time(18, 0),
+            end_time=time(19, 0),
+            status='scheduled',
+        )
+        LessonEnrollment.objects.create(
+            lesson=lesson,
+            child=child,
+            status='active',
+            trial_lesson_date=date(2026, 6, 10),
+        )
+
+        response = self.client.get('/api/v1/customers/children/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        children = response.data['results'] if 'results' in response.data else response.data
+        row = next(item for item in children if item['id'] == str(child.id))
+        self.assertEqual(row['enrollments'], [])
+
 
 

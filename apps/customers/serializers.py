@@ -11,6 +11,7 @@ from apps.customers.models import (
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
 from apps.core.models import Branch, Business, BusinessCategory
+from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 
 
@@ -32,9 +33,16 @@ def _identity_children(child):
 def _active_lesson_enrollments(child):
     seen = set()
     rows = []
+    today = date.today()
     for person in _identity_children(child):
         for enrollment in person.lesson_enrollments.all():
             if enrollment.status != 'active' or enrollment.id in seen:
+                continue
+            if (
+                enrollment.trial_lesson_date
+                and enrollment.trial_lesson_date < today
+                and enrollment.child.status in TRIAL_CHILD_STATUSES
+            ):
                 continue
             seen.add(enrollment.id)
             rows.append(enrollment)

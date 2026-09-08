@@ -182,6 +182,63 @@ class RemoveExpiredTrialEnrollmentTest(TestCase):
         self.assertEqual(self.enrollment.status, 'inactive')
         self.assertEqual(self.child.status, 'trial_completed')
 
+    @override_settings(TIME_ZONE='Asia/Jerusalem')
+    def test_removes_leftover_trial_on_trial_completed_child(self):
+        self.child.status = 'trial_completed'
+        self.child.save(update_fields=['status'])
+        fixed_now = timezone.make_aware(
+            datetime(2026, 6, 11, 1, 0),
+            ZoneInfo('Asia/Jerusalem'),
+        )
+        with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=fixed_now):
+            result = remove_expired_trial_enrollments()
+        self.enrollment.refresh_from_db()
+        self.child.refresh_from_db()
+        self.assertEqual(result['removed'], 1)
+        self.assertEqual(self.enrollment.status, 'inactive')
+        self.assertEqual(self.child.status, 'trial_completed')
+
+    @override_settings(TIME_ZONE='Asia/Jerusalem')
+    def test_keeps_paid_enrollment_and_clears_stale_trial_date(self):
+        from decimal import Decimal
+
+        from apps.customers.models import Payment, RecurringPayment
+
+        self.child.status = 'active'
+        self.child.save(update_fields=['status'])
+        payment = Payment.objects.create(
+            child=self.child,
+            family=self.child.family,
+            lesson=self.lesson,
+            branch=self.lesson.course.branch,
+            payment_type='recurring_subscription',
+            status='completed',
+            base_amount=Decimal('400.00'),
+            discount_amount=Decimal('0.00'),
+            final_amount=Decimal('400.00'),
+        )
+        RecurringPayment.objects.create(
+            child=self.child,
+            initial_payment=payment,
+            tranzila_token='tok',
+            status='active',
+            base_amount=Decimal('400.00'),
+            amount=Decimal('400.00'),
+            billing_day=1,
+            start_date=date(2026, 6, 1),
+            next_billing_date=date(2026, 7, 1),
+        )
+        fixed_now = timezone.make_aware(
+            datetime(2026, 6, 11, 1, 0),
+            ZoneInfo('Asia/Jerusalem'),
+        )
+        with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=fixed_now):
+            result = remove_expired_trial_enrollments()
+        self.enrollment.refresh_from_db()
+        self.assertEqual(result['removed'], 0)
+        self.assertEqual(self.enrollment.status, 'active')
+        self.assertIsNone(self.enrollment.trial_lesson_date)
+
 
 class RescheduleBlockedTrialEnrollmentTest(TestCase):
     def setUp(self):

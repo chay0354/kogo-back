@@ -17,10 +17,13 @@ def paying_enrollments(qs: QuerySet | None = None) -> QuerySet:
     Active enrollments that count as paying subscribers (revenue / salary tiers).
 
     Trial signups stay on the lesson roster but are excluded from financial counts
-    until the child converts to a paying status (e.g. active).
+    until paid conversion clears trial_lesson_date.
     """
     base = qs if qs is not None else LessonEnrollment.objects.all()
-    return base.filter(status='active').exclude(child__status__in=TRIAL_CHILD_STATUSES)
+    return (
+        base.filter(status='active', trial_lesson_date__isnull=True)
+        .exclude(child__status__in=TRIAL_CHILD_STATUSES)
+    )
 
 
 def count_paying_enrollments(*, lesson=None, course=None, courses=None) -> int:
@@ -48,6 +51,7 @@ def is_paying_enrollment(enrollment: LessonEnrollment) -> bool:
     return (
         enrollment.status == 'active'
         and enrollment.child.status not in TRIAL_CHILD_STATUSES
+        and not enrollment.trial_lesson_date
     )
 
 
@@ -63,6 +67,8 @@ def counts_toward_capacity(
     never fill the class, including on their trial day.
     """
     if enrollment.status != 'active':
+        return False
+    if enrollment.trial_lesson_date:
         return False
     return enrollment.child.status not in TRIAL_CHILD_STATUSES
 

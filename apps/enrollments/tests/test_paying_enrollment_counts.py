@@ -75,6 +75,9 @@ class PayingEnrollmentCountTest(TestCase):
     def test_trial_child_counts_after_converting_to_active(self):
         self.trial_child.status = 'active'
         self.trial_child.save(update_fields=['status'])
+        # Leftover trial_lesson_date still marks the row as a trial, not a seat.
+        self.assertEqual(count_paying_enrollments(lesson=self.lesson), 1)
+        LessonEnrollment.objects.filter(child=self.trial_child).update(trial_lesson_date=None)
         self.assertEqual(count_paying_enrollments(lesson=self.lesson), 2)
 
     def test_trial_never_counts_toward_capacity(self):
