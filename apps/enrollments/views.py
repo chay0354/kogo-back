@@ -257,7 +257,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(quote)
 
-    @action(detail=True, methods=['post'], url_path='cancel-scheduled-change')
+    @action(detail=True, methods=['post'], url_path='cancel-scheduled-change', permission_classes=[IsAuthenticated, IsManager])
     def cancel_scheduled_change(self, request, pk=None):
         from apps.enrollments.change_pricing import ChangePricingError, cancel_scheduled_change, pending_change_for
 
@@ -284,7 +284,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         from django.core.exceptions import ValidationError as DjangoValidationError
 
         from apps.courses.models import Course, LessonBundle
-        from apps.customers.serializers import _serialize_lesson_enrollment
+        from apps.customers.serializers import _serialize_lesson_enrollment, propagate_scheduled_change
         from apps.enrollments.change_course import move_trial_enrollment, replace_course_unit, replace_unit
         from apps.enrollments.change_pricing import ChangePricingError, apply_unit_change
 
@@ -344,6 +344,8 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
                 expected = Decimal(str(raw_expected))
             except (InvalidOperation, ValueError):
                 return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+            if not expected.is_finite():
+                return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             target_lessons, target_bundle = self._resolve_change_target(request)
             if not target_lessons:
@@ -358,6 +360,8 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
                     target_bundle=target_bundle,
                     expected_new_amount=expected,
                     created_by=request.user if request.user.is_authenticated else None,
+                    # Charging a card and rescheduling a standing order are owner-level acts.
+                    allow_pricing=IsManager().has_permission(request, self),
                 )
         except (Course.DoesNotExist, Lesson.DoesNotExist, LessonBundle.DoesNotExist, DjangoValidationError, TypeError):
             return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
@@ -370,9 +374,12 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         kept = result['kept']
         primary = next((row for row in kept if row.id == enrollment.id), kept[0])
         data = dict(self.get_serializer(primary).data)
-        data['enrollments'] = [_serialize_lesson_enrollment(row) for row in kept]
+        data['enrollments'] = propagate_scheduled_change([_serialize_lesson_enrollment(row) for row in kept])
         data['removed_enrollment_ids'] = [str(row_id) for row_id in result['removed_ids']]
         data['applied'] = result.get('applied', 'now')
+        data['unchanged'] = bool(result.get('unchanged')) and result.get('applied') != 'scheduled'
+        data['manual_collection'] = result.get('manual_collection')
+        data['cleared_pending'] = bool(result.get('cleared_pending'))
         data['charged'] = result.get('charged')
         data['folded_into_next_month'] = bool(result.get('folded_into_next_month'))
         data['scheduled_change'] = result.get('scheduled_change')

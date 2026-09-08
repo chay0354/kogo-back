@@ -177,20 +177,119 @@ class UpgradeTest(_Base):
         self.enrollment.refresh_from_db()
         self.assertEqual(self.enrollment.lesson_id, self.wed.id)
 
-    def test_no_saved_card_folds_the_difference_into_next_month(self):
+    def test_no_saved_card_moves_and_leaves_the_difference_to_the_office(self):
+        # The cron cannot bill an order without a card either, so no override is filed.
         self.recurring.tranzila_token = ''; self.recurring.save()
         with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod:
             res = self._post(expected_new_amount='335.00')
             prod.return_value.charge_with_token.assert_not_called()
         self.assertEqual(res.status_code, 200, res.content)
-        self.assertTrue(res.data['folded_into_next_month'])
-        override = RecurringChargeOverride.objects.get(recurring_payment=self.recurring)
-        self.assertEqual(override.billing_month, date(2026, 10, 1))
-        self.assertEqual(override.amount, Decimal('391.25'))                    # 335 + 56.25, once
+        self.assertEqual(res.data['manual_collection'], '56.25')
+        self.assertFalse(res.data['folded_into_next_month'])
+        self.assertFalse(RecurringChargeOverride.objects.filter(recurring_payment=self.recurring).exists())
+        self.assertFalse(Payment.objects.filter(payment_type='one_time').exists())
         self.recurring.refresh_from_db()
         self.assertEqual(self.recurring.pending_amount, Decimal('335.00'))
         self.enrollment.refresh_from_db()
         self.assertEqual(self.enrollment.lesson_id, self.mon.id)
+
+    def test_a_move_that_fails_after_the_charge_freezes_the_payment_and_nothing_moves(self):
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod, \
+             patch('apps.enrollments.change_pricing.replace_unit', side_effect=RuntimeError('db down')):
+            prod.return_value.charge_with_token.return_value = dict(OK_CHARGE)
+            res = self._post(expected_new_amount='335.00')
+        self.assertEqual(res.status_code, 409, res.content)
+        self.assertIn('חויב אך ההזזה נכשלה', res.data['error'])
+        diff = Payment.objects.get(payment_type='one_time')
+        self.assertEqual(diff.status, 'processing')                             # the guard, not 'completed'
+        self.assertFalse(TranzilaTransaction.objects.filter(idempotency_key=f'change_diff_{diff.id}').exists())
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.lesson_id, self.wed.id)
+        self.recurring.refresh_from_db()
+        self.assertIsNone(self.recurring.pending_amount)
+        # A second attempt is refused before the gateway is called again.
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod:
+            res = self._post(expected_new_amount='335.00')
+            prod.return_value.charge_with_token.assert_not_called()
+        self.assertEqual(res.status_code, 409)
+
+    def _frozen_difference(self):
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod:
+            prod.return_value.charge_with_token.return_value = {'success': False, 'uncertain': True, 'error': 'timeout'}
+            self._post(expected_new_amount='335.00')
+        return Payment.objects.get(payment_type='one_time', status='processing')
+
+    def test_resolving_a_frozen_difference_as_not_charged_frees_the_child(self):
+        diff = self._frozen_difference()
+        res = self.client.post(f'/api/v1/customers/payments/{diff.id}/resolve-change-difference/', {'decision': 'failed'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        diff.refresh_from_db()
+        self.assertEqual(diff.status, 'failed')
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod, \
+             patch('apps.enrollments.change_pricing.PaymentService._create_invoice_from_payment'):
+            prod.return_value.charge_with_token.return_value = dict(OK_CHARGE)
+            res = self._post(expected_new_amount='335.00')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.data['charged'], '56.25')
+
+    def test_resolving_a_frozen_difference_as_charged_applies_the_move_without_a_new_charge(self):
+        diff = self._frozen_difference()
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod, \
+             patch('apps.enrollments.change_pricing.PaymentService._create_invoice_from_payment') as invoice, self._today():
+            res = self.client.post(
+                f'/api/v1/customers/payments/{diff.id}/resolve-change-difference/',
+                {'decision': 'charged', 'transaction_id': 'T-manual', 'confirmation_code': 'C9'}, format='json',
+            )
+            prod.return_value.charge_with_token.assert_not_called()
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.data['moved'])
+        diff.refresh_from_db()
+        self.assertEqual(diff.status, 'completed')
+        self.assertEqual(TranzilaTransaction.objects.get(idempotency_key=f'change_diff_{diff.id}').transaction_id, 'T-manual')
+        invoice.assert_called_once()
+        active = sorted(LessonEnrollment.objects.filter(child=self.child, status='active').values_list('lesson_id', flat=True), key=str)
+        self.assertEqual(active, sorted([self.mon.id, self.thu.id], key=str))
+        self.recurring.refresh_from_db()
+        self.assertEqual(self.recurring.pending_amount, Decimal('335.00'))
+        # Partners and a second resolve are refused.
+        self.assertEqual(self.client.post(f'/api/v1/customers/payments/{diff.id}/resolve-change-difference/', {'decision': 'failed'}, format='json').status_code, 400)
+
+    def test_a_non_finite_amount_is_refused(self):
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod:
+            res = self._post(expected_new_amount='NaN')
+            prod.return_value.charge_with_token.assert_not_called()
+        self.assertEqual(res.status_code, 400)
+
+    def test_moving_to_the_same_unit_changes_nothing_and_charges_nothing(self):
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod, self._today():
+            res = self.client.post(self.url, {'lesson_id': str(self.wed.id)}, format='json')
+            prod.return_value.charge_with_token.assert_not_called()
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.data.get('unchanged'))
+        self.assertFalse(Payment.objects.filter(payment_type='one_time').exists())
+
+    def test_a_same_price_move_replaces_a_stale_pending_amount_only_after_confirmation(self):
+        # An upgrade reverted the same day: 260 → 335 (pending) → back to a 260 lesson.
+        self.recurring.pending_amount = Decimal('335.00'); self.recurring.pending_amount_effective_date = date(2026, 10, 1); self.recurring.save()
+        same = Lesson.objects.create(course=self.course_once, room=self.room, day_of_week=0, start_time=time(17, 0), end_time=time(18, 0))
+        with self._today():
+            quote = self.client.post(f'{self.url}quote/', {'lesson_id': str(same.id)}, format='json').data
+        self.assertEqual(quote['direction'], 'same')
+        self.assertTrue(quote['clears_pending'])
+        self.assertEqual(quote['pending_amount'], '335.00')
+        with self._today():
+            res = self.client.post(self.url, {'lesson_id': str(same.id)}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.recurring.refresh_from_db()
+        self.assertEqual(self.recurring.pending_amount, Decimal('335.00'))
+        with self._today():
+            res = self.client.post(self.url, {'lesson_id': str(same.id), 'expected_new_amount': '260.00'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.data['cleared_pending'])
+        self.recurring.refresh_from_db()
+        self.assertIsNone(self.recurring.pending_amount)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.lesson_id, same.id)
 
     def test_no_standing_order_moves_without_pricing(self):
         self.recurring.delete()
@@ -273,14 +372,72 @@ class DowngradeTest(_Base):
         self.recurring.refresh_from_db()
         self.assertEqual(self.recurring.amount, Decimal('260.00'))
 
-    def test_a_lesson_that_got_cancelled_leaves_the_change_for_a_person(self):
+    def test_a_lesson_that_got_cancelled_leaves_the_change_for_a_person_and_keeps_the_old_amount(self):
         self._post(expected_new_amount='260.00')
         self.wed.status = 'cancelled'; self.wed.save()
         summary = apply_due_scheduled_unit_changes(today=date(2026, 10, 1))
         self.assertEqual(summary['failed'], 1)
+        self.assertEqual(len(summary['errors']), 1)
         change = ScheduledUnitChange.objects.get(child=self.child)
         self.assertTrue(change.last_error)
+        self.assertTrue(change.is_pending)                                       # still there for a person
         self.assertEqual(set(LessonEnrollment.objects.filter(child=self.child, status='active').values_list('lesson_id', flat=True)), {self.mon.id, self.thu.id})
+        self.recurring.refresh_from_db()
+        self.assertEqual(self.recurring.amount, Decimal('335.00'))
+        self.assertIsNone(self.recurring.pending_amount)                         # the lower figure is not promoted
+
+    def test_the_billing_cron_moves_the_child_before_it_promotes_and_charges(self):
+        from apps.customers import recurring_billing
+        self._post(expected_new_amount='260.00')
+        order = []
+        real_apply = recurring_billing.apply_due_pending_recurring_amounts
+
+        def promote():
+            order.append('promote')
+            return real_apply()
+
+        oct_first = __import__('django').utils.timezone.make_aware(__import__('datetime').datetime(2026, 10, 1, 7, 0))
+        with patch('apps.customers.recurring_billing.timezone') as tz, \
+             patch('apps.enrollments.change_pricing.timezone.now', return_value=oct_first), \
+             patch('apps.customers.recurring_billing.apply_due_pending_recurring_amounts', side_effect=promote), \
+             patch('apps.enrollments.change_pricing.replace_unit', side_effect=lambda **kw: order.append('move')), \
+             patch('apps.customers.recurring_billing.TranzilaService') as svc:
+            tz.now.return_value = oct_first
+            summary = recurring_billing.process_due_recurring_charges(dry_run=True)
+        self.assertEqual(summary['scheduled_changes'].get('skipped'), 'dry_run')
+        self.assertEqual(order, ['promote'])                                     # a dry run moves nobody
+        order.clear()
+        with patch('apps.customers.recurring_billing.timezone') as tz, \
+             patch('apps.enrollments.change_pricing.timezone.now', return_value=oct_first), \
+             patch('apps.customers.recurring_billing.apply_due_pending_recurring_amounts', side_effect=promote), \
+             patch('apps.enrollments.change_pricing.replace_unit', side_effect=lambda **kw: order.append('move')), \
+             patch('apps.customers.recurring_billing.TranzilaService') as svc:
+            tz.now.return_value = oct_first
+            svc.production.return_value.charge_with_token.return_value = dict(OK_CHARGE)
+            summary = recurring_billing.process_due_recurring_charges(dry_run=False)
+        self.assertEqual(order, ['move', 'promote'])
+        self.assertEqual(summary['scheduled_changes']['applied'], 1)
+
+    def test_cancelling_after_the_amount_was_promoted_early_restores_it(self):
+        self._post(expected_new_amount='260.00')
+        # The recurring list promotes on read; simulate that happening before the cron moved the child.
+        self.recurring.amount = Decimal('260.00'); self.recurring.base_amount = Decimal('260.00')
+        self.recurring.pending_amount = None; self.recurring.pending_amount_effective_date = None; self.recurring.save()
+        res = self.client.post(f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/cancel-scheduled-change/')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.recurring.refresh_from_db()
+        self.assertEqual(self.recurring.amount, Decimal('335.00'))
+        self.assertIsNone(self.recurring.pending_amount)
+
+    def test_a_trial_row_of_the_same_child_does_not_carry_the_tag(self):
+        self._post(expected_new_amount='260.00')
+        LessonEnrollment.objects.create(lesson=self.wed, child=self.child, status='active', trial_lesson_date=date(2026, 9, 16))
+        res = self.client.get('/api/v1/customers/children/', {'family': str(self.family.id)})
+        rows = res.data['results'][0]['enrollments']
+        trial = [row for row in rows if row.get('trial_lesson_date')]
+        self.assertEqual(len(trial), 1)
+        self.assertIsNone(trial[0]['scheduled_change'])
+        self.assertTrue(all(row['scheduled_change'] for row in rows if not row.get('trial_lesson_date')))
 
 
 class PriceDriftReportTest(_Base):
@@ -309,3 +466,39 @@ class PriceDriftReportTest(_Base):
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f'Token {Token.objects.create(user=partner).key}')
         self.assertEqual(client.get('/api/v1/customers/recurring-payments/price-drift/').status_code, 403)
+
+
+class PartnerAndRoomTest(_Base):
+    def _partner_client(self):
+        User = get_user_model()
+        partner = User.objects.create_user(username='p@test.com', email='p@test.com', password='x')
+        UserProfile.objects.update_or_create(user=partner, defaults={'role': UserProfile.ROLE_PARTNER})
+        partner.profile.assigned_branches.add(self.branch)
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Token {Token.objects.create(user=partner).key}')
+        return client
+
+    def test_a_partner_cannot_make_a_priced_change_but_can_move_at_the_same_price(self):
+        client = self._partner_client()
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod:
+            res = client.post(self.url, {'bundle_id': str(self.bundle.id), 'expected_new_amount': '335.00'}, format='json')
+            prod.return_value.charge_with_token.assert_not_called()
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('מנהל בלבד', res.data['error'])
+        same = Lesson.objects.create(course=self.course_once, room=self.room, day_of_week=0, start_time=time(17, 0), end_time=time(18, 0))
+        res = client.post(self.url, {'lesson_id': str(same.id)}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(client.post(f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/cancel-scheduled-change/').status_code, 403)
+
+    def test_a_full_lesson_refuses_before_any_charge(self):
+        self.course_twice.capacity = 1
+        self.course_twice.save()
+        other_family = Family.objects.create(name='Levi', phone='0509999999', branch=self.branch)
+        other = Child.objects.create(family=other_family, first_name='Ido', last_name='Levi', birth_date=date(2018, 1, 1), gender='male', status='active')
+        LessonEnrollment.objects.create(lesson=self.mon, child=other, status='active')
+        with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod, self._today():
+            res = self.client.post(self.url, {'bundle_id': str(self.bundle.id), 'expected_new_amount': '335.00'}, format='json')
+            prod.return_value.charge_with_token.assert_not_called()
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('מלא', res.data['error'])
+        self.assertFalse(Payment.objects.filter(payment_type='one_time').exists())

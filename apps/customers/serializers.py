@@ -102,7 +102,21 @@ def _scheduled_change_for(enrollment):
         'target_label': change.target_label,
         'old_amount': str(change.old_amount) if change.old_amount is not None else None,
         'new_amount': str(change.new_amount) if change.new_amount is not None else None,
+        'last_error': change.last_error or '',
     }
+
+
+def propagate_scheduled_change(rows: list) -> list:
+    """One scheduled change covers the whole unit (both days of a bundle); show it on every regular row."""
+    pending_by_unit = {}
+    for row in rows:
+        if row.get('scheduled_change') and not row.get('trial_lesson_date'):
+            pending_by_unit[row.get('bundle_id') or row.get('course_id')] = row['scheduled_change']
+    if pending_by_unit:
+        for row in rows:
+            if not row.get('scheduled_change') and not row.get('trial_lesson_date'):
+                row['scheduled_change'] = pending_by_unit.get(row.get('bundle_id') or row.get('course_id'))
+    return rows
 
 
 class ParentSerializer(serializers.ModelSerializer):
@@ -357,15 +371,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
                 'trial_lesson_date': None,
             })
 
-        # One scheduled change covers the whole unit (both days of a bundle); show it on every row.
-        pending_by_unit = {}
-        for row in result:
-            if row.get('scheduled_change'):
-                pending_by_unit[row.get('bundle_id') or row.get('course_id')] = row['scheduled_change']
-        if pending_by_unit:
-            for row in result:
-                if not row.get('scheduled_change'):
-                    row['scheduled_change'] = pending_by_unit.get(row.get('bundle_id') or row.get('course_id'))
+        propagate_scheduled_change(result)
         return result
 
     def get_trial_enrollment(self, obj):

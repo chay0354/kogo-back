@@ -134,6 +134,11 @@ class ChildViewSet(viewsets.ModelViewSet):
                     'lesson_enrollments',
                     queryset=LessonEnrollment.objects.select_related(
                         'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+                    ).prefetch_related(
+                        Prefetch(
+                            'scheduled_changes',
+                            queryset=ScheduledUnitChange.objects.filter(applied_at__isnull=True, cancelled_at__isnull=True),
+                        ),
                     ),
                 ),
             ),
@@ -1084,6 +1089,26 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ).prefetch_related('discount_snapshots')
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+
+    @action(detail=True, methods=['post'], url_path='resolve-change-difference', permission_classes=[IsAuthenticated, IsManager])
+    def resolve_change_difference(self, request, pk=None):
+        """Close a lesson-change difference charge the gateway never confirmed: failed (retry allowed) or charged (apply the move)."""
+        from apps.enrollments.change_pricing import ChangePricingError, resolve_difference_payment
+
+        payment = self.get_object()
+        try:
+            out = resolve_difference_payment(
+                payment,
+                decision=str(request.data.get('decision') or '').strip(),
+                transaction_id=str(request.data.get('transaction_id') or '').strip()[:100],
+                confirmation_code=str(request.data.get('confirmation_code') or '').strip()[:100],
+                created_by=request.user,
+            )
+        except ChangePricingError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(out)
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['child__first_name', 'child__last_name', 'family__name']
     ordering_fields = ['created_at', 'payment_date', 'final_amount']
