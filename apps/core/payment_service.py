@@ -1783,14 +1783,17 @@ class PaymentService:
                     # SYNCHRONOUS TOKEN CHARGE
                     log_payment_operation("STORE_TOKEN_CHARGE", child=child.full_name, amount=total_amount)
                     
-                    # Create invoice (pending)
+                    # Create invoice (pending). The till sends each line's branch as
+                    # an id string (or 'delivery' / nothing), never a Branch instance.
+                    first_item = product_items[0] if product_items else None
+                    first_product = StoreProduct.objects.get(id=first_item['product_id']) if first_item else None
                     invoice = StoreInvoice.objects.create(
                         child=child,
                         total_amount=total_amount,
                         payment_method='credit_card',
                         payment_status='pending',
                         charged_with_token=True,
-                        branch=product_items[0].get('branch') if product_items else None
+                        branch_id=_store_line_item_branch_id(first_item, first_product) if first_item else None,
                     )
                     
                     # Charge token and complete purchase
