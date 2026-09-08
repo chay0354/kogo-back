@@ -226,6 +226,13 @@ REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
+    # Rates for views that opt in with ScopedRateThrottle. No default throttle
+    # classes — the CRM itself is not rate-limited. With no shared CACHES the
+    # counter lives in each serverless instance's memory, so this is a soft
+    # limit; the real guards are the per-request caps and the DB-side checks.
+    'DEFAULT_THROTTLE_RATES': {
+        'customers_broadcast': '30/min',
+    },
 }
 
 # Authentication backends (support login with email + password)
