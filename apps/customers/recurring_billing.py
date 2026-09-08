@@ -39,6 +39,10 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
     from apps.core.payment_service import PaymentService
 
     apply_due_pending_recurring_amounts()
+    # A downgrade scheduled from the customers page moves the child on its date,
+    # before this run bills the (already lowered) pending amount.
+    from apps.enrollments.change_pricing import apply_due_scheduled_unit_changes
+    scheduled = apply_due_scheduled_unit_changes()
     today = timezone.now().astimezone(JERUSALEM_TZ).date()
     service = PaymentService()
     tranzila = TranzilaService.production()
@@ -62,7 +66,7 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
     )
     due_rows = list(due)
 
-    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0, 'errors': []}
+    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0, 'errors': [], 'scheduled_changes': scheduled}
 
     for recurring in due_rows:
         if recurring.last_charge_date and recurring.last_charge_date >= today:

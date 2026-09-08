@@ -36,7 +36,7 @@ from apps.customers.serializers import (
 from apps.customers.discount_service import DiscountService
 from apps.customers.child_identity import exclude_weaker_duplicate_children
 from apps.core.payment_service import PaymentService
-from apps.enrollments.models import Enrollment, LessonEnrollment
+from apps.enrollments.models import Enrollment, LessonEnrollment, ScheduledUnitChange
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.core.scoping import (
     scope_courses,
@@ -120,6 +120,11 @@ class ChildViewSet(viewsets.ModelViewSet):
             'lesson_enrollments',
             queryset=LessonEnrollment.objects.select_related(
                 'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+            ).prefetch_related(
+                Prefetch(
+                    'scheduled_changes',
+                    queryset=ScheduledUnitChange.objects.filter(applied_at__isnull=True, cancelled_at__isnull=True),
+                ),
             ),
         ),
         Prefetch(
@@ -1547,6 +1552,14 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             RecurringPaymentSerializer(recurring).data,
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=['get'], url_path='price-drift', permission_classes=[IsAuthenticated, IsManager])
+    def price_drift(self, request):
+        """Read-only: standing orders whose amount differs from what their current lessons cost today."""
+        from apps.enrollments.change_pricing import price_drift_report
+
+        rows = price_drift_report()
+        return Response({'count': len(rows), 'results': rows})
 
     @action(detail=False, methods=['post'], url_path='sync-bundle-amounts')
     def sync_bundle_amounts(self, request):

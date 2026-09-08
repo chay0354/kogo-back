@@ -1,4 +1,4 @@
-"""Staff can move a child to another lesson without changing billed amounts."""
+"""Staff can move a child to another lesson; a different price is quoted and confirmed (2026-09-08)."""
 from datetime import date, time
 from decimal import Decimal
 
@@ -74,10 +74,21 @@ class ChangeLessonEnrollmentTest(TestCase):
         token, _ = Token.objects.get_or_create(user=user)
         self.client.credentials(HTTP_AUTHORIZATION=f'Token {token.key}')
 
-    def test_change_lesson_keeps_payment_amounts(self):
+    def test_change_to_a_dearer_lesson_needs_the_quoted_amount(self):
+        # Since 2026-09-08 a change that moves the price is refused until the office confirms the quote.
         res = self.client.post(
             f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/change-lesson/',
             {'lesson_id': str(self.lesson_b.id)},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 400, res.data)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.lesson_id, self.lesson_a.id)
+
+    def test_change_lesson_keeps_payment_amounts(self):
+        res = self.client.post(
+            f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/change-lesson/',
+            {'lesson_id': str(self.lesson_b.id), 'expected_new_amount': '400.00'},
             format='json',
         )
         self.assertEqual(res.status_code, 200, res.data)
@@ -90,8 +101,9 @@ class ChangeLessonEnrollmentTest(TestCase):
         self.assertEqual(self.payment.lesson_id, self.lesson_b.id)
         self.assertEqual(self.payment.final_amount, Decimal('260.00'))
         self.assertEqual(self.payment.base_amount, Decimal('260.00'))
-        self.assertEqual(self.recurring.amount, Decimal('260.00'))
+        self.assertEqual(self.recurring.amount, Decimal('260.00'))            # this month is already paid
         self.assertEqual(self.recurring.base_amount, Decimal('260.00'))
+        self.assertEqual(self.recurring.pending_amount, Decimal('400.00'))    # from the next cycle
 
     def test_same_course_is_noop(self):
         res = self.client.post(
@@ -131,7 +143,7 @@ class ChangeLessonEnrollmentTest(TestCase):
 
         res = self.client.post(
             f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/change-lesson/',
-            {'course_id': str(other_course.id)},
+            {'course_id': str(other_course.id), 'expected_new_amount': '335.00'},
             format='json',
         )
         self.assertEqual(res.status_code, 200, res.data)
@@ -157,7 +169,7 @@ class ChangeLessonEnrollmentTest(TestCase):
 
         res = self.client.post(
             f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/change-lesson/',
-            {'bundle_id': str(bundle.id)},
+            {'bundle_id': str(bundle.id), 'expected_new_amount': '335.00'},
             format='json',
         )
         self.assertEqual(res.status_code, 200, res.data)
@@ -167,7 +179,8 @@ class ChangeLessonEnrollmentTest(TestCase):
         self.assertEqual([row.lesson_id for row in active], [self.lesson_a.id, extra.id])
         self.assertTrue(all(row.bundle_id == bundle.id for row in active))
         self.recurring.refresh_from_db()
-        self.assertEqual(self.recurring.amount, Decimal('260.00'))
+        self.assertEqual(self.recurring.amount, Decimal('260.00'))            # this month is already paid
+        self.assertEqual(self.recurring.pending_amount, Decimal('335.00'))    # from the next cycle
         self.assertEqual(self.recurring.status, 'active')
 
     def test_drop_course_cancels_standing_order(self):
