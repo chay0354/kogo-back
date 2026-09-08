@@ -237,6 +237,7 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
     instructor = InstructorMinimalSerializer(read_only=True)
     lessons_count = serializers.SerializerMethodField()
     course_enrollment_count = serializers.SerializerMethodField()
+    lesson_headcounts = serializers.SerializerMethodField()
     monthly_revenue = serializers.SerializerMethodField()
     monthly_salary = serializers.SerializerMethodField()
     monthly_profit = serializers.SerializerMethodField()
@@ -249,6 +250,7 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
                   'registration_fee_override', 'charge_standing_order_immediately',
                   'branch', 'branch_name', 'instructor', 'instructor_salary_override',
                   'external_link', 'lessons_count', 'course_enrollment_count',
+                  'lesson_headcounts',
                   'monthly_revenue', 'monthly_salary', 'monthly_profit',
                   'is_active', 'show_in_widget']
 
@@ -258,6 +260,10 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
     def get_course_enrollment_count(self, obj):
         """Distinct active students in this course (paying + trial), across all lessons."""
         return self.context.get('course_enrollment_counts', {}).get(obj.id, 0)
+
+    def get_lesson_headcounts(self, obj):
+        """Scheduled lessons in day/time order with each one's active paying headcount."""
+        return self.context.get('lesson_headcounts', {}).get(obj.id, [])
 
     def _financials(self, obj):
         return self.context.get('course_financials', {}).get(obj.id) or {}
