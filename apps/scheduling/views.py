@@ -259,6 +259,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
                 'is_trial': is_trial,
                 'trial_outcome': e.trial_outcome or None,
+                'trial_number': e.trial_number if is_trial else None,
             })
         
         data['enrollments'] = visible_enrollments
@@ -754,6 +755,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'child_phone': child_contact_phone(child),
                 'trial_lesson_date': None,
                 'is_trial': False,
+                'trial_number': None,
                 'created': created,
                 'attendance_status': 'present',
             },

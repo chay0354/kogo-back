@@ -296,6 +296,14 @@ def _lookup_requested_lessons(data) -> list:
     return lessons_covered_by_selection(lesson=lesson, bundle=bundle)
 
 
+def _repeat_trial_response(child):
+    """The widget books first trials only; another one is the office's call."""
+    from apps.enrollments.repeat_trial import REPEAT_TRIAL_WIDGET_ERROR, child_had_trial
+    if child_had_trial(child):
+        return Response({'error': REPEAT_TRIAL_WIDGET_ERROR}, status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 def _already_registered_response(child, *, lesson=None, bundle=None):
     covered = lessons_covered_by_selection(lesson=lesson, bundle=bundle)
     if child_already_registered_for_lessons(child, covered):
@@ -766,6 +774,9 @@ class WidgetTrialRegisterView(APIView):
                     already = _already_registered_response(child, lesson=lesson)
                     if already:
                         return already
+                    repeat = _repeat_trial_response(child)
+                    if repeat:
+                        return repeat
                     payment = Payment.objects.create(
                         child=child,
                         family=child.family,
@@ -803,6 +814,9 @@ class WidgetTrialRegisterView(APIView):
                 already = _already_registered_response(child, lesson=lesson)
                 if already:
                     return already
+                repeat = _repeat_trial_response(child)
+                if repeat:
+                    return repeat
                 enrollment, _created = LessonEnrollment.objects.get_or_create(
                     child=child,
                     lesson=lesson,

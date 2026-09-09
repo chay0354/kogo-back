@@ -115,6 +115,27 @@ def compute_trial_lesson_date(lesson: Lesson, *, now: Optional[datetime] = None)
     return next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=now)
 
 
+def next_allowed_trial_date(lesson: Lesson, *, now: Optional[datetime] = None) -> date:
+    """
+    The coming occurrence a trial booked from the CRM defaults to — skipping
+    cancelled lessons and the blocked-dates calendar, like the picker the
+    parent sees in the widget. (The widget always sends an explicit date.)
+    """
+    from apps.scheduling.models import LessonCancellation
+
+    now = now or timezone.localtime()
+    blocked = blocked_trial_lesson_dates()
+    cancelled = set(
+        LessonCancellation.objects.filter(lesson=lesson).values_list('occurrence_date', flat=True)
+    ) if lesson.pk else set()
+    candidate = next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=now)
+    for _ in range(16):
+        if candidate not in blocked and candidate not in cancelled:
+            return candidate
+        candidate = candidate + timedelta(days=7)
+    return candidate
+
+
 def iter_upcoming_lesson_occurrences(
     lesson: Lesson,
     *,
@@ -448,7 +469,7 @@ def stamp_and_notify_trial_enrollment(enrollment_id: str) -> dict:
 
     try:
         if not enrollment.trial_lesson_date:
-            trial_date = compute_trial_lesson_date(lesson)
+            trial_date = next_allowed_trial_date(lesson)
             enrollment.trial_lesson_date = trial_date
             enrollment.save(update_fields=['trial_lesson_date', 'updated_at'])
             enrollment.refresh_from_db()

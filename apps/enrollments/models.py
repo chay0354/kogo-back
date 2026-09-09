@@ -90,6 +90,14 @@ class LessonEnrollment(models.Model):
         verbose_name="תוצאת הניסיון",
         help_text="נקבע לפי הנוכחות שסומנה בתאריך הניסיון, ברגע שהתאריך עבר.",
     )
+    # 1 for the child's first trial. The office may book another one from the
+    # CRM (2, 3…) — the widget never offers a repeat — and instructors see a
+    # small "ניסיון 2" tag on the register.
+    trial_number = models.PositiveSmallIntegerField(
+        default=1,
+        verbose_name="מספר הניסיון",
+        help_text="1 = ניסיון ראשון; ניסיון נוסף שנרשם מהמערכת מקבל 2, 3…",
+    )
     trial_evening_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת ערב נשלחה (לא בשימוש)")
     trial_10am_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת 10:00 ביום הניסיון נשלחה")
     trial_followup_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="after-test נשלח")

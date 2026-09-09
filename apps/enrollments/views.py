@@ -1,7 +1,9 @@
 import logging
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -48,6 +50,21 @@ def _is_trial_registration(request, validated_data) -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _existing_row(lesson_id, child_id):
+    """The (lesson, child) row a trial registration would collide with, if any."""
+    if not lesson_id or not child_id:
+        return None
+    try:
+        return (
+            LessonEnrollment.objects
+            .select_related('child', 'lesson', 'lesson__course', 'lesson__room')
+            .filter(lesson_id=str(lesson_id), child_id=str(child_id))
+            .first()
+        )
+    except (ValueError, DjangoValidationError):
+        return None
 
 
 class EnrollmentViewSet(viewsets.ModelViewSet):
@@ -104,6 +121,14 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def create(self, request, *args, **kwargs):
+        # A trial for a child who already has a row on this lesson — a trial
+        # that passed, or an old registration — reuses that row; the unique
+        # (lesson, child) rule would otherwise refuse it before anything runs.
+        if _is_trial_registration(request, {}):
+            existing = _existing_row(request.data.get('lesson'), request.data.get('child'))
+            if existing is not None:
+                return self._repeat_trial(request, existing)
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -139,26 +164,95 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             enrollment = serializer.save()
             status_code = status.HTTP_201_CREATED
 
-        data = dict(self.get_serializer(enrollment).data)
-        whatsapp_result = None
+        if not trial_registration:
+            data = dict(self.get_serializer(enrollment).data)
+            headers = self.get_success_headers(data)
+            return Response(data, status=status_code, headers=headers)
 
-        if trial_registration:
+        # A child who already had a trial gets the next number on this new row.
+        from apps.enrollments.repeat_trial import next_trial_number
+        wanted = next_trial_number(child, exclude_id=enrollment.id)
+        if wanted != enrollment.trial_number:
+            enrollment.trial_number = wanted
+            enrollment.save(update_fields=['trial_number', 'updated_at'])
+        return self._finish_trial(enrollment, status_code)
+
+    def _repeat_trial(self, request, existing):
+        """Another trial on a lesson the child already has a row for (the office only)."""
+        from apps.enrollments.enrollment_counts import count_capacity_enrollments
+        from apps.enrollments.repeat_trial import next_trial_number
+        from apps.enrollments.trial_reminders import next_allowed_trial_date
+
+        child = existing.child
+        lesson = existing.lesson
+        today = timezone.localdate()
+        if not existing.trial_lesson_date and existing.status in ('active', 'payments_problem'):
+            return Response({'error': 'הילד כבר רשום לשיעור הזה כתלמיד קבוע'}, status=status.HTTP_400_BAD_REQUEST)
+        if existing.trial_lesson_date and existing.trial_lesson_date >= today and existing.status == 'active':
+            return Response(
+                {'error': f'הילד כבר רשום לשיעור ניסיון בשיעור הזה ב־{existing.trial_lesson_date:%d/%m/%Y} — את התאריך אפשר לשנות מכרטיס הילד'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        raw_date = request.data.get('trial_lesson_date')
+        if raw_date:
             try:
-                whatsapp_result = stamp_and_notify_trial_enrollment(str(enrollment.id))
-            except Exception:
-                logger.exception("Trial WhatsApp notification failed (non-fatal)")
-                whatsapp_result = {'sent': False, 'reason': 'exception'}
-
-            Child.objects.filter(pk=child.pk).update(status='trial_signed')
-            data['trial_applied'] = True
-            data['whatsapp'] = whatsapp_result or {'sent': False, 'reason': 'skipped'}
-            logger.info(
-                "Trial registration for child %s lesson %s whatsapp=%s",
-                child.pk,
-                lesson.pk,
-                data['whatsapp'],
+                trial_date = date.fromisoformat(str(raw_date))
+            except ValueError:
+                return Response({'trial_lesson_date': 'תאריך לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+            if trial_date not in iter_upcoming_lesson_occurrences(lesson, count=8):
+                return Response({'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            trial_date = next_allowed_trial_date(lesson)
+        if trial_date is None or trial_date < today:
+            return Response({'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין'}, status=status.HTTP_400_BAD_REQUEST)
+        if not lesson.room:
+            return Response({'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'}, status=status.HTTP_400_BAD_REQUEST)
+        capacity = lesson.course.capacity or lesson.room.capacity
+        if count_capacity_enrollments(lesson=lesson, occurrence_date=trial_date) >= capacity:
+            return Response(
+                {'lesson': f'השיעור מלא - קיבולת מקסימלית: {capacity} תלמידים'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+        existing.trial_number = next_trial_number(child)
+        existing.trial_lesson_date = trial_date
+        existing.start_date = trial_date
+        existing.end_date = None
+        existing.status = 'active'
+        existing.bundle = None  # a trial is one lesson; an old bundle pointer must not follow the row
+        existing.trial_outcome = ''
+        existing.trial_10am_reminder_sent_at = None
+        existing.trial_followup_reminder_sent_at = None
+        existing.trial_evening_reminder_sent_at = None
+        existing.didnt_arrive_whatsapp_sent_at = None
+        existing.save(update_fields=[
+            'trial_number', 'trial_lesson_date', 'start_date', 'end_date', 'status', 'bundle', 'trial_outcome',
+            'trial_10am_reminder_sent_at', 'trial_followup_reminder_sent_at', 'trial_evening_reminder_sent_at',
+            'didnt_arrive_whatsapp_sent_at', 'updated_at',
+        ])
+        return self._finish_trial(existing, status.HTTP_200_OK)
+
+    def _finish_trial(self, enrollment, status_code):
+        """Stamp the date, tell the parent, mark the child — shared by first and repeat trials."""
+        child = enrollment.child
+        data = dict(self.get_serializer(enrollment).data)
+        try:
+            whatsapp_result = stamp_and_notify_trial_enrollment(str(enrollment.id))
+        except Exception:
+            logger.exception("Trial WhatsApp notification failed (non-fatal)")
+            whatsapp_result = {'sent': False, 'reason': 'exception'}
+
+        Child.objects.filter(pk=child.pk).update(status='trial_signed')
+        enrollment.refresh_from_db(fields=['trial_lesson_date'])
+        data['trial_lesson_date'] = enrollment.trial_lesson_date.isoformat() if enrollment.trial_lesson_date else None
+        data['trial_applied'] = True
+        data['trial_number'] = enrollment.trial_number
+        data['repeat_trial'] = enrollment.trial_number > 1
+        data['whatsapp'] = whatsapp_result or {'sent': False, 'reason': 'skipped'}
+        logger.info(
+            "Trial registration for child %s lesson %s number %s whatsapp=%s",
+            child.pk, enrollment.lesson_id, enrollment.trial_number, data['whatsapp'],
+        )
         headers = self.get_success_headers(data)
         return Response(data, status=status_code, headers=headers)
 
