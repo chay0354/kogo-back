@@ -8,7 +8,7 @@ from django.http import HttpResponse, JsonResponse
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
 
-from apps.core.permissions import IsSuperUser
+from apps.core.permissions import IsManager, IsSuperUser
 
 logger = logging.getLogger(__name__)
 
@@ -87,3 +87,19 @@ class EnvInfoView(APIView):
             'tranzila_iframe_terminal': settings.TRANZILA_TERMINAL,
             'tranzila_charge_terminal': settings.TRANZILA_PROD_TERMINAL,
         })
+
+
+class TranzilaTerminalMapView(APIView):
+    """
+    USAGE: GET /api/v1/core/tranzila/terminals/
+    USAGE: Which Tranzila terminal each money flow runs through.
+
+    Managers only. Terminal names are returned, keys never are — a terminal
+    name already appears in the iframe URL a paying customer sees.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        from apps.core.terminal_map import terminal_map
+
+        return JsonResponse(terminal_map())

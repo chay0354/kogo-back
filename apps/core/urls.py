@@ -7,7 +7,7 @@ from . import partner_views
 from .manychat_views import WhatsAppViewSet
 from .registration_terms_views import RegistrationTermsView
 from .credit_card_charge_views import CreditCardChargeView
-from .devops_views import DatabaseBackupView, EnvInfoView
+from .devops_views import DatabaseBackupView, EnvInfoView, TranzilaTerminalMapView
 
 router = DefaultRouter()
 router.register(r'cities', views.CityViewSet, basename='city')
@@ -29,5 +29,6 @@ urlpatterns = [
     path('credit-cards/charge/', CreditCardChargeView.as_view(), name='credit-card-charge'),
     path('devops/backup/', DatabaseBackupView.as_view(), name='devops-backup'),
     path('devops/env-info/', EnvInfoView.as_view(), name='devops-env-info'),
+    path('tranzila/terminals/', TranzilaTerminalMapView.as_view(), name='tranzila-terminal-map'),
 ]
 
