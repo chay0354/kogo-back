@@ -180,11 +180,54 @@ class RepeatTrialTest(TestCase):
 
     def test_the_default_date_skips_a_blocked_day(self, notify):
         row = self._finished_trial()
-        with override_settings(BLOCKED_TRIAL_LESSON_DATES=[_wednesday(0).isoformat()]):
+        # Today may itself be the coming occurrence (before the lesson ends): block both.
+        blocked = sorted({date.today().isoformat(), _wednesday(0).isoformat()})
+        with override_settings(BLOCKED_TRIAL_LESSON_DATES=blocked):
             res = self._book()
         self.assertEqual(res.status_code, 200, res.content)
         row.refresh_from_db()
-        self.assertEqual(row.trial_lesson_date, _wednesday(1))
+        self.assertNotIn(row.trial_lesson_date.isoformat(), blocked)
+        self.assertEqual(row.trial_lesson_date.weekday(), PY_WEDNESDAY)
+        self.assertGreater(row.trial_lesson_date, date.today())
+
+    def test_the_default_date_skips_cancelled_and_blocked_weeks_from_a_frozen_now(self, notify):
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        from django.utils import timezone as dj_tz
+        from apps.enrollments.trial_reminders import next_allowed_trial_date
+        from apps.scheduling.models import LessonCancellation
+        now = dj_tz.make_aware(datetime(2026, 5, 22, 10, 0), ZoneInfo('Asia/Jerusalem'))   # a Friday
+        self.lesson.refresh_from_db()   # the fixture's '16:00' strings become times, as the API path sees them
+        LessonCancellation.objects.create(lesson=self.lesson, occurrence_date=date(2026, 5, 27))
+        with override_settings(BLOCKED_TRIAL_LESSON_DATES=['2026-06-03']):
+            self.assertEqual(next_allowed_trial_date(self.lesson, now=now), date(2026, 6, 10))
+        self.assertEqual(next_allowed_trial_date(self.lesson, now=now), date(2026, 6, 3))
+
+    def test_a_malformed_id_with_the_trial_flag_is_a_plain_400(self, notify):
+        res = self.client.post(URL, {
+            'lesson': 'not-a-uuid', 'child': str(self.child.id), 'status': 'active', 'trial_registration': True,
+        }, format='json')
+        self.assertEqual(res.status_code, 400, res.content)
+        notify.assert_not_called()
+
+    def test_an_upcoming_trial_elsewhere_does_not_number_the_new_one(self, notify):
+        LessonEnrollment.objects.create(child=self.child, lesson=self.other, status='active', trial_lesson_date=_wednesday(1))
+        Child.objects.filter(pk=self.child.pk).update(status='trial_signed')
+        self.child.refresh_from_db()
+        res = self._book()
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()['trial_number'], 1)
+
+    def test_a_trial_dropped_before_its_date_is_not_a_held_trial(self, notify):
+        # Booked, then removed by the office before the day came: inactive, no outcome.
+        LessonEnrollment.objects.create(
+            child=self.child, lesson=self.other, status='inactive', trial_lesson_date=_wednesday(-2), end_date=_wednesday(-3),
+        )
+        Child.objects.filter(pk=self.child.pk).update(status='trial_signed')
+        self.child.refresh_from_db()
+        res = self._book()
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()['trial_number'], 1)
 
     def test_a_chosen_coming_date_is_kept(self, notify):
         row = self._finished_trial()
@@ -194,8 +237,8 @@ class RepeatTrialTest(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.trial_lesson_date, wanted)
 
-    def test_a_plain_registration_still_updates_an_existing_row(self, notify):
-        # Not a trial: the old path (reactivate the row) is untouched.
+    def test_a_plain_registration_to_an_existing_row_is_refused_as_before(self, notify):
+        # Not a trial: the unique rule answers first, exactly as it did before this change.
         row = LessonEnrollment.objects.create(child=self.child, lesson=self.lesson, status='inactive')
         res = self.client.post(URL, {
             'lesson': str(self.lesson.id), 'child': str(self.child.id), 'status': 'active',

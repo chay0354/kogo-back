@@ -1,7 +1,9 @@
 import logging
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -191,12 +193,16 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
                 {'error': f'הילד כבר רשום לשיעור ניסיון בשיעור הזה ב־{existing.trial_lesson_date:%d/%m/%Y} — את התאריך אפשר לשנות מכרטיס הילד'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        payload = {}
-        if request.data.get('trial_lesson_date'):
-            payload['trial_lesson_date'] = request.data.get('trial_lesson_date')
-        serializer = self.get_serializer(existing, data=payload, partial=True)
-        serializer.is_valid(raise_exception=True)
-        trial_date = serializer.validated_data.get('trial_lesson_date') or next_allowed_trial_date(lesson)
+        raw_date = request.data.get('trial_lesson_date')
+        if raw_date:
+            try:
+                trial_date = date.fromisoformat(str(raw_date))
+            except ValueError:
+                return Response({'trial_lesson_date': 'תאריך לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+            if trial_date not in iter_upcoming_lesson_occurrences(lesson, count=8):
+                return Response({'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            trial_date = next_allowed_trial_date(lesson)
         if trial_date is None or trial_date < today:
             return Response({'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין'}, status=status.HTTP_400_BAD_REQUEST)
         if not lesson.room:
@@ -213,14 +219,16 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         existing.start_date = trial_date
         existing.end_date = None
         existing.status = 'active'
+        existing.bundle = None  # a trial is one lesson; an old bundle pointer must not follow the row
         existing.trial_outcome = ''
         existing.trial_10am_reminder_sent_at = None
         existing.trial_followup_reminder_sent_at = None
         existing.trial_evening_reminder_sent_at = None
+        existing.didnt_arrive_whatsapp_sent_at = None
         existing.save(update_fields=[
-            'trial_number', 'trial_lesson_date', 'start_date', 'end_date', 'status', 'trial_outcome',
+            'trial_number', 'trial_lesson_date', 'start_date', 'end_date', 'status', 'bundle', 'trial_outcome',
             'trial_10am_reminder_sent_at', 'trial_followup_reminder_sent_at', 'trial_evening_reminder_sent_at',
-            'updated_at',
+            'didnt_arrive_whatsapp_sent_at', 'updated_at',
         ])
         return self._finish_trial(existing, status.HTTP_200_OK)
 

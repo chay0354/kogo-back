@@ -92,6 +92,52 @@ class WidgetRepeatTrialTests(TestCase):
         row.refresh_from_db()
         self.assertEqual((row.trial_lesson_date, row.trial_number), (_wednesday(1), 1))
 
+    def test_a_repeat_the_office_booked_still_blocks_the_widget_elsewhere(self, notify):
+        # Trial 1 was a no-show; the office reused the row for trial 2 (future date,
+        # outcome cleared, counter 0, child trial_signed). The widget must still refuse.
+        Child.objects.filter(pk=self.child.pk).update(status='trial_signed', trial_classes_attended=0)
+        LessonEnrollment.objects.create(
+            child=self.child, lesson=self.lesson, status='active', trial_lesson_date=_wednesday(1), trial_number=2,
+        )
+        other = Lesson.objects.create(
+            course=self.course, day_of_week=WEDNESDAY, start_time=time(18, 0), end_time=time(19, 0),
+        )
+        res = self.client.post(TRIAL_URL, {
+            'parent_id_number': '123456782', 'parent_first_name': 'רות', 'parent_last_name': 'ניסן',
+            'parent_phone': '0521234567',
+            'child_first_name': 'נועה', 'child_last_name': 'ניסן', 'child_id_number': '111111118',
+            'child_birth_date': '2018-05-05', 'child_gender': 'female',
+            'course_id': str(self.course.id), 'lesson_id': str(other.id), 'trial_lesson_date': _wednesday(0).isoformat(),
+        }, format='json')
+        self.assertEqual(res.status_code, 400, res.content)
+        self.assertEqual(res.json()['error'], REPEAT_TRIAL_WIDGET_ERROR)
+        self.assertFalse(LessonEnrollment.objects.filter(child=self.child, lesson=other).exists())
+
+    def test_the_same_child_under_another_parent_id_is_still_refused(self, notify):
+        LessonEnrollment.objects.create(
+            child=self.child, lesson=self.lesson, status='inactive',
+            trial_lesson_date=_wednesday(-2), trial_outcome='attended',
+        )
+        res = self.client.post(TRIAL_URL, {
+            'parent_id_number': '987654321', 'parent_first_name': 'דן', 'parent_last_name': 'ניסן',
+            'parent_phone': '0529999999',
+            'child_first_name': 'נועה', 'child_last_name': 'ניסן', 'child_id_number': '111111118',
+            'child_birth_date': '2018-05-05', 'child_gender': 'female',
+            'course_id': str(self.course.id), 'lesson_id': str(self.lesson.id), 'trial_lesson_date': _wednesday(0).isoformat(),
+        }, format='json')
+        self.assertEqual(res.status_code, 400, res.content)
+        self.assertEqual(res.json()['error'], REPEAT_TRIAL_WIDGET_ERROR)
+        notify.assert_not_called()
+
+    def test_a_trial_dropped_before_its_date_does_not_block_the_widget(self, notify):
+        Child.objects.filter(pk=self.child.pk).update(status='trial_signed', trial_classes_attended=0)
+        LessonEnrollment.objects.create(
+            child=self.child, lesson=self.lesson, status='inactive', trial_lesson_date=_wednesday(-2),
+        )
+        res = self._book(_wednesday(0))
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(LessonEnrollment.objects.get(child=self.child, lesson=self.lesson).trial_number, 1)
+
     def test_a_first_trial_still_books(self, notify):
         Child.objects.filter(pk=self.child.pk).update(status='pending', trial_classes_attended=0)
         res = self._book(_wednesday(0))
