@@ -667,7 +667,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             'id', 'child', 'child_name', 'parent', 'family', 'family_name',
             'branch', 'branch_name', 'lesson', 'lesson_name', 'lesson_course_display_id',
             'payment_type', 'status', 'base_amount', 'discount_amount',
-            'final_amount', 'registration_fee', 'trial_lesson_date',
+            'final_amount', 'registration_fee', 'trial_credit_amount', 'trial_lesson_date',
             'description', 'payment_date', 'failure_reason',
             'failure_code', 'discount_snapshots', 'tranzila_transaction',
             'created_at', 'updated_at'
@@ -705,7 +705,7 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'child_name', 'family_name', 'branch', 'branch_name',
             'lesson_name', 'payment_type', 'status', 'final_amount',
-            'registration_fee', 'trial_lesson_date', 'description',
+            'registration_fee', 'trial_credit_amount', 'trial_lesson_date', 'description',
             'payment_date', 'created_at',
             'tranzila_transaction_id', 'tranzila_confirmation_code',
         ]

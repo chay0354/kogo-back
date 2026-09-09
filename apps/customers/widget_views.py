@@ -635,6 +635,10 @@ class WidgetRegisterView(APIView):
                     'monthly_amount': payment['monthly_amount'],
                     'next_billing_date': payment['next_billing_date'],
                     'subscription_start_date': payment['subscription_start_date'],
+                    'trial_credit_amount': payment['trial_credit_amount'],
+                    'trial_credit_paid': payment['trial_credit_paid'],
+                    'trial_credit_date': payment['trial_credit_date'],
+                    'trial_credit_reason': payment['trial_credit_reason'],
                 }, status=status.HTTP_201_CREATED)
 
             result = PaymentService().initiate_subscription_payment(
