@@ -83,6 +83,7 @@ def _serialize_lesson_enrollment(enrollment):
             if enrollment.trial_lesson_date else None
         ),
         'trial_outcome': enrollment.trial_outcome or None,
+        'trial_number': enrollment.trial_number,
         'scheduled_change': _scheduled_change_for(enrollment),
     }
 
@@ -399,6 +400,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'lesson_id': str(lesson.id),
             'course_name': lesson.course.name,
             'trial_outcome': chosen.trial_outcome or None,
+            'trial_number': chosen.trial_number,
             'trial_lesson_date': (
                 chosen.trial_lesson_date.isoformat() if chosen.trial_lesson_date else None
             ),
