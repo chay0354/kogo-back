@@ -91,14 +91,21 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
                 'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'
             })
 
-        capacity = lesson.course.capacity or lesson.room.capacity
+        capacity = min(c for c in (lesson.course.capacity, lesson.room.capacity) if c)
+        # A paying place is measured against the payers; a trial is a body in the
+        # room that day and is measured against the payers plus that day's trials.
         current = count_capacity_enrollments(
             lesson=lesson,
             occurrence_date=occurrence_date if trial_registration else None,
+            include_trials=trial_registration,
         )
         if current >= capacity:
             raise serializers.ValidationError({
-                'lesson': f'השיעור מלא - קיבולת מקסימלית: {capacity} תלמידים'
+                'lesson': (
+                    f'התפוסה מלאה לשיעור ניסיון - קיבולת מקסימלית: {capacity} תלמידים'
+                    if trial_registration
+                    else f'השיעור מלא - קיבולת מקסימלית: {capacity} תלמידים'
+                )
             })
         
         return data

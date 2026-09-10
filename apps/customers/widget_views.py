@@ -12,7 +12,7 @@ from rest_framework import status
 from django.db import transaction
 from django.db.models import Prefetch, Q
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from django.utils import timezone
 from apps.core.tranzila_service import is_tranzila_uncertain_gateway_error
@@ -183,6 +183,9 @@ def _batch_paying_enrollment_counts(lesson_ids):
     return {row['lesson_id']: row['c'] for row in rows}
 
 
+TRIAL_FULL_ERROR = 'התפוסה מלאה לשיעור ניסיון'
+
+
 def _resolve_lesson_capacity(lesson, course):
     caps = []
     if course.capacity:
@@ -193,8 +196,16 @@ def _resolve_lesson_capacity(lesson, course):
     return min(caps) if caps else None
 
 
-def _lesson_widget_capacity(lesson, course, enrolled_counts):
+def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None):
+    """
+    Two capacities, because two different things are being asked.
+
+    `available_spots` is what a paying registration may take. `trial_spots_left`
+    is what a trial may take, and it is smaller: trials already booked sit in
+    the same room. When it reaches zero the widget must stop offering a trial.
+    """
     enrolled = enrolled_counts.get(lesson.id, 0)
+    trials = (trial_counts or {}).get(lesson.id, 0)
     capacity = _resolve_lesson_capacity(lesson, course)
     if capacity is None:
         return {
@@ -202,14 +213,40 @@ def _lesson_widget_capacity(lesson, course, enrolled_counts):
             'capacity': None,
             'available_spots': None,
             'is_full': False,
+            'trial_spots_left': None,
+            'trial_is_full': False,
         }
     available = max(0, capacity - enrolled)
+    trial_left = max(0, capacity - enrolled - trials)
     return {
         'enrolled_count': enrolled,
         'capacity': capacity,
         'available_spots': available,
         'is_full': available <= 0,
+        'trial_spots_left': trial_left,
+        'trial_is_full': trial_left <= 0,
     }
+
+
+def _batch_upcoming_trial_counts(lesson_ids):
+    """lesson_id -> trials still ahead, the ones that will sit in the room."""
+    if not lesson_ids:
+        return {}
+    from django.db.models import Count
+    from apps.enrollments.models import LessonEnrollment
+
+    rows = (
+        LessonEnrollment.objects
+        .filter(
+            lesson_id__in=lesson_ids,
+            status='active',
+            trial_lesson_date__isnull=False,
+            trial_lesson_date__gte=date.today(),
+        )
+        .values('lesson_id')
+        .annotate(c=Count('id'))
+    )
+    return {row['lesson_id']: row['c'] for row in rows}
 
 
 def _widget_instructor_photo_url(instructor):
@@ -222,7 +259,7 @@ def _widget_instructor_photo_url(instructor):
     return (instructor.photo_url or None) if instructor else None
 
 
-def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None, trials_default=None):
+def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None, trials_default=None, trial_counts=None):
     from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
     if trials_default is None:
         trials_default = trials_open_by_default()
@@ -230,7 +267,7 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None,
     lesson_payloads = []
     bundle_full = False
     for bl in bundle_lessons:
-        cap = _lesson_widget_capacity(bl, course, enrolled_counts)
+        cap = _lesson_widget_capacity(bl, course, enrolled_counts, trial_counts)
         if cap['is_full']:
             bundle_full = True
         lesson_payloads.append({
@@ -753,10 +790,14 @@ class WidgetTrialRegisterView(APIView):
 
         from apps.enrollments.enrollment_counts import count_capacity_enrollments
 
-        capacity = course.capacity or 20
-        if count_capacity_enrollments(lesson=lesson, occurrence_date=trial_date) >= capacity:
+        # A trial is a body in the room that day, so it is measured against the
+        # payers plus the trials already booked for that date.
+        capacity = _resolve_lesson_capacity(lesson, course) or course.capacity or 20
+        if count_capacity_enrollments(
+            lesson=lesson, occurrence_date=trial_date, include_trials=True,
+        ) >= capacity:
             return Response(
-                {'error': f'השיעור מלא בתאריך הנבחר (קיבולת: {capacity})'},
+                {'error': f'{TRIAL_FULL_ERROR} בתאריך הנבחר (קיבולת: {capacity})'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1460,6 +1501,7 @@ class WidgetCoursesView(APIView):
             for bundle in course.lesson_bundles.all():
                 all_lesson_ids.extend(bl.id for bl in bundle.lessons.all())
         enrolled_counts = _batch_paying_enrollment_counts(all_lesson_ids)
+        trial_counts = _batch_upcoming_trial_counts(all_lesson_ids)
         photo_map = pair_photo_map()
         from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
         trials_default = trials_open_by_default()
@@ -1469,7 +1511,7 @@ class WidgetCoursesView(APIView):
             lessons = []
             if not course.must_attend_all_lessons:
                 for lesson in course.lessons.all():
-                    cap = _lesson_widget_capacity(lesson, course, enrolled_counts)
+                    cap = _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts)
                     lessons.append({
                         'id': str(lesson.id),
                         'trial_registration_open': trial_registration_open_for(lesson, default=trials_default),
@@ -1497,7 +1539,7 @@ class WidgetCoursesView(APIView):
             bundles = [
                 _serialize_widget_bundle(
                     bundle, enrolled_counts=enrolled_counts, course=course, photo_map=photo_map,
-                    trials_default=trials_default,
+                    trials_default=trials_default, trial_counts=trial_counts,
                 )
                 for bundle in _widget_bundles_for_course(course)
             ]
@@ -1627,6 +1669,7 @@ class WidgetLessonOccurrencesView(APIView):
     DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
 
     def get(self, request):
+        from apps.enrollments.enrollment_counts import trial_seats_left
         from apps.enrollments.trial_reminders import (
             TRIAL_LESSON_OCCURRENCE_LIMIT,
             iter_merged_upcoming_lesson_occurrences,
@@ -1649,7 +1692,11 @@ class WidgetLessonOccurrencesView(APIView):
                 return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
             lesson_map = {str(lesson.id): lesson for lesson in lessons}
             ordered_lessons = [lesson_map[lid] for lid in lesson_ids if lid in lesson_map]
-            occurrences = iter_merged_upcoming_lesson_occurrences(ordered_lessons, count=count)
+            occurrences = [
+                (lesson, occurrence)
+                for lesson, occurrence in iter_merged_upcoming_lesson_occurrences(ordered_lessons, count=count)
+                if (left := trial_seats_left(lesson=lesson, occurrence_date=occurrence)) is None or left > 0
+            ]
             return Response([
                 {
                     'lesson_id': str(lesson.id),
@@ -1670,7 +1717,12 @@ class WidgetLessonOccurrencesView(APIView):
         except Lesson.DoesNotExist:
             return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        dates = iter_upcoming_lesson_occurrences(lesson, count=count)
+        # A date whose room is already full for a trial is not offered: the parent
+        # should not pick a day and only then be told it cannot be booked.
+        dates = [
+            d for d in iter_upcoming_lesson_occurrences(lesson, count=count)
+            if (left := trial_seats_left(lesson=lesson, occurrence_date=d)) is None or left > 0
+        ]
         return Response([
             {
                 'lesson_id': str(lesson.id),
