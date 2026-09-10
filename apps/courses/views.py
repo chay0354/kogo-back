@@ -34,18 +34,14 @@ from apps.core.scoping import (
     is_scoped_instructor,
     instructor_course_ids,
 )
-from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES
+from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, paying_enrollment_q
 
 
 def _course_type_stats_q(user):
     """Build scoped Q filters for course-type stat annotations."""
     course_q = Q(courses__is_active=True)
     lesson_q = course_q & Q(courses__lessons__is_recurring=True)
-    enrollment_q = (
-        course_q
-        & Q(courses__lessons__enrollments__status='active')
-        & ~Q(courses__lessons__enrollments__child__status__in=TRIAL_CHILD_STATUSES)
-    )
+    enrollment_q = course_q & paying_enrollment_q('courses__lessons__enrollments')
 
     if is_scoped_partner(user):
         branch_ids = partner_branch_ids(user)
@@ -119,7 +115,7 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
             queryset = queryset.annotate(
                 courses_count=Count('courses', filter=course_q, distinct=True),
                 lessons_count=Count('courses__lessons', filter=lesson_q, distinct=True),
-                students_count=Count('courses__lessons__enrollments', filter=enrollment_q),
+                students_count=Count('courses__lessons__enrollments', filter=enrollment_q, distinct=True),
             ).prefetch_related(
                 Prefetch('courses', queryset=visible_courses),
             )

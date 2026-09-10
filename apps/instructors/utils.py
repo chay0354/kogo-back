@@ -170,7 +170,9 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
     """
     enrollments = getattr(lesson, "enrollments", None)
     if enrollments is None:
-        qs = LessonEnrollment.objects.filter(lesson=lesson, status__in=statuses).exclude(
+        qs = LessonEnrollment.objects.filter(
+            lesson=lesson, status__in=statuses, trial_lesson_date__isnull=True,
+        ).exclude(
             child__status__in=TRIAL_CHILD_STATUSES,
         )
         return qs.filter(
@@ -181,6 +183,8 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
     cnt = 0
     for e in enrollments.all():
         if e.status in statuses and _enrollment_overlaps_range(e, start_d, end_d):
+            if e.trial_lesson_date:
+                continue
             if getattr(e, 'child', None) and e.child.status in TRIAL_CHILD_STATUSES:
                 continue
             cnt += 1
@@ -194,7 +198,9 @@ def _unique_students_for_period(lesson, start_d: date, end_d: date, statuses: tu
     s: set = set()
     enrollments = getattr(lesson, "enrollments", None)
     if enrollments is None:
-        qs = LessonEnrollment.objects.filter(lesson=lesson, status__in=statuses).exclude(
+        qs = LessonEnrollment.objects.filter(
+            lesson=lesson, status__in=statuses, trial_lesson_date__isnull=True,
+        ).exclude(
             child__status__in=TRIAL_CHILD_STATUSES,
         ).filter(
             Q(start_date__isnull=True) | Q(start_date__lte=end_d),
@@ -204,6 +210,8 @@ def _unique_students_for_period(lesson, start_d: date, end_d: date, statuses: tu
 
     for e in enrollments.all():
         if e.status in statuses and _enrollment_overlaps_range(e, start_d, end_d):
+            if e.trial_lesson_date:
+                continue
             if getattr(e, 'child', None) and e.child.status in TRIAL_CHILD_STATUSES:
                 continue
             s.add(e.child_id)

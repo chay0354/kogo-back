@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 from apps.enrollments.models import LessonEnrollment
 
@@ -23,6 +23,28 @@ def paying_enrollments(qs: QuerySet | None = None) -> QuerySet:
     return (
         base.filter(status='active', trial_lesson_date__isnull=True)
         .exclude(child__status__in=TRIAL_CHILD_STATUSES)
+    )
+
+
+def paying_enrollment_q(prefix: str = '') -> Q:
+    """
+    The same rule as `paying_enrollments`, shaped for an annotation `filter=`.
+
+    A seat is taken only by an active enrollment that is not a trial. Both halves
+    matter: the row carries `trial_lesson_date` while the trial is booked, and the
+    child's own status says `trial_signed` while they are in the trial flow. A
+    count that checks only the child's status gives a trial a seat whenever the
+    child is already active — which is exactly what happens when the office books
+    a trial for a child who already attends something else.
+
+    `prefix` is the path from the annotated model down to the enrollment, e.g.
+    'enrollments' on Lesson, 'courses__lessons__enrollments' on CourseType.
+    """
+    field = f'{prefix}__' if prefix else ''
+    return (
+        Q(**{f'{field}status': 'active'})
+        & Q(**{f'{field}trial_lesson_date__isnull': True})
+        & ~Q(**{f'{field}child__status__in': TRIAL_CHILD_STATUSES})
     )
 
 

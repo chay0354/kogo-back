@@ -16,7 +16,11 @@ from apps.core.models import UserProfile
 from apps.courses.models import Lesson
 from collections import defaultdict
 
-from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, counts_toward_capacity
+from apps.enrollments.enrollment_counts import (
+    TRIAL_CHILD_STATUSES,
+    counts_toward_capacity,
+    paying_enrollment_q,
+)
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
 from apps.external_students.roster import (
@@ -113,8 +117,7 @@ class LessonViewSet(viewsets.ModelViewSet):
             qs = qs.annotate(
                 paying_enrollment_count=Count(
                     'enrollments',
-                    filter=Q(enrollments__status='active')
-                    & ~Q(enrollments__child__status__in=TRIAL_CHILD_STATUSES),
+                    filter=paying_enrollment_q('enrollments'),
                     distinct=True,
                 )
             )
