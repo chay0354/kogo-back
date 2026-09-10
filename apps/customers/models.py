@@ -349,6 +349,26 @@ class Payment(models.Model):
         verbose_name="תאריך שיעור ניסיון",
         help_text="מוגדר על תשלום ממתין לשיעור ניסיון בתשלום; ההרשמה נוצרת לאחר סליקה מוצלחת.",
     )
+    # A paid trial the parent already paid for is credited once against the first
+    # charge of a real registration. The credit lives on the charge it reduced —
+    # `final_amount` is already net of it — and points at the trial payment it
+    # spent, which is what stops the same trial being credited twice.
+    trial_credit_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        verbose_name="קיזוז שיעור ניסיון",
+        help_text="סכום שקוזז מהחיוב הראשון בזכות שיעור ניסיון בתשלום ששולם קודם.",
+    )
+    trial_credit_source = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='trial_credit_uses',
+        verbose_name="תשלום הניסיון שקוזז",
+        help_text="התשלום של שיעור הניסיון שנוצל לקיזוז — כל ניסיון מזכה פעם אחת.",
+    )
 
     # Additional metadata
     description = models.TextField(blank=True, verbose_name="תיאור")

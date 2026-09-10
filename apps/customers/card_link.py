@@ -24,6 +24,7 @@ from django.utils import timezone
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
 from apps.core.manychat_service import ManyChatService
 from apps.core.password_reset_email import crm_frontend_url
+from apps.customers.trial_credit import credit_for_lesson
 from apps.core.payment_service import (
     JERUSALEM_TZ,
     PaymentService,
@@ -139,13 +140,18 @@ def quote_standing_order(link: CardLink, today: date | None = None) -> dict:
         prorated = Decimal('0.00')
     else:
         prorated = max(Decimal('1.00'), money(monthly * factor))
+    # A paid trial already settled in this branch comes off the first charge, once.
+    credit = credit_for_lesson(child, lesson, first_charge=prorated + fee, today=today)
     return {
         'monthly_amount': monthly,
         'base_amount': money(discount.base_price),
         'discount_amount': money(discount.total_discount_amount),
         'registration_fee': money(fee),
         'prorated_lesson': prorated,
-        'first_charge': money(prorated + fee),
+        'trial_credit': credit['amount'],
+        'trial_credit_source': credit['source'],
+        'trial_credit_reason': credit['reason'],
+        'first_charge': money(prorated + fee - credit['amount']),
         'next_billing_date': standing_order_next_billing_date(today=today, lesson=lesson),
         'deferred_first_charge_date': deferred,
         'description': subscription_payment_description(
@@ -182,6 +188,8 @@ def preview_payload(link: CardLink, *, already_done: bool = False) -> dict:
                     'first_charge': str(q['first_charge']),
                     'monthly_amount': str(q['monthly_amount']),
                     'registration_fee': str(q['registration_fee']),
+                    'trial_credit': str(q['trial_credit']),
+                    'trial_credit_reason': q['trial_credit_reason'],
                     'next_billing_date': q['next_billing_date'].isoformat(),
                 })
             except CardLinkError as exc:
@@ -366,6 +374,8 @@ def _apply_standing_order(link: CardLink, card: dict[str, Any], quote: dict, tod
             discount_amount=quote['discount_amount'],
             final_amount=quote['first_charge'],
             registration_fee=quote['registration_fee'],
+            trial_credit_amount=quote['trial_credit'],
+            trial_credit_source=quote['trial_credit_source'],
             description=quote['description'],
         )
         for applied in quote['discounts']:
@@ -391,6 +401,7 @@ def _apply_standing_order(link: CardLink, card: dict[str, Any], quote: dict, tod
             prorated_lesson=quote['prorated_lesson'],
             registration_fee=quote['registration_fee'],
             prorated=not quote['deferred_first_charge_date'],
+            trial_credit=quote['trial_credit'],
         )
         call = lambda: tranzila.charge_with_card(  # noqa: E731
             card_number=card['card_number'], expiry_month=card['expiry_month'], expiry_year=card['expiry_year'],

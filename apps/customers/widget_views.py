@@ -635,6 +635,10 @@ class WidgetRegisterView(APIView):
                     'monthly_amount': payment['monthly_amount'],
                     'next_billing_date': payment['next_billing_date'],
                     'subscription_start_date': payment['subscription_start_date'],
+                    'trial_credit_amount': payment['trial_credit_amount'],
+                    'trial_credit_paid': payment['trial_credit_paid'],
+                    'trial_credit_date': payment['trial_credit_date'],
+                    'trial_credit_reason': payment['trial_credit_reason'],
                 }, status=status.HTTP_201_CREATED)
 
             result = PaymentService().initiate_subscription_payment(
@@ -1146,16 +1150,34 @@ class WidgetChargeView(APIView):
         else:
             registration_fee = payment.registration_fee or Decimal('0')
             prorated_lesson = payment_prorated_lesson_amount(payment)
+            trial_credit = payment.trial_credit_amount or Decimal('0')
             items = subscription_tranzila_items(
                 label=item_label,
                 prorated_lesson=prorated_lesson,
                 registration_fee=registration_fee,
                 prorated=prorated_lesson > 0,
+                trial_credit=trial_credit,
             )
 
         charge_description = payment.description or (
             f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
         )
+
+        # A checkout left open for hours can be charged later. If the trial it was
+        # promised has meanwhile been credited to another registration, this row's
+        # amount is no longer the truth — refuse rather than charge the wrong sum.
+        if (payment.trial_credit_amount or Decimal('0')) > 0 and payment.trial_credit_source_id:
+            from apps.customers.trial_credit import credit_still_held_by
+
+            if not credit_still_held_by(payment):
+                payment.status = 'failed'
+                payment.failure_reason = 'הקיזוז של שיעור הניסיון נוצל בהרשמה אחרת'
+                payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
+                return {
+                    'success': False,
+                    'error': 'הקיזוז של שיעור הניסיון כבר נוצל בהרשמה אחרת. יש לרענן ולהתחיל את ההרשמה מחדש.',
+                    'payment_id': str(payment.id),
+                }
         if payment.final_amount > 0:
             result = tranzila.charge_with_card(
                 card_number=card_number,
@@ -1172,7 +1194,10 @@ class WidgetChargeView(APIView):
             # Nothing is due today (bundle member with no דמי רישום). Reuse the
             # token from the first day in this signup — a second Tranzila verify
             # was returning 20004 and aborting the rest of the checkout.
-            reused = saved_card_token_for_child(child)
+            # A charge that a paid-trial credit zeroed is a different case: this
+            # is the card the parent just typed and it has to be verified and
+            # tokenised, or the standing order would bill an older card.
+            reused = None if (payment.trial_credit_amount or Decimal('0')) > 0 else saved_card_token_for_child(child)
             if reused:
                 result = {
                     'success': True,

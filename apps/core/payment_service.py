@@ -30,6 +30,7 @@ from apps.customers.models import (
 )
 from apps.customers.financial_models import Invoice, InvoiceChild, Discount
 from apps.customers.discount_service import DiscountService
+from apps.customers.trial_credit import credit_for_lesson, describe as describe_trial_credit
 from apps.core.card_validation import validate_card_details
 from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc
 from apps.courses.models import Lesson, LessonBundle, LessonPriceOption
@@ -179,9 +180,16 @@ def payment_full_monthly_amount(payment: Payment) -> Decimal:
 
 
 def payment_prorated_lesson_amount(payment: Payment) -> Decimal:
-    """Pro-rated lesson portion of a pending/completed first subscription charge."""
+    """
+    Pro-rated lesson portion of a pending/completed first subscription charge.
+
+    A paid-trial credit is added back: it lowered what the card was charged, not
+    the month the parent bought. Without this a credited signup would look
+    fee-only and its paid-until date would be dropped.
+    """
     fee = payment.registration_fee or Decimal('0.00')
-    return (payment.final_amount - fee).quantize(Decimal('0.01'))
+    credit = getattr(payment, 'trial_credit_amount', None) or Decimal('0.00')
+    return (payment.final_amount - fee + credit).quantize(Decimal('0.01'))
 
 
 def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
@@ -451,17 +459,31 @@ def subscription_tranzila_items(
     prorated_lesson: Decimal,
     registration_fee: Decimal,
     prorated: bool = True,
+    trial_credit: Decimal = Decimal('0.00'),
 ) -> list[dict]:
     """
     Tranzila line items for a first subscription charge.
 
     The lesson line is dropped when there is nothing to bill for it, which is how a
     registration whose monthly billing only starts later charges דמי רישום alone.
+    A paid-trial credit comes off the lesson line first and then the fee, so the
+    lines always add up to the amount the card is charged (the gateway is never
+    sent a negative line).
     """
+    credit = (trial_credit or Decimal('0.00')).quantize(Decimal('0.01'))
+    credited_label = ''
+    if credit > 0:
+        take = min(credit, max(prorated_lesson, Decimal('0.00')))
+        prorated_lesson = prorated_lesson - take
+        registration_fee = max(Decimal('0.00'), registration_fee - (credit - take))
+        credited_label = ' (בניכוי שיעור ניסיון)'
     items = []
     if prorated_lesson > 0:
         items.append({
-            'name': f'מנוי חודשי (יחסי) - {label}' if prorated else f'מנוי חודשי - {label}',
+            'name': (
+                f'מנוי חודשי (יחסי){credited_label} - {label}' if prorated
+                else f'מנוי חודשי{credited_label} - {label}'
+            ),
             'type': 'I',
             'unit_price': float(prorated_lesson),
             'units_number': 1,
@@ -471,7 +493,7 @@ def subscription_tranzila_items(
         })
     if registration_fee > 0:
         items.append({
-            'name': 'דמי רישום',
+            'name': f'דמי רישום{credited_label}' if credit > 0 and prorated_lesson <= 0 else 'דמי רישום',
             'type': 'I',
             'unit_price': float(registration_fee),
             'units_number': 1,
@@ -871,7 +893,12 @@ class PaymentService:
                     registration_fee = (
                         registration_fee_amount(lesson.course) if charge_fee else Decimal('0.00')
                     )
-                    prorated_final = prorated_lesson + registration_fee
+                    # A paid trial already settled for this branch comes off this
+                    # first charge, once. It never touches the monthly amount.
+                    trial_credit = credit_for_lesson(
+                        child, lesson, first_charge=prorated_lesson + registration_fee, today=today_local,
+                    )
+                    prorated_final = prorated_lesson + registration_fee - trial_credit['amount']
                     payment = Payment.objects.create(
                         child=child,
                         family=child.family,
@@ -886,6 +913,8 @@ class PaymentService:
                         discount_amount=discount_calculation.total_discount_amount,
                         final_amount=prorated_final,
                         registration_fee=registration_fee,
+                        trial_credit_amount=trial_credit['amount'],
+                        trial_credit_source=trial_credit['source'],
                         description=subscription_payment_description(
                             child=child,
                             lesson=lesson,
@@ -961,6 +990,7 @@ class PaymentService:
             'prorated_amount': float(prorated_lesson),
             'registration_fee': float(registration_fee),
             'final_amount': float(prorated_final),
+            **describe_trial_credit(trial_credit),
             'prorate_factor': float(prorate_factor),
             'prorate_lessons_remaining': prorate_lessons_remaining,
             'total_lessons_this_month': total_lessons_this_month,
@@ -1318,7 +1348,10 @@ class PaymentService:
                 Decimal('1.00'),
                 (full_monthly_amount_c * prorate_factor_c).quantize(Decimal('0.01'))
             )
-        prorated_final_c = prorated_lesson_c + registration_fee_c
+        trial_credit_c = credit_for_lesson(
+            child, lesson, first_charge=prorated_lesson_c + registration_fee_c, today=payment_date,
+        )
+        prorated_final_c = prorated_lesson_c + registration_fee_c - trial_credit_c['amount']
 
         # Create Payment (pending)
         payment = Payment.objects.create(
@@ -1335,6 +1368,8 @@ class PaymentService:
             discount_amount=discount_calculation.total_discount_amount,
             final_amount=prorated_final_c,
             registration_fee=registration_fee_c,
+            trial_credit_amount=trial_credit_c['amount'],
+            trial_credit_source=trial_credit_c['source'],
             description=subscription_payment_description(
                 child=child,
                 lesson=lesson,
@@ -1364,6 +1399,7 @@ class PaymentService:
             prorated_lesson=prorated_lesson_c,
             registration_fee=registration_fee_c,
             prorated=not deferred_charge_date_c,
+            trial_credit=trial_credit_c['amount'],
         )
 
         if prorated_final_c > 0:

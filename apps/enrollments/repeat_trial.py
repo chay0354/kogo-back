@@ -30,14 +30,29 @@ def _held_or_numbered(child):
     )
 
 
+def id_number_variants(id_number: str) -> list[str]:
+    """
+    The ways one Israeli id number is stored across cards: as typed, digits only,
+    with the leading zeros dropped, and padded back to nine. Matching on this set
+    keeps the lookup an indexed query — walking every child was fine for a guard
+    that ran on trial signups and far too heavy once every registration asks.
+    """
+    digits = normalize_id_number(id_number)
+    stripped = digits.lstrip('0')
+    # A placeholder like 000000000 or a two-digit stub is not an identity; matching
+    # on it would make unrelated children twins.
+    if len(stripped) < 5:
+        return []
+    variants = {id_number.strip(), digits, stripped, stripped.zfill(9)}
+    return [value for value in variants if value]
+
+
 def _identity_twins(child):
     """The child's own card plus any other card carrying the same id number (another family, a duplicate)."""
     twins = [child]
-    id_number = normalize_id_number(getattr(child, 'id_number', '') or '')
-    if id_number:
-        for other in Child.objects.exclude(id=child.id).filter(id_number__isnull=False).exclude(id_number=''):
-            if normalize_id_number(other.id_number) == id_number:
-                twins.append(other)
+    variants = id_number_variants(getattr(child, 'id_number', '') or '')
+    if variants:
+        twins.extend(Child.objects.exclude(id=child.id).filter(id_number__in=variants))
     return twins
 
 
