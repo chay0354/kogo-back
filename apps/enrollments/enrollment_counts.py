@@ -102,12 +102,17 @@ def count_capacity_enrollments(
     enrollments=None,
 ) -> int:
     """Headcount for UI capacity (e.g. schedule card 3/20)."""
+    from apps.enrollments.duplicate_students import collapse_duplicate_people
+
     if enrollments is None:
         enrollments = LessonEnrollment.objects.filter(
             lesson=lesson,
             status='active',
-        ).select_related('child')
-    return sum(
-        1 for e in enrollments
+        ).select_related('child', 'child__family')
+    taking_a_seat = [
+        e for e in enrollments
         if counts_toward_capacity(e, occurrence_date=occurrence_date)
-    )
+    ]
+    # One person, one seat. A child registered twice under two cards used to
+    # hold two places in a class they attend once.
+    return len(collapse_duplicate_people(taking_a_seat))

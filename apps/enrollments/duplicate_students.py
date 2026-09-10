@@ -29,6 +29,48 @@ def _roster_enrollments(lesson_ids=None):
     return qs
 
 
+def collapse_duplicate_people(enrollments):
+    """
+    One row per person on a lesson.
+
+    A parent who registered twice leaves two Child rows for one child, and both
+    get an enrolment on the same lesson. The register then shows the child
+    twice, the class reads as fuller than it is, and a real seat is held by a
+    person who is not there. Folding them here means every screen counts and
+    shows the person once, without touching the rows themselves — merging the
+    cards is a decision for the office, not a side effect of drawing a list.
+
+    A row that cannot be keyed (no name or no phone) is never folded: half a key
+    is not evidence, and folding on it would hide unrelated children.
+    """
+    kept = {}
+    order = []
+    loose = []
+    for enrollment in enrollments:
+        key = child_person_key(getattr(enrollment, 'child', None))
+        if key is None:
+            loose.append(enrollment)
+            continue
+        current = kept.get(key)
+        if current is None:
+            kept[key] = enrollment
+            order.append(key)
+        elif _outranks(enrollment, current):
+            kept[key] = enrollment
+    return [kept[key] for key in order] + loose
+
+
+def _outranks(candidate, current) -> bool:
+    """A paying row beats a trial one; between equals the older card wins."""
+    if bool(current.trial_lesson_date) != bool(candidate.trial_lesson_date):
+        return not candidate.trial_lesson_date
+    current_at = getattr(current, 'created_at', None)
+    candidate_at = getattr(candidate, 'created_at', None)
+    if current_at and candidate_at:
+        return candidate_at < current_at
+    return False
+
+
 def duplicate_person_on_lesson(lesson, *, first_name, last_name, phone, exclude_child_id=None):
     """
     The enrolment of the same person already on this lesson, or None.

@@ -31,7 +31,16 @@ def _identity_children(child):
 
 
 def _active_lesson_enrollments(child):
+    """
+    The child's live lesson rows, one per lesson.
+
+    Duplicate cards of the same child each carry their own enrolment, so a child
+    registered twice used to read as attending twice a week when they attend
+    once. The card is the office's to merge; the list must not repeat the lesson
+    while it waits.
+    """
     seen = set()
+    seen_lessons = set()
     rows = []
     today = date.today()
     for person in _identity_children(child):
@@ -44,6 +53,10 @@ def _active_lesson_enrollments(child):
                 and enrollment.child.status in TRIAL_CHILD_STATUSES
             ):
                 continue
+            slot = (enrollment.lesson_id, bool(enrollment.trial_lesson_date))
+            if enrollment.lesson_id and slot in seen_lessons:
+                continue
+            seen_lessons.add(slot)
             seen.add(enrollment.id)
             rows.append(enrollment)
     return rows
@@ -132,11 +145,16 @@ class ParentSerializer(serializers.ModelSerializer):
 class FamilySerializer(serializers.ModelSerializer):
     """משפחה"""
     parents = ParentSerializer(many=True, read_only=True)
-    
+    accepts_computerized_documents = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = Family
-        fields = ['id', 'name', 'phone', 'email', 'address', 'parent_id_number', 'branch', 'notes', 'parents']
-        read_only_fields = ['id', 'parents']
+        fields = [
+            'id', 'name', 'phone', 'email', 'address', 'parent_id_number', 'branch', 'notes', 'parents',
+            'computerized_docs_consent_at', 'computerized_docs_consent_source',
+            'computerized_docs_consent_revoked_at', 'accepts_computerized_documents',
+        ]
+        read_only_fields = ['id', 'parents', 'accepts_computerized_documents']
 
 
 class EnrollmentDetailSerializer(serializers.Serializer):

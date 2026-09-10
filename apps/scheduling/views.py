@@ -16,6 +16,7 @@ from apps.core.models import UserProfile
 from apps.courses.models import Lesson
 from collections import defaultdict
 
+from apps.enrollments.duplicate_students import collapse_duplicate_people
 from apps.enrollments.enrollment_counts import (
     TRIAL_CHILD_STATUSES,
     counts_toward_capacity,
@@ -210,9 +211,9 @@ class LessonViewSet(viewsets.ModelViewSet):
         roster_q = Q(status='active')
         if occ_date:
             roster_q |= Q(trial_lesson_date=occ_date, status='inactive') & ~Q(trial_outcome='')
-        enrollments = list(
+        enrollments = collapse_duplicate_people(list(
             lesson.enrollments.filter(roster_q).select_related('child', 'child__family')
-        )
+        ))
 
         # Walk-ins the instructor added from this screen. They are not 'active',
         # so they never reach capacity, pay or billing; they ride along on the
