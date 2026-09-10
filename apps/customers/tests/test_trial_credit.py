@@ -23,6 +23,7 @@ from apps.courses.models import Course, CourseType, Lesson
 from apps.customers.models import Child, Family, Parent, Payment
 from apps.customers.trial_credit import (
     TRIAL_CREDIT_WINDOW_DAYS,
+    credit_still_held_by,
     creditable_trial_payment,
     credit_for_lesson,
 )
@@ -104,6 +105,12 @@ class CreditRulesTest(TrialCreditBase):
         self._paid_trial(days_ago=TRIAL_CREDIT_WINDOW_DAYS)
         self.assertIsNotNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
 
+    def test_a_trial_already_paid_for_but_still_ahead_is_credited(self):
+        self._paid_trial(days_ago=-7)
+        quote = credit_for_lesson(self.child, self.lesson, first_charge=Decimal('380.00'))
+        self.assertEqual(quote['amount'], Decimal('30.00'))
+        self.assertIn('שיעור ניסיון שנקבע ל', quote['reason'])
+
     def test_a_trial_that_was_never_charged_is_not_credited(self):
         self._paid_trial(status='pending')
         self.assertIsNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
@@ -167,11 +174,12 @@ class CreditRulesTest(TrialCreditBase):
         self.assertEqual(creditable_trial_payment(self.child, branch_id=self.branch.id), newer)
 
     def test_an_id_number_written_with_leading_zeros_still_matches(self):
+        # Same parent phone, id typed with and without the leading zero.
         Child.objects.filter(pk=self.child.pk).update(id_number='011111118')
         self.child.refresh_from_db()
-        other_family = Family.objects.create(name='כהן', phone='0509999999', branch=self.branch)
+        twin_family = Family.objects.create(name='כהן', phone='0501234567', branch=self.branch)
         twin = Child.objects.create(
-            family=other_family, first_name='נועה', last_name='כהן', id_number='11111118',
+            family=twin_family, first_name='נועה', last_name='כהן', id_number='11111118',
             birth_date=date(2015, 1, 1), gender='female', status='pending',
         )
         self._paid_trial(child=twin)
@@ -188,14 +196,51 @@ class CreditRulesTest(TrialCreditBase):
         self._paid_trial(child=stranger)
         self.assertIsNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
 
-    def test_a_duplicate_card_of_the_same_child_is_credited(self):
-        other_family = Family.objects.create(name='כהן', phone='0509999999', branch=self.branch)
+    def test_a_split_family_of_the_same_parent_is_credited(self):
+        # The widget opens a second family when a parent types their id differently.
+        Family.objects.filter(pk=self.family.pk).update(parent_id_number='039876545')
+        twin_family = Family.objects.create(
+            name='כהן', phone='0501234567', parent_id_number='39876545', branch=self.branch,
+        )
         twin = Child.objects.create(
-            family=other_family, first_name='נועה', last_name='כהן', id_number='111111118',
+            family=twin_family, first_name='נועה', last_name='כהן', id_number='111111118',
             birth_date=date(2015, 1, 1), gender='female', status='pending',
         )
         self._paid_trial(child=twin)
+        self.child.refresh_from_db()
         self.assertIsNotNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
+
+    def test_a_sibling_in_the_same_family_shares_the_credit(self):
+        sibling = Child.objects.create(
+            family=self.family, first_name='דן', last_name='כהן', id_number='222222226',
+            birth_date=date(2013, 1, 1), gender='male', status='pending',
+        )
+        self._paid_trial(child=sibling)
+        self.assertIsNotNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
+
+    def test_an_unrelated_family_with_the_same_child_id_is_not_credited(self):
+        stranger_family = Family.objects.create(
+            name='לוי', phone='0507777777', parent_id_number='888888888', branch=self.branch,
+        )
+        stranger = Child.objects.create(
+            family=stranger_family, first_name='נועה', last_name='לוי', id_number='111111118',
+            birth_date=date(2015, 1, 1), gender='female', status='pending',
+        )
+        self._paid_trial(child=stranger)
+        self.assertIsNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
+
+    def test_a_placeholder_id_number_does_not_make_children_twins(self):
+        Child.objects.filter(pk=self.child.pk).update(id_number='000000000')
+        self.child.refresh_from_db()
+        stranger_family = Family.objects.create(
+            name='לוי', phone='0507777777', parent_id_number='888888888', branch=self.branch,
+        )
+        stranger = Child.objects.create(
+            family=stranger_family, first_name='דן', last_name='לוי', id_number='000000000',
+            birth_date=date(2015, 1, 1), gender='male', status='pending',
+        )
+        self._paid_trial(child=stranger)
+        self.assertIsNone(creditable_trial_payment(self.child, branch_id=self.branch.id))
 
 
 class GatewayLinesTest(TrialCreditBase):
@@ -271,6 +316,36 @@ class WidgetRegistrationCreditTest(TrialCreditBase):
             Decimal(str(out['prorated_amount'])) + Decimal(str(out['registration_fee'])),
         )
 
+    def test_a_price_quote_does_not_starve_the_charge_that_follows_it(self, _tranzila):
+        # The CRM dialog prices a registration by creating a pending Payment. The
+        # real charge for the same lesson must still get the credit.
+        self._paid_trial()
+        preview = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(Decimal(str(preview['trial_credit_amount'])), Decimal('30.00'))
+        again = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.lesson.id),
+        )
+        self.assertEqual(Decimal(str(again['trial_credit_amount'])), Decimal('30.00'))
+
+    def test_a_stale_charge_is_refused_once_the_credit_went_elsewhere(self, _tranzila):
+        self._paid_trial()
+        stale = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.lesson.id),
+        )
+        stale_payment = Payment.objects.get(id=stale['payment_id'])
+        self.assertTrue(credit_still_held_by(stale_payment))
+        taken = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.sister_lesson.id),
+        )
+        Payment.objects.filter(id=taken['payment_id']).update(
+            status='completed', trial_credit_amount=Decimal('30.00'),
+            trial_credit_source=stale_payment.trial_credit_source,
+        )
+        stale_payment.refresh_from_db()
+        self.assertFalse(credit_still_held_by(stale_payment))
+
     def test_a_second_registration_does_not_take_the_credit_twice(self, _tranzila):
         self._paid_trial()
         first = PaymentService().initiate_subscription_payment(
@@ -325,3 +400,49 @@ class CardLinkCreditTest(TrialCreditBase):
         quote = quote_standing_order(self._link())
         self.assertEqual(quote['trial_credit'], Decimal('0.00'))
         self.assertEqual(quote['first_charge'], quote['prorated_lesson'] + quote['registration_fee'])
+
+
+@patch('apps.core.payment_service.TranzilaService')
+class GatewaySumTest(TrialCreditBase):
+    """
+    Tranzila has no amount field: the sum of the line items IS the money. Every
+    charge path must therefore send lines that add up to Payment.final_amount.
+    """
+
+    def _lines_for(self, payment):
+        from apps.core.payment_service import subscription_tranzila_items
+
+        return subscription_tranzila_items(
+            label='ג׳ודו',
+            prorated_lesson=payment_prorated_lesson_amount(payment),
+            registration_fee=payment.registration_fee or Decimal('0.00'),
+            prorated=payment_prorated_lesson_amount(payment) > 0,
+            trial_credit=payment.trial_credit_amount or Decimal('0.00'),
+        )
+
+    def test_the_widget_lines_add_up_to_the_credited_charge(self, _tranzila):
+        self._paid_trial()
+        out = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.lesson.id),
+        )
+        payment = Payment.objects.get(id=out['payment_id'])
+        self.assertGreater(payment.trial_credit_amount, 0)
+        total = sum(Decimal(str(line['unit_price'])) for line in self._lines_for(payment))
+        self.assertEqual(total, payment.final_amount)
+
+    def test_the_widget_lines_add_up_without_a_credit_too(self, _tranzila):
+        out = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.lesson.id),
+        )
+        payment = Payment.objects.get(id=out['payment_id'])
+        total = sum(Decimal(str(line['unit_price'])) for line in self._lines_for(payment))
+        self.assertEqual(total, payment.final_amount)
+
+    def test_a_credit_bigger_than_the_whole_charge_leaves_no_lines(self, _tranzila):
+        self._paid_trial(amount='500.00')
+        out = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id), lesson_id=str(self.lesson.id),
+        )
+        payment = Payment.objects.get(id=out['payment_id'])
+        self.assertEqual(payment.final_amount, Decimal('0.00'))
+        self.assertEqual(self._lines_for(payment), [])

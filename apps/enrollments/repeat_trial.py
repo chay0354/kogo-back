@@ -38,10 +38,12 @@ def id_number_variants(id_number: str) -> list[str]:
     that ran on trial signups and far too heavy once every registration asks.
     """
     digits = normalize_id_number(id_number)
-    if not digits:
-        return []
     stripped = digits.lstrip('0')
-    variants = {id_number.strip(), digits, stripped, stripped.zfill(9)} if stripped else {id_number.strip(), digits}
+    # A placeholder like 000000000 or a two-digit stub is not an identity; matching
+    # on it would make unrelated children twins.
+    if len(stripped) < 5:
+        return []
+    variants = {id_number.strip(), digits, stripped, stripped.zfill(9)}
     return [value for value in variants if value]
 
 

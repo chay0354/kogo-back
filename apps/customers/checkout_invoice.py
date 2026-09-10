@@ -42,10 +42,17 @@ def payment_checkout_line(payment: Payment) -> dict:
     slots = ', '.join(_lesson_slot_label(item) for item in lessons)
     description = f'{course_name} — {slots}' if slots else (course_name or 'מנוי חוג')
     fee = payment.registration_fee or Decimal('0.00')
+    credit = payment.trial_credit_amount or Decimal('0.00')
+    if credit > 0:
+        # Say the deduction on the receipt. Without it the line would read a full
+        # registration fee beside an amount that is net of the credit, and the
+        # parent would have no way to reconcile the two.
+        description = f'{description} (בניכוי שיעור ניסיון ששולם ₪{credit.normalize():f})'
     return {
         'child_name': child.full_name if child else '',
         'description': description,
         'registration_fee': str(fee),
+        'trial_credit': str(credit),
         'amount': str(payment.final_amount or Decimal('0.00')),
     }
 
