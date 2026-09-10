@@ -336,6 +336,17 @@ class LessonViewSet(viewsets.ModelViewSet):
         )
         queryset = scope_courses(queryset, self.request.user, 'course')
 
+        # The CRM enrolment dialog narrows by branch and by course type, and asks
+        # for the lessons of the whole narrowed set at once, so it can show days
+        # and times beside each course instead of one request per course.
+        lesson_branch_id = self.request.query_params.get('branch_id', None)
+        if lesson_branch_id:
+            queryset = queryset.filter(course__branch_id=lesson_branch_id)
+
+        lesson_course_type_id = self.request.query_params.get('course_type', None)
+        if lesson_course_type_id:
+            queryset = queryset.filter(course__course_type_id=lesson_course_type_id)
+
         course_id = self.request.query_params.get('course', None)
         if course_id:
             queryset = queryset.filter(course_id=course_id)
