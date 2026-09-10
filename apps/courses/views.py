@@ -23,6 +23,8 @@ from apps.courses.serializers import (
 from apps.instructors.models import Instructor
 from apps.core.models import LessonMonthlySnapshot
 from apps.enrollments.models import LessonEnrollment
+from apps.external_students.models import ExternalStudent
+from apps.external_students.roster import external_counts_by_course, external_counts_by_lesson
 from apps.enrollments.enrollment_counts import paying_enrollments
 from apps.core.permissions import IsManager, IsManagerOrPartner, StaffAccessMixin
 from apps.core.scoping import (
@@ -277,6 +279,7 @@ class CourseViewSet(viewsets.ModelViewSet):
         context = self.get_serializer_context()
         context['lessons_counts'] = lessons_counts
         context['paying_children_counts'] = paying_children_counts
+        context['external_students_counts'] = external_counts_by_course(course_ids)
         serializer = CourseSerializer(courses, many=True, context=context)
         return Response(serializer.data)
     
@@ -375,6 +378,7 @@ class LessonViewSet(viewsets.ModelViewSet):
 
         context = self.get_serializer_context()
         context['paying_enrollment_counts'] = enrollment_counts
+        context['external_lesson_counts'] = external_counts_by_lesson(lesson_ids)
         serializer = LessonSerializer(lessons, many=True, context=context)
         return Response(serializer.data)
 
@@ -480,6 +484,17 @@ class LessonViewSet(viewsets.ModelViewSet):
         if active_enrollments:
             return Response(
                 {'error': 'לא ניתן למחוק שיעור עם תלמידים פעילים'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # An external-branch lesson never has a paying enrollment, so the check
+        # above would wave it through and CASCADE would take the hand-typed
+        # municipality roster and its whole attendance history with it. Inactive
+        # rows count here too: that history is the thing the roster exists to
+        # produce, and it lives nowhere else.
+        if ExternalStudent.objects.filter(lesson=instance).exists():
+            return Response(
+                {'error': 'לא ניתן למחוק שיעור שרשומים בו תלמידים חיצוניים או שיש להם היסטוריית נוכחות'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         

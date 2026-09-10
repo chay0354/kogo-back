@@ -295,6 +295,7 @@ class CourseSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     lessons_count = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
+    external_students_count = serializers.SerializerMethodField()
     lessons = serializers.SerializerMethodField()
     managers = serializers.PrimaryKeyRelatedField(
         many=True,
@@ -318,6 +319,7 @@ class CourseSerializer(serializers.ModelSerializer):
                   'trial_lesson_is_paid', 'trial_lesson_price',
                   'registration_fee_override', 'charge_standing_order_immediately',
                   'external_link', 'lessons_count', 'enrolled_students_count',
+                  'external_students_count',
                   'lessons', 'managers', 'managers_detail', 'instructor', 'instructor_detail',
                   'instructor_salary_override', 'created_at', 'updated_at']
         read_only_fields = ['id', 'display_id', 'created_at', 'updated_at']
@@ -364,6 +366,19 @@ class CourseSerializer(serializers.ModelSerializer):
         if counts is not None:
             return counts.get(obj.id, 0)
         return count_distinct_paying_children(course=obj)
+
+    def get_external_students_count(self, obj):
+        """
+        Municipality children in this course, kept as its own number.
+
+        Never folded into enrolled_students_count: that figure means paying
+        students and is read beside prices and capacity.
+        """
+        counts = self.context.get('external_students_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
+        from apps.external_students.models import ExternalStudent
+        return ExternalStudent.objects.filter(lesson__course=obj, is_active=True).count()
     
     def get_lessons(self, obj):
         """Get lessons for this course (only for detail view)"""
@@ -418,6 +433,7 @@ class LessonSerializer(serializers.ModelSerializer):
     instructor_name = serializers.CharField(source='instructor.full_name', read_only=True, allow_null=True)
     day_name = serializers.SerializerMethodField()
     enrolled_students_count = serializers.SerializerMethodField()
+    external_students_count = serializers.SerializerMethodField()
     room_capacity = serializers.SerializerMethodField()
 
     class Meta:
@@ -430,7 +446,7 @@ class LessonSerializer(serializers.ModelSerializer):
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
                   'trial_registration_open',
-                  'status', 'notes', 'enrolled_students_count', 'room_capacity',
+                  'status', 'notes', 'enrolled_students_count', 'external_students_count', 'room_capacity',
                   'created_at', 'updated_at']
         read_only_fields = ['id', 'instructor_salary_override', 'created_at', 'updated_at']
 
@@ -475,6 +491,14 @@ class LessonSerializer(serializers.ModelSerializer):
         if counts is not None:
             return counts.get(obj.id, 0)
         return count_paying_enrollments(lesson=obj)
+
+    def get_external_students_count(self, obj):
+        """Municipality children on this lesson, separate from the paying count."""
+        counts = self.context.get('external_lesson_counts')
+        if counts is not None:
+            return counts.get(obj.id, 0)
+        from apps.external_students.models import ExternalStudent
+        return ExternalStudent.objects.filter(lesson=obj, is_active=True).count()
     
     def get_room_capacity(self, obj):
         """Get room capacity for this lesson"""

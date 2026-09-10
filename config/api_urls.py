@@ -14,5 +14,6 @@ urlpatterns = [
     path('store/', include('apps.store.urls')),
     path('documents/', include('apps.documents.urls')),
     path('payment-links/', include('apps.payment_links.urls')),
+    path('external-students/', include('apps.external_students.urls')),
 ]
 

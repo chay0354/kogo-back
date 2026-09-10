@@ -51,6 +51,28 @@ class BranchSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate_is_external(self, value):
+        """
+        Turning the flag off is refused while municipality children are on it.
+
+        Those rows can only be created under an external branch, so clearing the
+        flag would strand them somewhere nothing in the UI can reach or remove.
+        Reading a register never consults this flag, so an accidental toggle
+        cannot blank a class out either way.
+        """
+        from apps.external_students.models import ExternalStudent
+
+        if value or self.instance is None or not self.instance.is_external:
+            return value
+        count = ExternalStudent.objects.filter(
+            lesson__course__branch=self.instance, is_active=True,
+        ).count()
+        if count:
+            raise serializers.ValidationError(
+                f'לא ניתן לבטל "סניף חיצוני" כל עוד רשומים בו {count} תלמידים חיצוניים'
+            )
+        return value
+
 
 class BranchDetailSerializer(serializers.ModelSerializer):
     """Branch serializer with nested rooms"""
