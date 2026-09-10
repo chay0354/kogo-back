@@ -348,6 +348,11 @@ REGISTRATION_FEE_ILS = config('REGISTRATION_FEE_ILS', default=120, cast=int)
 # lives here and not in a constant.
 ALLOCATION_THRESHOLD_ILS = config('ALLOCATION_THRESHOLD_ILS', default='5000')
 
+# Card brands the terminal cannot clear. Comma-separated, matched against
+# apps.core.card_validation.card_brand. Refused at every card entry point with a
+# Hebrew message, before anything reaches Tranzila. Empty = accept every brand.
+BLOCKED_CARD_BRANDS = config('BLOCKED_CARD_BRANDS', default='diners')
+
 # Registrations made before this date pay only דמי רישום on signup; the monthly
 # subscription itself starts on this date at the full monthly price (no proration for
 # the signup month). Set empty to charge the first month on signup as usual.

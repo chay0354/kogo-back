@@ -3,11 +3,20 @@ Card detail checks that run before anything is sent to Tranzila.
 
 Live acquirers watch decline ratios, so obviously-invalid input must never reach
 the gateway. Messages are Hebrew because they are shown to parents as-is.
+
+Card *brand* is refused here too. A brand the terminal cannot clear is not a
+decline to recover from: the charge may even succeed while returning no token,
+which leaves a paid registration with no standing order behind it and nothing
+that will ever fail loudly. Refusing at the door is the only place that costs
+nothing. Every card entry point in the system funnels through
+`validate_card_details`, so this is the single gate.
 """
 from __future__ import annotations
 
 from datetime import date
 from typing import Any, Dict
+
+from django.conf import settings
 
 
 class CardValidationError(ValueError):
@@ -40,6 +49,68 @@ def _digits_only(raw: Any) -> str:
     return ''.join(ch for ch in str(raw or '') if ch.isdigit())
 
 
+# Brands the system can name. A card outside every range is 'unknown' and is
+# never blocked — an unrecognised BIN must not stop a paying customer.
+CARD_BRAND_LABELS: Dict[str, str] = {
+    'visa': 'ויזה',
+    'mastercard': 'מאסטרקארד',
+    'amex': 'אמריקן אקספרס',
+    'diners': 'דיינרס',
+    'discover': 'דיסקאבר',
+    'jcb': 'JCB',
+    'unionpay': 'יוניון פיי',
+}
+
+
+def _in_range(digits: str, length: int, low: int, high: int) -> bool:
+    if len(digits) < length:
+        return False
+    return low <= int(digits[:length]) <= high
+
+
+def card_brand(card_number: Any) -> str:
+    """
+    Issuer brand from the BIN, or 'unknown'.
+
+    Ranges follow ISO/IEC 7812 assignments. Diners is checked before the other
+    3xx brands because 36 / 38-39 are Diners while 34 / 37 are Amex and
+    3528-3589 is JCB — a plain "starts with 3" test would mix all three.
+    """
+    digits = _digits_only(card_number)
+    if not digits:
+        return 'unknown'
+
+    if _in_range(digits, 3, 300, 305) or digits.startswith('3095') \
+            or digits.startswith('36') or digits.startswith('38') or digits.startswith('39'):
+        return 'diners'
+    if digits.startswith('34') or digits.startswith('37'):
+        return 'amex'
+    if _in_range(digits, 4, 3528, 3589):
+        return 'jcb'
+    if digits.startswith('4'):
+        return 'visa'
+    if _in_range(digits, 2, 51, 55) or _in_range(digits, 4, 2221, 2720):
+        return 'mastercard'
+    if digits.startswith('6011') or digits.startswith('65') \
+            or _in_range(digits, 3, 644, 649) or _in_range(digits, 6, 622126, 622925):
+        return 'discover'
+    if digits.startswith('62'):
+        return 'unionpay'
+    return 'unknown'
+
+
+def blocked_card_brands() -> set:
+    """Read at call time so a settings override in a test takes effect."""
+    raw = getattr(settings, 'BLOCKED_CARD_BRANDS', '') or ''
+    if not isinstance(raw, str):
+        raw = ','.join(str(item) for item in raw)
+    return {part.strip().lower() for part in raw.split(',') if part.strip()}
+
+
+def brand_label(brand: str) -> str:
+    return CARD_BRAND_LABELS.get(brand, brand)
+
+
 def _normalized_year(raw: Any) -> int:
     year = int(str(raw).strip())
     if year < 100:
@@ -65,6 +136,12 @@ def validate_card_details(card_details: Dict[str, Any], *, today: date | None = 
         raise CardValidationError('מספר הכרטיס אינו תקין')
     if not luhn_valid(card_number):
         raise CardValidationError('מספר הכרטיס אינו תקין')
+
+    brand = card_brand(card_number)
+    if brand in blocked_card_brands():
+        raise CardValidationError(
+            f'אנחנו לא מקבלים כרטיסי {brand_label(brand)}. נא להזין כרטיס אחר.'
+        )
 
     try:
         expiry_month = int(str(card_details.get('expiry_month')).strip())
@@ -98,4 +175,5 @@ def validate_card_details(card_details: Dict[str, Any], *, today: date | None = 
         'expiry_year': expiry_year,
         'cvv': cvv,
         'card_holder_id': card_holder_id,
+        'brand': brand,
     }

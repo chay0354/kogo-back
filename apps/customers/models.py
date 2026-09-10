@@ -568,7 +568,21 @@ class RecurringPayment(models.Model):
         blank=True, 
         verbose_name="סיבת ביטול"
     )
-    
+
+    # Card-update chase. A failed standing order is never retried by the cron, so
+    # the only thing that revives it is the parent replacing the card. These two
+    # fields are what stops the chase from being either silent or endless.
+    card_update_reminders_sent = models.PositiveIntegerField(
+        default=0,
+        verbose_name="תזכורות שנשלחו",
+        help_text="כמה תזכורות לעדכון כרטיס נשלחו מאז הכישלון. מתאפס בהחלפת כרטיס.",
+    )
+    card_update_last_reminder_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="תזכורת אחרונה",
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
@@ -931,3 +945,70 @@ class CronHeartbeat(models.Model):
         ordering = ['-invoked_at']
         indexes = [models.Index(fields=['-invoked_at'])]
 
+
+
+class CardReplacement(models.Model):
+    """
+    החלפת כרטיס אשראי למשפחה — A card swap, and what it collected.
+
+    Until now nothing in the system recorded that somebody's card had been
+    changed. A parent calling to ask "who took ₪720 off my new card, and when
+    did you even get this card" had no answer waiting anywhere.
+
+    The card number is never stored — four digits, the brand and the expiry are
+    everything a person needs to recognise which card was used, and everything a
+    leak of this table could give away.
+    """
+    SOURCE_CHOICES = [
+        ('crm', 'הוקלד במערכת'),
+        ('parent_link', 'הוזן על ידי ההורה בקישור'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    family = models.ForeignKey(
+        Family,
+        on_delete=models.CASCADE,
+        related_name='card_replacements',
+        verbose_name="משפחה",
+    )
+    actor = models.ForeignKey(
+        'auth.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='card_replacements',
+        verbose_name="מי ביצע",
+        help_text="ריק כשההורה הזין את הכרטיס בעצמו בקישור.",
+    )
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='crm', verbose_name="מקור")
+
+    card_last4 = models.CharField(max_length=4, blank=True, verbose_name="4 ספרות אחרונות")
+    card_brand = models.CharField(max_length=20, blank=True, verbose_name="סוג כרטיס")
+    card_expire_month = models.PositiveIntegerField(null=True, blank=True, verbose_name="חודש תפוגה")
+    card_expire_year = models.PositiveIntegerField(null=True, blank=True, verbose_name="שנת תפוגה")
+
+    recurring_ids = models.JSONField(default=list, blank=True, verbose_name="הוראות קבע שעודכנו")
+    charged_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, default=Decimal('0.00'), verbose_name="סכום שנגבה",
+    )
+    results = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name="פירוט",
+        help_text="שורה לכל חודש שנוסה: נגבה / נדחה / לא ודאי / דולג.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך")
+
+    class Meta:
+        db_table = 'card_replacements'
+        verbose_name = "החלפת כרטיס"
+        verbose_name_plural = "החלפות כרטיס"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['family', '-created_at']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        return f"החלפת כרטיס {self.family.name} - {self.created_at:%d/%m/%Y}"
