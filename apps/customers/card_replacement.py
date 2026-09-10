@@ -36,6 +36,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Iterable
 
+from django.core.signing import BadSignature, SignatureExpired, dumps, loads
 from django.db import transaction
 from django.utils import timezone
 
@@ -62,6 +63,9 @@ REPLACEABLE_STATUSES = ('active', 'paused', 'failed')
 # Arrears are never collected further back than this. A card fixed after a long
 # silence must not surprise a parent with a year of charges in one click.
 MAX_ARREARS_MONTHS = 12
+
+SIGN_SALT = 'kogo-card-replacement'
+TOKEN_MAX_AGE = 14 * 24 * 3600
 
 
 class CardReplacementError(ValueError):
@@ -487,3 +491,57 @@ def _record(*, family, card, actor, source, recurring_ids, charged_total, result
         charged_amount=charged_total,
         results=list(results),
     )
+
+
+def build_family_token(family) -> str:
+    """Signed, family-scoped, 14 days. Colons break Next.js path segments."""
+    return dumps({'f': str(family.id)}, salt=SIGN_SALT).replace(':', '~')
+
+
+def family_public_url(family) -> str:
+    from apps.core.password_reset_email import crm_frontend_url
+
+    return f'{crm_frontend_url()}/replace-card/{build_family_token(family)}'
+
+
+def resolve_family_token(token: str):
+    """The family behind a link, or a Hebrew reason it cannot be used."""
+    from apps.customers.models import Family
+
+    raw = (token or '').strip().replace('~', ':')
+    if not raw:
+        raise CardReplacementError('קישור לא תקין')
+    try:
+        payload = loads(raw, salt=SIGN_SALT, max_age=TOKEN_MAX_AGE)
+    except SignatureExpired as exc:
+        raise CardReplacementError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.') from exc
+    except BadSignature as exc:
+        raise CardReplacementError('קישור לא תקין') from exc
+
+    family = Family.objects.filter(id=str((payload or {}).get('f') or '')).first()
+    if family is None:
+        raise CardReplacementError('קישור לא תקין')
+    return family
+
+
+def public_preview(family, *, today: date | None = None) -> dict:
+    """What the parent sees. Names and amounts only — never a token or four digits."""
+    data = quote(family, today=today)
+    parent_view = {
+        'ok': True,
+        'family_name': data['family_name'],
+        'total_due': data['total_due'],
+        'will_charge': data['will_charge'],
+        'items': [
+            {
+                'child_name': row['child_name'],
+                'course_name': row['course_name'],
+                'branch_name': row['branch_name'],
+                'monthly_amount': row['monthly_amount'],
+                'months_due': row['months_due'],
+            }
+            for row in data['targets'] if row['will_update_card']
+        ],
+    }
+    parent_view['already_done'] = not parent_view['items']
+    return parent_view

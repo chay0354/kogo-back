@@ -10,6 +10,13 @@ from .card_link_views import (
     CardLinkOptionsView,
     CardLinkPreviewView,
 )
+from .card_replacement_views import (
+    ChildFamilyCardQuoteView,
+    FamilyCardQuoteView,
+    FamilyCardReplaceView,
+    PublicCardReplaceApplyView,
+    PublicCardReplacePreviewView,
+)
 from .widget_views import (
     WidgetLookupView,
     WidgetRegisterView,
@@ -56,6 +63,11 @@ urlpatterns = [
     path('card-links/<uuid:link_id>/<str:action>/', CardLinkActionView.as_view(), name='card-link-action'),
     path('card-link/<str:token>/', CardLinkPreviewView.as_view(), name='card-link-preview'),
     path('card-link/<str:token>/charge/', CardLinkChargeView.as_view(), name='card-link-charge'),
+    path('families/<uuid:family_id>/card/', FamilyCardQuoteView.as_view(), name='family-card-quote'),
+    path('families/<uuid:family_id>/card/replace/', FamilyCardReplaceView.as_view(), name='family-card-replace'),
+    path('children/<uuid:child_id>/family-card/', ChildFamilyCardQuoteView.as_view(), name='child-family-card-quote'),
+    path('replace-card/<str:token>/', PublicCardReplacePreviewView.as_view(), name='replace-card-preview'),
+    path('replace-card/<str:token>/apply/', PublicCardReplaceApplyView.as_view(), name='replace-card-apply'),
     path('cron/recurring-billing/', cron_recurring_billing, name='cron-recurring-billing'),
     path('cron/recurring-billing/status/', cron_recurring_billing_status, name='cron-recurring-billing-status'),
 ]

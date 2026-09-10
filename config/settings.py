@@ -250,6 +250,8 @@ REST_FRAMEWORK = {
         # The tenant's public card page (apps/rental_billing): the same limits as card links.
         'rental_card_view': '30/min',
         'rental_card_charge': '5/min',
+        'card_replace_view': '30/min',
+        'card_replace': '5/min',
     },
 }
 
