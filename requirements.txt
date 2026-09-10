@@ -18,3 +18,9 @@ requests==2.31.0
 reportlab==5.0.0
 python-bidi==0.6.11
 
+# Municipality roster import: read the sheet, split the scan, ask the model.
+# All three are pure Python — no OS-level deps, safe on Vercel like reportlab.
+openpyxl==3.1.5
+pypdf==5.1.0
+anthropic==1.4.0
+
