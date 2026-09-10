@@ -418,6 +418,93 @@ class RosterAndAttendanceTests(ExternalStudentTestBase):
         self.assertEqual([m.lesson.id for m in missing_registers(OCC)], [self.lesson.id])
 
 
+class QuietUntilThereIsAListTests(ExternalStudentTestBase):
+    """
+    An external branch says nothing about its size until someone types the
+    municipality's sheet. A zero there means "we have not been told", not
+    "nobody came", and an alert that fires on it is noise on every external
+    lesson at once.
+    """
+
+    def test_the_instructor_alert_stays_quiet_on_an_empty_external_lesson(self):
+        self.instructor.email = 'teacher@ext.test'
+        self.instructor.save(update_fields=['email'])
+        self.auth(self.worker)
+
+        res = self.client.get('/api/v1/instructors/my-dashboard/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        groups = {g['lesson_id']: g for g in res.data['groups']}
+        row = groups[str(self.lesson.id)]
+        self.assertEqual(row['active_students'], 0)
+        self.assertFalse(row['is_low'])
+        self.assertTrue(row['roster_unknown'])
+
+    def test_it_speaks_again_once_the_list_is_there(self):
+        self.student()
+        self.instructor.email = 'teacher@ext.test'
+        self.instructor.save(update_fields=['email'])
+        self.auth(self.worker)
+
+        res = self.client.get('/api/v1/instructors/my-dashboard/')
+        row = {g['lesson_id']: g for g in res.data['groups']}[str(self.lesson.id)]
+        self.assertEqual(row['active_students'], 1)
+        self.assertTrue(row['is_low'])
+        self.assertFalse(row['roster_unknown'])
+
+    def test_a_normal_branch_with_nobody_on_it_is_still_flagged(self):
+        """The quieting is about external branches only, not about empty ones."""
+        self.instructor.email = 'teacher@ext.test'
+        self.instructor.save(update_fields=['email'])
+        self.auth(self.worker)
+
+        res = self.client.get('/api/v1/instructors/my-dashboard/')
+        row = {g['lesson_id']: g for g in res.data['groups']}[str(self.own_lesson.id)]
+        self.assertTrue(row['is_low'])
+        self.assertFalse(row['roster_unknown'])
+
+    def test_the_dashboard_leaves_an_empty_external_course_out_of_low_occupancy(self):
+        from apps.core.models import LessonMonthlySnapshot
+        from apps.instructors.utils import generate_monthly_snapshots
+
+        generate_monthly_snapshots('2026-09')
+        self.assertTrue(LessonMonthlySnapshot.objects.filter(month='2026-09').exists())
+
+        self.auth(self.manager)
+        res = self.client.get('/api/v1/core/dashboard/courses/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        by_id = {c['course_id']: c for c in res.data['course_list']}
+
+        external = by_id[str(self.lesson.course_id)]
+        self.assertTrue(external['is_external'])
+        self.assertTrue(external['roster_unknown'])
+        listed = {c['course_id'] for c in res.data['low_occupancy_courses']}
+        self.assertNotIn(str(self.lesson.course_id), listed)
+
+        # The branch we run ourselves is untouched by any of this.
+        own = by_id[str(self.own_lesson.course_id)]
+        self.assertFalse(own['is_external'])
+        self.assertFalse(own['roster_unknown'])
+        self.assertIn(str(self.own_lesson.course_id), listed)
+
+    def test_an_external_course_with_a_list_joins_the_occupancy_maths(self):
+        from apps.instructors.utils import generate_monthly_snapshots
+
+        for i in range(3):
+            ExternalStudent.objects.create(
+                lesson=self.lesson, first_name=f'תלמיד{i}', last_name='עירייה',
+            )
+        generate_monthly_snapshots('2026-09')
+
+        self.auth(self.manager)
+        res = self.client.get('/api/v1/core/dashboard/courses/')
+        row = {c['course_id']: c for c in res.data['course_list']}[str(self.lesson.course_id)]
+        self.assertEqual(row['external_students'], 3)
+        self.assertFalse(row['roster_unknown'])
+        # 3 of 20 seats — genuinely low, and now worth saying so.
+        listed = {c['course_id'] for c in res.data['low_occupancy_courses']}
+        self.assertIn(str(self.lesson.course_id), listed)
+
+
 class NoLeakIntoMoneyTests(ExternalStudentTestBase):
     """The tests that matter. Every one of these is a guarantee to the owner."""
 

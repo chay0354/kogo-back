@@ -906,9 +906,15 @@ class DashboardViewSet(viewsets.ViewSet):
             occupying = students + external_students
             occupancy = min(100, (occupying / capacity * 100)) if capacity > 0 else 0
 
-            if occupancy >= 90:
+            # An external course's roster only exists once someone types up the
+            # municipality's sheet. A zero there means "we have not been told",
+            # not "nobody came", so it is left out of both alerts rather than
+            # filling the low-occupancy list with 0% rows that say nothing.
+            roster_unknown = is_external and external_students == 0
+
+            if occupancy >= 90 and not roster_unknown:
                 full_capacity_count += 1
-            if occupancy < 50:
+            if occupancy < 50 and not roster_unknown:
                 low_occupancy_count += 1
                 low_occupancy_courses.append({
                     'course_id': str(cid),
@@ -928,6 +934,7 @@ class DashboardViewSet(viewsets.ViewSet):
                 'students': students,
                 'external_students': external_students,
                 'is_external': is_external,
+                'roster_unknown': roster_unknown,
                 'occupancy': round(occupancy, 1),
                 'revenue': revenue,
                 'profit': profit

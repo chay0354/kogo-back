@@ -1291,6 +1291,16 @@ class MyDashboardView(APIView):
         groups = []
         for lesson in lessons:
             count = len(current.get(lesson.id, ()))
+            # An external branch's roster only exists once someone types up the
+            # municipality's sheet. Until then a zero there means "we have not
+            # been told", not "this class is empty", and flagging it would put
+            # every external lesson in the alert box saying nothing.
+            is_external_branch = bool(
+                lesson.course_id
+                and lesson.course.branch_id
+                and lesson.course.branch.is_external
+            )
+            unknown_roster = is_external_branch and count == 0
             groups.append({
                 'lesson_id': str(lesson.id),
                 'course_name': lesson.course.name if lesson.course_id else '',
@@ -1298,7 +1308,8 @@ class MyDashboardView(APIView):
                 'day_of_week': lesson.day_of_week,
                 'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
                 'active_students': count,
-                'is_low': count < self.LOW_GROUP_THRESHOLD,
+                'is_low': count < self.LOW_GROUP_THRESHOLD and not unknown_roster,
+                'roster_unknown': unknown_roster,
             })
         groups.sort(key=lambda g: (g['active_students'], g['course_name']))
 
