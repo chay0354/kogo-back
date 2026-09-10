@@ -95,24 +95,72 @@ def counts_toward_capacity(
     return enrollment.child.status not in TRIAL_CHILD_STATUSES
 
 
+def occupies_a_trial_seat(enrollment, *, occurrence_date: Optional[date] = None) -> bool:
+    """
+    Whether this row puts a body in the room on `occurrence_date` as a trial.
+
+    A trial is booked for one date. It is a body in that room on that day and on
+    no other, which is why the date has to be part of the question.
+    """
+    if enrollment.status != 'active':
+        return False
+    if not enrollment.trial_lesson_date:
+        return False
+    if occurrence_date is None:
+        return enrollment.trial_lesson_date >= date.today()
+    return enrollment.trial_lesson_date == occurrence_date
+
+
 def count_capacity_enrollments(
     *,
     lesson,
     occurrence_date: Optional[date] = None,
     enrollments=None,
+    include_trials: bool = False,
 ) -> int:
-    """Headcount for UI capacity (e.g. schedule card 3/20)."""
+    """
+    Headcount for capacity.
+
+    Two different questions share this counter, and they get different answers:
+
+    * A paying registration asks how many paying students the class holds. A
+      trial is a visitor for one day and never costs a subscriber their place,
+      so `include_trials` is False and trials are not counted.
+    * A trial booking asks how many bodies will be in the room that day —
+      paying students plus everyone else trying the class out. Twenty paying
+      children and five trials is twenty-five children in a room built for
+      twenty, so `include_trials` is True and the trials booked for that date
+      are counted with the payers.
+    """
     from apps.enrollments.duplicate_students import collapse_duplicate_people
 
     if enrollments is None:
-        enrollments = LessonEnrollment.objects.filter(
-            lesson=lesson,
-            status='active',
-        ).select_related('child', 'child__family')
+        rows = LessonEnrollment.objects.filter(lesson=lesson, status='active')
+        enrollments = rows.select_related('child', 'child__family')
     taking_a_seat = [
         e for e in enrollments
         if counts_toward_capacity(e, occurrence_date=occurrence_date)
+        or (include_trials and occupies_a_trial_seat(e, occurrence_date=occurrence_date))
     ]
     # One person, one seat. A child registered twice under two cards used to
     # hold two places in a class they attend once.
     return len(collapse_duplicate_people(taking_a_seat))
+
+
+def trial_seats_left(*, lesson, occurrence_date: Optional[date] = None, capacity=None, enrollments=None):
+    """
+    Places a trial may still be booked into on `occurrence_date`, or None when
+    the lesson has no capacity set. Never negative.
+    """
+    if capacity is None:
+        course = getattr(lesson, 'course', None)
+        room = getattr(lesson, 'room', None)
+        caps = [int(c) for c in (getattr(course, 'capacity', None), getattr(room, 'capacity', None)) if c]
+        capacity = min(caps) if caps else None
+    if not capacity:
+        return None
+    taken = count_capacity_enrollments(
+        lesson=lesson, occurrence_date=occurrence_date,
+        enrollments=enrollments, include_trials=True,
+    )
+    return max(0, int(capacity) - taken)

@@ -207,10 +207,12 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             return Response({'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין'}, status=status.HTTP_400_BAD_REQUEST)
         if not lesson.room:
             return Response({'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'}, status=status.HTTP_400_BAD_REQUEST)
-        capacity = lesson.course.capacity or lesson.room.capacity
-        if count_capacity_enrollments(lesson=lesson, occurrence_date=trial_date) >= capacity:
+        capacity = min(c for c in (lesson.course.capacity, lesson.room.capacity) if c)
+        if count_capacity_enrollments(
+            lesson=lesson, occurrence_date=trial_date, include_trials=True,
+        ) >= capacity:
             return Response(
-                {'lesson': f'השיעור מלא - קיבולת מקסימלית: {capacity} תלמידים'},
+                {'lesson': f'התפוסה מלאה לשיעור ניסיון - קיבולת מקסימלית: {capacity} תלמידים'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
