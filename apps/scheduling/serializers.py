@@ -116,9 +116,27 @@ class LessonCancelSerializer(serializers.Serializer):
 
 
 class AttendanceMarkSerializer(serializers.Serializer):
-    """Serializer for marking attendance"""
-    child_id = serializers.UUIDField()
+    """
+    One mark, for a real child or for an external student.
+
+    ``child_id`` alone is still accepted: the two repositories deploy
+    separately, and a frontend that has not shipped yet must keep working.
+    ``attendee_kind`` says which table ``attendee_id`` belongs to, so the view
+    never has to guess — a wrong guess would be a 500, not a 404.
+    """
+
+    child_id = serializers.UUIDField(required=False)
+    attendee_id = serializers.UUIDField(required=False)
+    attendee_kind = serializers.ChoiceField(
+        choices=['child', 'external'], required=False, default='child',
+    )
     status = serializers.ChoiceField(choices=['present', 'absent', 'not_marked'])
+
+    def validate(self, data):
+        if not data.get('attendee_id') and not data.get('child_id'):
+            raise serializers.ValidationError('חסר מזהה תלמיד')
+        data['attendee_id'] = data.get('attendee_id') or data['child_id']
+        return data
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -128,9 +146,16 @@ class AttendanceSerializer(serializers.ModelSerializer):
     child_status = serializers.CharField(source='child.status', read_only=True)
     lesson_id = serializers.UUIDField(source='lesson.id', read_only=True)
     occurrence_date = serializers.DateField(read_only=True)
-    
+    # Same identity pair the roster rows carry, so the client keys both lists
+    # the same way. For a real child it is simply the child id again.
+    attendee_id = serializers.UUIDField(source='child.id', read_only=True)
+    attendee_kind = serializers.SerializerMethodField()
+
     class Meta:
         model = LessonAttendance
-        fields = ['id', 'lesson_id', 'occurrence_date', 'child_id', 'child_name', 'child_status', 'status', 'notes', 'created_at']
+        fields = ['id', 'lesson_id', 'occurrence_date', 'child_id', 'child_name', 'child_status', 'status', 'notes', 'created_at', 'attendee_id', 'attendee_kind']
         read_only_fields = ['id', 'created_at']
+
+    def get_attendee_kind(self, obj):
+        return 'child'
 

@@ -28,6 +28,8 @@ from apps.instructors.utils import (
 )
 from apps.courses.models import Lesson
 from apps.enrollments.models import LessonEnrollment
+from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
+from apps.external_students.roster import external_visible_on_date
 from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
 from apps.core.scoping import scope_instructors
 from apps.scheduling.models import LessonCancellation
@@ -1267,17 +1269,38 @@ class MyDashboardView(APIView):
             cursor = date(cursor.year + 1, 1, 1) if cursor.month == 12 else date(cursor.year, cursor.month + 1, 1)
 
         # --- per-group headcount, as of today ---
+        # Identity pairs, not bare ids: a municipality student and a child are
+        # different tables and must never satisfy each other in the marked-set
+        # comparison further down.
         current = {}
         for e in enrollments:
             if e['start_date'] and e['start_date'] > today:
                 continue
             if e['end_date'] and e['end_date'] < today:
                 continue
-            current.setdefault(e['lesson_id'], set()).add(e['child_id'])
+            current.setdefault(e['lesson_id'], set()).add(('c', e['child_id']))
+
+        # External-branch children. They pay us nothing, but the question this
+        # screen answers — is this class too small to run — is about how many
+        # children are in the room, and a municipality class of eighteen is not
+        # too small.
+        for student in ExternalStudent.objects.filter(lesson_id__in=lesson_ids, is_active=True):
+            if external_visible_on_date(student, today):
+                current.setdefault(student.lesson_id, set()).add(('e', student.id))
 
         groups = []
         for lesson in lessons:
             count = len(current.get(lesson.id, ()))
+            # An external branch's roster only exists once someone types up the
+            # municipality's sheet. Until then a zero there means "we have not
+            # been told", not "this class is empty", and flagging it would put
+            # every external lesson in the alert box saying nothing.
+            is_external_branch = bool(
+                lesson.course_id
+                and lesson.course.branch_id
+                and lesson.course.branch.is_external
+            )
+            unknown_roster = is_external_branch and count == 0
             groups.append({
                 'lesson_id': str(lesson.id),
                 'course_name': lesson.course.name if lesson.course_id else '',
@@ -1285,11 +1308,12 @@ class MyDashboardView(APIView):
                 'day_of_week': lesson.day_of_week,
                 'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
                 'active_students': count,
-                'is_low': count < self.LOW_GROUP_THRESHOLD,
+                'is_low': count < self.LOW_GROUP_THRESHOLD and not unknown_roster,
+                'roster_unknown': unknown_roster,
             })
         groups.sort(key=lambda g: (g['active_students'], g['course_name']))
 
-        total_active = len({cid for ids in current.values() for cid in ids})
+        total_active = len({key for keys in current.values() for key in keys})
 
         # --- occurrences still waiting for attendance ---
         # Only dates that have already happened: a lesson later today is not
@@ -1309,7 +1333,19 @@ class MyDashboardView(APIView):
             .exclude(status='not_marked')
             .values_list('lesson_id', 'occurrence_date', 'child_id')
         ):
-            marked.setdefault((lesson_id, occurrence_date), set()).add(child_id)
+            marked.setdefault((lesson_id, occurrence_date), set()).add(('c', child_id))
+
+        for lesson_id, occurrence_date, student_id in (
+            ExternalStudentAttendance.objects
+            .filter(
+                student__lesson_id__in=rostered_ids,
+                occurrence_date__gte=date_from,
+                occurrence_date__lte=date_to,
+            )
+            .exclude(status='not_marked')
+            .values_list('student__lesson_id', 'occurrence_date', 'student_id')
+        ):
+            marked.setdefault((lesson_id, occurrence_date), set()).add(('e', student_id))
 
         window_end = min(date_to, today)
         # Registers were not kept in the app before this date, so every lesson

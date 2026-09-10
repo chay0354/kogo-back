@@ -18,6 +18,14 @@ from collections import defaultdict
 
 from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, counts_toward_capacity
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
+from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
+from apps.external_students.roster import (
+    ATTENDEE_KIND_CHILD,
+    external_attendance_rows,
+    external_roster_rows,
+    external_visible_on_date,
+    visible_external_students,
+)
 from apps.scheduling.models import LessonCancellation, ScheduleEvent
 from apps.scheduling.studio_conflict import iter_occurrence_dates_in_range, occurrence_time_for_date
 from apps.scheduling.rental_agreement.generator import generate_rental_agreement_pdf
@@ -260,10 +268,21 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'is_trial': is_trial,
                 'trial_outcome': e.trial_outcome or None,
                 'trial_number': e.trial_number if is_trial else None,
+                # Which table this row's id came from. A real child's attendee_id
+                # is their child_id, so nothing about these rows changes.
+                'attendee_kind': ATTENDEE_KIND_CHILD,
+                'attendee_id': str(e.child.id),
             })
-        
-        data['enrollments'] = visible_enrollments
-        data['attendance'] = AttendanceSerializer(attendance_records, many=True).data
+
+        # Municipality children in an external branch. They are not Child rows,
+        # so they ride alongside rather than through the enrollment query.
+        external_students = visible_external_students(lesson, occ_date)
+
+        data['enrollments'] = visible_enrollments + external_roster_rows(external_students)
+        data['attendance'] = (
+            AttendanceSerializer(attendance_records, many=True).data
+            + external_attendance_rows(external_students, occ_date)
+        )
         return data
     
     def list(self, request, *args, **kwargs):
@@ -358,14 +377,34 @@ class LessonViewSet(viewsets.ModelViewSet):
             ).values_list('lesson_id', 'occurrence_date', 'child_id'):
                 marked_map[(rec[0], rec[1])].add(rec[2])
 
+            # Same two shapes for the external roster: who is on it, and who has
+            # already been marked. Two queries for the whole range.
+            external_by_lesson: dict = defaultdict(list)
+            for student in ExternalStudent.objects.filter(
+                lesson_id__in=lesson_ids, is_active=True,
+            ).only('id', 'lesson', 'is_active', 'start_date', 'end_date'):
+                external_by_lesson[student.lesson_id].append(student)
+
+            external_marked = defaultdict(set)
+            for rec in ExternalStudentAttendance.objects.filter(
+                student__lesson_id__in=lesson_ids,
+                occurrence_date__gte=start,
+                occurrence_date__lte=end,
+                status__in=['present', 'absent'],
+            ).values_list('student__lesson_id', 'occurrence_date', 'student_id'):
+                external_marked[(rec[0], rec[1])].add(rec[2])
+
             def occurrence_counts(lesson_id, occurrence_date, marked):
                 """
                 enrollment_count, student_count, active_student_count,
-                trial_student_count and whether the register is finished, in one
-                pass over the roster.
+                trial_student_count, external_student_count and whether the
+                register is finished, in one pass over the roster.
 
                 marked is None when the occurrence cannot be complete (cancelled,
                 or no date at all), otherwise the children already marked on it.
+
+                capacity is deliberately untouched by external students: it is
+                the paying count, and it shares its meaning with widget capacity.
                 """
                 capacity = 0
                 roster = 0
@@ -387,7 +426,19 @@ class LessonViewSet(viewsets.ModelViewSet):
                         actives += 1
                     if complete and enr.child_id not in marked:
                         complete = False
-                return capacity, roster, actives, trials, complete and roster > 0
+
+                externals = 0
+                ext_marked = external_marked.get((lesson_id, occurrence_date), set())
+                for student in external_by_lesson.get(lesson_id, ()):
+                    if not external_visible_on_date(student, occurrence_date):
+                        continue
+                    externals += 1
+                    roster += 1
+                    actives += 1
+                    if complete and student.id not in ext_marked:
+                        complete = False
+
+                return capacity, roster, actives, trials, externals, complete and roster > 0
 
             expanded = []
             for lesson in lessons_list:
@@ -403,6 +454,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                         data['student_count'],
                         data['active_student_count'],
                         data['trial_student_count'],
+                        data['external_student_count'],
                         data['attendance_complete'],
                     ) = occurrence_counts(lesson.id, occ, marked)
                     expanded.append(data)
@@ -428,6 +480,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                         data['student_count'],
                         data['active_student_count'],
                         data['trial_student_count'],
+                        data['external_student_count'],
                         attendance_done,
                     ) = occurrence_counts(lesson.id, occ, marked)
                     if c:
@@ -596,14 +649,52 @@ class LessonViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # The external roster for this lesson, read once. Looking a student up
+        # in here is also the authorization check: an id belonging to another
+        # lesson simply is not in the dict, so nothing is written for it.
+        external_by_id = {
+            s.id: s for s in ExternalStudent.objects.filter(lesson=lesson, is_active=True)
+        }
+
         # Mark attendance for each student
         results = []
         for item in attendance_list:
             serializer = AttendanceMarkSerializer(data=item)
             if serializer.is_valid():
-                child_id = serializer.validated_data['child_id']
+                attendee_id = serializer.validated_data['attendee_id']
                 attendance_status = serializer.validated_data['status']
-                
+
+                # An external student's mark lands in its own table and returns
+                # here. Everything below this block belongs to a real Child —
+                # the absence row, the irregular-absence rule and the parent's
+                # WhatsApp — and none of it applies to a municipality child.
+                # One early return, not four scattered guards, because a later
+                # edit would forget one of the four.
+                if serializer.validated_data.get('attendee_kind') == 'external':
+                    student = external_by_id.get(attendee_id)
+                    if student is None:
+                        results.append({
+                            'attendee_id': str(attendee_id),
+                            'attendee_kind': 'external',
+                            'success': False,
+                            'error': 'לא נמצא תלמיד חיצוני בשיעור הזה',
+                        })
+                        continue
+                    ExternalStudentAttendance.objects.update_or_create(
+                        student=student,
+                        occurrence_date=occ_date,
+                        defaults={'status': attendance_status, 'marked_by': request.user},
+                    )
+                    results.append({
+                        'attendee_id': str(student.id),
+                        'attendee_kind': 'external',
+                        'status': attendance_status,
+                        'success': True,
+                    })
+                    continue
+
+                child_id = attendee_id
+
                 # Get previous status if exists
                 try:
                     previous_attendance = LessonAttendance.objects.get(
@@ -614,7 +705,26 @@ class LessonViewSet(viewsets.ModelViewSet):
                     previous_status = previous_attendance.status
                 except LessonAttendance.DoesNotExist:
                     previous_status = None
-                
+
+                # Handle absence tracking
+                from apps.enrollments.models import ChildAbsence
+                from apps.customers.models import Child
+                from datetime import timedelta
+
+                # Resolved before the write, not after it: an id that is not a
+                # child used to reach update_or_create first and raise from the
+                # Child lookup once the attendance row already existed.
+                child = Child.objects.filter(id=child_id).first()
+                if child is None:
+                    results.append({
+                        'child_id': str(child_id),
+                        'attendee_id': str(child_id),
+                        'attendee_kind': 'child',
+                        'success': False,
+                        'error': 'ילד לא נמצא',
+                    })
+                    continue
+
                 # Update or create attendance record
                 attendance, created = LessonAttendance.objects.update_or_create(
                     lesson=lesson,
@@ -622,14 +732,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     occurrence_date=occ_date,
                     defaults={'status': attendance_status}
                 )
-                
-                # Handle absence tracking
-                from apps.enrollments.models import ChildAbsence
-                from apps.customers.models import Child
-                from datetime import timedelta
-                
-                child = Child.objects.get(id=child_id)
-                
+
                 if attendance_status == 'absent':
                     # Create ChildAbsence record
                     ChildAbsence.objects.get_or_create(

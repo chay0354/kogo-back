@@ -33,6 +33,7 @@ from apps.instructors.models import Instructor
 from apps.courses.models import Course, Lesson, CourseType
 from apps.customers.models import Child, Family
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
+from apps.external_students.roster import external_counts_by_branch, external_counts_by_course
 
 
 def parse_date_filters(request):
@@ -871,9 +872,23 @@ class DashboardViewSet(viewsets.ViewSet):
             snapshot_rows=Count('id'),
         ).order_by('-revenue_total')
 
+        # Municipality children, counted live rather than from the snapshots.
+        # A snapshot row's enrolled_students explains its own base_revenue, so
+        # folding heads that pay nothing into that column would make the row
+        # contradict itself — in finalized months too.
+        course_ids_for_external = [row['course_id'] for row in course_rows]
+        external_by_course = external_counts_by_course(course_ids_for_external)
+        external_branch_courses = set(
+            Course.objects
+            .filter(id__in=course_ids_for_external, branch__is_external=True)
+            .values_list('id', flat=True)
+        )
+
         for row in course_rows:
             cid = row['course_id']
             students = int(students_by_course.get(cid, 0) or 0)
+            external_students = int(external_by_course.get(cid, 0) or 0)
+            is_external = cid in external_branch_courses
             revenue = float(row['revenue_total'] or 0)
             profit = float(row['profit_total'] or 0)
             lessons_count = row['snapshot_rows'] or 0
@@ -885,11 +900,21 @@ class DashboardViewSet(viewsets.ViewSet):
             # Falls back to the course capacity for the rare period with no
             # snapshot rows to sum seats from.
             capacity = seats_by_course.get(cid) or row.get('course__capacity') or 0
-            occupancy = min(100, (students / capacity * 100)) if capacity > 0 else 0
+            # Occupancy is about how full the room is, so the municipality heads
+            # belong in it. Without them all 52 external courses sit in the
+            # low-occupancy list at 0% forever.
+            occupying = students + external_students
+            occupancy = min(100, (occupying / capacity * 100)) if capacity > 0 else 0
 
-            if occupancy >= 90:
+            # An external course's roster only exists once someone types up the
+            # municipality's sheet. A zero there means "we have not been told",
+            # not "nobody came", so it is left out of both alerts rather than
+            # filling the low-occupancy list with 0% rows that say nothing.
+            roster_unknown = is_external and external_students == 0
+
+            if occupancy >= 90 and not roster_unknown:
                 full_capacity_count += 1
-            if occupancy < 50:
+            if occupancy < 50 and not roster_unknown:
                 low_occupancy_count += 1
                 low_occupancy_courses.append({
                     'course_id': str(cid),
@@ -907,6 +932,9 @@ class DashboardViewSet(viewsets.ViewSet):
                 'course_type': course_type_name or '',
                 'lessons': lessons_count,
                 'students': students,
+                'external_students': external_students,
+                'is_external': is_external,
+                'roster_unknown': roster_unknown,
                 'occupancy': round(occupancy, 1),
                 'revenue': revenue,
                 'profit': profit
@@ -1045,6 +1073,15 @@ class DashboardViewSet(viewsets.ViewSet):
             if row['family__branch_id']
         }
 
+        # Municipality children per branch, and which branches are external.
+        # Kept beside `students` rather than added to it: that figure counts
+        # Child rows and is summed into the org-wide KPI above.
+        external_by_branch = external_counts_by_branch(branch_ids_in_snapshots)
+        external_branch_ids = {
+            str(bid) for bid in Branch.objects
+            .filter(is_external=True).values_list('id', flat=True)
+        }
+
         branch_list = []
         for row in branch_rows:
             bid = row['branch_id']
@@ -1056,6 +1093,8 @@ class DashboardViewSet(viewsets.ViewSet):
                 'branch_id': bid_str,
                 'name': row['branch__name'],
                 'students': student_counts.get(bid_str, 0),
+                'external_students': external_by_branch.get(bid, 0),
+                'is_external': bid_str in external_branch_ids,
                 'lessons': (row['month_rows'] or 0) * 4,
                 'revenue': revenue,
                 'profit': profit,
@@ -1093,6 +1132,8 @@ class DashboardViewSet(viewsets.ViewSet):
                 'branch_id': bid_str,
                 'name': b.name,
                 'students': rental_student_counts.get(bid_str, 0),
+                'external_students': 0,
+                'is_external': bid_str in external_branch_ids,
                 'lessons': 0,
                 'revenue': rental_extra,
                 'profit': rental_extra,

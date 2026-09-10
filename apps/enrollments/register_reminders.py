@@ -117,6 +117,8 @@ def missing_registers(day: date_cls, *, instructor_id=None) -> list[MissingRegis
     The roster is read exactly as the attendance screen reads it, so a lesson
     the instructor sees as finished is never reported as open.
     """
+    from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
+    from apps.external_students.roster import external_visible_on_date
     from apps.scheduling.views import enrollment_visible_on_date
 
     lessons = lessons_meeting_on(day, instructor_id=instructor_id)
@@ -124,6 +126,10 @@ def missing_registers(day: date_cls, *, instructor_id=None) -> list[MissingRegis
         return []
 
     lesson_ids = [lesson.id for lesson in lessons]
+
+    # Both sets hold ('c', child_id) / ('e', student_id) rather than bare ids.
+    # Two uuids from two tables must never satisfy each other, and a bare set
+    # of ids cannot say which table an entry came from.
     roster: dict = {}
     for enrollment in (
         LessonEnrollment.objects
@@ -133,7 +139,11 @@ def missing_registers(day: date_cls, *, instructor_id=None) -> list[MissingRegis
               'child__status', 'child__created_at')
     ):
         if enrollment_visible_on_date(enrollment, day):
-            roster.setdefault(enrollment.lesson_id, set()).add(enrollment.child_id)
+            roster.setdefault(enrollment.lesson_id, set()).add(('c', enrollment.child_id))
+
+    for student in ExternalStudent.objects.filter(lesson_id__in=lesson_ids, is_active=True):
+        if external_visible_on_date(student, day):
+            roster.setdefault(student.lesson_id, set()).add(('e', student.id))
 
     marked: dict = {}
     for lesson_id, child_id in (
@@ -141,7 +151,14 @@ def missing_registers(day: date_cls, *, instructor_id=None) -> list[MissingRegis
         .filter(lesson_id__in=lesson_ids, occurrence_date=day, status__in=MARKED_STATUSES)
         .values_list('lesson_id', 'child_id')
     ):
-        marked.setdefault(lesson_id, set()).add(child_id)
+        marked.setdefault(lesson_id, set()).add(('c', child_id))
+
+    for lesson_id, student_id in (
+        ExternalStudentAttendance.objects
+        .filter(student__lesson_id__in=lesson_ids, occurrence_date=day, status__in=MARKED_STATUSES)
+        .values_list('student__lesson_id', 'student_id')
+    ):
+        marked.setdefault(lesson_id, set()).add(('e', student_id))
 
     open_registers = []
     for lesson in lessons:
