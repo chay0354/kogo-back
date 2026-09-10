@@ -418,6 +418,61 @@ class RosterAndAttendanceTests(ExternalStudentTestBase):
         self.assertEqual([m.lesson.id for m in missing_registers(OCC)], [self.lesson.id])
 
 
+class TwiceWeeklyCountsOnceTests(ExternalStudentTestBase):
+    """
+    A child in a twice-weekly group holds one row per lesson.
+
+    That mirrors a paying child in a combined track, who holds one enrolment
+    per lesson — and the paying side answers "how many children" with distinct
+    children. The external number sits next to that one on the same screens, so
+    it has to be counted the same way.
+    """
+
+    def _twice_weekly(self):
+        """One child on both lessons of one course, as an import would create."""
+        second = Lesson.objects.create(
+            course=self.lesson.course, instructor=self.instructor,
+            day_of_week=4, start_time='16:00', end_time='17:00', is_recurring=True,
+        )
+        for lesson in (self.lesson, second):
+            ExternalStudent.objects.create(
+                lesson=lesson, first_name='נועם', last_name='כהן', phone='050-111-1111',
+            )
+        return second
+
+    def test_the_course_counts_one_child_not_two_rows(self):
+        from apps.external_students.roster import external_counts_by_course
+
+        self._twice_weekly()
+        counts = external_counts_by_course([self.lesson.course_id])
+        self.assertEqual(counts[self.lesson.course_id], 1)
+
+    def test_the_branch_counts_one_child_not_two_rows(self):
+        from apps.external_students.roster import external_counts_by_branch
+
+        self._twice_weekly()
+        counts = external_counts_by_branch([self.external_branch.id])
+        self.assertEqual(counts[self.external_branch.id], 1)
+
+    def test_each_lesson_still_counts_its_own_row(self):
+        """Per lesson the answer is rows: the child really is in both rooms."""
+        from apps.external_students.roster import external_counts_by_lesson
+
+        second = self._twice_weekly()
+        counts = external_counts_by_lesson([self.lesson.id, second.id])
+        self.assertEqual(counts[self.lesson.id], 1)
+        self.assertEqual(counts[second.id], 1)
+
+    def test_two_different_children_are_still_two(self):
+        """The fold is on identity, not on being in the same course."""
+        from apps.external_students.roster import external_counts_by_course
+
+        self.student(first='נועם', last='כהן', phone='0501111111')
+        self.student(first='שירה', last='לוי', phone='0502222222')
+        counts = external_counts_by_course([self.lesson.course_id])
+        self.assertEqual(counts[self.lesson.course_id], 2)
+
+
 class QuietUntilThereIsAListTests(ExternalStudentTestBase):
     """
     An external branch says nothing about its size until someone types the

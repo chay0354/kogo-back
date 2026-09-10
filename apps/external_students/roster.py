@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Iterable, Optional
 
+from apps.enrollments.person_match import normalise_name, normalise_phone
 from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
 
 # The frontend keys attendance state on one identifier per row. Real children
@@ -134,27 +135,49 @@ def external_counts_by_lesson(lesson_ids) -> dict:
     )
 
 
-def external_counts_by_course(course_ids) -> dict:
-    """{course_id: active external head count} — one query for a dashboard tab."""
-    from django.db.models import Count
+def _distinct_heads(rows) -> int:
+    """
+    How many children those rows are, rather than how many rows they are.
 
-    return dict(
+    A child in a twice-weekly municipality group holds one row per lesson, the
+    same way a paying child in a combined track holds one enrolment per lesson.
+    The paying side answers this question with distinct children
+    (``count_distinct_paying_children``), so a number sitting beside that one
+    has to answer it the same way, or the two drift apart the day the first
+    twice-weekly group is imported.
+
+    Identity is the same normalised name + phone the walk-in matcher uses, so a
+    child is never judged to be two people by two different definitions. A row
+    with no phone folds on its name alone, which is safe here: a duplicate
+    active name on one lesson is already refused, so two rows sharing a name
+    across a course really are the one child attending twice.
+    """
+    return len({
+        (normalise_name(f'{first} {last}'), normalise_phone(phone))
+        for first, last, phone in rows
+    })
+
+
+def _distinct_counts(group_field: str, ids) -> dict:
+    """{id: distinct external children} for a page of courses or branches."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    buckets: dict = {}
+    for key, first, last, phone in (
         ExternalStudent.objects
-        .filter(lesson__course_id__in=course_ids, is_active=True)
-        .values_list('lesson__course_id')
-        .annotate(c=Count('id'))
-        .values_list('lesson__course_id', 'c')
-    )
+        .filter(is_active=True, **{f'{group_field}__in': ids})
+        .values_list(group_field, 'first_name', 'last_name', 'phone')
+    ):
+        buckets.setdefault(key, []).append((first, last, phone))
+    return {key: _distinct_heads(rows) for key, rows in buckets.items()}
+
+
+def external_counts_by_course(course_ids) -> dict:
+    """{course_id: distinct external children} — one query for a dashboard tab."""
+    return _distinct_counts('lesson__course_id', course_ids)
 
 
 def external_counts_by_branch(branch_ids) -> dict:
-    """{branch_id: active external head count} — one query for a dashboard tab."""
-    from django.db.models import Count
-
-    return dict(
-        ExternalStudent.objects
-        .filter(lesson__course__branch_id__in=branch_ids, is_active=True)
-        .values_list('lesson__course__branch_id')
-        .annotate(c=Count('id'))
-        .values_list('lesson__course__branch_id', 'c')
-    )
+    """{branch_id: distinct external children} — one query for a dashboard tab."""
+    return _distinct_counts('lesson__course__branch_id', branch_ids)
