@@ -8,7 +8,7 @@ edited without touching layout code.
 STUDIO_NAME = 'קוגומלו גרופ בע"מ'
 STUDIO_COMPANY_NUMBER = '516504412'
 STUDIO_EMAIL = 'cogo@cogo.co.il'
-STUDIO_PHONE = '054-9424755'
+STUDIO_PHONE = '050-9424755'
 
 AGREEMENT_TITLE = 'הסכם הרשאת שימוש בסטודיו קוגומלו'
 
