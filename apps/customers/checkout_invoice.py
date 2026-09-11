@@ -5,6 +5,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.customers.financial_models import Invoice, InvoiceActivityLog, InvoiceChild
@@ -12,6 +13,46 @@ from apps.customers.models import Payment
 from apps.documents.numbering import SERIES_SUBSCRIPTION, next_document_number
 
 logger = logging.getLogger(__name__)
+
+# The activity log a checkout receipt carries: its lines, and every charge it
+# covers. The Invoice points at the first charge only; the others are named here.
+CHECKOUT_LINES_ACTION = 'checkout_lines'
+
+
+def checkout_log_payment_ids(details) -> list[str]:
+    """The charges a checkout_lines log says its receipt covers."""
+    return [str(value) for value in ((details or {}).get('payment_ids') or [])]
+
+
+def payments_covered_by_checkout(payment_ids) -> dict[str, str]:
+    """
+    Of these charges, the ones a family-checkout receipt already covers — each
+    with that receipt's number.
+
+    A checkout paying for several children or lessons issues ONE receipt that
+    points at its first charge; the rest are covered only by name, in the
+    receipt's checkout_lines log. Anything asking "does this charge have its
+    receipt?" has to read that log too, or it hands the rest a second receipt.
+
+    The text match only narrows the rows read; the ids are compared exactly.
+    """
+    wanted = sorted({str(pid) for pid in payment_ids})
+    covered: dict[str, str] = {}
+    for start in range(0, len(wanted), 100):
+        chunk = set(wanted[start:start + 100])
+        match = Q()
+        for pid in chunk:
+            match |= Q(details__payment_ids__icontains=pid)
+        logs = (
+            InvoiceActivityLog.objects
+            .filter(action=CHECKOUT_LINES_ACTION)
+            .filter(match)
+            .values_list('details', 'invoice__invoice_number')
+        )
+        for details, number in logs:
+            for pid in chunk.intersection(checkout_log_payment_ids(details)):
+                covered.setdefault(pid, number)
+    return covered
 
 
 def _lesson_slot_label(lesson) -> str:
@@ -143,7 +184,7 @@ def _finish_checkout_invoice(invoice, paid, *, send_email: bool, total):
 
     InvoiceActivityLog.objects.create(
         invoice=invoice,
-        action='checkout_lines',
+        action=CHECKOUT_LINES_ACTION,
         details={
             'lines': lines,
             'payment_ids': [str(p.id) for p in paid],
