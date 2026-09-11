@@ -53,8 +53,23 @@ class TenantSerializer(serializers.ModelSerializer):
             'company_number', 'id_number', 'phone', 'email', 'address',
         ]
         read_only_fields = ['id', 'full_name']
-        # A company tenant has one name. It goes in first_name.
-        extra_kwargs = {'last_name': {'required': False, 'allow_blank': True}}
+        # A company tenant has one name — the tenants screen writes it as
+        # "שם העסק" in last_name — and a person has two. Either field may be
+        # empty, never both (validate).
+        extra_kwargs = {
+            'first_name': {'required': False, 'allow_blank': True},
+            'last_name': {'required': False, 'allow_blank': True},
+        }
+
+    def validate(self, attrs):
+        # A new tenant needs a name. An edit that sends both names must leave one;
+        # an edit that sends one keeps the other as it is on the card.
+        partial = getattr(self.root, 'partial', False)
+        both_sent = 'first_name' in attrs and 'last_name' in attrs
+        names = (attrs.get('first_name', ''), attrs.get('last_name', ''))
+        if (not partial or both_sent) and not any(str(name).strip() for name in names):
+            raise serializers.ValidationError({'last_name': 'יש להזין את שם העסק, או שם פרטי ושם משפחה'})
+        return attrs
 
 
 class TenancySlotSerializer(serializers.ModelSerializer):

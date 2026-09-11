@@ -69,21 +69,22 @@ def _weekday_count(days) -> int:
 
 def suggested_monthly_amount(slots) -> Decimal:
     """
-    What the rental contract would bill a month for these slots, before VAT.
+    What the rental contract bills a month for these slots, before VAT.
 
-    Σ price_per_session × 4 × the number of weekdays each slot repeats on
-    (weekly_repeat_days). A slot with no weekdays listed counts one: that is how
-    the calendar reads a weekly rental saved before the list existed. The PDF
-    prints the same figure per weekday row, so the office sees one number in
-    both places.
+    Σ price_per_session × 4 × the number of weekdays each weekly slot repeats on
+    (weekly_repeat_days) — the PDF's "rate × 4" per weekday row, so the office
+    sees one number in both places. A weekly slot with no weekdays listed counts
+    one: that is how the calendar reads a weekly rental saved before the list
+    existed.
 
-    A one-time rental has no weekdays either and is counted the same way,
-    although the PDF bills it once. It is only a suggestion; the office confirms
-    the amount. Inactive slots are left out: nothing is rented there any more.
+    A one-time rental adds nothing: it is not monthly, and the PDF bills it once.
+    Neither does an inactive slot — nothing is rented there any more. The tenants
+    screen (tenancyUtils.estimateMonthlyAmount) follows the same rule, and the
+    office confirms the amount either way.
     """
     total = Decimal('0')
     for slot in slots:
-        if not slot.is_active:
+        if not slot.is_active or slot.event_type != 'weekly':
             continue
         rate = Decimal(str(slot.price_per_session or 0))
         total += rate * WEEKS_PER_MONTH * _weekday_count(slot.weekly_repeat_days)

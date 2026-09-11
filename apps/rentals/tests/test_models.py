@@ -79,11 +79,12 @@ class SuggestedMonthlyAmountTests(TestCase):
         slot = make_rental(self.branch, price='120', days=())
         self.assertEqual(suggested_monthly_amount([slot]), Decimal('480.00'))
 
-    def test_a_one_time_rental_counts_like_one_weekday(self):
-        # The rule as specified. The PDF bills a one-time rental once; the
-        # office confirms the amount, so this is only ever a suggestion.
-        slot = make_rental(self.branch, price='200', days=(), event_type='one_time')
-        self.assertEqual(suggested_monthly_amount([slot]), Decimal('800.00'))
+    def test_a_one_time_rental_adds_nothing_to_a_month(self):
+        # Not monthly: the PDF bills it once. The tenants screen agrees.
+        once = make_rental(self.branch, price='200', days=(), event_type='one_time')
+        weekly = make_rental(self.branch, price='100', days=(1,))
+        self.assertEqual(suggested_monthly_amount([once]), Decimal('0.00'))
+        self.assertEqual(suggested_monthly_amount([once, weekly]), Decimal('400.00'))
 
     def test_a_weekday_listed_twice_is_one_weekday(self):
         slot = make_rental(self.branch, price='100', days=(1, 1, '1'))
