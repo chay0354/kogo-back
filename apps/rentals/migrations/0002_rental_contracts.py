@@ -14,6 +14,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # The foreign key to the user table locks it against writes until this
+        # migration commits; fail the build after 5s rather than queue logins.
+        migrations.RunSQL("SET LOCAL lock_timeout = '5s'", reverse_sql=migrations.RunSQL.noop),
         migrations.CreateModel(
             name='RentalContract',
             fields=[

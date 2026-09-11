@@ -24,6 +24,11 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # The foreign keys below lock business_customers and branches against
+        # writes until this migration commits. Behind a long open write it would
+        # queue, and writes queued behind it would wait too; giving up after 5s
+        # fails the build instead, and the running deployment stays live.
+        migrations.RunSQL("SET LOCAL lock_timeout = '5s'", reverse_sql=migrations.RunSQL.noop),
         migrations.CreateModel(
             name='Tenancy',
             fields=[

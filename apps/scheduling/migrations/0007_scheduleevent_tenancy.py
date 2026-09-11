@@ -13,6 +13,12 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # ALTER TABLE takes an ACCESS EXCLUSIVE lock on schedule_events: every
+        # calendar read waits for it. The change itself is instant (a nullable
+        # column), but behind a long open transaction it would queue and stall
+        # the calendar; giving up after 5s fails the build instead, and the
+        # running deployment stays live.
+        migrations.RunSQL("SET LOCAL lock_timeout = '5s'", reverse_sql=migrations.RunSQL.noop),
         migrations.AddField(
             model_name='scheduleevent',
             name='tenancy',
