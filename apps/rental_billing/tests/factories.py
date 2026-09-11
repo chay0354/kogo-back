@@ -46,9 +46,11 @@ def card_url(link) -> str:
 
 
 def sign_contract(tenancy) -> RentalContract:
-    return RentalContract.objects.create(
-        tenancy=tenancy, version=1, status=RentalContract.STATUS_SIGNED, terms={'v': 1}, pdf=b'%PDF-1.4',
-    )
+    """A signed contract for the tenancy. Issued as a draft, then signed the one way the model allows."""
+    from apps.rentals.tests.factories import sign_directly
+
+    draft = RentalContract.objects.create(tenancy=tenancy, version=1, terms={'v': 1}, pdf=b'%PDF-1.4')
+    return sign_directly(draft)
 
 
 def mocked_gateway() -> MagicMock:

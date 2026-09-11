@@ -25,7 +25,8 @@ Public — the tenant, no login, throttled:
 
 Cron — the courses' cron auth (CRON_TOKEN / CRON_SECRET):
 
-    POST        cron/charge/                        ?limit= ; not scheduled in vercel.json until phase 7
+    GET, POST   cron/charge/                        ?limit= ; Vercel Cron calls with GET. Not scheduled
+                                                    in vercel.json until phase 7
 """
 from __future__ import annotations
 
@@ -395,12 +396,13 @@ class PublicCardView(APIView):
         return Response(result)
 
 
-@api_view(['POST'])
+@api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def cron_charge(request):
     """
     Charge the tenants' standing orders that are due. The courses' cron auth:
     X-Cron-Token, ?token= or a Bearer matching CRON_TOKEN / CRON_SECRET.
+    GET as well as POST, as cron_recurring_billing takes: Vercel Cron calls with GET.
 
     While RENTAL_BILLING_ENABLED is off it answers {"summary": {"disabled": true}}
     and touches nothing. Not in vercel.json: it is scheduled in phase 7.

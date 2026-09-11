@@ -35,10 +35,12 @@ class KillSwitchTests(BillingFixture, APITestCase):
 
     def test_the_cron_endpoint_answers_disabled_and_keeps_its_auth(self):
         self.active_order(next_charge_date=date(2020, 1, 10))
-        self.assertEqual(self.client.post(CRON_URL).status_code, 401)
-        res = self.client.post(CRON_URL, HTTP_X_CRON_TOKEN='cron-secret')
-        self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.data['summary']['disabled'])
+        for call in (self.client.get, self.client.post):
+            self.assertEqual(call(CRON_URL).status_code, 401)
+            self.assertEqual(call(CRON_URL, HTTP_X_CRON_TOKEN='wrong').status_code, 401)
+            res = call(CRON_URL, HTTP_X_CRON_TOKEN='cron-secret')
+            self.assertEqual(res.status_code, 200)
+            self.assertTrue(res.data['summary']['disabled'])
         self.assertFalse(TenantCharge.objects.exists())
         self.assert_tranzila_untouched()
 

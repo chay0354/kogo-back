@@ -9,7 +9,7 @@ from rest_framework.test import APITestCase
 from apps.rental_billing.billing import charge_due
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
 from apps.rental_billing.tests.factories import (
-    CHARGES_URL, DECLINE, ORDERS_URL, STATUS_URL, BillingFixture, make_customer, make_tenancy,
+    CHARGES_URL, CRON_URL, DECLINE, ORDERS_URL, STATUS_URL, BillingFixture, make_customer, make_tenancy,
 )
 
 Order = TenantStandingOrder
@@ -206,6 +206,20 @@ class OfficeApiTests(BillingFixture, APITestCase):
         self.assertEqual(self.client.post(charge_url(charge, 'void/'), {'reason': 'x'}, format='json').status_code, 400)
         self.assertEqual(self.client.post(charge_url(charge, 'retry/')).status_code, 400)
         self.assertEqual(self.gateway_calls(), 0)
+
+    @override_settings(CRON_TOKEN='cron-secret')
+    def test_the_cron_endpoint_charges_on_get_as_vercel_calls_it(self):
+        self.active_order(next_charge_date=date(2020, 1, 10))
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(CRON_URL).status_code, 401)
+        self.assertEqual(self.gateway_calls(), 0)
+        res = self.client.get(CRON_URL, HTTP_AUTHORIZATION='Bearer cron-secret')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['summary']['charged'], 1)
+        # POST is the same endpoint: the month is taken, nothing is charged twice.
+        again = self.client.post(CRON_URL, HTTP_X_CRON_TOKEN='cron-secret')
+        self.assertEqual((again.status_code, again.data['summary']['charged']), (200, 0))
+        self.assertEqual(self.gateway.charge_with_token.call_count, 1)
 
     def test_status(self):
         res = self.client.get(STATUS_URL)

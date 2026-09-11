@@ -98,7 +98,7 @@ class SigningPageView(_PublicSigningView):
             'state': STATE_SIGNED,
             'signed_at': signed.signed_at.isoformat(),
             'pdf_url': public_pdf_path(token),
-            **after_signing(signed),
+            **after_signing(signed, request),
         })
 
 
