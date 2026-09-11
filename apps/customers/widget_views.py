@@ -354,6 +354,32 @@ def _computerized_docs_consent_given(data) -> bool:
     return str(data.get('computerized_docs_consent', '')).strip().lower() in ('true', '1', 'yes', 'on')
 
 
+def _record_signature(request, *, family, child, branch, data, refs):
+    """
+    Keep the parent's signature once the registration has succeeded.
+
+    Called outside the registration's transaction.atomic() — by now the family,
+    the child and the payment or enrollment are committed — and capture writes
+    in an atomic block of its own (a savepoint if a transaction is open), so a
+    failure there can never roll the registration back. Capture is evidence,
+    not a step of registering: it logs and stores nothing rather than raise,
+    and this guard keeps that promise even if the capture module itself breaks.
+    """
+    try:
+        from apps.signatures.capture import record_registration_signature
+
+        record_registration_signature(
+            request, family=family, child=child, branch=branch, data=data, refs=refs,
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            'signature capture raised — ignored, the registration stands (family %s, child %s)',
+            getattr(family, 'pk', None), getattr(child, 'pk', None),
+        )
+
+
 def _resolve_family_and_child(data, branch):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
@@ -677,6 +703,16 @@ class WidgetRegisterView(APIView):
                     include_monthly_amount=True,
                 )
                 payments = [payment]
+                _record_signature(
+                    request, family=family, child=child, branch=lesson.course.branch, data=data,
+                    refs={
+                        'payment_ids': [payment.get('payment_id')],
+                        'lesson_ids': [str(member.id) for member in members],
+                        'course_ids': [str(course.id)],
+                        'bundle_ids': [str(bundle.id)],
+                        'trial': False,
+                    },
+                )
                 return Response({
                     'is_bundle': True,
                     'child_id': str(child.id),
@@ -706,6 +742,15 @@ class WidgetRegisterView(APIView):
                 include_registration_fee=bool(data.get('include_registration_fee', True)),
             )
             result['child_id'] = str(child.id)
+            _record_signature(
+                request, family=family, child=child, branch=lesson.course.branch, data=data,
+                refs={
+                    'payment_ids': [result.get('payment_id')],
+                    'lesson_ids': [str(lesson.id)],
+                    'course_ids': [str(course.id)],
+                    'trial': False,
+                },
+            )
             return Response(result, status=status.HTTP_201_CREATED)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -863,6 +908,16 @@ class WidgetTrialRegisterView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
+            _record_signature(
+                request, family=family, child=child, branch=lesson.course.branch, data=data,
+                refs={
+                    'payment_ids': [str(payment.id)],
+                    'lesson_ids': [str(lesson.id)],
+                    'course_ids': [str(course.id)],
+                    'trial_lesson_dates': [trial_date.isoformat()],
+                    'trial': True,
+                },
+            )
             return Response({
                 'requires_payment': True,
                 'payment_id': str(payment.id),
@@ -915,6 +970,16 @@ class WidgetTrialRegisterView(APIView):
 
         Child.objects.filter(pk=child.pk).update(status='trial_signed')
 
+        _record_signature(
+            request, family=family, child=child, branch=lesson.course.branch, data=data,
+            refs={
+                'enrollment_ids': [str(enrollment.id)],
+                'lesson_ids': [str(lesson.id)],
+                'course_ids': [str(course.id)],
+                'trial_lesson_dates': [trial_date.isoformat()],
+                'trial': True,
+            },
+        )
         return Response({
             'enrollment_id': str(enrollment.id),
             'child_id': str(child.id),
