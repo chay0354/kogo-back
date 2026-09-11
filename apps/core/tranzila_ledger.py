@@ -143,6 +143,7 @@ def normalize_tranzila_document(row: dict, customer_name: str = '') -> dict:
         'customer_name': customer_name or str(row.get('client_name') or row.get('contact') or ''),
         'document_type': TRANZILA_DOC_TYPE_LABELS.get(doc_type, doc_type or 'מסמך טרנזילה'),
         'document_type_code': doc_type,
+        'is_credit': doc_type in {'CN', 'CR'},
         'total_amount': amount,
         'amount_paid': paid,
         'open_balance': 0.0 if status == 'completed' else amount,
@@ -230,7 +231,9 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'document_type_code': doc.document_type,
             'total_amount': amount,
             'amount_paid': paid,
-            'open_balance': 0.0 if status in ('completed', 'draft') else amount,
+            # A credit note is money going back, never a debt to chase.
+            'open_balance': 0.0 if is_credit or status in ('completed', 'draft') else amount,
+            'is_credit': is_credit,
             'status': status,
             'pdf_url': doc.pdf_url or (
                 f'{TRANZILA_PDF_PUBLIC_BASE}/{doc.tranzila_retrieval_key}'

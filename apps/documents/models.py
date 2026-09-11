@@ -149,6 +149,13 @@ class FormalDocument(models.Model):
     # For credit invoices: manual invoice number if linked_document not resolved
     linked_document_number = models.CharField(max_length=30, blank=True, verbose_name="מספר חשבונית מקושרת")
     credit_reason = models.TextField(blank=True, verbose_name="סיבת זיכוי")
+    # סעיף 9(ה)(4): a credit note names the original's number AND date. The
+    # original is often not a FormalDocument (a lesson receipt, a store sale),
+    # so its date is kept here rather than reached through linked_document.
+    linked_document_date = models.DateField(null=True, blank=True, verbose_name="תאריך המסמך המקורי")
+    # The customer when there is no child or business customer to point at —
+    # a walk-in store buyer whose sale is credited. Nullable: expand-only.
+    customer_name = models.CharField(max_length=200, null=True, blank=True, verbose_name="שם לקוח")
     # For drafts: the document type it becomes when approved.
     draft_target_type = models.CharField(max_length=30, blank=True, verbose_name="סוג מסמך לאחר אישור")
 

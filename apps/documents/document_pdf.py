@@ -114,6 +114,8 @@ def _customer_details(doc: FormalDocument) -> list[tuple[str, str]]:
                 value = getattr(family, attr, '') or ''
                 if value:
                     rows.append((label, str(value)))
+    elif doc.customer_name:
+        rows.append(('שם הלקוח', doc.customer_name))
     return rows
 
 
@@ -143,6 +145,9 @@ def _header_card(doc: FormalDocument, styles: dict) -> Table:
         linked = doc.linked_document.document_number if doc.linked_document_id else doc.linked_document_number
         if linked:
             doc_pairs.append(('זיכוי עבור מסמך', linked))
+        linked_date = doc.linked_document_date or (doc.linked_document.document_date if doc.linked_document_id else None)
+        if linked_date:
+            doc_pairs.append(('תאריך המסמך המקורי', linked_date.strftime('%d/%m/%Y')))
     if doc.document_type == 'draft':
         doc_pairs.append(('יהפוך ל', TYPE_LABELS.get(doc.draft_target_type, doc.draft_target_type or '')))
 

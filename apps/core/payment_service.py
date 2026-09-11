@@ -2253,34 +2253,40 @@ class PaymentService:
     # ============================================================================
     
     @staticmethod
-    def _email_payment_credit_note(payment: Payment, refund_amount: Decimal, reason: str) -> None:
-        """Mail the family their credit note for a refunded lesson/subscription payment."""
-        from apps.core.computerized_docs import check_consent
-        from apps.core.credit_note_email import CreditNote, send_credit_note_email
+    def _issue_payment_credit_note(payment: Payment, refund_amount: Decimal, reason: str) -> None:
+        """
+        The numbered הודעת זיכוי for a refunded lesson charge, mailed to the family.
 
-        # The invoice the family already has in their inbox — סעיף 9(ה)(4) wants
-        # that document identified on the credit note, by number and by date.
+        It names the receipt the family already holds — סעיף 9(ה)(4) wants that
+        document identified by number and by date — and goes to the name on it.
+        """
+        from apps.core.computerized_docs import check_consent
+        from apps.documents.service import issue_refund_credit_note
+
         original = payment.invoices.order_by('invoice_date').first()
         family = payment.family
         email = (family.email or '').strip()
         if not email and original:
             email = (original.payer_email or '').strip()
-
         check_consent(family, original.invoice_number if original else str(payment.id))
 
-        send_credit_note_email(CreditNote(
-            customer_name=(original.payer_name if original else '') or family.name,
-            email=email,
-            amount=refund_amount,
+        course = payment.lesson.course if payment.lesson_id and payment.lesson.course_id else None
+        issue_refund_credit_note(
+            gross_amount=refund_amount,
             reason=reason,
             original_number=original.invoice_number if original else '',
             original_date=original.invoice_date if original else payment.payment_date,
-        ))
+            child=payment.child,
+            customer_name=(original.payer_name if original else '') or family.name,
+            email=email,
+            branch_id=payment.branch_id,
+            business_id=course.business_id if course else None,
+        )
 
     @staticmethod
-    def _email_store_credit_note(invoice, refund_amount: Decimal, reason: str) -> None:
-        """Mail the customer their credit note for a refunded store invoice."""
-        from apps.core.credit_note_email import CreditNote, send_credit_note_email
+    def _issue_store_credit_note(invoice, refund_amount: Decimal, reason: str) -> None:
+        """The numbered הודעת זיכוי for a refunded store sale — walk-in buyers included."""
+        from apps.documents.service import issue_refund_credit_note
 
         email = (invoice.customer_email or '').strip()
         name = (invoice.customer_name or '').strip()
@@ -2288,16 +2294,18 @@ class PaymentService:
             family = getattr(invoice.child, 'family', None)
             if family:
                 email = email or (family.email or '').strip()
-                name = name or invoice.child.full_name
+            name = name or invoice.child.full_name
 
-        send_credit_note_email(CreditNote(
-            customer_name=name,
-            email=email,
-            amount=refund_amount,
+        issue_refund_credit_note(
+            gross_amount=refund_amount,
             reason=reason,
             original_number=invoice.invoice_number,
             original_date=invoice.issue_date,
-        ))
+            child=invoice.child,
+            customer_name=name,
+            email=email,
+            branch_id=invoice.branch_id,
+        )
 
     def refund_payment(
         self,
@@ -2434,9 +2442,9 @@ class PaymentService:
             # The money is already back with the card issuer — a failed email
             # must never turn a successful refund into an error response.
             try:
-                self._email_payment_credit_note(payment, refund_amount, reason)
+                self._issue_payment_credit_note(payment, refund_amount, reason)
             except Exception:
-                logger.exception('Credit note email failed for payment %s (non-fatal)', payment_id)
+                logger.exception('Credit note failed for payment %s (non-fatal)', payment_id)
 
             return {
                 'success': True,
@@ -2639,10 +2647,10 @@ class PaymentService:
 
             # Stock is back and the card is credited — email failures stay non-fatal.
             try:
-                self._email_store_credit_note(invoice, refund_amount, reason)
+                self._issue_store_credit_note(invoice, refund_amount, reason)
             except Exception:
                 logger.exception(
-                    'Credit note email failed for store invoice %s (non-fatal)',
+                    'Credit note failed for store invoice %s (non-fatal)',
                     invoice.invoice_number,
                 )
 

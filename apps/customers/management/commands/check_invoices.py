@@ -162,21 +162,22 @@ class Command(BaseCommand):
 
     def _report_gaps(self):
         """Every number a series handed out must belong to a document that exists."""
+        from apps.documents.models import FormalDocument
+
         sources = {
-            'IR': Invoice.objects.values_list('invoice_number', flat=True),
-            'ST': StoreInvoice.objects.values_list('invoice_number', flat=True),
-            'SD': StoreInvoice.objects.values_list('invoice_number', flat=True),
+            'IR': (Invoice.objects, 'invoice_number'),
+            'ST': (StoreInvoice.objects, 'invoice_number'),
+            'SD': (StoreInvoice.objects, 'invoice_number'),
+            'CR': (FormalDocument.objects, 'document_number'),
         }
         clean = True
         for row in DocumentSeries.objects.order_by('series', 'year'):
-            prefix = f'{row.series}-{row.year}-'
-            numbers = sources.get(row.series)
-            if numbers is None:
+            if row.series not in sources:
                 continue
-            issued = {
-                int(number[len(prefix):]) for number in numbers.filter(invoice_number__startswith=prefix)
-                if number[len(prefix):].isdigit()
-            }
+            manager, field = sources[row.series]
+            prefix = f'{row.series}-{row.year}-'
+            numbers = manager.filter(**{f'{field}__startswith': prefix}).values_list(field, flat=True)
+            issued = {int(number[len(prefix):]) for number in numbers if number[len(prefix):].isdigit()}
             gaps = sorted(set(range(1, row.counter + 1)) - issued)
             if gaps:
                 clean = False

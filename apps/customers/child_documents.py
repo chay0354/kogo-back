@@ -36,6 +36,16 @@ def _late_issue(invoice) -> tuple[bool, str]:
     return False, _day(payment.payment_date) if payment is not None and payment.payment_date else ''
 
 
+def _covered_payment_ids(invoice) -> list[str]:
+    """Every charge a receipt covers — a family checkout issues one receipt for several."""
+    for log in invoice.activity_logs.all():
+        if log.action == 'checkout_lines':
+            ids = (log.details or {}).get('payment_ids') or []
+            if ids:
+                return [str(value) for value in ids]
+    return [str(invoice.payment_id)] if invoice.payment_id else []
+
+
 def child_documents(child) -> list[dict]:
     rows: list[dict] = []
 
@@ -58,6 +68,7 @@ def child_documents(child) -> list[dict]:
             'status': invoice.status,
             'description': (invoice.payment.description if invoice.payment_id else '') or 'מנוי חוג',
             'payment_id': str(invoice.payment_id) if invoice.payment_id else None,
+            'payment_ids': _covered_payment_ids(invoice),
             'issued_late': issued_late,
             'paid_at': paid_at,
             'download_url': f'/customers/invoices/{invoice.id}/pdf/',
@@ -75,13 +86,19 @@ def child_documents(child) -> list[dict]:
             'status': sale.payment_status,
             'description': ', '.join(products) or 'רכישה בחנות',
             'payment_id': None,
+            'payment_ids': [],
             'issued_late': False,
             'paid_at': _day(sale.issue_date) if sale.payment_status == 'completed' else '',
             'download_url': f'/store/invoices/{sale.id}/download/',
         })
 
-    # Drafts are not issued documents, so they have no place in the family's list.
-    for doc in FormalDocument.objects.filter(child=child).exclude(document_type='draft'):
+    # Drafts are not issued documents, and a store sale issued through Tranzila
+    # also has a FormalDocument copy — listed once, as the sale above.
+    store_copies = StoreInvoice.objects.filter(child=child, formal_document__isnull=False).values_list(
+        'formal_document_id', flat=True,
+    )
+    formal = FormalDocument.objects.filter(child=child).exclude(document_type='draft').exclude(id__in=store_copies)
+    for doc in formal:
         rows.append({
             'id': str(doc.id),
             'kind': 'formal',
@@ -92,6 +109,7 @@ def child_documents(child) -> list[dict]:
             'status': 'credit' if doc.document_type == 'credit_invoice' else 'issued',
             'description': doc.credit_reason or doc.description or '',
             'payment_id': None,
+            'payment_ids': [],
             'issued_late': False,
             'paid_at': '',
             'download_url': f'/documents/documents/{doc.id}/pdf/',

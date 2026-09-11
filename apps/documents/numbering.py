@@ -6,6 +6,7 @@ the accountant and a tax inspector can each check a run on its own:
     IR — חשבונית מס / קבלה for lesson charges (widget, standing orders, card links)
     ST — חשבונית מס / קבלה for store sales paid on the spot (card or cash)
     SD — חשבונית עסקה for store sales put on monthly billing (not yet paid)
+    CR — חשבונית מס זיכוי (credit notes; סעיף 18(א)(1) keeps them in a book of their own)
 
 One series per document type, because סעיף 5(ג) wants invoices that double as
 receipts numbered in a run of their own.
@@ -25,6 +26,7 @@ from apps.documents.models import DocumentSeries
 SERIES_SUBSCRIPTION = 'IR'
 SERIES_STORE = 'ST'
 SERIES_STORE_TRANSACTION = 'SD'
+SERIES_CREDIT = 'CR'
 
 
 def _tax_year(when: date | datetime | None) -> int:
