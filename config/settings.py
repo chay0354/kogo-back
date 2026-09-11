@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'apps.store',
     'apps.payment_links',
     'apps.external_students',
+    'apps.signatures',
 ]
 
 MIDDLEWARE = [
