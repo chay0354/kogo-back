@@ -1,20 +1,27 @@
-"""API shapes for tenancies: what the office reads, and what it may write.
+"""API shapes for tenancies and their contracts: what the office reads, and what it may write.
 
 A tenancy is read with its tenant and its slots nested, and written with either
 `tenant_id` (a merchant already on file) or `tenant` (the details of a new one,
 or on PATCH the changes to the one it has). Branch scoping is enforced here, on
 write, the way the rest of the app scopes a write: a partner may only put a
 tenancy in one of their own branches, and may only attach a merchant they can see.
+
+A tenancy also shows its current contract, the newest one that is not void,
+and whether the tenancy changed after it was issued (is_stale). Contracts are
+read only here: they are issued and voided by their own endpoints
+(apps/rentals/contracts.py) and never edited.
 """
 from __future__ import annotations
 
 from django.db import transaction
+from django.urls import reverse
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
 from apps.core.scoping import is_scoped_partner, partner_branch_ids, scope_branches
 from apps.customers.models import BusinessCustomer
-from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, Tenancy
+from apps.rentals.contracts import contract_is_stale, current_contract
+from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, RentalContract, Tenancy
 from apps.rentals.slots import suggested_monthly_amount
 from apps.rentals.tenants import create_tenant, update_tenant
 from apps.scheduling.models import ScheduleEvent
@@ -87,6 +94,43 @@ class TenancySlotSerializer(serializers.ModelSerializer):
         ]
 
 
+class RentalContractSerializer(serializers.ModelSerializer):
+    """One issued contract, as the tenancy's contracts list shows it. Read only."""
+
+    status_label = serializers.CharField(source='get_status_display', read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+    pdf_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RentalContract
+        fields = [
+            'id', 'version', 'status', 'status_label', 'created_at', 'created_by_name',
+            'voided_at', 'void_reason', 'terms_sha256', 'pdf_url',
+        ]
+        read_only_fields = fields
+
+    def get_created_by_name(self, obj) -> str:
+        user = obj.created_by
+        if not user:
+            return ''
+        return (user.get_full_name() or user.username or '').strip()
+
+    def get_pdf_url(self, obj) -> str:
+        # The API path of the stored PDF; the screen downloads it with its own credentials.
+        return reverse('rental-contract-pdf', args=[obj.pk])
+
+
+class CurrentContractSerializer(serializers.ModelSerializer):
+    """The tenancy's current contract in brief. is_stale is added by the tenancy, which knows its own terms."""
+
+    status_label = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = RentalContract
+        fields = ['id', 'version', 'status', 'status_label', 'created_at']
+        read_only_fields = fields
+
+
 class TenancySerializer(serializers.ModelSerializer):
     status_label = serializers.CharField(source='get_status_display', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
@@ -100,6 +144,7 @@ class TenancySerializer(serializers.ModelSerializer):
         queryset=BusinessCustomer.objects.all(), write_only=True, required=False,
     )
     slots = TenancySlotSerializer(many=True, read_only=True)
+    current_contract = serializers.SerializerMethodField()
 
     class Meta:
         model = Tenancy
@@ -107,7 +152,7 @@ class TenancySerializer(serializers.ModelSerializer):
             'id', 'status', 'status_label', 'branch', 'branch_name',
             'monthly_amount', 'monthly_total', 'billing_day', 'start_date', 'end_date',
             'notes', 'created_at', 'suggested_monthly_amount',
-            'tenant', 'tenant_id', 'slots',
+            'tenant', 'tenant_id', 'slots', 'current_contract',
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -123,6 +168,16 @@ class TenancySerializer(serializers.ModelSerializer):
     def get_suggested_monthly_amount(self, obj) -> str:
         # A string, like every other amount in this API.
         return f'{suggested_monthly_amount(obj.slots.all()):.2f}'
+
+    def get_current_contract(self, obj):
+        contract = current_contract(obj)
+        if contract is None:
+            return None
+        data = CurrentContractSerializer(contract).data
+        # The agreement changed after the contract was issued: the terms the
+        # tenancy gives now fingerprint differently from the contract's own.
+        data['is_stale'] = contract_is_stale(obj, contract)
+        return data
 
     def validate_monthly_amount(self, value):
         if value < 0:

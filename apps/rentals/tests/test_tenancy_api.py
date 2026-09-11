@@ -14,7 +14,7 @@ URL = '/api/v1/rentals/tenancies/'
 READ_KEYS = {
     'id', 'status', 'status_label', 'branch', 'branch_name', 'monthly_amount', 'monthly_total',
     'billing_day', 'start_date', 'end_date', 'notes', 'created_at', 'suggested_monthly_amount',
-    'tenant', 'slots',
+    'tenant', 'slots', 'current_contract',
 }
 TENANT_KEYS = {'id', 'first_name', 'last_name', 'full_name', 'company_number', 'id_number', 'phone', 'email', 'address'}
 SLOT_KEYS = {

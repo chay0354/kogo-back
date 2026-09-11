@@ -26,10 +26,9 @@ from django.utils import timezone
 
 from apps.core.scoping import scope_branches
 from apps.scheduling.models import ScheduleEvent
-
-# The contract's own rule: a month is four weeks of every weekday rented.
-# apps/scheduling/rental_agreement/generator.py prints "rate × 4" per weekday row.
-WEEKS_PER_MONTH = 4
+# The contract's own rule, a month is four weeks of every weekday rented, kept
+# with the terms the contract PDF is drawn from ("rate × 4" per weekday row).
+from apps.scheduling.rental_agreement.terms import WEEKS_PER_MONTH
 
 _TWOPLACES = Decimal('0.01')
 _NON_DIGITS = re.compile(r'\D+')

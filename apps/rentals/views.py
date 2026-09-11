@@ -1,21 +1,27 @@
-"""Tenancies API — /api/v1/rentals/tenancies/.
+"""Tenancies and their contracts — /api/v1/rentals/.
 
     GET, POST          tenancies/                   list (branch, status, search) / create
-    GET, PATCH, DELETE tenancies/{id}/              one tenancy; DELETE only a draft with no slots
+    GET, PATCH, DELETE tenancies/{id}/              one tenancy; DELETE only a draft with no slots and no contracts
     POST               tenancies/{id}/link-slots/   {"slot_ids": [...]}, all of them or none
     POST               tenancies/{id}/unlink-slot/  {"slot_id": "..."}
+    GET, POST          tenancies/{id}/contracts/    its contracts, newest first / issue the next version
     GET                tenancies/suggestions/       unlinked studio rentals, grouped by renter
     POST               tenancies/import/            {"groups": [...]}, in one transaction
+    GET                contracts/{id}/pdf/          the stored PDF, checked against its fingerprint first
+    POST               contracts/{id}/void/         {"reason": "..."}, a draft, sent or viewed contract
 
 Managers and partners only. A partner reads and writes only the tenancies of
-their own branches, and one with no branches assigned sees none.
+their own branches and those tenancies' contracts; one with no branches
+assigned sees none.
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 
 from django.db.models import Prefetch, Q
+from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -26,10 +32,13 @@ from apps.core.permissions import IsManagerOrPartner
 from apps.core.scoping import scope_branches
 from apps.customers.phone_search import phone_query_digits
 from apps.rentals import slots as slot_rules
+from apps.rentals.contracts import ContractError, issue_contract, live_contracts_prefetch, void_contract
 from apps.rentals.importer import GroupError, import_tenancies
-from apps.rentals.models import Tenancy
-from apps.rentals.serializers import SuggestionSerializer, TenancySerializer
+from apps.rentals.models import RentalContract, Tenancy
+from apps.rentals.serializers import RentalContractSerializer, SuggestionSerializer, TenancySerializer
 from apps.scheduling.models import ScheduleEvent
+
+logger = logging.getLogger(__name__)
 
 _NON_DIGITS = re.compile(r'\D+')
 
@@ -77,6 +86,10 @@ def _slot_error(exc: slot_rules.SlotError) -> Response:
     return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _contract_error(exc: ContractError) -> Response:
+    return Response({'error': exc.message}, status=status.HTTP_400_BAD_REQUEST)
+
+
 class TenancyViewSet(viewsets.ModelViewSet):
     """הסכמי שכירות — one tenant, their studio slots, and the monthly terms."""
 
@@ -96,7 +109,9 @@ class TenancyViewSet(viewsets.ModelViewSet):
                 'slots',
                 queryset=ScheduleEvent.objects.select_related('branch', 'studio')
                 .order_by('event_date', 'start_time', 'created_at'),
-            )
+            ),
+            # current_contract and its is_stale, without a query per tenancy.
+            live_contracts_prefetch(),
         )
         # A partner reaches their own branches' tenancies only, none without a branch.
         queryset = scope_branches(queryset, self.request.user, 'branch')
@@ -121,7 +136,7 @@ class TenancyViewSet(viewsets.ModelViewSet):
         return [by_pk[pk] for pk in tenancy_ids]
 
     def destroy(self, request, *args, **kwargs):
-        """Only a draft that holds no slots. Anything further along is part of the record."""
+        """Only a draft that holds no slots and has no contracts. Anything further along is part of the record."""
         tenancy = self.get_object()
         if tenancy.status != Tenancy.STATUS_DRAFT:
             return Response(
@@ -131,6 +146,12 @@ class TenancyViewSet(viewsets.ModelViewSet):
         if tenancy.slots.exists():
             return Response(
                 {'error': 'יש לנתק את השכירויות מההסכם לפני מחיקתו'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tenancy.contracts.exists():
+            # PROTECT would refuse the delete anyway; this says why instead of a 500.
+            return Response(
+                {'error': 'להסכם הזה כבר הופקו חוזים, ולכן אי אפשר למחוק אותו'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         tenancy.delete()
@@ -162,6 +183,28 @@ class TenancyViewSet(viewsets.ModelViewSet):
         (fresh,) = self._read([tenancy.pk])
         return Response(self.get_serializer(fresh).data)
 
+    @action(detail=True, methods=['get', 'post'])
+    def contracts(self, request, pk=None):
+        """
+        GET: the tenancy's contracts, newest first.
+        POST: issue the next version from the tenancy as it is now — 201 with the
+        new contract, or 400 with the reason none can be issued.
+        """
+        tenancy = self.get_object()
+        if request.method == 'POST':
+            try:
+                contract = issue_contract(tenancy, request.user)
+            except ContractError as exc:
+                return _contract_error(exc)
+            return Response(RentalContractSerializer(contract).data, status=status.HTTP_201_CREATED)
+        contracts = (
+            RentalContract.objects.filter(tenancy=tenancy)
+            .select_related('created_by')
+            .defer('pdf', 'terms')
+            .order_by('-version')
+        )
+        return Response(RentalContractSerializer(contracts, many=True).data)
+
     @action(detail=False, methods=['get'])
     def suggestions(self, request):
         """The studio rentals no tenancy holds yet, one group per renter and branch."""
@@ -188,3 +231,55 @@ class TenancyViewSet(viewsets.ModelViewSet):
             return Response(exc.payload(), status=exc.status_code)
         tenancies = self._read([tenancy.pk for tenancy in created])
         return Response(self.get_serializer(tenancies, many=True).data, status=status.HTTP_201_CREATED)
+
+
+class RentalContractViewSet(viewsets.GenericViewSet):
+    """
+    חוזי שכירות — one issued contract: download its stored PDF, or void it.
+
+    There is no list or edit here. A tenancy lists and issues its own contracts
+    (TenancyViewSet.contracts), and a contract is never edited.
+    """
+
+    serializer_class = RentalContractSerializer
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    pagination_class = None
+    filter_backends = []
+    lookup_value_regex = '[0-9a-fA-F-]{36}'
+
+    def get_queryset(self):
+        queryset = RentalContract.objects.select_related('created_by')
+        if self.action != 'pdf':
+            # The PDF and the terms are the heavy columns, and only the download reads one.
+            queryset = queryset.defer('pdf', 'terms')
+        # A partner reaches the contracts of their own branches' tenancies only.
+        return scope_branches(queryset, self.request.user, 'tenancy__branch')
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        """The PDF exactly as it was issued. A file that no longer matches its fingerprint is never served."""
+        contract = self.get_object()
+        if not contract.pdf_is_intact():
+            logger.error(
+                'Rental contract %s (tenancy %s, version %s): the stored PDF does not match its '
+                'SHA-256 %s; refusing to serve it',
+                contract.pk, contract.tenancy_id, contract.version, contract.pdf_sha256,
+            )
+            return Response(
+                {'error': 'קובץ החוזה השמור אינו תקין ולכן לא הורד. יש לפנות לתמיכה'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        response = HttpResponse(bytes(contract.pdf), content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="rental-contract-v{contract.version}.pdf"'
+        return response
+
+    @action(detail=True, methods=['post'])
+    def void(self, request, pk=None):
+        """Void a draft, sent or viewed contract: {"reason": "..."}. A signed or void one is refused."""
+        contract = self.get_object()
+        reason = request.data.get('reason', '') if isinstance(request.data, dict) else ''
+        try:
+            voided = void_contract(contract, reason)
+        except ContractError as exc:
+            return _contract_error(exc)
+        return Response(self.get_serializer(voided).data)
