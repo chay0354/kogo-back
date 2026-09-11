@@ -29,6 +29,18 @@ def split_vat_inclusive(gross: Decimal | float | int | str) -> tuple[Decimal, De
     return before, vat, total
 
 
+def add_vat(net: Decimal | float | int | str) -> Decimal:
+    """
+    The VAT-inclusive total for an amount quoted before VAT, to the agora.
+
+    The other direction from split_vat_inclusive: a studio rental is priced
+    before מע"מ (the contract says "לפני מע"מ"), so what the tenant pays is
+    the net amount plus VAT at the current rate.
+    """
+    amount = Decimal(str(net or 0))
+    return (amount * (Decimal('1') + VAT_RATE)).quantize(_TWOPLACES, rounding=ROUND_HALF_UP)
+
+
 def format_vat_breakdown_he(gross: Decimal | float | int | str) -> list[tuple[str, str]]:
     """Hebrew label/value pairs for invoice totals (before VAT, VAT, grand total)."""
     before, vat, total = split_vat_inclusive(gross)

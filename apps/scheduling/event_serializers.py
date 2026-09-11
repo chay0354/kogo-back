@@ -2,7 +2,9 @@ from datetime import time as time_cls
 from types import SimpleNamespace
 
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
+from apps.core.scoping import is_scoped_partner, partner_branch_ids
 from apps.scheduling.models import ScheduleEvent
 from apps.scheduling.studio_conflict import (
     event_conflicts_lessons,
@@ -68,6 +70,53 @@ class ScheduleEventSerializer(serializers.ModelSerializer):
             weekly_day_times=attrs.get('weekly_day_times', inst.weekly_day_times if inst else {}),
         )
 
+    def _check_partner_branch(self, attrs, branch):
+        """
+        A scoped partner books only in their own branches.
+
+        The viewset scopes what a partner can read and open, but a create never
+        passes through the queryset, and a PATCH can name any branch or studio.
+        So the event as it will be saved is checked here: its branch must be one
+        of the partner's (an event with no branch is one they could not see
+        again), and a studio being set must be a room in one of their branches.
+        """
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not is_scoped_partner(user):
+            return
+        allowed = set(partner_branch_ids(user))
+        if branch is None:
+            raise PermissionDenied('יש לבחור אחד מהסניפים שלך')
+        if branch.pk not in allowed:
+            raise PermissionDenied('אין הרשאה לסניף הזה')
+        studio = attrs.get('studio')
+        if studio is not None and studio.branch_id not in allowed:
+            raise PermissionDenied('אין הרשאה לסטודיו הזה')
+
+    def _check_tenancy_hold(self, branch, is_studio_rental):
+        """
+        A slot a rental agreement holds keeps the agreement's rules: a studio
+        rental, in the agreement's branch (apps/rentals/slots.py links it on
+        those terms). Turning it into an ordinary event or moving it elsewhere
+        would leave the agreement holding a slot that no longer fits it, so the
+        office unlinks it from the agreement first.
+        """
+        inst = self.instance
+        if inst is None or not inst.tenancy_id:
+            return
+        tenancy = inst.tenancy
+        who = tenancy.tenant.full_name if tenancy.tenant_id else 'השוכר'
+        if not is_studio_rental:
+            raise serializers.ValidationError({
+                'is_studio_rental': f'השכירות שייכת להסכם השכירות של {who}. '
+                                    f'יש לנתק אותה מההסכם לפני שהופכים אותה לאירוע רגיל.',
+            })
+        if tenancy.branch_id and (branch is None or branch.pk != tenancy.branch_id):
+            raise serializers.ValidationError({
+                'branch': f'השכירות שייכת להסכם השכירות של {who} בסניף {tenancy.branch.name}. '
+                          f'יש לנתק אותה מההסכם לפני העברה לסניף אחר.',
+            })
+
     def validate(self, attrs):
         """Validate times, city, studio rentals, weekly per-day times, and studio slot conflicts."""
         inst = self.instance
@@ -79,6 +128,9 @@ class ScheduleEventSerializer(serializers.ModelSerializer):
         studio = attrs.get('studio', inst.studio if inst else None)
         start_time = attrs.get('start_time', inst.start_time if inst else None)
         end_time = attrs.get('end_time', inst.end_time if inst else None)
+
+        self._check_partner_branch(attrs, branch)
+        self._check_tenancy_hold(branch, is_studio_rental)
 
         if not city:
             raise serializers.ValidationError({

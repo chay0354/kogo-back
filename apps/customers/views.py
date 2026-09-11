@@ -7,10 +7,10 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError as DRFValidationError
 from rest_framework.throttling import ScopedRateThrottle
 from apps.core.manychat_service import ManyChatService
-from django.db.models import Q, Prefetch, Count, Sum, Value, CharField
+from django.db.models import Q, Prefetch, Count, Sum, Value, CharField, ProtectedError
 from django.db.models.functions import Concat
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -40,6 +40,7 @@ from apps.core.payment_service import PaymentService
 from apps.enrollments.models import Enrollment, LessonEnrollment, ScheduledUnitChange
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.core.scoping import (
+    scope_branches,
     scope_courses,
     is_scoped_partner,
     partner_branch_ids,
@@ -1996,4 +1997,50 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
-        return BusinessCustomer.objects.all()
+        # A partner sees the merchants of their own branches only, and none when
+        # no branch is assigned to them. A merchant with no branch is the
+        # office's and is not shown to any partner.
+        return scope_branches(BusinessCustomer.objects.all(), self.request.user, 'branch')
+
+    def destroy(self, request, *args, **kwargs):
+        customer = self.get_object()
+        try:
+            customer.delete()
+        except ProtectedError:
+            # A tenant: the rental agreement keeps its tenant (Tenancy.tenant is PROTECT).
+            return Response(
+                {'error': 'לא ניתן למחוק לקוח עסקי שיש לו הסכם שכירות'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def perform_create(self, serializer):
+        serializer.save(branch=self._partner_branch(serializer.validated_data.get('branch')))
+
+    def perform_update(self, serializer):
+        if 'branch' in serializer.validated_data:
+            serializer.save(branch=self._partner_branch(serializer.validated_data['branch']))
+        else:
+            serializer.save()
+
+    def _partner_branch(self, branch):
+        """
+        The branch a scoped partner files a merchant under.
+
+        A merchant with no branch is the office's and hidden from every partner,
+        so one a partner saves without a branch would vanish from their own
+        searches the moment it was created. It takes their branch when they
+        have one, and they must name one when they have several.
+        """
+        user = self.request.user
+        if not is_scoped_partner(user):
+            return branch
+        allowed = list(partner_branch_ids(user))
+        if branch is None:
+            if len(allowed) == 1:
+                from apps.core.models import Branch
+                return Branch.objects.get(pk=allowed[0])
+            raise DRFValidationError({'branch_id': 'יש לבחור סניף'})
+        if branch.pk not in allowed:
+            raise PermissionDenied('אין הרשאה לסניף הזה')
+        return branch

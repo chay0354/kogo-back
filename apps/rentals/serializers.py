@@ -1,0 +1,186 @@
+"""API shapes for tenancies: what the office reads, and what it may write.
+
+A tenancy is read with its tenant and its slots nested, and written with either
+`tenant_id` (a merchant already on file) or `tenant` (the details of a new one,
+or on PATCH the changes to the one it has). Branch scoping is enforced here, on
+write, the way the rest of the app scopes a write: a partner may only put a
+tenancy in one of their own branches, and may only attach a merchant they can see.
+"""
+from __future__ import annotations
+
+from django.db import transaction
+from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
+
+from apps.core.scoping import is_scoped_partner, partner_branch_ids, scope_branches
+from apps.customers.models import BusinessCustomer
+from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, Tenancy
+from apps.rentals.slots import suggested_monthly_amount
+from apps.rentals.tenants import create_tenant, update_tenant
+from apps.scheduling.models import ScheduleEvent
+
+
+def _request_user(serializer):
+    request = serializer.context.get('request')
+    return getattr(request, 'user', None)
+
+
+def check_partner_branch(user, branch) -> None:
+    """
+    A scoped partner may place a tenancy only in one of their own branches.
+
+    Fails closed: no branch at all, or a partner with no branches assigned, is
+    refused as well. A tenancy outside their branches is one they could never
+    open again.
+    """
+    if not is_scoped_partner(user):
+        return
+    if branch is None:
+        raise PermissionDenied('יש לבחור אחד מהסניפים שלך')
+    if branch.pk not in set(partner_branch_ids(user)):
+        raise PermissionDenied('אין הרשאה לסניף הזה')
+
+
+class TenantSerializer(serializers.ModelSerializer):
+    """A tenant as the tenancy shows it, and the fields the tenancy screen may write."""
+
+    full_name = serializers.ReadOnlyField()
+
+    class Meta:
+        model = BusinessCustomer
+        fields = [
+            'id', 'first_name', 'last_name', 'full_name',
+            'company_number', 'id_number', 'phone', 'email', 'address',
+        ]
+        read_only_fields = ['id', 'full_name']
+        # A company tenant has one name. It goes in first_name.
+        extra_kwargs = {'last_name': {'required': False, 'allow_blank': True}}
+
+
+class TenancySlotSerializer(serializers.ModelSerializer):
+    """A studio-rental event as it appears inside a tenancy or a suggestion. Read only."""
+
+    studio_name = serializers.CharField(source='studio.name', read_only=True, allow_null=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = ScheduleEvent
+        fields = [
+            'id', 'name', 'studio_name', 'branch_name', 'event_type', 'event_date',
+            'weekly_repeat_days', 'weekly_day_times', 'start_time', 'end_time',
+            'price_per_session', 'is_active', 'contract_start_date', 'contract_end_date',
+        ]
+
+
+class TenancySerializer(serializers.ModelSerializer):
+    status_label = serializers.CharField(source='get_status_display', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+    # Declared rather than generated so the range messages are the office's own.
+    monthly_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
+    billing_day = serializers.IntegerField(required=False)
+    monthly_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    suggested_monthly_amount = serializers.SerializerMethodField()
+    tenant = TenantSerializer(required=False)
+    tenant_id = serializers.PrimaryKeyRelatedField(
+        queryset=BusinessCustomer.objects.all(), write_only=True, required=False,
+    )
+    slots = TenancySlotSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Tenancy
+        fields = [
+            'id', 'status', 'status_label', 'branch', 'branch_name',
+            'monthly_amount', 'monthly_total', 'billing_day', 'start_date', 'end_date',
+            'notes', 'created_at', 'suggested_monthly_amount',
+            'tenant', 'tenant_id', 'slots',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_fields(self):
+        fields = super().get_fields()
+        user = _request_user(self)
+        if user is not None:
+            # A partner attaches only a merchant they can see: the same scope
+            # the business-customer list gives them. Anyone else is not found.
+            fields['tenant_id'].queryset = scope_branches(BusinessCustomer.objects.all(), user, 'branch')
+        return fields
+
+    def get_suggested_monthly_amount(self, obj) -> str:
+        # A string, like every other amount in this API.
+        return f'{suggested_monthly_amount(obj.slots.all()):.2f}'
+
+    def validate_monthly_amount(self, value):
+        if value < 0:
+            raise serializers.ValidationError('הסכום החודשי לא יכול להיות שלילי')
+        return value
+
+    def validate_billing_day(self, value):
+        if not BILLING_DAY_MIN <= value <= BILLING_DAY_MAX:
+            raise serializers.ValidationError(
+                f'יום החיוב חייב להיות בין {BILLING_DAY_MIN} ל־{BILLING_DAY_MAX}'
+            )
+        return value
+
+    def validate(self, attrs):
+        inst = self.instance
+        user = _request_user(self)
+        if 'tenant' in attrs and 'tenant_id' in attrs:
+            raise serializers.ValidationError({'tenant': 'יש לבחור שוכר קיים או להזין שוכר חדש — לא את שניהם'})
+        if inst is None and 'tenant' not in attrs and 'tenant_id' not in attrs:
+            raise serializers.ValidationError({'tenant': 'יש לבחור שוכר קיים או להזין פרטי שוכר חדש'})
+
+        branch = attrs['branch'] if 'branch' in attrs else (inst.branch if inst else None)
+        check_partner_branch(user, branch)
+
+        if inst is not None and getattr(branch, 'pk', None) != inst.branch_id and inst.slots.exists():
+            # A slot joins only a tenancy of its own branch. Moving the tenancy
+            # would leave its slots behind in the old one.
+            raise serializers.ValidationError({'branch': 'יש לנתק את השכירויות מההסכם לפני העברתו לסניף אחר'})
+
+        if inst is not None and 'tenant' in attrs and is_scoped_partner(user):
+            # Editing the tenant edits the merchant's card, which other
+            # documents share. A partner edits only a card in their branches.
+            if inst.tenant.branch_id not in set(partner_branch_ids(user)):
+                raise PermissionDenied('אין הרשאה לערוך את פרטי השוכר הזה')
+
+        start = attrs.get('start_date', inst.start_date if inst else None)
+        end = attrs.get('end_date', inst.end_date if inst else None)
+        if start and end and end < start:
+            raise serializers.ValidationError({'end_date': 'תאריך הסיום לא יכול להיות לפני תאריך ההתחלה'})
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        tenant_data = validated_data.pop('tenant', None)
+        tenant = validated_data.pop('tenant_id', None)
+        if tenant is None:
+            tenant = create_tenant(tenant_data, validated_data.get('branch'))
+        return Tenancy.objects.create(tenant=tenant, **validated_data)
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        tenant_data = validated_data.pop('tenant', None)
+        tenant = validated_data.pop('tenant_id', None)
+        if tenant is not None:
+            instance.tenant = tenant
+        elif tenant_data is not None:
+            update_tenant(instance.tenant, tenant_data)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
+
+
+class SuggestionSerializer(serializers.Serializer):
+    """One group from slots.rental_suggestions. Read only."""
+
+    key = serializers.CharField()
+    renter_name = serializers.CharField()
+    renter_id_number = serializers.CharField()
+    branch = serializers.UUIDField()
+    branch_name = serializers.CharField()
+    slots = TenancySlotSerializer(many=True)
+    suggested_monthly_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    contract_start_date = serializers.DateField(allow_null=True)
+    contract_end_date = serializers.DateField(allow_null=True)
+    existing_tenant = serializers.DictField(allow_null=True)

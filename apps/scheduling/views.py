@@ -932,7 +932,20 @@ class ScheduleEventViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated(), IsManagerOrPartner()]
         return [IsAuthenticated()]
-    
+
+    def destroy(self, request, *args, **kwargs):
+        event = self.get_object()
+        if event.tenancy_id:
+            # A slot a rental agreement holds is unlinked from it first, on purpose:
+            # deleting it here would shrink the agreement while its amount stays.
+            tenancy = event.tenancy
+            who = tenancy.tenant.full_name if tenancy.tenant_id else 'השוכר'
+            return Response(
+                {'error': f'השכירות שייכת להסכם השכירות של {who}. יש לנתק אותה מההסכם לפני מחיקה.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
+
     def get_queryset(self):
         """Filter events based on query parameters and user role"""
         from apps.core.models import UserProfile
