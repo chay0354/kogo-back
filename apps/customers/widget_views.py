@@ -411,9 +411,10 @@ def _resolve_family_and_child(data, branch):
             if parent_updates:
                 primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
 
-    # סעיף 18ב(ג): the parent ticked the box to receive invoices, receipts and
-    # credit notes by email. A box left empty, or a payload without it, records
-    # nothing — and never withdraws a consent the family gave before.
+    # סעיף 18ב(ג): the parent accepted the terms, and their paragraph on
+    # computerized documents is the consent to receive invoices, receipts and
+    # credit notes by email (core migration 0020 put it there). A payload
+    # without it records nothing — and never withdraws a consent given before.
     if _computerized_docs_consent_given(data):
         record_consent(family, CONSENT_SOURCE_WIDGET)
 
@@ -581,8 +582,8 @@ class WidgetRegisterView(APIView):
         The fee is once per child: extra courses in this checkout, and later
         signups for the same child, skip it. A twice/thrice-a-week bundle also
         applies the fee only on the first member.
-      computerized_docs_consent (bool) — the parent agreed to receive invoices,
-        receipts and credit notes by email as computerized documents (סעיף 18ב(ג));
+      computerized_docs_consent (bool) — the parent accepted the terms, whose
+        paragraph on computerized documents is the consent (סעיף 18ב(ג));
         recorded on the family. False or absent records nothing and withdraws nothing.
     """
     authentication_classes = []
