@@ -70,6 +70,18 @@ class ScheduleEvent(models.Model):
     contract_end_date = models.DateField(
         null=True, blank=True, verbose_name="סיום תוקף הסכם השכירות"
     )
+    # The rental agreement this slot belongs to (apps/rentals). A slot is covered
+    # by one agreement at most; a tenant with several weekly slots is one
+    # tenancy holding several events. Set only through the tenancy endpoints,
+    # which check the branch and that no other tenancy holds the slot.
+    tenancy = models.ForeignKey(
+        'rentals.Tenancy',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='slots',
+        verbose_name="הסכם שכירות",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 

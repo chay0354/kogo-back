@@ -16,5 +16,6 @@ urlpatterns = [
     path('payment-links/', include('apps.payment_links.urls')),
     path('external-students/', include('apps.external_students.urls')),
     path('signatures/', include('apps.signatures.urls')),
+    path('rentals/', include('apps.rentals.urls')),
 ]
 
