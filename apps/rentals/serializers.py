@@ -22,6 +22,7 @@ from apps.core.scoping import is_scoped_partner, partner_branch_ids, scope_busin
 from apps.customers.models import BusinessCustomer
 from apps.rentals.contracts import contract_is_stale, current_contract
 from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, RentalContract, Tenancy
+from apps.rentals.signing import link_expires_at, link_is_live, signing_url
 from apps.rentals.slots import suggested_monthly_amount
 from apps.rentals.tenants import create_tenant, update_tenant
 from apps.scheduling.models import ScheduleEvent
@@ -95,17 +96,30 @@ class TenancySlotSerializer(serializers.ModelSerializer):
 
 
 class RentalContractSerializer(serializers.ModelSerializer):
-    """One issued contract, as the tenancy's contracts list shows it. Read only."""
+    """
+    One issued contract, as the tenancy's contracts list shows it. Read only.
+
+    signing_url and signing_expires_at are there only while the link is live
+    (sent or viewed, and within its 14 days); the URL is built from the
+    request in the context, the way card links build theirs.
+    """
 
     status_label = serializers.CharField(source='get_status_display', read_only=True)
     created_by_name = serializers.SerializerMethodField()
     pdf_url = serializers.SerializerMethodField()
+    signing_url = serializers.SerializerMethodField()
+    signing_expires_at = serializers.SerializerMethodField()
+    signer_name = serializers.SerializerMethodField()
+    signature_id = serializers.UUIDField(read_only=True, allow_null=True)
+    signed_pdf_url = serializers.SerializerMethodField()
 
     class Meta:
         model = RentalContract
         fields = [
             'id', 'version', 'status', 'status_label', 'created_at', 'created_by_name',
             'voided_at', 'void_reason', 'terms_sha256', 'pdf_url',
+            'sent_at', 'viewed_at', 'signed_at', 'signing_url', 'signing_expires_at',
+            'signer_name', 'signature_id', 'signed_pdf_url',
         ]
         read_only_fields = fields
 
@@ -119,16 +133,42 @@ class RentalContractSerializer(serializers.ModelSerializer):
         # The API path of the stored PDF; the screen downloads it with its own credentials.
         return reverse('rental-contract-pdf', args=[obj.pk])
 
+    def get_signing_url(self, obj):
+        if not link_is_live(obj):
+            return None
+        return signing_url(obj, self.context.get('request'))
+
+    def get_signing_expires_at(self, obj):
+        if not link_is_live(obj):
+            return None
+        return serializers.DateTimeField().to_representation(link_expires_at(obj))
+
+    def get_signer_name(self, obj) -> str:
+        return obj.signature.signer_name if obj.signature_id else ''
+
+    def get_signed_pdf_url(self, obj):
+        if obj.status != RentalContract.STATUS_SIGNED:
+            return None
+        return reverse('rental-contract-signed-pdf', args=[obj.pk])
+
 
 class CurrentContractSerializer(serializers.ModelSerializer):
     """The tenancy's current contract in brief. is_stale is added by the tenancy, which knows its own terms."""
 
     status_label = serializers.CharField(source='get_status_display', read_only=True)
+    # The tenants row shows where the link stands (sent · viewed · signed) and who signed.
+    signer_name = serializers.SerializerMethodField()
 
     class Meta:
         model = RentalContract
-        fields = ['id', 'version', 'status', 'status_label', 'created_at']
+        fields = [
+            'id', 'version', 'status', 'status_label', 'created_at',
+            'sent_at', 'viewed_at', 'signed_at', 'signer_name',
+        ]
         read_only_fields = fields
+
+    def get_signer_name(self, obj) -> str:
+        return obj.signature.signer_name if obj.signature_id else ''
 
 
 class TenancySerializer(serializers.ModelSerializer):

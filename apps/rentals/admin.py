@@ -33,15 +33,17 @@ class RentalContractAdmin(admin.ModelAdmin):
         'tenancy__tenant__company_number', 'tenancy__tenant__id_number', 'terms_sha256',
     ]
     list_select_related = ['tenancy__tenant', 'created_by']
+    # The signing token is left out on purpose: it opens the tenant's page to whoever holds it.
     fields = [
         'tenancy', 'version', 'status', 'created_at', 'created_by', 'voided_at', 'void_reason',
         'terms_sha256', 'terms_display', 'pdf_sha256', 'pdf_size',
+        'sign_token_created_at', 'sent_at', 'viewed_at', 'signed_at', 'signature', 'signed_pdf_sha256',
     ]
     readonly_fields = fields
 
     def get_queryset(self, request):
-        # The list never shows the file; the detail page loads it for its size.
-        return super().get_queryset(request).defer('pdf')
+        # The list never shows the files; the detail page loads the issued one for its size.
+        return super().get_queryset(request).defer('pdf', 'signed_pdf')
 
     def has_add_permission(self, request):
         return False

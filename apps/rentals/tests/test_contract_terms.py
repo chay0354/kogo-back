@@ -15,7 +15,9 @@ from reportlab.pdfgen.canvas import Canvas
 from apps.core.models import UserProfile
 from apps.rentals.contracts import build_terms, issue_contract
 from apps.rentals.models import FrozenContractError, RentalContract, Tenancy, sha256_hex
-from apps.rentals.tests.factories import make_branch, make_customer, make_rental, make_studio, make_tenancy, make_user
+from apps.rentals.tests.factories import (
+    make_branch, make_customer, make_rental, make_studio, make_tenancy, make_user, sign_directly,
+)
 from apps.scheduling.models import ScheduleEvent
 from apps.scheduling.rental_agreement import content, generator
 from apps.scheduling.rental_agreement.terms import TEMPLATE_VERSION, canonical_json, terms_sha256
@@ -261,9 +263,14 @@ class FrozenContractTests(ContractTestCase):
         extra = {'tenancy': self.tenancy, 'terms': {}, 'pdf': b'%PDF'}
         with self.assertRaises(IntegrityError), transaction.atomic():
             RentalContract.objects.create(version=2, **extra)
-        RentalContract.objects.filter(pk=self.contract.pk).update(status=RentalContract.STATUS_SIGNED)
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            RentalContract.objects.create(version=2, status=RentalContract.STATUS_SIGNED, **extra)
+        signed = sign_directly(self.contract)
+        # Signed with everything a signed contract holds, so only the one-signed rule can refuse it.
+        with self.assertRaises(IntegrityError) as refused, transaction.atomic():
+            RentalContract.objects.create(
+                version=2, status=RentalContract.STATUS_SIGNED, signed_at=signed.signed_at,
+                signature=signed.signature, signed_pdf=b'%PDF', signed_pdf_sha256='0' * 64, **extra,
+            )
+        self.assertIn('rental_contract_one_signed_per_tenancy', str(refused.exception))
 
 
 class AdminTests(ContractTestCase):

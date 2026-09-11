@@ -10,7 +10,9 @@ from rest_framework.test import APITestCase
 from apps.core.models import UserProfile
 from apps.rentals.contracts import build_terms, issue_contract
 from apps.rentals.models import RentalContract, Tenancy
-from apps.rentals.tests.factories import make_branch, make_customer, make_rental, make_studio, make_tenancy, make_user
+from apps.rentals.tests.factories import (
+    make_branch, make_customer, make_rental, make_studio, make_tenancy, make_user, sign_directly,
+)
 from apps.scheduling.models import ScheduleEvent
 from apps.scheduling.rental_agreement.terms import terms_sha256
 
@@ -20,8 +22,13 @@ CONTRACTS = '/api/v1/rentals/contracts/'
 CONTRACT_KEYS = {
     'id', 'version', 'status', 'status_label', 'created_at', 'created_by_name',
     'voided_at', 'void_reason', 'terms_sha256', 'pdf_url',
+    'sent_at', 'viewed_at', 'signed_at', 'signing_url', 'signing_expires_at',
+    'signer_name', 'signature_id', 'signed_pdf_url',
 }
-CURRENT_KEYS = {'id', 'version', 'status', 'status_label', 'created_at', 'is_stale'}
+CURRENT_KEYS = {
+    'id', 'version', 'status', 'status_label', 'created_at', 'is_stale',
+    'sent_at', 'viewed_at', 'signed_at', 'signer_name',
+}
 
 NO_SLOT = 'אין בהסכם שכירויות פעילות. יש לשייך לפחות שכירות אחת לפני הפקת חוזה'
 NO_DATES = 'יש להזין להסכם תאריך התחלה ותאריך סיום לפני הפקת חוזה'
@@ -133,7 +140,7 @@ class IssueTests(ContractApiTestCase):
 
     def test_a_signed_contract_is_final(self):
         first = self.issue().data
-        RentalContract.objects.filter(pk=first['id']).update(status='signed')
+        sign_directly(RentalContract.objects.get(pk=first['id']))
         res = self.issue()
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(res.data, {'error': ALREADY_SIGNED})
@@ -193,7 +200,7 @@ class VoidTests(ContractApiTestCase):
         self.assertEqual(RentalContract.objects.get(pk=voided['id']).void_reason, 'x')
 
         signed = self.issue().data
-        RentalContract.objects.filter(pk=signed['id']).update(status='signed')
+        sign_directly(RentalContract.objects.get(pk=signed['id']))
         res = self.client.post(void_url(signed['id']), {'reason': 'z'}, format='json')
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(res.data, {'error': 'אי אפשר לבטל חוזה חתום'})
@@ -219,7 +226,7 @@ class CurrentContractTests(ContractApiTestCase):
         listed = self.client.get(TENANCIES).data
         self.assertEqual(listed[0]['current_contract'], current)
 
-        RentalContract.objects.filter(pk=issued['id']).update(status='signed')
+        sign_directly(RentalContract.objects.get(pk=issued['id']))
         self.assertEqual(self.current()['status'], 'signed')
 
     def test_is_stale_follows_the_amount(self):
