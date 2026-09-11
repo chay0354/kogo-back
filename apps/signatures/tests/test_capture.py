@@ -121,7 +121,8 @@ class RecordRegistrationSignatureTests(CaptureTestBase):
         del data['terms_consent']
         del data['health_consent']
         signature = self._capture(data)
-        self.assertEqual(signature.consents, {'health': False, 'terms': True, 'computerized_documents': True})
+        # Health is left out, not recorded as refused: that build never sent it.
+        self.assertEqual(signature.consents, {'terms': True, 'computerized_documents': True})
 
 
 class RefusedSignatureTests(CaptureTestBase):

@@ -22,7 +22,7 @@ import json
 import logging
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.core.registration_terms_service import get_registration_terms
@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 PNG_DATA_URL_PREFIX = 'data:image/png;base64,'
 PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
-MAX_SIGNATURE_BYTES = 300 * 1024
+# The widget's canvas is 400×96 CSS pixels: even at 3× device pixels its PNG is
+# tens of KB. The public endpoints are not throttled, so the cap stays near that.
+MAX_SIGNATURE_BYTES = 150 * 1024
 # Base64 is 4 characters per 3 bytes: anything longer than this cannot decode
 # to an allowed image, so it is refused before being decoded at all.
 _MAX_ENCODED_LENGTH = 4 * ((MAX_SIGNATURE_BYTES + 2) // 3)
@@ -106,17 +108,18 @@ def consents_from_payload(data) -> dict:
     is that consent. A payload from a widget build that predates terms_consent
     still says the terms were accepted through computerized_docs_consent — the
     field whose meaning was exactly that — so it stands in when terms_consent
-    is absent. Nothing is inferred for the health declaration.
+    is absent. Nothing is inferred for the health declaration: a payload that
+    doesn't carry it leaves it out, rather than recording "not approved" for a
+    declaration the widget never lets a parent skip.
     """
     if 'terms_consent' in data:
         terms = _truthy(data.get('terms_consent'))
     else:
         terms = _truthy(data.get('computerized_docs_consent'))
-    return {
-        'health': _truthy(data.get('health_consent')),
-        'terms': terms,
-        'computerized_documents': terms,
-    }
+    consents = {'terms': terms, 'computerized_documents': terms}
+    if 'health_consent' in data:
+        consents['health'] = _truthy(data.get('health_consent'))
+    return consents
 
 
 def _json_safe_refs(refs) -> dict:
@@ -196,7 +199,16 @@ def _record_registration_signature(request, *, family, child, branch, data, refs
     # Its own atomic block: a transaction of its own in autocommit, a savepoint
     # inside any transaction that happens to be open. A database error here
     # rolls back this block alone, never the registration around it.
+    outermost = not connection.in_atomic_block
     with transaction.atomic():
+        if outermost and connection.vendor == 'postgresql':
+            # The registration has already committed; the parent is waiting on
+            # this response. A slow statement or a lock wait gives up and is
+            # logged instead of holding it. SET LOCAL ends with this transaction,
+            # which is why it is only set when this block is the transaction.
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL statement_timeout = '3s'")
+                cursor.execute("SET LOCAL lock_timeout = '1s'")
         existing = None
         if family is not None:
             existing = (
