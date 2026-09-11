@@ -311,7 +311,8 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
             'document_type_code': 'IR',
             'total_amount': amount,
             'amount_paid': paid if status == 'completed' else 0.0,
-            'open_balance': 0.0 if status == 'completed' else amount,
+            # A cancelled or credited receipt is nobody's debt.
+            'open_balance': 0.0 if status == 'completed' or inv.status in ('cancelled', 'credit') else amount,
             'status': status,
             'pdf_url': inv.pdf_url or '',
             'tranzila_doc_id': inv.tranzila_transaction_id,

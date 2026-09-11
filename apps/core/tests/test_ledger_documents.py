@@ -101,3 +101,25 @@ class LedgerRowSaysWhereItCameFromTests(TestCase):
         self.assertEqual(row['origin'], 'store_counter')
         self.assertEqual(row['origin_label'], 'חנות · סניף')
         self.assertEqual(row['payment_method_label'], 'מזומן')
+
+
+class CancelledReceiptIsNotADebtTest(TestCase):
+    """The collection tab chases open balances — a cancelled receipt must not be one."""
+
+    def test_a_cancelled_receipt_has_no_open_balance(self):
+        from apps.core.tests.test_fixtures import TestDataFactory
+        from apps.customers.financial_models import Invoice
+
+        family = TestDataFactory.create_family()
+        Invoice.objects.create(
+            invoice_number='IR-TEST-CANCELLED', family=family, amount=Decimal('236.00'),
+            status='cancelled', invoice_date=timezone.now(),
+        )
+        today = timezone.localdate()
+
+        row = next(
+            r for r in list_ledger_documents(start_date=today, end_date=today, local_only=True)['documents']
+            if r['document_number'] == 'IR-TEST-CANCELLED'
+        )
+
+        self.assertEqual(row['open_balance'], 0.0)
