@@ -391,6 +391,7 @@ class MissingReceiptsViewSet(viewsets.ViewSet):
 
     GET  /api/v1/documents/missing-receipts/?year=YYYY
     GET  /api/v1/documents/missing-receipts/export/?year=YYYY   (CSV for the accountant)
+    GET  /api/v1/documents/missing-receipts/next-number/        (the IR number issuing starts from, now)
     POST /api/v1/documents/missing-receipts/issue/  {payment_ids: [...], confirm: 'הפק'}
 
     Managers only: the list is the whole business's money, and issuing takes
@@ -434,6 +435,13 @@ class MissingReceiptsViewSet(viewsets.ViewSet):
         )
         response['Content-Disposition'] = f'attachment; filename="missing-receipts-{year}.csv"'
         return response
+
+    @action(detail=False, methods=['get'], url_path='next-number')
+    def next_number(self, request):
+        """The number the next late receipt takes — read again as the confirmation opens, so it is current."""
+        from apps.documents.missing_receipts import next_receipt_number
+
+        return Response({'next_number': next_receipt_number()})
 
     @action(detail=False, methods=['post'], url_path='issue')
     def issue(self, request):

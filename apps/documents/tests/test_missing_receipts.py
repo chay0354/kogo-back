@@ -9,7 +9,7 @@ import csv
 import io
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
@@ -23,16 +23,23 @@ from rest_framework.test import APITestCase
 from apps.core.models import UserProfile
 from apps.core.payment_service import PaymentService
 from apps.core.tests.test_fixtures import TestDataFactory
+from apps.customers.checkout_invoice import issue_widget_checkout_invoice
 from apps.customers.financial_models import Invoice, InvoiceActivityLog
 from apps.customers.models import Payment
-from apps.documents.missing_receipts import CSV_COLUMNS, payments_without_invoice
-from apps.documents.models import DocumentSeries
+from apps.documents.missing_receipts import (
+    CSV_COLUMNS,
+    FAILED_MESSAGE,
+    issue_late_receipt,
+    payments_without_invoice,
+)
+from apps.documents.models import DocumentSeries, FormalDocument
 
 User = get_user_model()
 
 URL = '/api/v1/documents/missing-receipts/'
 EXPORT = f'{URL}export/'
 ISSUE = f'{URL}issue/'
+NEXT_NUMBER = f'{URL}next-number/'
 
 UUID_LINE = re.compile(r'^\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s', re.M)
 
@@ -60,21 +67,27 @@ class _Base(APITestCase):
     def at(self, year, month, day):
         return timezone.make_aware(datetime(year, month, day, 10, 0))
 
-    def payment(self, when, *, amount='236.00', status='completed'):
+    def payment(self, when, *, amount='236.00', status='completed', child=None):
         return Payment.objects.create(
-            child=self.child, family=self.family, lesson=self.lesson, branch=self.branch,
+            child=child or self.child, family=self.family, lesson=self.lesson, branch=self.branch,
             payment_type='recurring_subscription', status=status,
             base_amount=Decimal(amount), discount_amount=Decimal('0.00'), final_amount=Decimal(amount),
             payment_date=when,
         )
 
-    def command_ids(self, *args):
+    def command_output(self, *args):
         out = StringIO()
         call_command('check_invoices', *args, stdout=out)
-        return UUID_LINE.findall(out.getvalue())
+        return out.getvalue()
+
+    def command_ids(self, *args):
+        return UUID_LINE.findall(self.command_output(*args))
 
     def issue(self, ids, confirm='הפק'):
         return self.client.post(ISSUE, {'payment_ids': [str(i) for i in ids], 'confirm': confirm}, format='json')
+
+    def listed(self):
+        return [row['payment_id'] for row in self.client.get(URL, {'year': self.year}).data['rows']]
 
 
 class ReportTest(_Base):
@@ -112,6 +125,7 @@ class ReportTest(_Base):
         self.assertEqual(row['amount'], '236.00')
         self.assertEqual((row['channel'], row['channel_label']), ('standing_order', 'הוראת קבע'))
         self.assertEqual(row['method'], '')
+        self.assertIsNone(row['possible_manual_document'])
         self.assertEqual(data['next_number'], f'IR-{self.year}-000002')
 
     def test_the_year_defaults_to_this_one(self):
@@ -131,6 +145,131 @@ class ReportTest(_Base):
 
         self.assertEqual(runs['IR']['missing'], [f'IR-{self.year}-000002'])
         self.assertFalse(runs['IR']['complete'])
+
+
+class CheckoutReceiptTest(_Base):
+    """
+    A family checkout issues ONE receipt for every child and lesson it charged,
+    pointing at the first charge and naming the rest in its checkout_lines log.
+    None of those charges is missing its receipt, and none may get a second one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.first = self.payment(self.at(self.year, 1, 15))
+        self.second = self.payment(self.at(self.year, 1, 15), child=TestDataFactory.create_child(family=self.family))
+        self.receipt = issue_widget_checkout_invoice([self.first, self.second], send_email=False)
+
+    def test_neither_charge_of_the_checkout_is_listed(self):
+        self.assertEqual(self.receipt.payment_id, self.first.id)
+        data = self.client.get(URL, {'year': self.year}).data
+
+        self.assertEqual(data['rows'], [])
+        self.assertEqual(data['count'], 0)
+        self.assertEqual(payments_without_invoice(), [])
+
+    def test_issuing_one_explicitly_is_skipped_and_names_the_receipt(self):
+        res = self.issue([self.second.id, self.first.id])
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['issued'], [])
+        reasons = {row['payment_id']: row for row in res.data['skipped']}
+        self.assertEqual(reasons[str(self.second.id)]['reason'], 'in_checkout_receipt')
+        self.assertIn(self.receipt.invoice_number, reasons[str(self.second.id)]['message'])
+        self.assertEqual(reasons[str(self.first.id)]['reason'], 'has_receipt')
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(DocumentSeries.objects.get(series='IR', year=self.year).counter, 1)
+
+    def test_the_locked_recheck_reads_the_checkout_log_too(self):
+        # Past the screen's own check: a list read before the checkout's log was written.
+        self.assertIsNone(issue_late_receipt(self.second, now=timezone.now()))
+        self.assertEqual(Invoice.objects.count(), 1)
+
+    def test_the_command_finds_nothing_missing_and_issues_nothing(self):
+        output = self.command_output('--all', '--fix')
+
+        self.assertEqual(UUID_LINE.findall(output), [])
+        self.assertIn('כל חיוב שהושלם בטווח קיבל חשבונית מס/קבלה.', output)
+        self.assertNotIn('הונפק', output)
+        self.assertEqual(Invoice.objects.count(), 1)
+
+    def test_a_charge_outside_the_checkout_is_still_listed(self):
+        alone = self.payment(self.at(self.year, 2, 1))
+
+        self.assertEqual(self.listed(), [str(alone.id)])
+        self.assertEqual(self.command_ids('--all'), [str(alone.id)])
+
+
+class RecentChargeTest(_Base):
+    """A charge completed minutes ago may still be getting its checkout receipt: not missing yet."""
+
+    def test_a_charge_completed_minutes_ago_is_not_listed(self):
+        self.payment(timezone.now() - timedelta(minutes=5))
+        settled = self.payment(timezone.now() - timedelta(minutes=20))
+
+        self.assertEqual(self.listed(), [str(settled.id)])
+        self.assertEqual(self.command_ids('--all'), [str(settled.id)])
+
+    def test_issuing_one_is_skipped_and_the_recheck_refuses_it(self):
+        recent = self.payment(timezone.now() - timedelta(minutes=5))
+
+        res = self.issue([recent.id])
+
+        self.assertEqual(res.data['issued'], [])
+        self.assertEqual([row['reason'] for row in res.data['skipped']], ['too_recent'])
+        self.assertIsNone(issue_late_receipt(recent, now=timezone.now()))
+        self.assertFalse(Invoice.objects.exists())
+
+
+class ManualDocumentTest(_Base):
+    """A document issued by hand for the same family and sum, near the charge, is pointed at."""
+
+    def document(self, number, day, *, amount='236.00', child=None, document_type='combined'):
+        return FormalDocument.objects.create(
+            document_number=number, document_type=document_type, client_type='existing',
+            child=child or self.child, document_date=day, subtotal=Decimal(amount),
+            vat_amount=Decimal('0.00'), total_amount=Decimal(amount),
+        )
+
+    def row(self, payment):
+        rows = {row['payment_id']: row for row in self.client.get(URL, {'year': self.year}).data['rows']}
+        return rows[str(payment.id)]
+
+    def test_the_same_child_and_sum_within_45_days_flags_the_row(self):
+        payment = self.payment(self.at(self.year, 3, 10))
+        self.document(f'IRM-{self.year}-000007', date(self.year, 4, 20))
+
+        self.assertEqual(self.row(payment)['possible_manual_document'], {
+            'number': f'IRM-{self.year}-000007', 'date': f'{self.year}-04-20', 'amount': '236.00',
+        })
+
+    def test_a_sibling_is_the_same_family_and_the_nearest_document_is_named(self):
+        payment = self.payment(self.at(self.year, 3, 10))
+        sibling = TestDataFactory.create_child(family=self.family)
+        self.document(f'RC-{self.year}-000001', date(self.year, 2, 1), child=sibling)
+        self.document(f'RC-{self.year}-000002', date(self.year, 3, 12), child=sibling)
+
+        self.assertEqual(self.row(payment)['possible_manual_document']['number'], f'RC-{self.year}-000002')
+
+    def test_what_does_not_match_is_not_flagged(self):
+        payment = self.payment(self.at(self.year, 3, 10))
+        stranger = TestDataFactory.create_child(family=TestDataFactory.create_family(email='other@example.com'))
+        self.document(f'TI-{self.year}-000001', date(self.year, 3, 10), amount='120.00')  # another sum
+        self.document(f'TI-{self.year}-000002', date(self.year, 4, 25))  # 46 days on
+        self.document(f'TI-{self.year}-000003', date(self.year, 3, 10), child=stranger)  # another family
+        self.document(f'CR-{self.year}-000001', date(self.year, 3, 10), document_type='credit_invoice')
+        self.document(f'DR-{self.year}-000001', date(self.year, 3, 10), document_type='draft')
+
+        self.assertIsNone(self.row(payment)['possible_manual_document'])
+
+    def test_the_csv_carries_the_flag(self):
+        self.payment(self.at(self.year, 3, 10))
+        self.document(f'IRM-{self.year}-000007', date(self.year, 4, 20))
+
+        rows = list(csv.reader(io.StringIO(self.client.get(EXPORT, {'year': self.year}).content.decode('utf-8-sig'))))
+
+        self.assertEqual(rows[0][-1], 'ייתכן שכבר הופק ידנית')
+        self.assertEqual(rows[1][-1], f'IRM-{self.year}-000007 (20/04/{self.year})')
 
 
 class ExportTest(_Base):
@@ -154,6 +293,7 @@ class ExportTest(_Base):
         self.assertEqual(rows[1][1], '\'=HYPERLINK("http://x")')
         self.assertEqual(rows[1][4], '236.00')
         self.assertEqual(rows[1][7], str(payment.id))
+        self.assertEqual(rows[1][8], '')
 
 
 class IssueTest(_Base):
@@ -212,6 +352,36 @@ class IssueTest(_Base):
 
         self.assertEqual(self.command_ids('--all'), [str(self.newer.id)])
 
+    def test_a_failure_is_said_in_hebrew_and_its_error_stays_in_the_server_log(self):
+        real = PaymentService._create_invoice_from_payment
+
+        def flaky(service, payment, *args, **kwargs):
+            if payment.pk == self.older.pk:
+                raise RuntimeError('duplicate key value violates unique constraint "internal_detail"')
+            return real(service, payment, *args, **kwargs)
+
+        with patch.object(PaymentService, '_create_invoice_from_payment', autospec=True, side_effect=flaky), \
+                self.assertLogs('apps.documents.missing_receipts', level='ERROR') as logs:
+            res = self.issue([self.older.id, self.newer.id])
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['failed'], [{'payment_id': str(self.older.id), 'message': FAILED_MESSAGE}])
+        self.assertEqual(FAILED_MESSAGE, 'ההפקה נכשלה — נסו שוב או פנו לתמיכה')
+        self.assertNotIn('internal_detail', str(res.data))
+        self.assertIn('internal_detail', str(logs.records[0].exc_info[1]))
+        self.assertEqual([row['payment_id'] for row in res.data['issued']], [str(self.newer.id)])
+
+    def test_more_than_a_hundred_at_once_is_refused(self):
+        res = self.issue([uuid.uuid4() for _ in range(101)])
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('100', res.data['error'])
+
+    def test_the_next_number_is_read_fresh(self):
+        self.assertEqual(self.client.get(NEXT_NUMBER).data, {'next_number': f'IR-{self.year}-000001'})
+        self.issue([self.older.id])
+        self.assertEqual(self.client.get(NEXT_NUMBER).data, {'next_number': f'IR-{self.year}-000002'})
+
     def test_without_the_exact_word_nothing_is_issued(self):
         for confirm in ('', 'הפקה', 'כן', None):
             payload = {'payment_ids': [str(self.older.id)]}
@@ -248,6 +418,7 @@ class PermissionTest(_Base):
             self.client.force_authenticate(make_user(f'{role}-missing@test', role))
             self.assertEqual(self.client.get(URL).status_code, 403, role)
             self.assertEqual(self.client.get(EXPORT).status_code, 403, role)
+            self.assertEqual(self.client.get(NEXT_NUMBER).status_code, 403, role)
             self.assertEqual(self.issue([payment.id]).status_code, 403, role)
         self.assertFalse(Invoice.objects.exists())
 

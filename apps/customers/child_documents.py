@@ -38,11 +38,13 @@ def _late_issue(invoice) -> tuple[bool, str]:
 
 def _covered_payment_ids(invoice) -> list[str]:
     """Every charge a receipt covers — a family checkout issues one receipt for several."""
+    from apps.customers.checkout_invoice import CHECKOUT_LINES_ACTION, checkout_log_payment_ids
+
     for log in invoice.activity_logs.all():
-        if log.action == 'checkout_lines':
-            ids = (log.details or {}).get('payment_ids') or []
+        if log.action == CHECKOUT_LINES_ACTION:
+            ids = checkout_log_payment_ids(log.details)
             if ids:
-                return [str(value) for value in ids]
+                return ids
     return [str(invoice.payment_id)] if invoice.payment_id else []
 
 

@@ -13,12 +13,17 @@ one `check_invoices --fix` would have issued:
   * issued in the order the money arrived, and marked "הופק באיחור" with both
     dates (the `issued_late` activity log, which the PDF prints);
   * not mailed — the screen never mails; only the command's --email does.
+
+A charge has its receipt when an Invoice points at it, or when a family
+checkout's receipt names it in its checkout_lines log (one receipt for every
+child and lesson paid together — checkout_invoice.py).
 """
 from __future__ import annotations
 
 import csv
 import io
 import logging
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
@@ -35,7 +40,21 @@ CONFIRM_WORD = 'הפק'
 
 # One request stays well inside a serverless timeout; a longer backlog is
 # issued in a few rounds, each one idempotent.
-MAX_ISSUE_BATCH = 500
+MAX_ISSUE_BATCH = 100
+
+# A charge completed this recently is not "missing" yet — not on the list, and
+# not at the moment of issue. A family checkout marks its charges completed,
+# issues its one receipt pointing at the first, and only then writes the log
+# naming the others (checkout_invoice._finish_checkout_invoice); until it does,
+# those others look receipt-less, and a late receipt issued then would be a
+# second one. Every path that completes a charge stamps payment_date as it
+# does, so that date is when it was completed. A real miss is still missing
+# fifteen minutes later.
+RECENT_CHARGE_GRACE = timedelta(minutes=15)
+
+# A document issued by hand this close to the charge, for the same money and
+# the same family, may be the receipt the charge is missing.
+MANUAL_DOCUMENT_WINDOW = timedelta(days=45)
 
 CHANNEL_LABELS = {
     'trial': 'שיעור ניסיון',
@@ -56,7 +75,13 @@ SKIP_MESSAGES = {
     'not_found': 'התשלום לא נמצא',
     'not_completed': 'החיוב לא הושלם, או שאין בו סכום',
     'has_receipt': 'כבר הופקה לו קבלה',
+    'in_checkout_receipt': 'כבר כלול בקבלה של רכישה משותפת',
+    'too_recent': 'החיוב הושלם לפני פחות מ-15 דקות, וייתכן שהקבלה שלו עוד בהפקה',
 }
+
+# What the office sees for a receipt that failed. The exception itself can
+# carry internals, so it goes to the server log and nowhere else.
+FAILED_MESSAGE = 'ההפקה נכשלה — נסו שוב או פנו לתמיכה'
 
 
 def charge_date(payment):
@@ -64,13 +89,27 @@ def charge_date(payment):
     return payment.payment_date or payment.created_at
 
 
-def _missing_queryset():
-    """Completed, actually charged, carrying no Invoice. The one definition of "missing"."""
+def _completed_since(cutoff) -> Q:
+    return Q(payment_date__gte=cutoff) | Q(payment_date__isnull=True, created_at__gte=cutoff)
+
+
+def _is_recent(charged_on, now) -> bool:
+    return charged_on is not None and charged_on >= now - RECENT_CHARGE_GRACE
+
+
+def _missing_queryset(now=None):
+    """
+    Completed, actually charged, no Invoice pointing at it, and not completed in
+    the last few minutes. The database's half of "missing" — payments_without_invoice
+    adds the checkout receipts' logs.
+    """
     from apps.customers.models import Payment
 
+    now = now or timezone.now()
     return (
         Payment.objects
         .filter(status='completed', final_amount__gt=0, invoices__isnull=True)
+        .exclude(_completed_since(now - RECENT_CHARGE_GRACE))
         .select_related('child', 'family', 'parent', 'branch', 'lesson__course',
                         'tranzila_transaction', 'card_link')
     )
@@ -78,11 +117,13 @@ def _missing_queryset():
 
 def payments_without_invoice(since=None, *, year: int | None = None) -> list:
     """
-    Every charge missing its receipt — oldest money first.
+    Every charge missing its receipt — oldest money first. The one definition of "missing".
 
     `since` is the command's window (rows created since then); `year` is the
     screen's, by the day the money came in.
     """
+    from apps.customers.checkout_invoice import payments_covered_by_checkout
+
     rows = _missing_queryset()
     if since is not None:
         rows = rows.filter(created_at__gte=since)
@@ -90,7 +131,9 @@ def payments_without_invoice(since=None, *, year: int | None = None) -> list:
         rows = rows.filter(
             Q(payment_date__year=year) | Q(payment_date__isnull=True, created_at__year=year)
         )
-    return sorted(rows, key=charge_date)
+    rows = list(rows)
+    covered = payments_covered_by_checkout(payment.id for payment in rows)
+    return sorted((payment for payment in rows if str(payment.id) not in covered), key=charge_date)
 
 
 # ------------------------------------------------------------------ the report
@@ -120,7 +163,68 @@ def _description(payment) -> str:
     return course.name if course is not None else ''
 
 
-def receipt_row(payment) -> dict:
+def possible_manual_documents(payments) -> dict[str, dict]:
+    """
+    payment id -> a document issued by hand that may already be the charge's receipt.
+
+    Before lesson charges issued receipts of their own the office covered some
+    by hand, and nothing links a charge to such a document. So this matches the
+    way the register's possible duplicates do (register.find_possible_duplicates,
+    undocumented_income._issued_document_index): only documents issued for a
+    registered child, never a draft or a credit, never a store sale's Tranzila
+    copy, for the same sum. Here the child may be any child of the family —
+    the office often issues one document to the family — and the date within
+    45 days of the charge; the nearest one is named.
+
+    A document is not used up by the first charge it matches: a flag only leaves
+    the row unticked for the office to decide, while a missed one issues a
+    second receipt for the same money.
+    """
+    from apps.documents.models import FormalDocument
+
+    payments = list(payments)
+    child_ids = {payment.child_id for payment in payments if payment.child_id}
+    family_ids = {payment.family_id for payment in payments if payment.family_id}
+    if not child_ids and not family_ids:
+        return {}
+    days = {str(payment.id): timezone.localtime(charge_date(payment)).date() for payment in payments}
+
+    documents = (
+        FormalDocument.objects
+        .filter(child__isnull=False, store_invoices__isnull=True)
+        .exclude(document_type__in=('draft', 'credit_invoice'))
+        .filter(Q(child_id__in=child_ids) | Q(child__family_id__in=family_ids))
+        .filter(total_amount__in={payment.final_amount for payment in payments})
+        .filter(
+            document_date__gte=min(days.values()) - MANUAL_DOCUMENT_WINDOW,
+            document_date__lte=max(days.values()) + MANUAL_DOCUMENT_WINDOW,
+        )
+        .values_list('document_number', 'document_date', 'total_amount', 'child_id', 'child__family_id')
+        .order_by('document_date', 'document_number')
+    )
+    by_amount: dict = {}
+    for number, day, total, child_id, family_id in documents:
+        by_amount.setdefault(Decimal(total), []).append((number, day, Decimal(total), child_id, family_id))
+
+    flagged = {}
+    for payment in payments:
+        paid_on = days[str(payment.id)]
+        nearest = None
+        for number, day, total, child_id, family_id in by_amount.get(Decimal(payment.final_amount), ()):
+            same_child = bool(payment.child_id) and child_id == payment.child_id
+            same_family = bool(payment.family_id) and family_id == payment.family_id
+            gap = abs((day - paid_on).days)
+            if not (same_child or same_family) or gap > MANUAL_DOCUMENT_WINDOW.days:
+                continue
+            if nearest is None or gap < nearest[0]:
+                nearest = (gap, number, day, total)
+        if nearest is not None:
+            _gap, number, day, total = nearest
+            flagged[str(payment.id)] = {'number': number, 'date': day.isoformat(), 'amount': f'{total:.2f}'}
+    return flagged
+
+
+def receipt_row(payment, manual_document: dict | None = None) -> dict:
     channel, method = _channel(payment), _method(payment)
     return {
         'payment_id': str(payment.id),
@@ -133,6 +237,9 @@ def receipt_row(payment) -> dict:
         'channel_label': CHANNEL_LABELS[channel],
         'method': method,
         'method_label': METHOD_LABELS[method],
+        # {number, date, amount} of a document issued by hand that may already
+        # cover this charge, or None.
+        'possible_manual_document': manual_document,
     }
 
 
@@ -164,20 +271,26 @@ def missing_receipts_report(year: int) -> dict:
     from apps.documents.numbering import continuity
 
     payments = payments_without_invoice(year=year)
+    manual = possible_manual_documents(payments)
     total = sum((payment.final_amount for payment in payments), Decimal('0.00'))
     return {
         'year': year,
         'count': len(payments),
         'total': f'{total:.2f}',
         'next_number': next_receipt_number(),
-        'rows': [receipt_row(payment) for payment in payments],
+        'rows': [receipt_row(payment, manual.get(str(payment.id))) for payment in payments],
         'continuity': [_run_dict(run) for run in continuity(year)],
     }
 
 
 CSV_COLUMNS = (
     'תאריך התשלום', 'משפחה', 'ילד', 'תיאור', 'סכום', 'ערוץ', 'אמצעי תשלום', 'מזהה תשלום',
+    'ייתכן שכבר הופק ידנית',
 )
+
+
+def _day_text(iso: str) -> str:
+    return f'{iso[8:10]}/{iso[5:7]}/{iso[0:4]}'
 
 
 def missing_receipts_csv(report: dict) -> bytes:
@@ -194,9 +307,9 @@ def missing_receipts_csv(report: dict) -> bytes:
     writer = csv.writer(buffer, lineterminator='\r\n')
     writer.writerow(CSV_COLUMNS)
     for row in report['rows']:
-        paid_on = row['paid_at'][:10]
+        manual = row.get('possible_manual_document')
         writer.writerow([
-            f'{paid_on[8:10]}/{paid_on[5:7]}/{paid_on[0:4]}',
+            _day_text(row['paid_at'][:10]),
             _text(row['family_name']),
             _text(row['child_name']),
             _text(row['description']),
@@ -204,6 +317,7 @@ def missing_receipts_csv(report: dict) -> bytes:
             row['channel_label'],
             row['method_label'],
             _text(row['payment_id']),
+            _text(f"{manual['number']} ({_day_text(manual['date'])})") if manual else '',
         ])
     return buffer.getvalue().encode('utf-8-sig')
 
@@ -215,11 +329,14 @@ def issue_late_receipt(payment, *, now, send_email: bool = False, backdate: bool
     Issue one late receipt, or return None when the charge no longer needs one.
 
     The charge is locked and looked at again first: two clicks, or the screen
-    and the command at once, must not give one payment two receipts. The
-    receipt and its "issued late" mark commit together, so no receipt ever
-    stands without the dates it is printed with.
+    and the command at once, must not give one payment two receipts — and
+    neither may a family checkout's receipt that already names it, or one still
+    being written for a charge completed a moment ago. The receipt and its
+    "issued late" mark commit together, so no receipt ever stands without the
+    dates it is printed with.
     """
     from apps.core.payment_service import PaymentService
+    from apps.customers.checkout_invoice import payments_covered_by_checkout
     from apps.customers.financial_models import Invoice, InvoiceActivityLog
     from apps.customers.models import Payment
 
@@ -228,12 +345,16 @@ def issue_late_receipt(payment, *, now, send_email: bool = False, backdate: bool
         state = (
             Payment.objects.select_for_update()
             .filter(pk=payment.pk)
-            .values_list('status', 'final_amount')
+            .values_list('status', 'final_amount', 'payment_date', 'created_at')
             .first()
         )
         if state is None or state[0] != 'completed' or not state[1] > 0:
             return None
+        if _is_recent(state[2] or state[3], timezone.now()):
+            return None
         if Invoice.objects.filter(payment_id=payment.pk).exists():
+            return None
+        if payments_covered_by_checkout([payment.pk]):
             return None
 
         invoice = PaymentService()._create_invoice_from_payment(
@@ -270,6 +391,7 @@ def issue_missing_receipts(payment_ids, *, user) -> dict:
     was) is skipped and says why; one that fails is reported and the rest go on,
     as in the command.
     """
+    from apps.customers.checkout_invoice import payments_covered_by_checkout
     from apps.customers.financial_models import Invoice
     from apps.customers.models import Payment
 
@@ -284,12 +406,15 @@ def issue_missing_receipts(payment_ids, *, user) -> dict:
     with_receipt = {
         str(pid) for pid in Invoice.objects.filter(payment_id__in=wanted).values_list('payment_id', flat=True)
     }
+    in_checkout = payments_covered_by_checkout(found)
 
     issued, skipped, failed, candidates = [], [], [], []
 
-    def skip(pid, reason):
-        skipped.append({'payment_id': pid, 'reason': reason, 'message': SKIP_MESSAGES[reason]})
+    def skip(pid, reason, detail=''):
+        message = SKIP_MESSAGES[reason] + (f' ({detail})' if detail else '')
+        skipped.append({'payment_id': pid, 'reason': reason, 'message': message})
 
+    now = timezone.now()
     for pid in wanted:
         payment = found.get(pid)
         if payment is None:
@@ -298,17 +423,20 @@ def issue_missing_receipts(payment_ids, *, user) -> dict:
             skip(pid, 'not_completed')
         elif pid in with_receipt:
             skip(pid, 'has_receipt')
+        elif pid in in_checkout:
+            skip(pid, 'in_checkout_receipt', in_checkout[pid])
+        elif _is_recent(charge_date(payment), now):
+            skip(pid, 'too_recent')
         else:
             candidates.append(payment)
 
-    now = timezone.now()
     for payment in sorted(candidates, key=charge_date):
         pid = str(payment.id)
         try:
             invoice = issue_late_receipt(payment, now=now, send_email=False, backdate=False, issued_by=user)
-        except Exception as exc:
+        except Exception:
             logger.exception('Late receipt failed for payment %s', pid)
-            failed.append({'payment_id': pid, 'error': str(exc) or exc.__class__.__name__})
+            failed.append({'payment_id': pid, 'message': FAILED_MESSAGE})
             continue
         if invoice is None:
             skip(pid, 'has_receipt')
