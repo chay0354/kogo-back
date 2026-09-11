@@ -13,17 +13,17 @@ a second submit cannot charge twice. A decline puts the link back to
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, time as dt_time, timedelta
 from decimal import Decimal
 from typing import Any
 
-from django.core.signing import BadSignature, SignatureExpired, dumps, loads
+from django.core.signing import BadSignature, SignatureExpired, loads
 from django.db import transaction
 from django.utils import timezone
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
 from apps.core.manychat_service import ManyChatService
-from apps.core.password_reset_email import crm_frontend_url
+from apps.core.frontend_url import public_frontend_url
 from apps.customers.trial_credit import credit_for_lesson
 from apps.core.payment_service import (
     JERUSALEM_TZ,
@@ -32,6 +32,7 @@ from apps.core.payment_service import (
     child_has_standing_order_for_lessons,
     deferred_first_charge_date,
     enroll_child_in_paid_lessons,
+    lessons_covered_by_selection,
     registration_fee_amount,
     resolve_billing_price,
     resolve_include_registration_fee,
@@ -42,7 +43,7 @@ from apps.core.payment_service import (
 from apps.core.tranzila_service import TranzilaService, extract_card_token, is_tranzila_uncertain_gateway_error
 from apps.customers.models import Payment, PaymentDiscountSnapshot, RecurringPayment, TranzilaTransaction
 from apps.customers.widget_views import _ensure_recurring_payment_for_widget_charge
-from apps.payment_links.models import CardLink, money
+from apps.payment_links.models import CardLink, money, new_card_link_token
 
 logger = logging.getLogger(__name__)
 
@@ -75,34 +76,97 @@ def _qs():
 
 
 def build_card_link_token(link: CardLink) -> str:
-    return dumps({'id': str(link.id), 'v': link.token_version}, salt=SIGN_SALT).replace(':', '~')
+    """The short token stored on the row, filled in on first save."""
+    if not link.token:
+        link.token = new_card_link_token()
+        link.save(update_fields=['token', 'updated_at'])
+    return link.token
 
 
-def card_link_public_url(link: CardLink) -> str:
-    return f'{crm_frontend_url()}/card-link/{build_card_link_token(link)}'
+def card_link_public_url(link: CardLink, base: str | None = None) -> str:
+    """`<crm>/c/<token>` — the short path a parent reads off a WhatsApp message."""
+    return f'{(base or public_frontend_url()).rstrip("/")}/c/{build_card_link_token(link)}'
+
+
+def _resolve_legacy_signed_token(raw: str) -> CardLink | None:
+    """Links sent before the short token existed carry a signed payload."""
+    try:
+        payload = loads(raw.replace('~', ':'), salt=SIGN_SALT, max_age=CARD_LINK_TOKEN_MAX_AGE)
+    except SignatureExpired as exc:
+        raise CardLinkError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.') from exc
+    except BadSignature:
+        return None
+    link_id = str((payload or {}).get('id') or '').strip()
+    if not link_id:
+        return None
+    link = _qs().filter(id=link_id).first()
+    if link is not None and (payload or {}).get('v') != link.token_version:
+        raise CardLinkError('הקישור כבר לא בתוקף. בקשו מהמשרד קישור חדש.')
+    return link
 
 
 def resolve_card_link_token(token: str) -> tuple[CardLink, bool]:
     """The link for a token, and whether it is already done."""
-    raw = (token or '').strip().replace('~', ':')
+    raw = (token or '').strip()
     if not raw:
         raise CardLinkError('קישור לא תקין')
-    try:
-        payload = loads(raw, salt=SIGN_SALT, max_age=CARD_LINK_TOKEN_MAX_AGE)
-    except SignatureExpired as exc:
-        raise CardLinkError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.') from exc
-    except BadSignature as exc:
-        raise CardLinkError('קישור לא תקין') from exc
-    link_id = str((payload or {}).get('id') or '').strip()
-    version = (payload or {}).get('v')
-    link = _qs().filter(id=link_id).first() if link_id else None
+
+    link = _qs().filter(token=raw).first() or _resolve_legacy_signed_token(raw)
     if link is None:
         raise CardLinkError('קישור לא תקין')
+
     if link.status == CardLink.STATUS_COMPLETED:
         return link, True
-    if link.status == CardLink.STATUS_CANCELLED or version != link.token_version:
+    if link.status == CardLink.STATUS_CANCELLED:
         raise CardLinkError('הקישור כבר לא בתוקף. בקשו מהמשרד קישור חדש.')
+
+    age = timezone.now() - link.created_at
+    if age.total_seconds() > CARD_LINK_TOKEN_MAX_AGE:
+        raise CardLinkError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.')
     return link, False
+
+
+# ---------------------------------------------------------------------------
+# The unit a link bills — one lesson, or a twice/thrice-a-week bundle
+# ---------------------------------------------------------------------------
+
+_FREQUENCY_LABELS = {1: 'פעם בשבוע', 2: 'פעמיים בשבוע', 3: 'שלוש פעמים בשבוע'}
+
+
+def unit_frequency_label(count: int) -> str:
+    return _FREQUENCY_LABELS.get(count, f'{count} פעמים בשבוע')
+
+
+def unit_lessons(*, lesson, bundle) -> list:
+    """The days a link bills, in week order: every member of a bundle, or the one lesson."""
+    members = list(bundle.lessons.select_related('course', 'course__branch', 'instructor').all()) if bundle is not None else []
+    if not members:
+        return [lesson] if lesson is not None else []
+    return sorted(members, key=lambda member: (member.day_of_week, member.start_time or dt_time.min))
+
+
+def unit_sessions(*, lesson, bundle) -> list[dict]:
+    return [
+        {
+            'lesson_id': str(member.id),
+            'day_name': member.get_day_of_week_display(),
+            'start_time': member.start_time.strftime('%H:%M') if member.start_time else '',
+            'end_time': member.end_time.strftime('%H:%M') if member.end_time else '',
+            'instructor_name': member.instructor.full_name if member.instructor_id else '',
+        }
+        for member in unit_lessons(lesson=lesson, bundle=bundle)
+    ]
+
+
+def unit_label(*, lesson, bundle) -> str:
+    """'קפואירה · פעמיים בשבוע · שני 16:00 + רביעי 16:00'."""
+    sessions = unit_sessions(lesson=lesson, bundle=bundle)
+    when = ' + '.join(f"{row['day_name']} {row['start_time']}".strip() for row in sessions)
+    parts = [lesson.course.name if lesson is not None else '']
+    if len(sessions) > 1:
+        parts.append(unit_frequency_label(len(sessions)))
+    parts.append(when)
+    return ' · '.join(part for part in parts if part)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +185,15 @@ def quote_standing_order(link: CardLink, today: date | None = None) -> dict:
     lesson = link.lesson
     if lesson is None:
         raise CardLinkError('להוראת קבע נדרש שיעור')
-    base_price, used_lesson_tier, _course_index, bundle, price_option = resolve_billing_price(child, lesson, None, None)
+    # The bundle goes through the same resolver the widget uses, so a twice-a-week
+    # link bills the combined price the parent saw on signup. `seated_child`
+    # keeps a full class from refusing the child who already sits in it.
+    try:
+        base_price, used_lesson_tier, _course_index, bundle, price_option = resolve_billing_price(
+            child, lesson, str(link.bundle_id) if link.bundle_id else None, None, seated_child=child,
+        )
+    except ValueError as exc:
+        raise CardLinkError(str(exc)) from exc
     if not base_price:
         raise CardLinkError('לשיעור אין מחיר מוגדר')
     discount = PaymentService().discount_service.evaluate_discounts_for_payment(
@@ -174,12 +246,17 @@ def preview_payload(link: CardLink, *, already_done: bool = False) -> dict:
     }
     if link.kind == CardLink.KIND_STANDING_ORDER and link.lesson_id:
         lesson = link.lesson
+        sessions = unit_sessions(lesson=lesson, bundle=link.bundle)
+        first = sessions[0] if sessions else {}
         out.update({
             'course_name': lesson.course.name,
             'branch_name': lesson.course.branch.name if lesson.course.branch_id else '',
-            'day_name': lesson.get_day_of_week_display(),
-            'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
-            'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else '',
+            'frequency_label': unit_frequency_label(len(sessions) or 1),
+            'sessions': sessions,
+            # Single-day fields, kept for anything built before `sessions`.
+            'day_name': first.get('day_name', ''),
+            'start_time': first.get('start_time', ''),
+            'end_time': first.get('end_time', ''),
         })
         if not already_done:
             try:
@@ -258,7 +335,8 @@ def _prevalidate(link: CardLink, today: date) -> dict:
     if link.kind == CardLink.KIND_STANDING_ORDER:
         if link.lesson is None:
             raise CardLinkError('להוראת קבע נדרש שיעור. פנו למשרד.')
-        if child_has_standing_order_for_lessons(link.child, [link.lesson]):
+        covered = lessons_covered_by_selection(lesson=link.lesson, bundle=link.bundle)
+        if child_has_standing_order_for_lessons(link.child, covered):
             raise CardLinkError('לילד כבר יש הוראת קבע לשיעור הזה. פנו למשרד.')
         return quote_standing_order(link, today)
     amount = money(link.amount or 0)
@@ -543,7 +621,7 @@ def _after_success(payment: Payment, txn: TranzilaTransaction, *, invoice: bool)
 # Sending the link
 # ---------------------------------------------------------------------------
 
-def send_card_link_whatsapp(link: CardLink) -> dict:
+def send_card_link_whatsapp(link: CardLink, base: str | None = None) -> dict:
     """Same field names as the card-update flow, so the owner can point one ManyChat flow at both."""
     child = link.child
     ctx = build_enrollment_whatsapp_context(child=child, lesson=link.lesson)
@@ -559,7 +637,7 @@ def send_card_link_whatsapp(link: CardLink) -> dict:
     else:
         amount_label = str(money(link.amount or 0))
     extra_fields = {
-        'kogo_card_update_url': f'{crm_frontend_url()}/card-link/{token}',
+        'kogo_card_update_url': card_link_public_url(link, base),
         'kogo_card_update_token': token,
         'kogo_amount': amount_label,
         'kogo_support_phone': '050-9424755',
@@ -576,3 +654,104 @@ def send_card_link_whatsapp(link: CardLink) -> dict:
         updated_at=timezone.now(),
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Options — what the office can send this child a standing-order link for
+# ---------------------------------------------------------------------------
+
+def _option(child, *, lesson, bundle, enrolled: bool, is_trial: bool) -> dict:
+    members = unit_lessons(lesson=lesson, bundle=bundle)
+    primary = members[0] if members else lesson
+    covered = lessons_covered_by_selection(lesson=primary, bundle=bundle)
+    option = {
+        'key': f'bundle:{bundle.id}' if bundle is not None else f'lesson:{primary.id}',
+        'kind': 'bundle' if bundle is not None else 'lesson',
+        'lesson_id': str(primary.id),
+        'bundle_id': str(bundle.id) if bundle is not None else None,
+        'course_name': primary.course.name,
+        'branch_name': primary.course.branch.name if primary.course.branch_id else '',
+        'label': unit_label(lesson=primary, bundle=bundle),
+        'frequency_label': unit_frequency_label(len(members) or 1),
+        'sessions': unit_sessions(lesson=primary, bundle=bundle),
+        'enrolled': enrolled,
+        'is_trial': is_trial,
+        'has_standing_order': child_has_standing_order_for_lessons(child, covered),
+    }
+    if option['has_standing_order']:
+        return option
+    probe = CardLink(
+        kind=CardLink.KIND_STANDING_ORDER, child=child, lesson=primary, bundle=bundle,
+        include_registration_fee=True,
+    )
+    try:
+        quote = quote_standing_order(probe)
+    except CardLinkError as exc:
+        option['quote_error'] = str(exc)
+        return option
+    option['quote'] = {
+        'first_charge': str(quote['first_charge']),
+        'monthly_amount': str(quote['monthly_amount']),
+        'registration_fee': str(quote['registration_fee']),
+        'next_billing_date': quote['next_billing_date'].isoformat(),
+    }
+    return option
+
+
+def card_link_options(child) -> list[dict]:
+    """
+    The units this child can be sent a standing-order link for, in the order the
+    office wants them: what the child is enrolled in — a twice/thrice-a-week
+    track as one unit, never split into its days — then the other tracks those
+    courses offer, so a once-a-week child can be moved up. Each carries its
+    quote, so the price is visible before anything is created.
+    """
+    from apps.courses.bundles import catalog_bundles_for_course
+    from apps.enrollments.models import LessonEnrollment
+
+    rows = list(
+        LessonEnrollment.objects
+        .filter(child=child, status='active', lesson__isnull=False)
+        .select_related('lesson__course__branch', 'lesson__instructor', 'bundle')
+        .order_by('lesson__day_of_week', 'lesson__start_time')
+    )
+    enrolled_ids = {row.lesson_id for row in rows}
+    trial_ids = {row.lesson_id for row in rows if row.trial_lesson_date}
+
+    bundles: list[dict] = []
+    singles: list[dict] = []
+    others: list[dict] = []
+    seen: set = set()
+    courses: dict = {}
+
+    for row in rows:
+        courses.setdefault(row.lesson.course_id, row.lesson)
+        if row.bundle is not None:
+            key = ('bundle', row.bundle_id)
+            if key not in seen:
+                seen.add(key)
+                bundles.append(_option(child, lesson=row.lesson, bundle=row.bundle, enrolled=True,
+                                       is_trial=row.lesson_id in trial_ids))
+            continue
+        key = ('lesson', row.lesson_id)
+        if key not in seen:
+            seen.add(key)
+            singles.append(_option(child, lesson=row.lesson, bundle=None, enrolled=True,
+                                   is_trial=row.lesson_id in trial_ids))
+
+    # A child on every day of a track without the track recorded on the rows
+    # (an older signup) is on that track: offer it as enrolled, first.
+    for course_lesson in courses.values():
+        for bundle in catalog_bundles_for_course(course_lesson.course):
+            key = ('bundle', bundle.id)
+            if key in seen:
+                continue
+            member_ids = set(bundle.lessons.values_list('id', flat=True))
+            if not member_ids or not member_ids & enrolled_ids:
+                continue
+            seen.add(key)
+            on_every_day = member_ids <= enrolled_ids
+            target = bundles if on_every_day else others
+            target.append(_option(child, lesson=course_lesson, bundle=bundle, enrolled=on_every_day, is_trial=False))
+
+    return bundles + singles + others

@@ -12,6 +12,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from apps.core.manychat_service import ManyChatService
 from django.db.models import Q, Prefetch, Count, Sum, Value, CharField
 from django.db.models.functions import Concat
+from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date, timedelta
@@ -21,7 +22,7 @@ from apps.customers.phone_search import PhoneAwareSearchFilter
 # Store models moved to apps.store
 from apps.customers.financial_models import Discount
 from apps.customers.serializers import (
-    FamilySerializer, ParentSerializer, ChildSerializer,
+    FamilySerializer, FamilyComputerizedDocsConsentSerializer, ParentSerializer, ChildSerializer,
     ChildWithDetailsSerializer, ChildCreateSerializer, ChildUpdateSerializer,
     # Store serializers moved to apps.store.serializers
     DiscountSerializer, EarlySignupDiscountSerializer, SecondChildDiscountSerializer,
@@ -78,6 +79,31 @@ class FamilyViewSet(viewsets.ModelViewSet):
                 )
             ).distinct()
         return queryset
+
+    @action(detail=True, methods=['post'], url_path='computerized-consent')
+    def computerized_consent(self, request, pk=None):
+        """
+        The family's consent to receive tax documents by email (סעיף 18ב(ג)), as the office records it.
+
+        POST /api/v1/customers/families/{id}/computerized-consent/  {"consent": true | false}
+        true records consent given to the office; false withdraws the family's
+        consent, wherever it was given. Answers with the family's consent fields.
+        """
+        from apps.core.computerized_docs import CONSENT_SOURCE_CRM, record_consent, revoke_consent
+
+        family = self.get_object()
+        consent = request.data.get('consent')
+        # A JSON boolean only: a missing or misspelt value must not withdraw anything.
+        if not isinstance(consent, bool):
+            return Response(
+                {'error': 'יש לשלוח consent עם true או false'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if consent:
+            record_consent(family, CONSENT_SOURCE_CRM)
+        else:
+            revoke_consent(family)
+        return Response(FamilyComputerizedDocsConsentSerializer(family).data)
 
 
 class ParentViewSet(viewsets.ModelViewSet):
@@ -745,6 +771,16 @@ class ChildViewSet(viewsets.ModelViewSet):
             'message': 'תלמיד רפאים נוצר בהצלחה'
         }, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=['get'], url_path='documents')
+    def documents(self, request, pk=None):
+        """
+        GET /api/v1/customers/children/{id}/documents/ — every document issued for
+        this child (receipts, store sales, manual documents and credit notes),
+        newest first, each with the API route that downloads its PDF.
+        """
+        from apps.customers.child_documents import child_documents
+        return Response({'documents': child_documents(self.get_object())})
+
 
 # Store ViewSets moved to apps.store.views
 
@@ -1068,6 +1104,97 @@ class DiscountViewSet(viewsets.ModelViewSet):
 # Payment ViewSets - Tranzila Integration
 # ============================================================================
 
+def _filter_by_ledger_dimensions(queryset, params):
+    """
+    The invoices page's filters, applied to charges: business ('branches' is the
+    branch network — courses with no business of their own; 'store' has no CRM
+    charges), city, course type, the course's age range, and instructor.
+    """
+    from apps.core.ledger_dimensions import parse_age_key
+
+    business = params.get('business')
+    if business == 'store':
+        return queryset.none()
+    if business == 'branches':
+        queryset = queryset.filter(lesson__course__business__isnull=True)
+    elif business:
+        queryset = queryset.filter(lesson__course__business_id=business)
+
+    city = params.get('city')
+    if city:
+        queryset = queryset.filter(Q(branch__city_id=city) | Q(lesson__course__branch__city_id=city))
+    course_type = params.get('course_type')
+    if course_type:
+        queryset = queryset.filter(lesson__course__course_type_id=course_type)
+    instructor = params.get('instructor')
+    if instructor:
+        queryset = queryset.filter(lesson__instructor_id=instructor)
+    age = params.get('age')
+    if age:
+        low, high = parse_age_key(age)
+        # age_key() writes a bound of 0 like a missing one (a 0–9 course is '-9'), so
+        # a missing bound matches both here — or that course could never be chosen.
+        minimum = Q(lesson__course__min_age=low) if low is not None else (
+            Q(lesson__course__min_age__isnull=True) | Q(lesson__course__min_age=0))
+        maximum = Q(lesson__course__max_age=high) if high is not None else (
+            Q(lesson__course__max_age__isnull=True) | Q(lesson__course__max_age=0))
+        queryset = queryset.filter(minimum, maximum)
+    return queryset.select_related(
+        'lesson__course__course_type', 'lesson__course__business', 'lesson__course__branch__city',
+        'lesson__instructor', 'branch__city',
+    )
+
+
+def _ledger_dimension_options(queryset):
+    """
+    Every course type, age group and instructor among these charges, for the
+    invoices page's filter bar — each as the part of a ledger row the bar reads
+    (apps/core/ledger_dimensions.py). The charges list is paginated, so the page
+    in hand would offer only what happens to be on it.
+
+    Read with DISTINCT queries, not by loading the charges. The caller passes
+    the charges before its filters, so a choice never takes away its own
+    alternatives.
+    """
+    from apps.core.ledger_dimensions import age_key, age_label
+    from apps.instructors.models import Instructor
+
+    # values_list() drops the select_related joins, but neither the ordering
+    # (DISTINCT would count the ordering column too) nor the prefetch.
+    charges = queryset.order_by().prefetch_related(None)
+
+    course_types = (
+        charges.filter(lesson__course__course_type__isnull=False)
+        .values_list('lesson__course__course_type_id', 'lesson__course__course_type__name')
+        .distinct()
+    )
+    options = [
+        {'course_type_id': str(type_id), 'course_type_name': name} for type_id, name in course_types
+    ]
+
+    # Two ranges can share a key (min_age 0 reads as none), so the key decides.
+    ages = {}
+    ranges = (
+        charges.filter(lesson__course__isnull=False)
+        .values_list('lesson__course__min_age', 'lesson__course__max_age')
+        .distinct()
+    )
+    for low, high in ranges:
+        key = age_key(low, high)
+        if key:
+            ages.setdefault(key, age_label(low, high))
+    options += [{'age_key': key, 'age_label': label} for key, label in ages.items()]
+
+    # The instructors themselves, so each is named as every ledger row names them (full_name).
+    instructors = Instructor.objects.filter(
+        pk__in=charges.filter(lesson__instructor__isnull=False).values('lesson__instructor_id'),
+    )
+    options += [
+        {'instructor_id': str(person.id), 'instructor_name': person.full_name} for person in instructors
+    ]
+    return options
+
+
 class PaymentLedgerPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
@@ -1140,16 +1267,21 @@ class PaymentViewSet(viewsets.ModelViewSet):
         """
         Slim charge list for the invoices payments tab.
 
-        GET /api/v1/customers/payments/ledger/?start_date=&end_date=&page=&page_size=
-        Defaults to the last 90 days when start_date is omitted.
+        GET /api/v1/customers/payments/ledger/?start_date=&end_date=&page=&page_size=&with_options=1
+        Defaults to the last 90 days when start_date is omitted. with_options=1
+        adds `dimension_options`: every course type, age group and instructor in
+        the window, for the filter bar (_ledger_dimension_options).
         """
         from django.utils import timezone
 
-        queryset = self.filter_queryset(self.get_queryset())
+        # The window: what this user may see, in the requested dates. The filter
+        # bar's options are read from it, before the search and the filters.
+        window = self.get_queryset()
         if not request.query_params.get('start_date'):
-            queryset = queryset.filter(
+            window = window.filter(
                 created_at__date__gte=timezone.localdate() - timedelta(days=90)
             )
+        queryset = self.filter_queryset(window)
 
         status_filter = request.query_params.get('status')
         if status_filter:
@@ -1158,6 +1290,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
         branch_id = request.query_params.get('branch')
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
+
+        queryset = _filter_by_ledger_dimensions(queryset, request.query_params)
 
         kind = request.query_params.get('kind')
         if kind == 'standing_order':
@@ -1181,6 +1315,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
         ).aggregate(total=Sum('final_amount'))['total'] or 0
         pending_count = queryset.filter(status__in=('pending', 'processing')).count()
 
+        with_options = str(request.query_params.get('with_options') or '').lower() in ('1', 'true', 'yes')
+        options = _ledger_dimension_options(window) if with_options else None
+
         paginator = PaymentLedgerPagination()
         page = paginator.paginate_queryset(queryset, request)
         serializer = PaymentLedgerSerializer(page if page is not None else queryset, many=True)
@@ -1188,13 +1325,18 @@ class PaymentViewSet(viewsets.ModelViewSet):
             response = paginator.get_paginated_response(serializer.data)
             response.data['month_total'] = float(month_total)
             response.data['pending_count'] = pending_count
+            if options is not None:
+                response.data['dimension_options'] = options
             return response
-        return Response({
+        body = {
             'results': serializer.data,
             'count': len(serializer.data),
             'month_total': float(month_total),
             'pending_count': pending_count,
-        })
+        }
+        if options is not None:
+            body['dimension_options'] = options
+        return Response(body)
 
     @action(detail=False, methods=['get'], url_path='tranzila-transactions')
     def tranzila_transactions(self, request):
@@ -1425,6 +1567,37 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 'error': result.get('error', 'שגיאה בזיכוי התשלום')
             }, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=True, methods=['get'], url_path='invoice')
+    def invoice(self, request, pk=None):
+        """
+        GET /api/v1/customers/payments/{id}/invoice/ — the חשבונית מס / קבלה for this charge.
+
+        The document existed only as a mail attachment, so anyone who lost the mail
+        had no way back to it. This is the same PDF, on demand.
+        """
+        from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
+
+        payment = self.get_object()
+        invoice = payment.invoices.order_by('invoice_date').first()
+        if invoice is None:
+            return Response(
+                {'error': 'לא הופקה חשבונית לתשלום זה'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            pdf_bytes = generate_subscription_invoice_pdf(invoice)
+        except Exception:
+            logger.exception('Subscription invoice PDF failed for %s', invoice.invoice_number)
+            return Response(
+                {'error': 'שגיאה ביצירת הקובץ'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{invoice.invoice_number}.pdf"'
+        return response
+
 
 class RecurringPaymentViewSet(viewsets.ModelViewSet):
     """
@@ -1441,7 +1614,12 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         'initial_payment',
         'initial_payment__lesson',
         'initial_payment__lesson__course',
-        'initial_payment__branch'
+        'initial_payment__branch',
+        'initial_payment__branch__city',
+        'initial_payment__lesson__course__course_type',
+        'initial_payment__lesson__course__business',
+        'initial_payment__lesson__course__branch__city',
+        'initial_payment__lesson__instructor',
     ).prefetch_related('amount_overrides__store_invoice', 'amount_overrides__created_by')
     serializer_class = RecurringPaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]

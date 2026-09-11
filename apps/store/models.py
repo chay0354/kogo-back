@@ -452,29 +452,21 @@ class StoreInvoice(models.Model):
         return f"{self.invoice_number} - {customer} - ₪{self.total_amount}"
     
     def save(self, *args, **kwargs):
-        # Auto-generate invoice number if not set
-        if not self.invoice_number:
-            # Format: INV-YYYYMM-XXXXX
-            today = timezone.now()
-            prefix = f"INV-{today.strftime('%Y%m')}"
-            
-            # Get last invoice number for this month
-            last_invoice = StoreInvoice.objects.filter(
-                invoice_number__startswith=prefix
-            ).order_by('-invoice_number').first()
-            
-            if last_invoice:
-                try:
-                    last_num = int(last_invoice.invoice_number.split('-')[-1])
-                    next_num = last_num + 1
-                except (ValueError, IndexError):
-                    next_num = 1
-            else:
-                next_num = 1
-            
-            self.invoice_number = f"{prefix}-{next_num:05d}"
-        
-        super().save(*args, **kwargs)
+        # A new sale takes the next number of the ST series. It used to read the
+        # month's highest number and add one, with no lock: two sales at the same
+        # moment computed the same number and one of them failed after the card
+        # had already been charged. The number and the row commit together.
+        if self.invoice_number:
+            super().save(*args, **kwargs)
+            return
+        from django.db import transaction
+        from apps.documents.numbering import SERIES_STORE, SERIES_STORE_TRANSACTION, next_document_number
+
+        # Monthly billing is not paid yet — a חשבונית עסקה, in its own series.
+        series = SERIES_STORE_TRANSACTION if self.payment_method == 'monthly_billing' else SERIES_STORE
+        with transaction.atomic():
+            self.invoice_number = next_document_number(series, self.issue_date)
+            super().save(*args, **kwargs)
 
 
 class InventoryAdjustment(models.Model):

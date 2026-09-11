@@ -17,6 +17,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps.core.ledger_dimensions import EMPTY_DIMENSIONS, lesson_paths, row_dimensions
 from apps.core.tranzila_service import TranzilaService, is_tranzila_approved
 
 TRANZILA_PDF_PUBLIC_BASE = TranzilaService.TRANZILA_PDF_PUBLIC_BASE
@@ -57,6 +58,24 @@ PAYMENT_METHOD_LABELS = {
     'bank_transfer': 'העברה בנקאית',
     'check': "צ'ק",
     'monthly_billing': 'הוראת קבע',
+}
+
+# Where a document came from. Four systems issue documents into one ledger, and
+# without this the list cannot answer "where is this row from" — a website
+# delivery, a sale over the counter, a monthly subscription charge, or a document
+# someone wrote by hand.
+ORIGIN_STORE_WEBSITE = 'store_website'
+ORIGIN_STORE_COUNTER = 'store_counter'
+ORIGIN_SUBSCRIPTION = 'subscription'
+ORIGIN_MANUAL = 'manual'
+ORIGIN_TRANZILA = 'tranzila'
+
+ORIGIN_LABELS = {
+    ORIGIN_STORE_WEBSITE: 'חנות · אתר',
+    ORIGIN_STORE_COUNTER: 'חנות · סניף',
+    ORIGIN_SUBSCRIPTION: 'מנוי',
+    ORIGIN_MANUAL: 'מסמך ידני',
+    ORIGIN_TRANZILA: 'טרנזילה',
 }
 
 
@@ -124,6 +143,7 @@ def normalize_tranzila_document(row: dict, customer_name: str = '') -> dict:
         'customer_name': customer_name or str(row.get('client_name') or row.get('contact') or ''),
         'document_type': TRANZILA_DOC_TYPE_LABELS.get(doc_type, doc_type or 'מסמך טרנזילה'),
         'document_type_code': doc_type,
+        'is_credit': doc_type in {'CN', 'CR'},
         'total_amount': amount,
         'amount_paid': paid,
         'open_balance': 0.0 if status == 'completed' else amount,
@@ -131,6 +151,9 @@ def normalize_tranzila_document(row: dict, customer_name: str = '') -> dict:
         'pdf_url': pdf_url,
         'tranzila_doc_id': doc_id,
         'source': 'tranzila',
+        'origin': ORIGIN_TRANZILA,
+        'origin_label': ORIGIN_LABELS[ORIGIN_TRANZILA],
+        **EMPTY_DIMENSIONS,
         'branch': '',
         'branch_id': None,
     }
@@ -179,7 +202,7 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
 
     docs = (
         FormalDocument.objects
-        .select_related('child', 'business_customer', 'branch')
+        .select_related('child', 'business_customer', 'branch__city', 'business')
         .filter(document_date__gte=start, document_date__lte=end)
         .order_by('-document_date', '-created_at')
     )
@@ -208,7 +231,9 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'document_type_code': doc.document_type,
             'total_amount': amount,
             'amount_paid': paid,
-            'open_balance': 0.0 if status in ('completed', 'draft') else amount,
+            # A credit note is money going back, never a debt to chase.
+            'open_balance': 0.0 if is_credit or status in ('completed', 'draft') else amount,
+            'is_credit': is_credit,
             'status': status,
             'pdf_url': doc.pdf_url or (
                 f'{TRANZILA_PDF_PUBLIC_BASE}/{doc.tranzila_retrieval_key}'
@@ -221,10 +246,35 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'source': 'tranzila' if doc.tranzila_issued else 'local',
             'tranzila_issued': doc.tranzila_issued,
             'is_draft': doc.document_type == 'draft',
+            'origin': ORIGIN_MANUAL,
+            'origin_label': ORIGIN_LABELS[ORIGIN_MANUAL],
+            **row_dimensions(branch=doc.branch, business=doc.business),
             'branch': doc.branch.name if doc.branch_id else '',
             'branch_id': str(doc.branch_id) if doc.branch_id else None,
         })
     return rows
+
+
+def _invoice_lesson(invoice):
+    """The lesson a receipt is for: its payment's, else the first child line's."""
+    payment = invoice.payment if invoice.payment_id else None
+    if payment is not None and payment.lesson_id:
+        return payment.lesson
+    for line in invoice.children.all():
+        if line.lesson_id:
+            return line.lesson
+    return None
+
+
+def _late_issue(invoice) -> dict:
+    """When a receipt was issued after the money came in, the row says so and when it came."""
+    for log in invoice.activity_logs.all():
+        if log.action == 'issued_late':
+            details = log.details or {}
+            return {'issued_late': True, 'paid_at': _iso_date(details.get('money_received_at'))}
+    payment = invoice.payment if invoice.payment_id else None
+    paid_at = payment.payment_date if payment is not None else None
+    return {'issued_late': False, 'paid_at': _iso_date(paid_at) if paid_at else ''}
 
 
 def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
@@ -232,13 +282,12 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
 
     invoices = (
         Invoice.objects
-        .select_related('family', 'payment', 'payment__tranzila_transaction', 'branch')
-        .filter(invoice_date__date__gte=start, invoice_date__date__lte=end)
-        .filter(
-            Q(tranzila_transaction_id__gt='')
-            | Q(payment__tranzila_transaction__isnull=False)
-            | Q(payment_method='credit_card')
+        .select_related(
+            'family', 'payment', 'payment__tranzila_transaction', 'branch__city',
+            *lesson_paths('payment__lesson'),
         )
+        .prefetch_related('children__lesson__course__course_type', 'children__lesson__instructor', 'activity_logs')
+        .filter(invoice_date__date__gte=start, invoice_date__date__lte=end)
         .order_by('-invoice_date')
     )
     rows = []
@@ -262,11 +311,18 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
             'document_type_code': 'IR',
             'total_amount': amount,
             'amount_paid': paid if status == 'completed' else 0.0,
-            'open_balance': 0.0 if status == 'completed' else amount,
+            # A cancelled or credited receipt is nobody's debt.
+            'open_balance': 0.0 if status == 'completed' or inv.status in ('cancelled', 'credit') else amount,
             'status': status,
             'pdf_url': inv.pdf_url or '',
             'tranzila_doc_id': inv.tranzila_transaction_id,
             'source': 'crm',
+            'origin': ORIGIN_SUBSCRIPTION,
+            'origin_label': ORIGIN_LABELS[ORIGIN_SUBSCRIPTION],
+            'payment_method': inv.payment_method or '',
+            'payment_method_label': PAYMENT_METHOD_LABELS.get(inv.payment_method, inv.payment_method or ''),
+            **row_dimensions(lesson=_invoice_lesson(inv), branch=inv.branch),
+            **_late_issue(inv),
             'branch': inv.branch.name if inv.branch_id else '',
             'branch_id': str(inv.branch_id) if inv.branch_id else None,
         })
@@ -276,16 +332,14 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
 def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
     from apps.store.models import StoreInvoice
 
+    # Every store invoice in the range belongs here. The old filter demanded a
+    # Tranzila transaction or a credit-card method, so a sale paid in cash or put
+    # on monthly billing produced a numbered tax document that never appeared on
+    # the documents page — the owner had no way to find it.
     invoices = (
         StoreInvoice.objects
-        .select_related('child', 'branch', 'formal_document')
+        .select_related('child', 'branch__city', 'formal_document')
         .filter(issue_date__date__gte=start, issue_date__date__lte=end)
-        .filter(
-            Q(tranzila_transaction_id__gt='')
-            | Q(tranzila_txn__isnull=False)
-            | Q(formal_document__isnull=False)
-            | Q(payment_method='credit_card')
-        )
         .order_by('-issue_date')
     )
     rows = []
@@ -298,6 +352,9 @@ def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
         customer = inv.child_name if hasattr(inv, 'child_name') else ''
         if not customer:
             customer = inv.child.full_name if inv.child_id else (inv.customer_name or '')
+        # A website order carries the order number the buyer got by mail; anything
+        # else was rung up at a branch.
+        origin = ORIGIN_STORE_WEBSITE if inv.website_order_number else ORIGIN_STORE_COUNTER
         pdf_url = ''
         formal = getattr(inv, 'formal_document', None)
         if formal and formal.pdf_url:
@@ -309,8 +366,9 @@ def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
             'document_number': inv.invoice_number,
             'issue_date': _iso_date(inv.issue_date),
             'customer_name': customer,
-            'document_type': 'חשבונית מס/קבלה' if inv.payment_method == 'credit_card' else 'חשבונית עסקה',
-            'document_type_code': 'IR' if inv.payment_method == 'credit_card' else 'DI',
+            # Paid on the spot (card or cash) is a receipt; monthly billing is not paid yet.
+            'document_type': 'חשבונית עסקה' if inv.payment_method == 'monthly_billing' else 'חשבונית מס/קבלה',
+            'document_type_code': 'DI' if inv.payment_method == 'monthly_billing' else 'IR',
             'total_amount': amount,
             'amount_paid': paid,
             'open_balance': max(amount - paid, 0.0),
@@ -319,6 +377,13 @@ def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
             'store_invoice_id': str(inv.id),
             'tranzila_doc_id': (formal.tranzila_doc_id if formal else '') or inv.tranzila_transaction_id,
             'source': 'store',
+            'origin': origin,
+            'origin_label': ORIGIN_LABELS[origin],
+            'payment_method': inv.payment_method,
+            'payment_method_label': PAYMENT_METHOD_LABELS.get(inv.payment_method, inv.payment_method),
+            'website_order_number': inv.website_order_number or '',
+            'shipping_address': inv.shipping_address or '',
+            **row_dimensions(branch=inv.branch),
             'branch': inv.branch.name if inv.branch_id else '',
             'branch_id': str(inv.branch_id) if inv.branch_id else None,
         })

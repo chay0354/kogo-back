@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.db import transaction
 
 from apps.documents.models import (
-    DocumentCounter, FormalDocument, DocumentLineItem, DocumentPayment,
+    FormalDocument, DocumentLineItem, DocumentPayment,
     TRANZILA_DOCUMENT_TYPE,
 )
 
@@ -46,9 +46,9 @@ def _income_tags(data: dict) -> dict:
 
 
 def _generate_document_number(document_type: str) -> str:
-    year = timezone.now().year
-    seq = DocumentCounter.next_number(year)
-    return f"{year}-{seq:04d}"
+    """The next number in the run of the document's type (numbering.FORMAL_SERIES, סעיף 5(ג))."""
+    from apps.documents.numbering import formal_document_number
+    return formal_document_number(document_type)
 
 
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,
@@ -356,6 +356,111 @@ def create_credit_invoice(data: dict) -> FormalDocument:
     )
 
     _attempt_tranzila(doc)
+
+    # A credit note is only useful to the customer if it reaches them. Never let a
+    # mail failure roll back a document that was already issued and numbered.
+    try:
+        _email_credit_note(doc)
+    except Exception:
+        logger.exception('Credit note email failed for %s (non-fatal)', doc.document_number)
+
+    return doc
+
+
+def _credit_note_recipient(doc: FormalDocument) -> tuple[str, str]:
+    """Return (customer_name, email) for a credit note, or ('', '') if unreachable."""
+    if doc.business_customer_id:
+        customer = doc.business_customer
+        return customer.full_name, (customer.email or '').strip()
+    if doc.child_id:
+        family = getattr(doc.child, 'family', None)
+        return doc.child.full_name, (family.email or '').strip() if family else ''
+    return '', ''
+
+
+def _email_credit_note(doc: FormalDocument, *, customer_name: str | None = None, email: str | None = None) -> None:
+    """Send a credit note to the customer with its PDF attached."""
+    from apps.core.credit_note_email import CreditNote, send_credit_note_email
+    from apps.documents.document_pdf import generate_document_pdf
+
+    default_name, default_email = _credit_note_recipient(doc)
+    name = customer_name or default_name or (doc.customer_name or '')
+    email = email or default_email
+    if not email:
+        logger.info('No email for credit note %s — not sent', doc.document_number)
+        return
+
+    linked = doc.linked_document
+    send_credit_note_email(
+        CreditNote(
+            customer_name=name,
+            email=email,
+            amount=doc.total_amount,
+            reason=doc.credit_reason,
+            original_number=doc.linked_document_number or (linked.document_number if linked else ''),
+            original_date=doc.linked_document_date or (linked.document_date if linked else None),
+            document_number=doc.document_number,
+            issued_at=doc.document_date,
+        ),
+        pdf_bytes=generate_document_pdf(doc),
+        pdf_filename=f'{doc.document_number}.pdf',
+    )
+
+
+def issue_refund_credit_note(
+    *,
+    gross_amount,
+    reason: str,
+    original_number: str,
+    original_date=None,
+    child=None,
+    customer_name: str = '',
+    email: str = '',
+    branch_id=None,
+    business_id=None,
+) -> FormalDocument:
+    """
+    The הודעת זיכוי a refund owes the customer.
+
+    A refund is corrected by a further, numbered document — never by editing the
+    original (סעיף 23(ב), 23א). This one carries what סעיף 9(ה) asks for: the
+    original's number and date, the reason, and the amount split into VAT. The
+    amount refunded is gross, so the split comes from it, not the other way
+    round — a credit of ₪49.00 must total exactly ₪49.00.
+    """
+    from apps.core.vat import split_vat_inclusive
+
+    before, vat, total = split_vat_inclusive(gross_amount)
+    if hasattr(original_date, 'date') and callable(original_date.date):
+        original_date = timezone.localtime(original_date).date() if timezone.is_aware(original_date) else original_date.date()
+
+    with transaction.atomic():
+        doc = FormalDocument.objects.create(
+            document_number=_generate_document_number('credit_invoice'),
+            document_type='credit_invoice',
+            client_type='existing',
+            child=child,
+            customer_name=(customer_name or '').strip() or None,
+            branch_id=branch_id,
+            business_id=business_id,
+            document_date=timezone.localdate(),
+            vat_exempt=False,
+            vat_percent=Decimal('18'),
+            subtotal=before,
+            discount_amount=Decimal('0'),
+            discount_percent=Decimal('0'),
+            vat_amount=vat,
+            total_amount=total,
+            linked_document_number=original_number or '',
+            linked_document_date=original_date,
+            credit_reason=reason or 'זיכוי',
+            internal_notes='הופק אוטומטית עם זיכוי העסקה',
+        )
+
+    try:
+        _email_credit_note(doc, customer_name=customer_name or None, email=email or None)
+    except Exception:
+        logger.exception('Credit note email failed for %s (non-fatal)', doc.document_number)
     return doc
 
 

@@ -62,3 +62,17 @@ class TranzilaStoreInvoiceTests(TestCase):
         self.assertTrue(formal.tranzila_issued)
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.formal_document_id, formal.id)
+
+    @override_settings(TRANZILA_BILLING_TERMINAL='test-terminal')
+    @patch.object(TranzilaService, 'create_formal_document')
+    def test_a_copy_without_tranzilas_number_carries_the_sales_own(self, mock_create):
+        from apps.documents.models import DocumentSeries
+
+        # Tranzila issued the document but sent no number back. The local copy is
+        # the same sale, so it takes the sale's number and opens no new document.
+        mock_create.return_value = {'status_code': 0, 'document': {'id': '99', 'retrieval_key': 'rk'}}
+
+        formal = issue_store_tranzila_document(self.invoice)
+
+        self.assertEqual(formal.document_number, self.invoice.invoice_number)
+        self.assertFalse(DocumentSeries.objects.filter(series='IRM').exists())

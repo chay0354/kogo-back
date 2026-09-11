@@ -10,7 +10,6 @@ from django.utils import timezone
 
 from apps.core.tranzila_service import TranzilaService
 from apps.documents.models import DocumentLineItem, FormalDocument
-from apps.documents.service import _generate_document_number
 from apps.store.models import StoreInvoice
 
 logger = logging.getLogger(__name__)
@@ -114,7 +113,11 @@ def issue_store_tranzila_document(invoice: StoreInvoice) -> FormalDocument | Non
         )
         return None
 
-    doc_number = parsed.get('document_number') or _generate_document_number('combined')
+    # Tranzila's number is the document's. When it sends none, the copy carries
+    # the sale's own number: it is the same sale, not a new document, so it must
+    # never draw a fiscal number of its own — that would open a second document
+    # for one sale in a run of manual invoice-receipts.
+    doc_number = parsed.get('document_number') or invoice.invoice_number
     formal = invoice.formal_document
     if formal is None:
         formal = FormalDocument(

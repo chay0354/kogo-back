@@ -15,6 +15,7 @@ the row completed only when they match; otherwise it goes to review.
 from __future__ import annotations
 
 import secrets
+import string
 import uuid
 from decimal import Decimal
 
@@ -170,6 +171,20 @@ def money(value) -> Decimal:
     return Decimal(str(value)).quantize(Decimal('0.01'))
 
 
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
+def new_card_link_token() -> str:
+    """
+    10 base-62 characters (~59 bits): short enough to read off a phone, far too
+    wide to guess — and the preview endpoint is throttled on top of that.
+    """
+    while True:
+        token = ''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(10))
+        if not CardLink.objects.filter(token=token).exists():
+            return token
+
+
 class CardLink(models.Model):
     """
     A link the office sends to an existing customer to enter card details.
@@ -204,6 +219,10 @@ class CardLink(models.Model):
     child = models.ForeignKey('customers.Child', on_delete=models.CASCADE, related_name='card_links')
     # standing_order: the lesson the order bills (the cron skips lesson-less orders).
     lesson = models.ForeignKey('courses.Lesson', on_delete=models.SET_NULL, null=True, blank=True, related_name='card_links')
+    # A twice/thrice-a-week track. Priced at its combined price exactly as the
+    # widget prices it; `lesson` is then the member day the standing order hangs
+    # on, and every other day is enrolled alongside it.
+    bundle = models.ForeignKey('courses.LessonBundle', on_delete=models.SET_NULL, null=True, blank=True, related_name='card_links')
     include_registration_fee = models.BooleanField(default=True)
     # one_time
     amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -212,6 +231,16 @@ class CardLink(models.Model):
     business = models.ForeignKey('core.Business', on_delete=models.SET_NULL, null=True, blank=True, related_name='card_links')
     business_category = models.ForeignKey('core.BusinessCategory', on_delete=models.SET_NULL, null=True, blank=True, related_name='card_links')
     token_version = models.PositiveIntegerField(default=1)
+    # The public token in the URL. Short on purpose: this link is read off a
+    # WhatsApp message by a parent, and a 119-character signed blob made the
+    # message look like spam. Regenerated whenever token_version moves, which is
+    # what retires an old URL.
+    #
+    # Nullable on purpose. Vercel runs `migrate` at build time, so this column can
+    # exist while the previous code is still serving — and that code inserts card
+    # links without it. NULL keeps those inserts valid (Postgres allows many NULLs
+    # under a unique index); the first read of such a link fills a token in.
+    token = models.CharField(max_length=32, unique=True, null=True, blank=True)
     charge_started_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveIntegerField(default=0)
     last_error = models.TextField(blank=True)
@@ -228,6 +257,17 @@ class CardLink(models.Model):
     class Meta:
         db_table = 'card_links'
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.token:
+            self.token = new_card_link_token()
+        super().save(*args, **kwargs)
+
+    def rotate_token(self) -> str:
+        """A new URL for this link; the previous one stops resolving."""
+        self.token = new_card_link_token()
+        self.token_version += 1
+        return self.token
 
     def __str__(self) -> str:
         return f'{self.get_kind_display()} — {self.child_id} ({self.status})'

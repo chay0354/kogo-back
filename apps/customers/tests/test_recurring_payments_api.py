@@ -66,6 +66,25 @@ class RecurringPaymentListAPITests(TestCase):
         self.assertNotIn('tranzila_transaction', details)
         self.assertNotIn('discount_snapshots', details)
 
+    def test_each_order_sends_the_branch_id_of_its_initial_payment(self):
+        # The invoices page filters standing orders by this id: two branches may share a name.
+        signed_up = RecurringPayment.objects.select_related('initial_payment').first()
+        RecurringPayment.objects.create(
+            child=signed_up.child,
+            initial_payment=None,
+            status='active',
+            amount=Decimal('350.00'),
+            billing_day=1,
+            start_date=date.today(),
+        )
+
+        res = self.client.get('/api/v1/customers/recurring-payments/')
+
+        self.assertEqual(res.status_code, 200, res.content)
+        branch_ids = [row['branch_id'] for row in res.json()]
+        self.assertEqual(branch_ids.count(str(signed_up.initial_payment.branch_id)), 25)
+        self.assertEqual(branch_ids.count(None), 1)
+
 
 class RecurringPaymentEditAPITests(TestCase):
     def setUp(self):

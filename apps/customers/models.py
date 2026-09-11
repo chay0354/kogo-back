@@ -15,6 +15,25 @@ class Family(models.Model):
     parent_id_number = models.CharField(max_length=20, blank=True, verbose_name="ת.ז. הורה")
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, related_name='families', verbose_name="סניף")
     notes = models.TextField(blank=True, verbose_name="הערות")
+
+    # סעיף 18ב(ג) להוראות ניהול פנקסי חשבונות: a tax document may be sent by
+    # computer only to someone who consented to receive computerized documents,
+    # and only until they withdraw that consent. The consent — and its withdrawal
+    # — is kept as an inseparable part of the accounting system, which is why it
+    # lives here on the customer record and not in a settings flag.
+    computerized_docs_consent_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="הסכמה לקבלת מסמכים ממוחשבים"
+    )
+    # Nullable so the column can land (Vercel migrates at build time) while the
+    # previous code — which inserts families without it — is still serving.
+    computerized_docs_consent_source = models.CharField(
+        max_length=50, blank=True, null=True, verbose_name="מקור ההסכמה",
+        help_text="היכן ניתנה ההסכמה — הרשמה בווידג'ט, CRM, אתר",
+    )
+    computerized_docs_consent_revoked_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="ביטול ההסכמה"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
@@ -26,6 +45,14 @@ class Family(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def accepts_computerized_documents(self) -> bool:
+        """Consent given and not since withdrawn — סעיף 18ב(ג)."""
+        if not self.computerized_docs_consent_at:
+            return False
+        revoked = self.computerized_docs_consent_revoked_at
+        return not revoked or revoked < self.computerized_docs_consent_at
 
 
 class Parent(models.Model):

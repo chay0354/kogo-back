@@ -222,6 +222,18 @@ class CheckPlanSerializer(serializers.ModelSerializer):
         pending = [item.due_date for item in obj.items.all() if item.status == 'pending']
         return min(pending) if pending else None
 
+    def to_representation(self, obj):
+        # Business → city → course type → age → instructor, as on every ledger
+        # row, so the invoices page's filter bar narrows plans like charges.
+        # branch_id is the plan's own branch: its lesson's, or the family's when
+        # it has no lesson (register_check_plan).
+        from apps.core.ledger_dimensions import row_dimensions
+        return {
+            **super().to_representation(obj),
+            **row_dimensions(lesson=obj.lesson, branch=obj.branch),
+            'branch_id': str(obj.branch_id) if obj.branch_id else None,
+        }
+
 
 class CreateCheckPlanSerializer(serializers.Serializer):
     child_id = serializers.UUIDField()

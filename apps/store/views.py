@@ -282,11 +282,18 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
     - List invoices with filters
     - View invoice details
     - Create cash/monthly invoices
+
+    An issued invoice is a tax document: סעיף 23(ב) להוראות ניהול פנקסי חשבונות
+    forbids editing or deleting one in a computerized system — a correction is
+    made by issuing a further document (a credit note), never by rewriting the
+    original. PUT, PATCH and DELETE are therefore off; `refund` is the supported
+    way to reverse an invoice.
     """
     queryset = StoreInvoice.objects.all()
     serializer_class = StoreInvoiceSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
     pagination_class = StoreInvoicePagination
+    http_method_names = ['get', 'post', 'head', 'options']
     
     def get_queryset(self):
         """Filter invoices by query parameters."""

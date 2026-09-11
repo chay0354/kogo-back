@@ -54,6 +54,38 @@ class DocumentCounter(models.Model):
             return obj.counter
 
 
+class DocumentSeries(models.Model):
+    """
+    One consecutive number series per document kind and tax year.
+
+    סעיף 18(א)(3) להוראות ניהול פנקסי חשבונות: consecutive numbers that never
+    repeat within a tax year. The receipts issued for lesson charges used to be
+    numbered from a payment's UUID, which is unique but not consecutive, so
+    nobody — the software included (נספח ה׳(א)(5)) — could show the run is whole.
+    """
+    series = models.CharField(max_length=10, verbose_name="סדרה")
+    year = models.PositiveIntegerField(verbose_name="שנת מס")
+    counter = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'document_series'
+        unique_together = [('series', 'year')]
+
+    def __str__(self) -> str:
+        return f'{self.series}-{self.year}: {self.counter}'
+
+    @classmethod
+    def next_number(cls, series: str, year: int) -> int:
+        """The next number, under a row lock; a caller that rolls back gives it back."""
+        with transaction.atomic():
+            row, _ = cls.objects.select_for_update().get_or_create(
+                series=series, year=year, defaults={'counter': 0},
+            )
+            row.counter += 1
+            row.save(update_fields=['counter'])
+            return row.counter
+
+
 class FormalDocument(models.Model):
     """מסמך פיננסי רשמי — tax invoice, receipt, combined, transaction invoice, or credit note."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -117,6 +149,13 @@ class FormalDocument(models.Model):
     # For credit invoices: manual invoice number if linked_document not resolved
     linked_document_number = models.CharField(max_length=30, blank=True, verbose_name="מספר חשבונית מקושרת")
     credit_reason = models.TextField(blank=True, verbose_name="סיבת זיכוי")
+    # סעיף 9(ה)(4): a credit note names the original's number AND date. The
+    # original is often not a FormalDocument (a lesson receipt, a store sale),
+    # so its date is kept here rather than reached through linked_document.
+    linked_document_date = models.DateField(null=True, blank=True, verbose_name="תאריך המסמך המקורי")
+    # The customer when there is no child or business customer to point at —
+    # a walk-in store buyer whose sale is credited. Nullable: expand-only.
+    customer_name = models.CharField(max_length=200, null=True, blank=True, verbose_name="שם לקוח")
     # For drafts: the document type it becomes when approved.
     draft_target_type = models.CharField(max_length=30, blank=True, verbose_name="סוג מסמך לאחר אישור")
 

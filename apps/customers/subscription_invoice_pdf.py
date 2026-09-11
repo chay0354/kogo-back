@@ -15,6 +15,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 from apps.customers.financial_models import Invoice
 from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
+from apps.documents.issuer import COMPUTERIZED_MARK, ISSUER_LINE, ORIGINAL_MARK
 from apps.store.invoice_pdf import (
     BORDER,
     BRAND_NAVY,
@@ -71,8 +72,20 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
     email = (invoice.payer_email or invoice.family.email or '').strip()
     phone = (invoice.payer_phone or invoice.family.phone or '').strip()
 
+    # תקנה 9א(א)(1)–(2) and סעיף 18ב(א): the registration line, "מקור" and
+    # "מסמך ממוחשב" have to appear on the document itself, not just the letterhead.
+    statutory_style = ParagraphStyle(
+        'SubStatutory', fontName='Heebo-Bold', fontSize=10,
+        textColor=BRAND_NAVY, alignment=TA_CENTER, leading=13,
+    )
+
     story = [
         Paragraph(_rtl(DOCUMENT_TITLE), title_style),
+        Paragraph(_rtl(ORIGINAL_MARK), ParagraphStyle(
+            'SubOrigin', fontName='Heebo-Bold', fontSize=11,
+            textColor=BRAND_NAVY, alignment=TA_CENTER, leading=14,
+        )),
+        Paragraph(_rtl(ISSUER_LINE), statutory_style),
         Paragraph(_rtl('קוגומלו — מנוי לחוג'), ParagraphStyle(
             'Sub', fontName='Heebo', fontSize=11, textColor=BRAND_NAVY, alignment=TA_CENTER,
         )),
@@ -232,6 +245,28 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
             Spacer(1, 0.25 * cm),
             Paragraph(_rtl(f'אישור תשלום: {txn}'), value_style),
         ])
+
+    # A receipt issued after the money came in says so on its face, with both
+    # dates — the one thing an accountant needs to place it in the right period.
+    late = next((log for log in invoice.activity_logs.all() if log.action == 'issued_late'), None)
+    if late is not None:
+        details = late.details or {}
+        received = (details.get('money_received_at') or '')[:10]
+        issued = (details.get('document_issued_at') or '')[:10]
+
+        def _dmy(iso: str) -> str:
+            parts = iso.split('-')
+            return f'{parts[2]}/{parts[1]}/{parts[0]}' if len(parts) == 3 else iso
+
+        story.extend([
+            Spacer(1, 0.3 * cm),
+            Paragraph(_rtl(f'הופק באיחור ביום {_dmy(issued)}; התשלום התקבל ביום {_dmy(received)}.'), value_style),
+        ])
+
+    story.extend([
+        Spacer(1, 0.45 * cm),
+        Paragraph(_rtl(COMPUTERIZED_MARK), statutory_style),
+    ])
 
     doc.build(story, onFirstPage=_draw_letterhead, onLaterPages=_draw_letterhead)
     return buffer.getvalue()

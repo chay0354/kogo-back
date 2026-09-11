@@ -1,9 +1,41 @@
 """ManyChat registration WhatsApp: custom fields must land before the template."""
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase
+from django.conf import settings
+from django.test import SimpleTestCase, override_settings
 
 from apps.core.manychat_service import ManyChatError, ManyChatService
+
+
+class CardLinkFlowTests(SimpleTestCase):
+    """The card link goes by its own WhatsApp template — never the failed-charge one."""
+
+    def test_the_setting_is_declared_so_the_environment_reaches_it(self):
+        # It was read but never declared, so setting it in Vercel changed nothing
+        # and every card link went out as free text.
+        self.assertTrue(hasattr(settings, 'MANYCHAT_CARD_LINK_FLOW_NS'))
+
+    @override_settings(MANYCHAT_CARD_LINK_FLOW_NS='content_card_link')
+    def test_the_configured_flow_is_used(self):
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock()
+        self.assertEqual(svc.resolve_flow_ns('MANYCHAT_CARD_LINK_FLOW_NS'), 'content_card_link')
+        svc.get_flows.assert_not_called()
+
+    @override_settings(MANYCHAT_CARD_LINK_FLOW_NS='')
+    def test_without_one_an_automation_named_card_link_is_found(self):
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock(return_value=[
+            {'name': 'card-update', 'ns': 'content_update'},
+            {'name': 'card-link', 'ns': 'content_link'},
+        ])
+        self.assertEqual(svc.resolve_flow_ns('MANYCHAT_CARD_LINK_FLOW_NS'), 'content_link')
+
+    @override_settings(MANYCHAT_CARD_LINK_FLOW_NS='')
+    def test_the_failed_charge_template_is_never_borrowed(self):
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock(return_value=[{'name': 'card-update', 'ns': 'content_update'}])
+        self.assertEqual(svc.resolve_flow_ns('MANYCHAT_CARD_LINK_FLOW_NS'), '')
 
 
 class SetCustomFieldsFallbackTests(SimpleTestCase):

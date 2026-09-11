@@ -330,6 +330,12 @@ MANYCHAT_PAYMENT_FAILED_FLOW_NS = config('MANYCHAT_PAYMENT_FAILED_FLOW_NS', defa
 # Failed standing-order charge — WhatsApp template with a card-update link.
 # Create a ManyChat automation named exactly "card-update" (or set the flow ns here).
 MANYCHAT_CARD_UPDATE_FLOW_NS = config('MANYCHAT_CARD_UPDATE_FLOW_NS', default='')
+# The office's link to enter a card (a standing order or a one-time charge). Create
+# a ManyChat automation named exactly "card-link" (or set the flow ns here). Without
+# one the link goes as free text, which WhatsApp delivers only inside the 24-hour
+# window. It takes the card-update flow's fields, but not its wording — that one
+# tells the parent a charge failed.
+MANYCHAT_CARD_LINK_FLOW_NS = config('MANYCHAT_CARD_LINK_FLOW_NS', default='')
 # After 3 consecutive non-present attendance marks (didnt_arrive automation).
 MANYCHAT_DIDNT_ARRIVE_FLOW_NS = config('MANYCHAT_DIDNT_ARRIVE_FLOW_NS', default='')
 # To the instructor, after a lesson whose register was left open (register-missing).

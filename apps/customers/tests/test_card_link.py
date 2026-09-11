@@ -86,14 +86,20 @@ class TokenTest(_Base):
         with self.assertRaises(CardLinkError):
             resolve_card_link_token('')
 
-    def test_version_bump_invalidates_the_old_link(self):
+    def test_reissuing_invalidates_the_old_link(self):
+        """The token in the URL is what retires a link, not token_version on its own."""
         link = self._sto_link()
         old = build_card_link_token(link)
-        link.token_version += 1
+        link.rotate_token()
         link.save()
         with self.assertRaises(CardLinkError):
             resolve_card_link_token(old)
         resolve_card_link_token(build_card_link_token(link))
+
+    def test_the_token_is_short_enough_to_send(self):
+        link = self._sto_link()
+
+        self.assertLessEqual(len(build_card_link_token(link)), 24)
 
     def test_completed_resolves_as_done_and_cancelled_refuses(self):
         link = self._sto_link(status=CardLink.STATUS_COMPLETED)
@@ -377,7 +383,7 @@ class CardLinkApiTest(_Base):
             'kind': 'standing_order', 'child_id': str(self.child.id), 'lesson_id': str(self.lesson.id),
         }, format='json')
         self.assertEqual(res.status_code, 201, res.content)
-        self.assertIn('/card-link/', res.data['public_url'])
+        self.assertIn('/c/', res.data['public_url'])
         self.assertEqual(Decimal(res.data['quote']['registration_fee']), Decimal('120.00'))
         self.assertEqual(res.data['status'], 'pending')
 
@@ -403,7 +409,7 @@ class CardLinkApiTest(_Base):
         self.assertTrue(res.data['whatsapp']['sent'])
         kwargs = send.call_args.kwargs
         self.assertEqual(kwargs['kind'], 'card_link')
-        self.assertIn('/card-link/', kwargs['extra_fields']['kogo_card_update_url'])
+        self.assertIn('/c/', kwargs['extra_fields']['kogo_card_update_url'])
         self.assertEqual(kwargs['extra_fields']['kogo_amount'], '150.00')
         old_token = build_card_link_token(link)
         res = self.client.post(f'/api/v1/customers/card-links/{link.id}/cancel/')
@@ -411,7 +417,7 @@ class CardLinkApiTest(_Base):
         self.assertEqual(APIClient().get(f'/api/v1/customers/card-link/{old_token}/').status_code, 400)
         res = self.client.post(f'/api/v1/customers/card-links/{link.id}/regenerate/')
         self.assertEqual(res.data['status'], 'pending')
-        self.assertEqual(APIClient().get(f"/api/v1/customers/card-link/{res.data['public_url'].split('/card-link/')[1]}/").status_code, 200)
+        self.assertEqual(APIClient().get(f"/api/v1/customers/card-link/{res.data['public_url'].split('/c/')[1]}/").status_code, 200)
 
     def test_public_preview_and_charge(self):
         link = self._one_time_link()

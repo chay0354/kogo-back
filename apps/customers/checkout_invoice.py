@@ -4,10 +4,12 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.customers.financial_models import Invoice, InvoiceActivityLog, InvoiceChild
 from apps.customers.models import Payment
+from apps.documents.numbering import SERIES_SUBSCRIPTION, next_document_number
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +102,15 @@ def issue_widget_checkout_invoice(payments, *, send_email: bool = True) -> Invoi
             break
 
     stamp = timezone.now()
-    invoice_number = f"INV-{stamp.strftime('%Y%m%d')}-FAM-{first.id.hex[:8].upper()}"
-    invoice = Invoice.objects.create(
-        invoice_number=invoice_number,
+    # The number and the document commit together, so the IR run never skips.
+    with transaction.atomic():
+        invoice = _create_checkout_invoice(first, family, total, txn, stamp)
+    return _finish_checkout_invoice(invoice, paid, send_email=send_email, total=total)
+
+
+def _create_checkout_invoice(first, family, total, txn, stamp):
+    return Invoice.objects.create(
+        invoice_number=next_document_number(SERIES_SUBSCRIPTION, stamp),
         family=family,
         parent=first.parent,
         branch=first.branch,
@@ -118,6 +126,8 @@ def issue_widget_checkout_invoice(payments, *, send_email: bool = True) -> Invoi
         invoice_date=stamp,
     )
 
+
+def _finish_checkout_invoice(invoice, paid, *, send_email: bool, total):
     lines = []
     for payment in paid:
         child = payment.child
