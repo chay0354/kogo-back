@@ -23,14 +23,18 @@ refuses otherwise; agree it with the accountant before using it on real books.
 
 Every run also checks each number series for gaps (נספח ה׳(א)(5)). Issued
 documents are never edited or deleted here (סעיף 23(ב)).
+
+What counts as missing, and how a late document is issued, live in
+apps/documents/missing_receipts.py — the office's missing-receipts screen reads
+the same two, so it never disagrees with this command.
 """
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from apps.customers.financial_models import Invoice, InvoiceActivityLog
-from apps.customers.models import Payment
+from apps.customers.financial_models import Invoice
+from apps.documents.missing_receipts import charge_date, issue_late_receipt, payments_without_invoice
 from apps.documents.numbering import SERIES_SUBSCRIPTION
 from apps.store.models import StoreInvoice
 
@@ -50,7 +54,7 @@ class Command(BaseCommand):
         since = None if options['all'] else timezone.now() - timedelta(days=options['days'])
         self.stdout.write('בודק את כל החיובים…\n' if since is None else f'בודק חיובים מ-{since.date().isoformat()} ואילך…\n')
 
-        missing = self._payments_without_invoice(since)
+        missing = payments_without_invoice(since)
         self._report_payments(missing)
         if options['fix'] and missing:
             if options['backdate']:
@@ -65,21 +69,6 @@ class Command(BaseCommand):
 
     # ------------------------------------------------------------------ payments
 
-    @staticmethod
-    def _charge_date(payment):
-        return payment.payment_date or payment.created_at
-
-    def _payments_without_invoice(self, since):
-        """Completed, actually charged, carrying no Invoice — oldest money first."""
-        rows = (
-            Payment.objects
-            .filter(status='completed', final_amount__gt=0, invoices__isnull=True)
-            .select_related('child', 'family', 'parent', 'branch', 'lesson__course', 'tranzila_transaction')
-        )
-        if since is not None:
-            rows = rows.filter(created_at__gte=since)
-        return sorted(rows, key=self._charge_date)
-
     def _report_payments(self, rows):
         if not rows:
             return
@@ -87,13 +76,13 @@ class Command(BaseCommand):
         for payment in rows:
             child = payment.child.full_name if payment.child_id else '—'
             self.stdout.write(
-                f'  {payment.id}  {self._charge_date(payment).date().isoformat()}  ₪{payment.final_amount}  '
+                f'  {payment.id}  {charge_date(payment).date().isoformat()}  ₪{payment.final_amount}  '
                 f'{child}  ({payment.get_payment_type_display()})'
             )
 
     def _guard_backdate(self, rows):
         """Refuse to put an earlier date on a higher number than an issued document."""
-        earliest = self._charge_date(rows[0])
+        earliest = charge_date(rows[0])
         later = (
             Invoice.objects
             .filter(invoice_number__startswith=f'{SERIES_SUBSCRIPTION}-', invoice_date__gt=earliest)
@@ -107,35 +96,20 @@ class Command(BaseCommand):
             )
 
     def _issue_missing(self, rows, *, send_email: bool, backdate: bool):
-        from apps.core.payment_service import PaymentService
-
-        service = PaymentService()
         issued = failed = 0
         now = timezone.now()
         for payment in rows:
-            charged_on = self._charge_date(payment)
+            charged_on = charge_date(payment)
             try:
-                invoice = service._create_invoice_from_payment(
-                    payment,
-                    payment.tranzila_transaction,
-                    send_email=send_email,
-                    invoice_date=charged_on if backdate else now,
-                )
+                invoice = issue_late_receipt(payment, now=now, send_email=send_email, backdate=backdate)
             except Exception as exc:
                 self.stdout.write(self.style.ERROR(f'  נכשל {payment.id}: {exc}'))
                 failed += 1
                 continue
-            InvoiceActivityLog.objects.create(
-                invoice=invoice,
-                action='issued_late',
-                details={
-                    'payment_id': str(payment.id),
-                    'money_received_at': charged_on.isoformat(),
-                    'document_issued_at': now.isoformat(),
-                    'backdated': backdate,
-                    'emailed': send_email,
-                },
-            )
+            if invoice is None:
+                # Issued meanwhile — from the office's screen, or a second run.
+                self.stdout.write(f'  דולג {payment.id}: כבר יש לו חשבונית')
+                continue
             issued += 1
             self.stdout.write(self.style.SUCCESS(
                 f'  הונפק {invoice.invoice_number} (תשלום {charged_on.date().isoformat()}) לתשלום {payment.id}'

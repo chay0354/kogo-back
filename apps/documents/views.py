@@ -382,3 +382,86 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
         plan.items.filter(status='pending').update(status='cancelled')
         plan = self.get_queryset().get(pk=plan.pk)
         return Response(CheckPlanSerializer(plan).data)
+
+
+class MissingReceiptsViewSet(viewsets.ViewSet):
+    """
+    Completed charges that never got their חשבונית מס / קבלה — `check_invoices`,
+    for the office (apps/documents/missing_receipts.py holds both).
+
+    GET  /api/v1/documents/missing-receipts/?year=YYYY
+    GET  /api/v1/documents/missing-receipts/export/?year=YYYY   (CSV for the accountant)
+    POST /api/v1/documents/missing-receipts/issue/  {payment_ids: [...], confirm: 'הפק'}
+
+    Managers only: the list is the whole business's money, and issuing takes
+    numbers in the IR run that can never be given back.
+    """
+
+    permission_classes = [IsAuthenticated, IsManager]
+
+    @staticmethod
+    def _year(request):
+        """The year asked for (this one by default), or None when it is not a year."""
+        from django.utils import timezone
+
+        this_year = timezone.localdate().year
+        raw = (request.query_params.get('year') or '').strip()
+        if not raw:
+            return this_year
+        try:
+            year = int(raw)
+        except ValueError:
+            return None
+        return year if 2000 <= year <= this_year + 1 else None
+
+    def list(self, request):
+        from apps.documents.missing_receipts import missing_receipts_report
+
+        year = self._year(request)
+        if year is None:
+            return Response({'error': 'שנה לא תקינה'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(missing_receipts_report(year))
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export(self, request):
+        from apps.documents.missing_receipts import missing_receipts_csv, missing_receipts_report
+
+        year = self._year(request)
+        if year is None:
+            return Response({'error': 'שנה לא תקינה'}, status=status.HTTP_400_BAD_REQUEST)
+        response = HttpResponse(
+            missing_receipts_csv(missing_receipts_report(year)), content_type='text/csv; charset=utf-8',
+        )
+        response['Content-Disposition'] = f'attachment; filename="missing-receipts-{year}.csv"'
+        return response
+
+    @action(detail=False, methods=['post'], url_path='issue')
+    def issue(self, request):
+        """
+        Issue the chosen charges' receipts, exactly as `check_invoices --fix` does:
+        dated today, in payment order, marked "הופק באיחור", never mailed, never
+        backdated. Safe to repeat — a charge that has its receipt is skipped.
+        """
+        import uuid
+
+        from apps.documents.missing_receipts import CONFIRM_WORD, MAX_ISSUE_BATCH, issue_missing_receipts
+
+        if request.data.get('confirm') != CONFIRM_WORD:
+            return Response(
+                {'error': f'לא הופקו קבלות: כדי להפיק יש להקליד "{CONFIRM_WORD}" לאישור.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        raw_ids = request.data.get('payment_ids')
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return Response({'error': 'לא נבחרו תשלומים להפקה.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(raw_ids) > MAX_ISSUE_BATCH:
+            return Response(
+                {'error': f'אפשר להפיק עד {MAX_ISSUE_BATCH} קבלות בפעם אחת.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            payment_ids = [str(uuid.UUID(str(raw))) for raw in raw_ids]
+        except ValueError:
+            return Response({'error': 'מזהה תשלום לא תקין.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(issue_missing_receipts(payment_ids, user=request.user))
