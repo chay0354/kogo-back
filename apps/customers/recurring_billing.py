@@ -209,8 +209,6 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 payment.tranzila_transaction = tranzila_txn
                 payment.save(update_fields=['tranzila_transaction'])
 
-                service._create_invoice_from_payment(payment, tranzila_txn)
-
                 charge_month = recurring.next_billing_date or today
                 recurring.last_charge_date = today
                 recurring.next_billing_date = _next_month_first(charge_month)
@@ -227,12 +225,24 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 if override is not None:
                     override.applied_at = timezone.now()
                     override.save(update_fields=['applied_at', 'updated_at'])
-
-            summary['charged'] += 1
         except Exception as exc:
             logger.exception('Recurring charge post-processing failed for %s', recurring.id)
             summary['failed'] += 1
             summary['errors'].append(f'{recurring.id}: {exc}')
+            continue
+
+        summary['charged'] += 1
+        # The receipt is issued once the charge is on record, never inside the
+        # block above. There, a receipt that failed (a wait on the series lock, a
+        # dropped connection, the function's time limit) rolled the charge back
+        # with it: the payment stayed pending, next_billing_date stayed due, and
+        # the next hourly run charged the same card again. A missing receipt is
+        # found and issued by `check_invoices`; a second charge is not undone.
+        try:
+            service._create_invoice_from_payment(payment, tranzila_txn)
+        except Exception as exc:
+            logger.exception('Receipt not issued for recurring charge %s (the charge is recorded)', recurring.id)
+            summary['errors'].append(f'{recurring.id}: receipt not issued — {exc}')
 
     try:
         from apps.documents.check_plans import issue_due_check_invoices

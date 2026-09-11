@@ -339,7 +339,6 @@ def apply_new_card(recurring: RecurringPayment, card: dict[str, Any]) -> dict:
             )
             payment.tranzila_transaction = tranzila_txn
             payment.save(update_fields=['tranzila_transaction'])
-            service._create_invoice_from_payment(payment, tranzila_txn)
             locked.last_charge_date = today
             locked.next_billing_date = _next_month_first(charge_month)
             update_fields.extend(['last_charge_date', 'next_billing_date'])
@@ -352,6 +351,16 @@ def apply_new_card(recurring: RecurringPayment, card: dict[str, Any]) -> dict:
                 child.save(update_fields=['status', 'updated_at'])
 
         locked.save(update_fields=update_fields)
+
+    if will_charge and payment is not None:
+        # After the charge is on record, never inside it: a receipt that failed
+        # there rolled back the payment, the new token and next_billing_date, so
+        # the parent saw an error for a card that had been charged, and tried
+        # again. `check_invoices` issues a receipt that is missing.
+        try:
+            service._create_invoice_from_payment(payment, tranzila_txn)
+        except Exception:
+            logger.exception('Receipt not issued for card-update charge %s (the charge is recorded)', payment.id)
 
     return {
         'success': True,

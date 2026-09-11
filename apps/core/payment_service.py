@@ -1513,11 +1513,18 @@ class PaymentService:
                         next_billing_date=next_billing_date_c,
                     )
 
-            # Invoice (nothing to invoice when the card was only verified)
-            invoice = (
-                self._create_invoice_from_payment(payment, tranzila_transaction)
-                if payment.final_amount > 0 else None
-            )
+            # Invoice (nothing to invoice when the card was only verified). The card
+            # is charged by now and this method is one transaction: a receipt that
+            # raised rolled back the payment, the standing order and the
+            # enrollment, so the office saw an error for money already taken and
+            # could charge again. The receipt's own savepoint fails alone;
+            # `check_invoices` issues it later.
+            invoice = None
+            if payment.final_amount > 0:
+                try:
+                    invoice = self._create_invoice_from_payment(payment, tranzila_transaction)
+                except Exception:
+                    logger.exception('Receipt not issued for payment %s (the charge is recorded)', payment.id)
 
             # Child status
             child.status = 'active'
@@ -1676,11 +1683,18 @@ class PaymentService:
         logger.info(f"Created invoice: {invoice.invoice_number}")
 
         if send_email:
-            try:
-                from apps.customers.subscription_invoice_email import send_subscription_invoice_email
-                send_subscription_invoice_email(invoice)
-            except Exception:
-                logger.exception('Subscription invoice email failed for %s (non-fatal)', invoice.invoice_number)
+            def _email():
+                try:
+                    from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+                    send_subscription_invoice_email(invoice)
+                except Exception:
+                    logger.exception('Subscription invoice email failed for %s (non-fatal)', invoice.invoice_number)
+
+            # After the commit, never before. Emailed from inside a transaction that
+            # then rolled back, the parent held a number the run hands out again to
+            # someone else; and the series' row lock stayed held for the email's
+            # round trip. With no transaction open this runs at once.
+            transaction.on_commit(_email)
 
         return invoice
     
