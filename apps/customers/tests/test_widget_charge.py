@@ -249,7 +249,7 @@ class WidgetChargeIdempotencyTest(TestCase):
         paid_ids = {call.args[0].id for call in mock_whatsapp.call_args_list}
         self.assertEqual(paid_ids, {first.id, second.id})
         from apps.customers.financial_models import Invoice
-        invoices = Invoice.objects.filter(family=self.family, invoice_number__contains='FAM')
+        invoices = Invoice.objects.filter(family=self.family, activity_logs__action='checkout_lines')
         self.assertEqual(invoices.count(), 1)
         combined = invoices.get()
         self.assertEqual(combined.amount, Decimal('240.00'))

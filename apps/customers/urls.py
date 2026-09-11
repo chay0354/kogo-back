@@ -2,7 +2,14 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 from .card_update_views import CardUpdateChargeView, CardUpdatePreviewView
-from .card_link_views import CardLinkActionView, CardLinkChargeView, CardLinkListCreateView, CardLinkPreviewView
+from .child_documents import InvoicePdfView
+from .card_link_views import (
+    CardLinkActionView,
+    CardLinkChargeView,
+    CardLinkListCreateView,
+    CardLinkOptionsView,
+    CardLinkPreviewView,
+)
 from .widget_views import (
     WidgetLookupView,
     WidgetRegisterView,
@@ -44,6 +51,8 @@ urlpatterns = [
     path('card-update/<str:token>/', CardUpdatePreviewView.as_view(), name='card-update-preview'),
     path('card-update/<str:token>/charge/', CardUpdateChargeView.as_view(), name='card-update-charge'),
     path('card-links/', CardLinkListCreateView.as_view(), name='card-links'),
+    path('card-links/options/', CardLinkOptionsView.as_view(), name='card-link-options'),
+    path('invoices/<uuid:invoice_id>/pdf/', InvoicePdfView.as_view(), name='invoice-pdf'),
     path('card-links/<uuid:link_id>/<str:action>/', CardLinkActionView.as_view(), name='card-link-action'),
     path('card-link/<str:token>/', CardLinkPreviewView.as_view(), name='card-link-preview'),
     path('card-link/<str:token>/charge/', CardLinkChargeView.as_view(), name='card-link-charge'),

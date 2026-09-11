@@ -356,7 +356,53 @@ def create_credit_invoice(data: dict) -> FormalDocument:
     )
 
     _attempt_tranzila(doc)
+
+    # A credit note is only useful to the customer if it reaches them. Never let a
+    # mail failure roll back a document that was already issued and numbered.
+    try:
+        _email_credit_note(doc)
+    except Exception:
+        logger.exception('Credit note email failed for %s (non-fatal)', doc.document_number)
+
     return doc
+
+
+def _credit_note_recipient(doc: FormalDocument) -> tuple[str, str]:
+    """Return (customer_name, email) for a credit note, or ('', '') if unreachable."""
+    if doc.business_customer_id:
+        customer = doc.business_customer
+        return customer.full_name, (customer.email or '').strip()
+    if doc.child_id:
+        family = getattr(doc.child, 'family', None)
+        return doc.child.full_name, (family.email or '').strip() if family else ''
+    return '', ''
+
+
+def _email_credit_note(doc: FormalDocument) -> None:
+    """Send a manually issued credit note to the customer with its PDF attached."""
+    from apps.core.credit_note_email import CreditNote, send_credit_note_email
+    from apps.documents.document_pdf import generate_document_pdf
+
+    name, email = _credit_note_recipient(doc)
+    if not email:
+        logger.info('No email for credit note %s — not sent', doc.document_number)
+        return
+
+    linked = doc.linked_document
+    send_credit_note_email(
+        CreditNote(
+            customer_name=name,
+            email=email,
+            amount=doc.total_amount,
+            reason=doc.credit_reason,
+            original_number=doc.linked_document_number or (linked.document_number if linked else ''),
+            original_date=linked.document_date if linked else None,
+            document_number=doc.document_number,
+            issued_at=doc.document_date,
+        ),
+        pdf_bytes=generate_document_pdf(doc),
+        pdf_filename=f'{doc.document_number}.pdf',
+    )
 
 
 def _receipt_amount(receipt: dict) -> Decimal:

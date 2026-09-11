@@ -281,7 +281,8 @@ class StoreInvoiceModelTest(TestCase):
         )
         
         self.assertIsNotNone(invoice.invoice_number)
-        self.assertTrue(invoice.invoice_number.startswith('INV-'))
+        # The ST series: consecutive per tax year, e.g. ST-2026-000001.
+        self.assertRegex(invoice.invoice_number, r'^ST-\d{4}-\d{6}$')
     
     def test_store_invoice_unique_invoice_number(self):
         """Test store invoice number must be unique"""

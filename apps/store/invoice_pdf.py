@@ -17,6 +17,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
+from apps.documents.issuer import COMPUTERIZED_MARK, ISSUER_LINE, ORIGINAL_MARK
 from apps.store.models import StoreInvoice
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
@@ -159,6 +160,22 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=BRAND_PURPLE,
             alignment=TA_LEFT,
             leading=18,
+        ),
+        'origin': ParagraphStyle(
+            'InvoiceOrigin',
+            fontName='Heebo-Bold',
+            fontSize=11,
+            textColor=BRAND_NAVY,
+            alignment=TA_CENTER,
+            leading=14,
+        ),
+        'statutory': ParagraphStyle(
+            'InvoiceStatutory',
+            fontName='Heebo-Bold',
+            fontSize=10,
+            textColor=BRAND_NAVY,
+            alignment=TA_CENTER,
+            leading=13,
         ),
     }
 
@@ -330,7 +347,9 @@ def generate_store_invoice_pdf(invoice: StoreInvoice) -> bytes:
     )
 
     story = [
-        Paragraph(_rtl(DOCUMENT_TITLE), styles['title']),
+        Paragraph(_rtl('חשבונית עסקה' if invoice.payment_method == 'monthly_billing' else DOCUMENT_TITLE), styles['title']),
+        Paragraph(_rtl(ORIGINAL_MARK), styles['origin']),
+        Paragraph(_rtl(ISSUER_LINE), styles['statutory']),
         Paragraph(_rtl('קוגומלו — חנות מוצרים'), styles['subtitle']),
         Paragraph(_rtl('המחירים כוללים מע"מ'), styles['subtitle']),
         Spacer(1, 0.35 * cm),
@@ -341,6 +360,8 @@ def generate_store_invoice_pdf(invoice: StoreInvoice) -> bytes:
         _items_table(invoice, styles),
         Spacer(1, 0.35 * cm),
         _summary_block(invoice, styles),
+        Spacer(1, 0.45 * cm),
+        Paragraph(_rtl(COMPUTERIZED_MARK), styles['statutory']),
     ]
 
     doc.build(story, onFirstPage=_draw_letterhead, onLaterPages=_draw_letterhead)

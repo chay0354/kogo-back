@@ -718,6 +718,12 @@ class PaymentLedgerSerializer(serializers.ModelSerializer):
         txn = obj.tranzila_transaction
         return txn.confirmation_code if txn else None
 
+    def to_representation(self, obj):
+        # Business → city/branch → course type → age → instructor, as on every
+        # ledger row, so the invoices page filters charges like documents.
+        from apps.core.ledger_dimensions import row_dimensions
+        return {**super().to_representation(obj), **row_dimensions(lesson=obj.lesson, branch=obj.branch)}
+
     class Meta:
         model = Payment
         fields = [
@@ -792,6 +798,17 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
         if payment and payment.branch_id and payment.branch:
             return payment.branch.name
         return None
+
+    def to_representation(self, obj):
+        from apps.core.ledger_dimensions import row_dimensions
+        payment = obj.initial_payment
+        return {
+            **super().to_representation(obj),
+            **row_dimensions(
+                lesson=payment.lesson if payment is not None else None,
+                branch=payment.branch if payment is not None else None,
+            ),
+        }
 
     class Meta:
         model = RecurringPayment

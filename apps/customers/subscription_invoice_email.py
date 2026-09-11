@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.utils import timezone
 
+from apps.core.computerized_docs import check_consent
 from apps.core.resend_email import resend_configured, send_resend_email
 from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
 from apps.customers.financial_models import Invoice
@@ -83,6 +84,8 @@ def send_subscription_invoice_email(invoice: Invoice) -> bool:
     if not _email_configured():
         logger.warning('No email provider — cannot send invoice %s', invoice.invoice_number)
         return False
+
+    check_consent(invoice.family if invoice.family_id else None, invoice.invoice_number)
 
     subject, text, html = build_subscription_invoice_email(invoice)
     pdf_bytes = generate_subscription_invoice_pdf(invoice)
