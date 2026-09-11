@@ -875,6 +875,97 @@ def _income_by_group_block(report: PeriodReport, styles: dict) -> list:
     ]
 
 
+def _integrity_block(report: PeriodReport, styles: dict) -> list:
+    """
+    רצף המספרים, מספרים שלא הפכו למסמך, ומסמכים שייתכן שהופקו פעמיים.
+
+    נספח ה׳(א)(5) מבקש מהתוכנה עצמה "בדיקת רצף המספרים העוקבים". כל סדרה נבדקת
+    על כל שנת המס ולא רק על התקופה: מספר שחסר בחודש אחר הוא חור באותה סדרה.
+    מספר שהוקצה לעסקה שלא הושלמה אינו חור — הוא מופיע כאן בשמו, כדי שמי שמחפש
+    אותו ברשימה ימצא למה הוא לא שם.
+    """
+    full_width = PAGE_WIDTH - 2 * SIDE_MARGIN
+
+    def titled(title, table, note):
+        return [
+            Spacer(1, 0.7 * cm),
+            Paragraph(_rtl(title), styles['label']),
+            Spacer(1, 0.15 * cm),
+            table,
+            Spacer(1, 0.1 * cm),
+            _rtl_cell(note, styles['note'], full_width),
+        ]
+
+    def listing(headers, widths, rows, highlighted=()):
+        data = [[_rtl_cell(text, styles['th'], width) for text, width in zip(headers, widths)], *rows]
+        table = Table(data, colWidths=widths, hAlign='RIGHT', repeatRows=1)
+        style = [
+            ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, PANEL_BG]),
+        ]
+        style += [('BACKGROUND', (0, index), (-1, index), CREDIT_BG) for index in highlighted]
+        table.setStyle(_card(style, padding=(5, 5, 5, 5)))
+        return table
+
+    out = []
+    runs = [run for run in (report.continuity or []) if run.issued]
+    if runs:
+        widths = [2.9 * cm, 4.3 * cm, 5.0 * cm, 1.6 * cm, 4.2 * cm]
+        rows, broken = [], []
+        for run in runs:
+            if run.complete:
+                state = 'רציפה ושלמה'
+            else:
+                broken.append(len(rows) + 1)
+                shown = ', '.join(run.missing[:4]) + (' …' if len(run.missing) > 4 else '')
+                state = f'חסרים {len(run.missing)}: {shown}'
+            rows.append([
+                _rtl_cell(run.name if run.series else f'{run.year} · ישנה', styles['td_num'], widths[0]),
+                _rtl_cell(run.label, styles['td'], widths[1]),
+                _rtl_cell(f'{run.first} — {run.last}', styles['td_num'], widths[2]),
+                _rtl_cell(str(run.issued), styles['td_num'], widths[3]),
+                _rtl_cell(state, styles['td'], widths[4]),
+            ])
+        out += titled(
+            'רצף מספרי המסמכים',
+            listing(('סדרה', 'סוג', 'טווח', 'מספרים', 'מצב'), widths, rows, broken),
+            'כל סדרה נבדקת על כל שנת המס: כל מספר שהסדרה הקצתה נמצא על מסמך קיים '
+            '(נספח ה׳(א)(5) להוראות ניהול פנקסי חשבונות).',
+        )
+
+    if report.void_rows:
+        widths = [3.4 * cm, 2.2 * cm, 5.2 * cm, 4.6 * cm, 2.6 * cm]
+        rows = [[
+            _rtl_cell(row.document_number, styles['td_num'], widths[0]),
+            _rtl_cell(row.document_date.strftime('%d/%m/%Y'), styles['td_num'], widths[1]),
+            _rtl_cell(row.customer, styles['td'], widths[2]),
+            _rtl_cell(row.void_reason, styles['td'], widths[3]),
+            _rtl_cell(_money(row.total_amount), styles['td_num'], widths[4]),
+        ] for row in report.void_rows]
+        out += titled(
+            'מספרים שלא הפכו למסמך',
+            listing(('מספר', 'תאריך', 'לקוח', 'סיבה', 'סכום'), widths, rows),
+            'המספר נשמר עם העסקה, ולכן אינו חור ברצף. העסקה לא הושלמה, ולכן סכומה אינו בסיכומים.',
+        )
+
+    if report.possible_duplicates:
+        widths = [3.4 * cm, 3.4 * cm, 5.4 * cm, 2.2 * cm, 3.6 * cm]
+        rows = [[
+            _rtl_cell(pair['number'], styles['td_num'], widths[0]),
+            _rtl_cell(pair['other'], styles['td_num'], widths[1]),
+            _rtl_cell(pair['customer'], styles['td'], widths[2]),
+            _rtl_cell(pair['date'].strftime('%d/%m/%Y'), styles['td_num'], widths[3]),
+            _rtl_cell(_money(pair['amount']), styles['td_num'], widths[4]),
+        ] for pair in report.possible_duplicates]
+        out += titled(
+            'מסמכים שייתכן שהופקו פעמיים לאותו תשלום',
+            listing(('קבלת חוג', 'מסמך ידני', 'לקוח', 'תאריך', 'סכום'), widths, rows),
+            'קבלת חוג ומסמך שהופק ידנית לאותו ילד ובאותו סכום בתקופה. שניהם נספרים בדוח; '
+            'אם הם מתעדים תשלום אחד, מבטלים אחד מהם בהודעת זיכוי.',
+        )
+    return out
+
+
 def generate_period_report_pdf(report: PeriodReport) -> bytes:
     _ensure_fonts_registered()
     styles = _styles()
@@ -909,9 +1000,10 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
             styles['subtitle'],
         ))
     else:
-        story.append(Paragraph(
-            _rtl('הדוח כולל את כל סוגי המסמכים שהופקו בתקופה (טיוטות אינן נכללות — אינן מסמך).'),
-            styles['subtitle'],
+        story.append(_rtl_cell(
+            'הדוח כולל את כל המסמכים שהופקו בתקופה: ידניים, קבלות חוגים ומכירות חנות. '
+            'טיוטות אינן נכללות — אינן מסמך.',
+            styles['subtitle'], PAGE_WIDTH - 2 * SIDE_MARGIN,
         ))
 
     story.append(Spacer(1, 0.5 * cm))
@@ -972,6 +1064,7 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
                 ),
             ])
 
+    story.extend(_integrity_block(report, styles))
     story.extend(_undocumented_block(report, styles))
     story.extend(_income_by_group_block(report, styles))
     story.extend(_reconciliation_block(report, styles))

@@ -367,6 +367,8 @@ class ManyChatService:
         ),
         'MANYCHAT_PAYMENT_FAILED_FLOW_NS': ('payment-failed',),
         'MANYCHAT_CARD_UPDATE_FLOW_NS': ('card-update', 'card update', 'update-card'),
+        # Not the card-update names: that template says a charge failed.
+        'MANYCHAT_CARD_LINK_FLOW_NS': ('card-link', 'card link', 'card_link'),
         'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
         'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS': ('after-test', 'after test'),
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),

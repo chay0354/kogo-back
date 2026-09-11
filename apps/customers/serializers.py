@@ -154,7 +154,27 @@ class FamilySerializer(serializers.ModelSerializer):
             'computerized_docs_consent_at', 'computerized_docs_consent_source',
             'computerized_docs_consent_revoked_at', 'accepts_computerized_documents',
         ]
-        read_only_fields = ['id', 'parents', 'accepts_computerized_documents']
+        # The consent is taken through record_consent / revoke_consent (the
+        # widget, families/{id}/computerized-consent/), never typed into the
+        # card: when and where it was given is the record סעיף 18ב(ג) asks for.
+        read_only_fields = [
+            'id', 'parents', 'accepts_computerized_documents',
+            'computerized_docs_consent_at', 'computerized_docs_consent_source',
+            'computerized_docs_consent_revoked_at',
+        ]
+
+
+class FamilyComputerizedDocsConsentSerializer(serializers.ModelSerializer):
+    """The family's consent to computerized documents — what the family card shows."""
+    accepts_computerized_documents = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Family
+        fields = [
+            'id', 'computerized_docs_consent_at', 'computerized_docs_consent_source',
+            'computerized_docs_consent_revoked_at', 'accepts_computerized_documents',
+        ]
+        read_only_fields = fields
 
 
 class EnrollmentDetailSerializer(serializers.Serializer):
@@ -808,6 +828,9 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
                 lesson=payment.lesson if payment is not None else None,
                 branch=payment.branch if payment is not None else None,
             ),
+            # The branch the order was signed up in, by id: the invoices page
+            # filters on it, and two branches may share a name.
+            'branch_id': str(payment.branch_id) if payment is not None and payment.branch_id else None,
         }
 
     class Meta:

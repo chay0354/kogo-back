@@ -15,6 +15,7 @@ from django.db.models import Prefetch, Q
 from datetime import date, timedelta
 
 from django.utils import timezone
+from apps.core.computerized_docs import CONSENT_SOURCE_WIDGET, record_consent
 from apps.core.tranzila_service import is_tranzila_uncertain_gateway_error
 from apps.customers.models import Family, Parent, Child, Payment
 from apps.customers.child_identity import find_existing_child_on_family
@@ -348,10 +349,17 @@ def _already_registered_response(child, *, lesson=None, bundle=None):
     return None
 
 
+def _computerized_docs_consent_given(data) -> bool:
+    """An explicit yes to computerized documents: JSON true, or its form spelling — never bool('false')."""
+    return str(data.get('computerized_docs_consent', '')).strip().lower() in ('true', '1', 'yes', 'on')
+
+
 def _resolve_family_and_child(data, branch):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
     the Child (existing active child on discount confirmation, or a new record).
+    Records the family's consent to computerized documents when the payload
+    gives it (`computerized_docs_consent`).
 
     Shared by WidgetRegisterView (paid flow) and WidgetTrialRegisterView (trial flow).
     """
@@ -402,6 +410,12 @@ def _resolve_family_and_child(data, branch):
                 parent_updates['email'] = parent_email
             if parent_updates:
                 primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
+
+    # סעיף 18ב(ג): the parent ticked the box to receive invoices, receipts and
+    # credit notes by email. A box left empty, or a payload without it, records
+    # nothing — and never withdraws a consent the family gave before.
+    if _computerized_docs_consent_given(data):
+        record_consent(family, CONSENT_SOURCE_WIDGET)
 
     # ── 2. Resolve child ──────────────────────────────────────
     child = None
@@ -567,6 +581,9 @@ class WidgetRegisterView(APIView):
         The fee is once per child: extra courses in this checkout, and later
         signups for the same child, skip it. A twice/thrice-a-week bundle also
         applies the fee only on the first member.
+      computerized_docs_consent (bool) — the parent agreed to receive invoices,
+        receipts and credit notes by email as computerized documents (סעיף 18ב(ג));
+        recorded on the family. False or absent records nothing and withdraws nothing.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -712,6 +729,9 @@ class WidgetTrialRegisterView(APIView):
       child_phone
       discount_confirmed  (bool) — parent confirmed the discount question
       existing_child_id   (str)  — returned by lookup when child is already active
+      computerized_docs_consent (bool) — as in WidgetRegisterView: recorded on the
+        family when true. A free trial's summary screen has no consents step and
+        sends false.
     """
     authentication_classes = []
     permission_classes = [AllowAny]

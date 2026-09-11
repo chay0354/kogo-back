@@ -10,7 +10,9 @@ from rest_framework.test import APITestCase
 
 from apps.core.models import Branch, City, UserProfile
 from apps.customers.models import Child, Family
-from apps.documents.models import DocumentCounter, FormalDocument
+from django.utils import timezone
+
+from apps.documents.models import DocumentSeries, FormalDocument
 
 User = get_user_model()
 CREATE = '/api/v1/documents/documents/create-document/'
@@ -60,15 +62,17 @@ class DraftDocumentTests(APITestCase):
         self.assertEqual(str(FormalDocument.objects.get(pk=res.data['id']).branch_id), str(self.branch.id))
 
     def test_draft_takes_no_fiscal_number(self):
-        before = DocumentCounter.objects.filter(year=2026).first()
-        before = before.counter if before else 0
+        def handed_out():
+            run = DocumentSeries.objects.filter(series='TI', year=timezone.localdate().year).first()
+            return run.counter if run else 0
+
+        before = handed_out()
         res = self.client.post(CREATE, self.payload('draft', draft_target_type='tax_invoice'), format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
         doc = FormalDocument.objects.get(pk=res.data['id'])
         self.assertEqual(doc.document_type, 'draft')
         self.assertTrue(re.fullmatch(r'D-[0-9A-F]{8}', doc.document_number), doc.document_number)
-        after = DocumentCounter.objects.filter(year=2026).first()
-        self.assertEqual(after.counter if after else 0, before)
+        self.assertEqual(handed_out(), before)
         self.assertFalse(doc.tranzila_issued)
         self.assertEqual(doc.total_amount, Decimal('424.80'))
 
@@ -108,8 +112,10 @@ class DraftDocumentTests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
         doc = FormalDocument.objects.get(pk=draft.data['id'])
         self.assertEqual(doc.document_type, 'tax_invoice')
-        real_seq = int(real.data['document_number'].split('-')[1])
-        self.assertEqual(doc.document_number, f'2026-{real_seq + 1:04d}')
+        # Both are tax invoices, so both draw from the TI run: the draft takes the next number.
+        prefix, _, seq = real.data['document_number'].rpartition('-')
+        self.assertTrue(prefix.startswith('TI-'), real.data['document_number'])
+        self.assertEqual(doc.document_number, f'{prefix}-{int(seq) + 1:06d}')
 
     def test_finalizing_a_real_document_is_refused(self):
         real = self.client.post(CREATE, self.payload('tax_invoice'), format='json')

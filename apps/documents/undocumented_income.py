@@ -1,19 +1,16 @@
-"""Money taken in a period that produced no formal document.
+"""Money taken in a period that produced no document.
 
-The period report counts FormalDocument rows, which is what an accountant asks
-for. It is not the whole of what the business took in, because only two flows
-issue a document at all: manual issuance from the invoices page (including the
-check-plan cron) and a store order whose Tranzila document succeeded.
+The period report lists every document (register.py): what the office issues,
+and the lesson receipts and store sales numbered in consecutive runs (IR, ST,
+SD). What is left is collected here, so the report can state the period's whole
+take and say plainly which part of it has no document behind it:
 
-A lesson charge issues none. It creates a customers.Invoice, mails the payer a
-PDF rendered here rather than by Tranzila, and stops — so the money is real and
-the document is not. A store order whose Tranzila call failed leaves the same
-shape: a StoreInvoice with formal_document NULL.
-
-Neither can be printed beside the documents: they carry no fiscal number and
-summing them into the document totals would misstate both. They are collected
-here as their own section so the report can state the period's whole take and
-say plainly which part of it has no document behind it.
+* a lesson charge or a store sale from before those runs existed. It carries an
+  'INV-…' number cut from a payment's UUID — no fiscal number — so summing it
+  into the document totals would misstate both. Such a store sale that got a
+  Tranzila document is listed by that document instead;
+* a charge that went through and never got even an Invoice row;
+* a payment through a payment link that issued no document.
 
 Read-only by construction, like period_report: every figure is a stored column.
 """
@@ -32,6 +29,7 @@ from apps.core.revenue_service import (
     DELIVERY_CATEGORY_LABEL,
 )
 from apps.core.scoping import is_scoped_partner, partner_branch_ids
+from apps.documents.numbering import LESSON_RUN_REGEX, STORE_RUN_REGEX
 from apps.documents.period_report import (
     GROUP_BY_BRANCH,
     GROUP_BY_CATEGORY,
@@ -47,8 +45,8 @@ SOURCE_ORPHAN_CHARGES = 'orphan_charges'
 SOURCE_PAYMENT_LINKS = 'payment_links'
 
 SOURCE_LABELS = {
-    SOURCE_LESSONS: 'חיובי חוגים — נשלח מייל, לא הופק מסמך',
-    SOURCE_STORE: 'מכירות חנות — הפקת המסמך בטרנזילה נכשלה',
+    SOURCE_LESSONS: 'חיובי חוגים במספור הישן — נשלח מייל, לא מסמך במספר עוקב',
+    SOURCE_STORE: 'מכירות חנות במספור הישן — ללא מסמך טרנזילה',
     SOURCE_ORPHAN_CHARGES: 'חיובים שנגבו ואין להם אפילו רשומת חשבונית',
     SOURCE_PAYMENT_LINKS: 'תשלומים בקישור — לא הופק מסמך',
 }
@@ -301,6 +299,8 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
     qs = (
         Invoice.objects
         .filter(status='paid', invoice_date__date__gte=start, invoice_date__date__lte=end)
+        # A receipt numbered in the IR run is a document, listed with the rest (register.py).
+        .exclude(invoice_number__regex=LESSON_RUN_REGEX)
         .select_related('family', 'family__branch', 'branch',
                         'payment__card_link__business', 'payment__card_link__business_category')
         .prefetch_related('children__child', 'children__course__business',
@@ -367,6 +367,8 @@ def _store_rows(branch_ids, start: date, end: date, delivery: dict) -> list:
         StoreInvoice.objects
         .filter(_STORE_PAID, formal_document__isnull=True,
                 issue_date__date__gte=start, issue_date__date__lte=end)
+        # A sale numbered in the ST or SD run is a document, listed with the rest.
+        .exclude(invoice_number__regex=STORE_RUN_REGEX)
         .select_related('branch', 'child', 'child__family', 'child__family__branch')
         .order_by('issue_date', 'invoice_number')
     )

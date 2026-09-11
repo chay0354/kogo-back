@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.db import transaction
 
 from apps.documents.models import (
-    DocumentCounter, FormalDocument, DocumentLineItem, DocumentPayment,
+    FormalDocument, DocumentLineItem, DocumentPayment,
     TRANZILA_DOCUMENT_TYPE,
 )
 
@@ -46,12 +46,9 @@ def _income_tags(data: dict) -> dict:
 
 
 def _generate_document_number(document_type: str) -> str:
-    if document_type == 'credit_invoice':
-        from apps.documents.numbering import SERIES_CREDIT, next_document_number
-        return next_document_number(SERIES_CREDIT)
-    year = timezone.now().year
-    seq = DocumentCounter.next_number(year)
-    return f"{year}-{seq:04d}"
+    """The next number in the run of the document's type (numbering.FORMAL_SERIES, סעיף 5(ג))."""
+    from apps.documents.numbering import formal_document_number
+    return formal_document_number(document_type)
 
 
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,

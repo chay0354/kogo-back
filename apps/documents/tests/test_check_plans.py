@@ -178,6 +178,46 @@ class CheckPlanAPITests(TestCase):
         self.assertEqual(plan.status, 'cancelled')
         self.assertEqual(plan.items.get().status, 'cancelled')
 
+    def test_a_plan_carries_the_ledger_dimensions_of_its_lesson(self):
+        # The invoices page filters plans by class, age group and instructor as
+        # it filters charges, so the list sends them — and the branch by id.
+        course_type = TestDataFactory.create_course_type(name='ג׳ודו')
+        course = TestDataFactory.create_course(
+            name='ג׳ודו מתחילים', course_type=course_type, min_age=6, max_age=9,
+        )
+        instructor = TestDataFactory.create_instructor(first_name='שירה', last_name='לוי', branch=course.branch)
+        lesson = TestDataFactory.create_lesson(course=course, instructor=instructor)
+        future = (date.today() + timedelta(days=40)).isoformat()
+        with_lesson = register_check_plan(
+            child_id=str(self.child.id),
+            lesson_id=str(lesson.id),
+            checks=[{'date': future, 'amount': '100', 'check_number': '5001'}],
+        )
+        without_lesson = register_check_plan(
+            child_id=str(self.child.id),
+            checks=[{'date': future, 'amount': '100', 'check_number': '5002'}],
+        )
+
+        res = self.client.get('/api/v1/documents/check-plans/')
+        self.assertEqual(res.status_code, 200, res.content)
+        rows = {row['id']: row for row in res.json()}
+
+        row = rows[str(with_lesson.id)]
+        self.assertEqual(row['branch_id'], str(course.branch_id))
+        self.assertEqual(row['city_id'], str(course.branch.city_id))
+        self.assertEqual((row['course_type_id'], row['course_type_name']), (str(course_type.id), 'ג׳ודו'))
+        self.assertEqual((row['age_key'], row['age_label']), ('6-9', 'גילאי 6–9'))
+        self.assertEqual((row['instructor_id'], row['instructor_name']), (str(instructor.id), 'שירה לוי'))
+        self.assertIsNone(row['business_id'])
+
+        # Without a lesson the plan sits in the family's branch and names no class.
+        bare = rows[str(without_lesson.id)]
+        self.assertEqual(bare['branch_id'], str(self.child.family.branch_id))
+        self.assertEqual(bare['city_id'], str(self.child.family.branch.city_id))
+        self.assertIsNone(bare['course_type_id'])
+        self.assertEqual(bare['age_key'], '')
+        self.assertIsNone(bare['instructor_id'])
+
 
 class CheckPlanCronHookTests(TestCase):
     def setUp(self):

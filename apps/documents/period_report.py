@@ -141,10 +141,11 @@ def scoped_documents(user, start: date, end: date, document_type: str = '') -> t
         FormalDocument.objects
         .filter(document_date__gte=start, document_date__lte=end)
         .select_related(
-            'branch',
+            'branch', 'business', 'business_category',
             'business_customer', 'business_customer__branch',
             'child', 'child__family', 'child__family__branch',
         )
+        .prefetch_related('payments', 'store_invoices')
     )
     qs = qs.exclude(document_type='draft')
     if document_type:
@@ -228,7 +229,8 @@ def customer_name(doc) -> str:
         return doc.business_customer.full_name or 'לקוח עסקי'
     if doc.child_id and doc.child:
         return doc.child.full_name or 'לקוח'
-    return 'ללא שם לקוח'
+    # A credit note issued with a refund names its customer on the document itself.
+    return (getattr(doc, 'customer_name', None) or '').strip() or 'ללא שם לקוח'
 
 
 @dataclass
@@ -246,6 +248,20 @@ class ReportRow:
     is_credit: bool
     currency: str
     vat_exempt: bool
+    # Where the row came from and what it points at. The PDF prints none of
+    # these; the register export and the uniform-format files read them.
+    channel: str = 'manual'
+    source_id: str = ''
+    reference: str = ''
+    payment_method: str = ''
+    branch_name: str = ''
+    business_name: str = ''
+    category_name: str = ''
+    # Another document that may cover the same payment (register.find_possible_duplicates).
+    duplicate_of: str = ''
+    # A number handed to a sale that never became a document: listed, never summed.
+    void: bool = False
+    void_reason: str = ''
 
 
 @dataclass
@@ -348,6 +364,12 @@ class PeriodReport:
     reconciliation: dict = None
     # תקבולים בתקופה שלא הופק להם מסמך פורמלי. None = לא נאסף.
     undocumented: object = None
+    # Numbers handed to sales that never became a document (register.py).
+    void_rows: list = field(default_factory=list)
+    # Every run of the years the period touches, checked for gaps (numbering.continuity).
+    continuity: list = field(default_factory=list)
+    # A lesson receipt and a document issued by hand that may cover one payment.
+    possible_duplicates: list = field(default_factory=list)
 
     def _sum_types(self, codes, credits: bool = False) -> Decimal:
         total = sum((self.type_totals[c].total_amount for c in codes if c in self.type_totals), Decimal('0.00'))
@@ -429,7 +451,16 @@ class PeriodReport:
 
 def _row_from(doc) -> ReportRow:
     net = doc.subtotal - doc.discount_amount
+    # A store sale's Tranzila copy points at the sale; a credit note at what it credits.
+    store_sale = next(iter(doc.store_invoices.all()), None)
+    payment = next(iter(doc.payments.all()), None)
     return ReportRow(
+        channel='manual',
+        source_id=str(doc.id),
+        reference=store_sale.invoice_number if store_sale else (doc.linked_document_number or ''),
+        payment_method=payment.payment_method if payment else '',
+        business_name=doc.business.name if doc.business_id else '',
+        category_name=doc.business_category.name if doc.business_category_id else '',
         customer=customer_name(doc),
         document_number=doc.document_number,
         document_type=doc.document_type,
@@ -454,25 +485,34 @@ def build_report(
     group_by: str = GROUP_BY_BRANCH,
     document_type: str = '',
 ) -> PeriodReport:
-    """Group every document in the period into exactly one bucket, and total it."""
+    """
+    Group every document in the period into exactly one bucket, and total it.
+
+    The documents come from every channel (register.py): the documents module,
+    and the lesson receipts and store sales numbered in consecutive runs. A number
+    that never became a document is kept apart — listed, never summed.
+    """
+    # Imported here: each of these modules imports this one.
+    from apps.documents.numbering import continuity
+    from apps.documents.register import channel_documents, find_possible_duplicates
+    from apps.documents.undocumented_income import RANK_UNASSIGNED, _group_key
+
     if group_by not in GROUP_BY_CHOICES:
         raise ReportInputError('קיבוץ לא נתמך')
 
     qs, branch_ids = scoped_documents(user, start, end, document_type)
     documents = list(qs.order_by('document_date', 'document_number'))
-    enrollment_map = _enrollment_branch_map(documents) if group_by == GROUP_BY_BRANCH else {}
+    enrollment_map = _enrollment_branch_map(documents)
 
-    groups: dict = {}
-    overall = Totals()
-    type_totals: dict = {}
-    currencies = set()
-
+    placed = []  # (row, group key, group title, is the catch-all bucket)
+    manual_rows = {}
     for doc in documents:
         row = _row_from(doc)
-        currencies.add(doc.currency)
+        branch_key, branch_title, _source = resolve_branch(doc, enrollment_map)
+        row.branch_name = branch_title if branch_key is not None else ''
 
         if group_by == GROUP_BY_BRANCH:
-            key, title, _source = resolve_branch(doc, enrollment_map)
+            key, title = branch_key, branch_title
             unassigned = key is None
         elif group_by == GROUP_BY_UNIT:
             key = doc.business_id
@@ -496,7 +536,36 @@ def build_report(
                 key = None
                 title = PRIVATE_CUSTOMERS_LABEL
                 unassigned = True
+        placed.append((row, key, title, unassigned))
+        manual_rows[doc.document_number] = row
 
+    # A partner with no branch was handed no documents above, and no receipts here.
+    channel = channel_documents(branch_ids, start, end, document_type) if branch_ids != [] else []
+    void_rows = []
+    for item in channel:
+        if item.row.void:
+            void_rows.append(item.row)
+            continue
+        key, title, rank = _group_key(item, group_by)
+        unassigned = rank == RANK_UNASSIGNED
+        # The document side keys its catch-all bucket None: one bucket, not two.
+        placed.append((item.row, None if unassigned else key, title, unassigned))
+
+    duplicates = find_possible_duplicates(channel, documents)
+    channel_rows = {item.row.document_number: item.row for item in channel}
+    for pair in duplicates:
+        channel_rows[pair['number']].duplicate_of = pair['other']
+        if pair['other'] in manual_rows:
+            manual_rows[pair['other']].duplicate_of = pair['number']
+
+    groups: dict = {}
+    overall = Totals()
+    type_totals: dict = {}
+    currencies = set()
+    for row, key, title, unassigned in sorted(
+        placed, key=lambda entry: (entry[0].document_date, entry[0].document_number),
+    ):
+        currencies.add(row.currency)
         group = groups.get(key)
         if group is None:
             group = ReportGroup(key=key, title=title, is_unassigned=unassigned)
@@ -521,6 +590,12 @@ def build_report(
         names = sorted({g.title for g in ordered if not g.is_unassigned})
         scope_label = 'סניפים משויכים: ' + (', '.join(names) if names else 'ללא')
 
+    # The runs are the whole business's, so only a reader who sees all of it gets them.
+    runs = []
+    if branch_ids is None:
+        for year in range(start.year, end.year + 1):
+            runs.extend(continuity(year))
+
     return PeriodReport(
         start=start,
         end=end,
@@ -532,4 +607,7 @@ def build_report(
         document_type=document_type,
         scope_label=scope_label,
         currencies=currencies,
+        void_rows=sorted(void_rows, key=lambda row: (row.document_date, row.document_number)),
+        continuity=runs,
+        possible_duplicates=duplicates,
     )

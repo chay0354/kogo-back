@@ -144,6 +144,64 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return response
 
+    @action(detail=False, methods=['get'], url_path='register-export',
+            permission_classes=[IsAuthenticated, IsManager])
+    def register_export(self, request):
+        """
+        Every document in a period, one row each, as a CSV the accountant opens in Excel.
+
+        GET /api/v1/documents/documents/register-export/?month=YYYY-MM
+        (or start_date/end_date). The same rows as the period report
+        (apps/documents/register.py), and the numbers that never became a
+        document. Read-only; managers only, like the report.
+        """
+        from apps.documents.period_report import ReportInputError, build_report, parse_period
+        from apps.documents.register import register_csv
+
+        try:
+            start, end, label = parse_period(request.query_params)
+            report = build_report(request.user, start, end, label)
+        except ReportInputError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        response = HttpResponse(register_csv(report), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="documents-{start.isoformat()}-{end.isoformat()}.csv"'
+        )
+        return response
+
+    @action(detail=False, methods=['get'], url_path='uniform-export',
+            permission_classes=[IsAuthenticated, IsManager])
+    def uniform_export(self, request):
+        """
+        The period's documents in the uniform structure (מבנה אחיד): INI.TXT and
+        BKMVDATA.TXT in their OPENFRMT folder, zipped.
+
+        GET /api/v1/documents/documents/uniform-export/?month=YYYY-MM
+        (or start_date/end_date inside one tax year). The same register as the
+        period report (apps/documents/uniform_export.py). Read-only; managers only.
+        """
+        from apps.documents.period_report import ReportInputError, parse_period
+        from apps.documents.uniform_export import build_uniform_export
+        from apps.documents.uniform_format import UniformFormatError
+
+        try:
+            start, end, label = parse_period(request.query_params)
+            archive, filename = build_uniform_export(request.user, start, end, label)
+        except ReportInputError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except UniformFormatError as exc:
+            # A stored document the format cannot carry, named so it can be found —
+            # never a file with that document quietly missing.
+            logger.warning('Uniform export refused: %s', exc)
+            return Response(
+                {'error': f'מסמך בטווח אינו עומד בדרישות המבנה האחיד: {exc}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        response = HttpResponse(archive, content_type='application/zip')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
     @action(detail=False, methods=['post'], url_path='create-document')
     def create_document(self, request):
         """
@@ -266,9 +324,14 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
+        from apps.core.ledger_dimensions import lesson_paths
+
         qs = (
             CheckPlan.objects
-            .select_related('child', 'lesson', 'lesson__course', 'branch', 'receipt')
+            # Everything the ledger dimensions read (CheckPlanSerializer): the
+            # lesson's course, type, business, city and instructor, and the
+            # plan branch's city.
+            .select_related('child', 'branch', 'branch__city', 'receipt', *lesson_paths('lesson'))
             .prefetch_related('items', 'items__tax_invoice')
         )
         status_filter = self.request.query_params.get('status')

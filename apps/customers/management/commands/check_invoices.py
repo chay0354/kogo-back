@@ -31,7 +31,6 @@ from django.utils import timezone
 
 from apps.customers.financial_models import Invoice, InvoiceActivityLog
 from apps.customers.models import Payment
-from apps.documents.models import DocumentSeries
 from apps.documents.numbering import SERIES_SUBSCRIPTION
 from apps.store.models import StoreInvoice
 
@@ -162,27 +161,16 @@ class Command(BaseCommand):
 
     def _report_gaps(self):
         """Every number a series handed out must belong to a document that exists."""
-        from apps.documents.models import FormalDocument
+        from apps.documents.numbering import continuity
 
-        sources = {
-            'IR': (Invoice.objects, 'invoice_number'),
-            'ST': (StoreInvoice.objects, 'invoice_number'),
-            'SD': (StoreInvoice.objects, 'invoice_number'),
-            'CR': (FormalDocument.objects, 'document_number'),
-        }
         clean = True
-        for row in DocumentSeries.objects.order_by('series', 'year'):
-            if row.series not in sources:
+        for run in continuity():
+            if run.complete:
                 continue
-            manager, field = sources[row.series]
-            prefix = f'{row.series}-{row.year}-'
-            numbers = manager.filter(**{f'{field}__startswith': prefix}).values_list(field, flat=True)
-            issued = {int(number[len(prefix):]) for number in numbers if number[len(prefix):].isdigit()}
-            gaps = sorted(set(range(1, row.counter + 1)) - issued)
-            if gaps:
-                clean = False
-                shown = ', '.join(f'{prefix}{n:06d}' for n in gaps[:20])
-                more = f' ועוד {len(gaps) - 20}' if len(gaps) > 20 else ''
-                self.stdout.write(self.style.ERROR(f'\nחור בסדרה {row.series}-{row.year}: {shown}{more}'))
+            clean = False
+            shown = ', '.join(run.missing[:20])
+            more = f' ועוד {len(run.missing) - 20}' if len(run.missing) > 20 else ''
+            name = run.name if run.series else f'{run.label} {run.year}'
+            self.stdout.write(self.style.ERROR(f'\nחור בסדרה {name}: {shown}{more}'))
         if clean:
             self.stdout.write(self.style.SUCCESS('\nרצף המספרים שלם בכל הסדרות.'))
