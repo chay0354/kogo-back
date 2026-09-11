@@ -25,6 +25,7 @@ from apps.documents.period_report import ReportInputError, build_report
 from apps.documents.register import (
     CHANNEL_LESSONS,
     CHANNEL_MANUAL,
+    CHANNEL_RENTALS,
     CHANNEL_STORE,
     register_rows,
     series_of,
@@ -69,6 +70,7 @@ BUSINESS = UniformBusiness(
 _RUN_TYPES = {
     'IR': DOCUMENT_TYPE_CODES['combined'],
     'ST': DOCUMENT_TYPE_CODES['combined'],
+    'RT': DOCUMENT_TYPE_CODES['combined'],
     'IRM': DOCUMENT_TYPE_CODES['combined'],
     'SD': DOCUMENT_TYPE_CODES['transaction_invoice'],
     'TX': DOCUMENT_TYPE_CODES['transaction_invoice'],
@@ -258,7 +260,7 @@ def _documents(rows) -> list[UniformDocument]:
 
     formal = {
         str(doc.pk): doc for doc in FormalDocument.objects
-        .filter(pk__in=ids(CHANNEL_MANUAL))
+        .filter(pk__in=ids(CHANNEL_MANUAL) + ids(CHANNEL_RENTALS))
         .select_related('business_customer', 'linked_document')
         .prefetch_related('line_items', 'payments')
     }
@@ -279,7 +281,8 @@ def _documents(rows) -> list[UniformDocument]:
 
     out = []
     for row in rows:
-        if row.channel == CHANNEL_MANUAL:
+        if row.channel in (CHANNEL_MANUAL, CHANNEL_RENTALS):
+            # A tenant's receipt is a FormalDocument like the office's: its lines and payment are on it.
             out.append(_manual(row, formal[row.source_id], formal_types))
         elif row.channel == CHANNEL_LESSONS:
             out.append(_lesson(row, lessons[row.source_id]))

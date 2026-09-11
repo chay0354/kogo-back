@@ -14,9 +14,10 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from apps.documents.issuer import (
-    ISSUER_ADDRESS, ISSUER_COMPANY_NUMBER, ISSUER_EMAIL, ISSUER_NAME, ISSUER_PHONE,
+    ISSUER_ADDRESS, ISSUER_COMPANY_NUMBER, ISSUER_EMAIL, ISSUER_LINE, ISSUER_NAME, ISSUER_PHONE,
 )
 from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
+from apps.documents.numbering import is_rental_number
 from apps.store.invoice_pdf import (
     BORDER, BRAND_NAVY, BRAND_ORANGE, BRAND_PURPLE, PANEL_BG, _ensure_fonts_registered, _money, _rtl,
 )
@@ -105,6 +106,10 @@ def _customer_details(doc: FormalDocument) -> list[tuple[str, str]]:
             value = getattr(bc, attr, '') or ''
             if value:
                 rows.append((label, str(value)))
+        # A tenant is often a person, with an ID number and no company number:
+        # a rental receipt names them by whichever they have.
+        if is_rental_number(doc.document_number) and bc.id_number:
+            rows.insert(2 if bc.company_number else 1, ('ת.ז.', str(bc.id_number)))
     elif doc.child_id and doc.child:
         child = doc.child
         rows.append(('שם הלקוח', child.full_name or ''))
@@ -332,6 +337,10 @@ def generate_document_pdf(doc: FormalDocument) -> bytes:
         story.append(_p('טיוטה — אינו מסמך מס', styles['origin']))
     else:
         story.append(_p('מקור', styles['origin']))
+        if is_rental_number(doc.document_number):
+            # תקנה 9א(א)(1): "עוסק מורשה" and the number, printed on the face,
+            # as the lesson and store receipts print it.
+            story.append(_p(ISSUER_LINE, styles['origin']))
     story.append(Spacer(1, 0.5 * cm))
 
     story.append(_header_card(doc, styles))

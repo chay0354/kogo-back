@@ -6,6 +6,7 @@ the accountant and a tax inspector can each check a run on its own:
     IR  — חשבונית מס / קבלה for lesson charges (widget, standing orders, card links)
     ST  — חשבונית מס / קבלה for store sales paid on the spot (card or cash)
     SD  — חשבונית עסקה for store sales put on monthly billing (not yet paid)
+    RT  — חשבונית מס / קבלה for studio rentals (the tenants' standing orders)
     TI  — חשבונית מס issued by hand
     IRM — חשבונית מס / קבלה issued by hand
     RC  — קבלה issued by hand (the office's check plans too)
@@ -24,6 +25,7 @@ exactly as they are: an issued document is never renumbered (סעיף 23(ב)).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -34,6 +36,7 @@ from apps.documents.models import DocumentSeries
 SERIES_SUBSCRIPTION = 'IR'
 SERIES_STORE = 'ST'
 SERIES_STORE_TRANSACTION = 'SD'
+SERIES_RENTAL = 'RT'
 SERIES_TAX_INVOICE = 'TI'
 SERIES_MANUAL_INVOICE_RECEIPT = 'IRM'
 SERIES_RECEIPT = 'RC'
@@ -55,6 +58,7 @@ SERIES_LABELS = {
     SERIES_SUBSCRIPTION: 'חשבונית מס/קבלה · חוגים',
     SERIES_STORE: 'חשבונית מס/קבלה · חנות',
     SERIES_STORE_TRANSACTION: 'חשבונית עסקה · חנות',
+    SERIES_RENTAL: 'חשבונית מס/קבלה · שכירויות',
     SERIES_TAX_INVOICE: 'חשבונית מס · ידני',
     SERIES_MANUAL_INVOICE_RECEIPT: 'חשבונית מס/קבלה · ידני',
     SERIES_RECEIPT: 'קבלה · ידני',
@@ -68,6 +72,15 @@ LEGACY_LABEL = 'מסמכים ידניים · סדרה משותפת (סגורה)'
 # were never fiscal numbers (see apps/documents/register.py).
 LESSON_RUN_REGEX = r'^IR-[0-9]{4}-[0-9]{6}$'
 STORE_RUN_REGEX = r'^(ST|SD)-[0-9]{4}-[0-9]{6}$'
+# A tenant's receipt: a FormalDocument, issued with a standing order's charge
+# (apps/rental_billing), that the register files under a channel of its own.
+RENTAL_RUN_REGEX = r'^RT-[0-9]{4}-[0-9]{6}$'
+_RENTAL_RUN = re.compile(RENTAL_RUN_REGEX)
+
+
+def is_rental_number(number) -> bool:
+    """True for a number from the RT run."""
+    return bool(_RENTAL_RUN.match(number or ''))
 
 
 def _tax_year(when: date | datetime | None) -> int:
@@ -126,6 +139,7 @@ def _series_sources() -> dict:
         SERIES_SUBSCRIPTION: (Invoice.objects.all(), 'invoice_number'),
         SERIES_STORE: store,
         SERIES_STORE_TRANSACTION: store,
+        SERIES_RENTAL: formal,
         SERIES_TAX_INVOICE: formal,
         SERIES_MANUAL_INVOICE_RECEIPT: formal,
         SERIES_RECEIPT: formal,
