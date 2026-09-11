@@ -843,3 +843,20 @@ class OfficeViewAndCachingTests(SigningTestCase):
         row = self.client.get(f'{TENANCIES}{self.tenancy.pk}/').data['current_contract']
         self.assertIsNotNone(row['signed_at'])
         self.assertIn('כהן', row['signer_name'])
+
+
+class SignedLinkClosesTests(SigningTestCase):
+    """A signed contract's link shows it for 30 days, then only says it was signed."""
+
+    def test_the_signed_link_closes_after_thirty_days(self):
+        self.send_link()
+        self.assertEqual(self.sign().status_code, status.HTTP_200_OK)
+        signed = self.fresh()
+        self.assertEqual(signing.link_state(signed).state, signing.STATE_SIGNED)
+
+        later = signed.signed_at + signing.SIGNED_LINK_LIFETIME + timedelta(minutes=1)
+        closed = signing.link_state(signed, now=later)
+        self.assertEqual(closed.state, signing.STATE_EXPIRED)
+        self.assertEqual(closed.status_code, 410)
+        payload = signing.public_payload(signed, closed)
+        self.assertEqual(set(payload), {'state', 'message', 'version'})

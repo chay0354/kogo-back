@@ -173,7 +173,10 @@ def live_contracts_prefetch() -> Prefetch:
     return Prefetch(
         'contracts',
         queryset=RentalContract.objects.exclude(status=RentalContract.STATUS_VOID)
-        .defer(*HEAVY_COLUMNS)
+        # The signer's name shows on the tenants row; the image and the text as
+        # signed stay in the database until someone opens the signature.
+        .select_related('signature')
+        .defer(*HEAVY_COLUMNS, 'signature__signature_png', 'signature__document_html')
         .order_by('-version'),
         to_attr=LIVE_CONTRACTS_ATTR,
     )

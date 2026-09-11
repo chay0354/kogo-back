@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 # The same lifetime as a card link: long enough for a tenant to get round to
 # it, short enough that an old message does not open a contract for ever.
 LINK_LIFETIME = timedelta(days=14)
+# After signing, the link keeps showing the signed contract for a while, then
+# closes: the page carries the tenant's ID, phone and email, and a forwarded
+# message should not open them for ever. The office keeps the signed copy.
+SIGNED_LINK_LIFETIME = timedelta(days=30)
 # A token is short_token(): 10 letters and digits. Anything else is not looked up at all.
 _TOKEN_PATTERN = re.compile(r'[A-Za-z0-9]{6,32}')
 
@@ -69,6 +73,7 @@ EXPIRED = 'פג תוקף הקישור — בקשו מהמשרד קישור חד�
 UPDATED = 'החוזה עודכן — בקשו מהמשרד קישור חדש'
 WITHDRAWN = 'הקישור בוטל — בקשו מהמשרד קישור חדש'
 ALREADY_SIGNED = 'החוזה כבר נחתם'
+SIGNED_CLOSED = 'החוזה נחתם. לעותק נוסף — פנו למשרד'
 BROKEN = 'לא ניתן לחתום על החוזה כרגע. פנו למשרד'
 
 # What the office reads.
@@ -228,6 +233,8 @@ def link_state(contract, *, now=None) -> LinkState:
     the signing refuses a stale contract (sign_contract, 409).
     """
     if contract.status == RentalContract.STATUS_SIGNED:
+        if contract.signed_at and (now or timezone.now()) - contract.signed_at > SIGNED_LINK_LIFETIME:
+            return LinkState(STATE_EXPIRED, SIGNED_CLOSED, 410)
         return LinkState(STATE_SIGNED, ALREADY_SIGNED, 409)
     # "Not the current one": a newer version exists. It voided this one when it
     # was issued, so this is the void case too, told apart only by its message.

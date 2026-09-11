@@ -235,9 +235,13 @@ def generate_signature_pdf(signature) -> bytes:
         Paragraph(escape(_rtl('הצהרות ואישורים')), styles['heading']),
         Spacer(1, 0.15 * cm),
         _label_table(
-            # Only what the signed document asked: a rental contract has no health
+            # A rental contract lists only what it asked — it has no health
             # declaration, and "לא אושר" there would misstate what was signed.
-            [(label, 'אושר' if consents.get(key) else 'לא אושר') for key, label in CONSENT_LABELS if key in consents],
+            # A registration's PDF stays exactly as it was.
+            [
+                (label, 'אושר' if consents.get(key) else 'לא אושר') for key, label in CONSENT_LABELS
+                if key in consents or signature.kind != signature.KIND_RENTAL_CONTRACT
+            ],
             styles['label'], styles['value'], label_width=CONTENT_WIDTH - 3.0 * cm,
         ),
         Spacer(1, 0.45 * cm),
