@@ -53,12 +53,10 @@ class PartnerEventBranchScopeTests(APITestCase):
         res = self.client.post(URL, self.rental(), format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
-    def test_nothing_is_created_in_another_branch_or_in_none(self):
+    def test_nothing_is_created_in_another_branch(self):
         for body in (
             self.event(branch=str(self.theirs.id)),
             self.rental(branch=str(self.theirs.id), studio=str(self.their_room.id)),
-            # No branch: an event the partner could not see again.
-            self.event(branch=None),
             # My branch on the event, another branch's studio in it.
             self.rental(studio=str(self.their_room.id)),
         ):
@@ -67,16 +65,28 @@ class PartnerEventBranchScopeTests(APITestCase):
                 self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN, res.data)
         self.assertFalse(ScheduleEvent.objects.exists())
 
+    def test_an_event_with_no_branch_is_asked_for_one(self):
+        # No branch: an event the partner could not see again. Refused as a
+        # missing field, in words the event dialog shows.
+        res = self.client.post(URL, self.event(branch=None), format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST, res.data)
+        self.assertEqual(res.data['branch'], ['יש לבחור סניף'])
+        self.assertFalse(ScheduleEvent.objects.exists())
+
     def test_an_event_cannot_be_moved_out_of_my_branches(self):
         event = ScheduleEvent.objects.create(
             name='חזרה', event_date=date(2026, 9, 20), start_time=time(10), end_time=time(11),
             branch=self.mine, city=self.city,
         )
         url = f'{URL}{event.id}/'
-        for body in ({'branch': str(self.theirs.id)}, {'branch': None}, {'studio': str(self.their_room.id)}):
+        for body, refused in (
+            ({'branch': str(self.theirs.id)}, status.HTTP_403_FORBIDDEN),
+            ({'branch': None}, status.HTTP_400_BAD_REQUEST),
+            ({'studio': str(self.their_room.id)}, status.HTTP_403_FORBIDDEN),
+        ):
             with self.subTest(body=body):
                 res = self.client.patch(url, body, format='json')
-                self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN, res.data)
+                self.assertEqual(res.status_code, refused, res.data)
         event.refresh_from_db()
         self.assertEqual(event.branch_id, self.mine.id)
         self.assertIsNone(event.studio_id)

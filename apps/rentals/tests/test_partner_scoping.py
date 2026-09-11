@@ -76,13 +76,25 @@ class PartnerScopingTests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('tenant_id', res.data)
 
+    def test_attaches_a_merchant_with_no_branch(self):
+        # The business-customer list shows it to this partner, so it may be picked.
+        office = make_customer('משרד', 'כללי')
+        res = self.client.post(URL, {
+            'branch': str(self.mine.id), 'tenant_id': str(office.id), 'monthly_amount': '1',
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(Tenancy.objects.get(pk=res.data['id']).tenant_id, office.id)
+
     def test_cannot_edit_a_merchant_card_outside_my_branches(self):
-        # A manager attached a merchant from another branch to this tenancy.
-        self.my_tenancy.tenant = make_customer('זר', 'אחר', branch=self.theirs)
-        self.my_tenancy.save()
-        res = self.client.patch(self.detail(self.my_tenancy), {'tenant': {'phone': '050'}}, format='json')
-        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(BusinessCustomer.objects.get(first_name='זר').phone, '')
+        # A manager attached a merchant from another branch, or one with no
+        # branch, to this tenancy. Either card is not this partner's to change.
+        for branch in (self.theirs, None):
+            with self.subTest(branch=branch):
+                self.my_tenancy.tenant = make_customer('זר', 'אחר', branch=branch)
+                self.my_tenancy.save()
+                res = self.client.patch(self.detail(self.my_tenancy), {'tenant': {'phone': '050'}}, format='json')
+                self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertEqual(BusinessCustomer.objects.get(pk=self.my_tenancy.tenant_id).phone, '')
 
     def test_links_only_rentals_of_my_branches(self):
         elsewhere = make_rental(self.theirs)
@@ -108,6 +120,19 @@ class PartnerScopingTests(APITestCase):
         res = self.client.post(f'{URL}import/', {'groups': [{**group, 'slot_ids': [str(mine.id)]}]}, format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
         self.assertEqual(str(res.data[0]['branch']), str(self.mine.id))
+
+    def test_suggestions_offer_a_merchant_with_no_branch(self):
+        # A merchant on file with no branch is one this partner can pick, so the
+        # import attaches it rather than opening a duplicate.
+        slot = make_rental(self.mine, renter_id_number='512345678')
+        office = make_customer('סטודיו', 'אור', company_number='512345678')
+        groups = self.client.get(f'{URL}suggestions/').data
+        self.assertEqual(groups[0]['existing_tenant']['id'], str(office.id))
+        res = self.client.post(f'{URL}import/', {'groups': [{
+            'tenant_id': str(office.id), 'monthly_amount': '1', 'slot_ids': [str(slot.id)],
+        }]}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
+        self.assertEqual(BusinessCustomer.objects.filter(company_number='512345678').count(), 1)
 
     def test_a_partner_with_no_branch_sees_and_creates_nothing(self):
         self.client.force_authenticate(make_user('partner-none@test', UserProfile.ROLE_PARTNER))

@@ -86,7 +86,9 @@ class ScheduleEventSerializer(serializers.ModelSerializer):
             return
         allowed = set(partner_branch_ids(user))
         if branch is None:
-            raise PermissionDenied('יש לבחור אחד מהסניפים שלך')
+            # A field left empty, not a refusal: answered on `branch` so the
+            # event dialog can tell the partner what to fill in.
+            raise serializers.ValidationError({'branch': 'יש לבחור סניף'})
         if branch.pk not in allowed:
             raise PermissionDenied('אין הרשאה לסניף הזה')
         studio = attrs.get('studio')
@@ -282,7 +284,13 @@ class ScheduleEventSerializer(serializers.ModelSerializer):
         is_rental = validated_data.get('is_studio_rental', instance.is_studio_rental)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-        instance.save()
+        # Every column but `tenancy`. Only the tenancy endpoints set the link
+        # (apps/rentals/slots.py); writing back the value loaded with this
+        # instance would silently undo a link or unlink committed meanwhile.
+        instance.save(update_fields=[
+            field.name for field in instance._meta.concrete_fields
+            if not field.primary_key and field.name != 'tenancy'
+        ])
         if instructors is not None:
             if is_rental:
                 instance.assigned_instructors.clear()

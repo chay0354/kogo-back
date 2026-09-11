@@ -215,6 +215,25 @@ def scope_store_products(qs, user):
     ).distinct()
 
 
+def scope_business_customers(qs, user):
+    """
+    Business customers (merchants) `user` may find and pick.
+
+    A partner reaches their own branches' merchants and the ones filed under
+    no branch: most merchants were created before a branch was recorded on
+    them, and hiding those would send a partner to open a duplicate. A partner
+    with no branch assigned sees none. Changing a merchant's card stays
+    narrower — scope_branches, their own branches only — because a card with
+    no branch is shared by every branch's documents.
+    """
+    if not is_scoped_partner(user):
+        return scope_branches(qs, user, 'branch')
+    ids = partner_branch_ids(user)
+    if not ids:
+        return qs.none()
+    return qs.filter(Q(branch_id__in=ids) | Q(branch__isnull=True))
+
+
 def partner_instructor_ids(user):
     """Instructor ids linked to a partner's assigned branches."""
     from apps.instructors.models import Instructor

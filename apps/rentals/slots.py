@@ -24,7 +24,7 @@ from django.db import transaction
 from django.db.models import CharField, Func, Q
 from django.utils import timezone
 
-from apps.core.scoping import scope_branches
+from apps.core.scoping import scope_branches, scope_business_customers
 from apps.scheduling.models import ScheduleEvent
 # The contract's own rule, a month is four weeks of every weekday rented, kept
 # with the terms the contract PDF is drawn from ("rate × 4" per weekday row).
@@ -207,8 +207,10 @@ def _existing_tenants(wanted: set, user) -> dict:
     """ID digits -> the merchant on file with that company or ID number, oldest first."""
     from apps.customers.models import BusinessCustomer
 
+    # The merchants the partner can pick as a tenant (tenant_id), so a match
+    # with no branch is offered rather than duplicated by the import.
     customers = (
-        scope_branches(BusinessCustomer.objects.all(), user, 'branch')
+        scope_business_customers(BusinessCustomer.objects.all(), user)
         .annotate(_company_digits=DigitsOnly('company_number'), _id_digits=DigitsOnly('id_number'))
         .filter(Q(_company_digits__in=wanted) | Q(_id_digits__in=wanted))
         .order_by('created_at', 'id')

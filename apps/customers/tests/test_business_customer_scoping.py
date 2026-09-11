@@ -1,4 +1,8 @@
-"""A partner sees the business customers of their own branches only, and a tenant is not deleted from under its agreement."""
+"""
+A partner finds the business customers of their own branches and the ones with
+no branch, changes only their own branches', and a tenant is not deleted from
+under its agreement.
+"""
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -31,7 +35,8 @@ class BusinessCustomerScopingTests(APITestCase):
         self.manager = make_user('manager-bc@test', UserProfile.ROLE_MANAGER)
         self.my_customer = BusinessCustomer.objects.create(first_name='רון', last_name='כהן', branch=self.mine)
         self.their_customer = BusinessCustomer.objects.create(first_name='רון', last_name='בר', branch=self.theirs)
-        # No branch: the office's own merchant, not any partner's.
+        # No branch: filed before merchants carried one. Every partner may find
+        # it; only the office changes it.
         self.office_customer = BusinessCustomer.objects.create(first_name='רון', last_name='לוי')
 
     def ids(self, res):
@@ -39,21 +44,32 @@ class BusinessCustomerScopingTests(APITestCase):
         rows = res.data['results'] if isinstance(res.data, dict) else res.data
         return {row['id'] for row in rows}
 
-    def test_a_partner_lists_and_searches_only_their_branches(self):
+    def test_a_partner_finds_their_branches_and_the_branchless_never_another_branch(self):
         self.client.force_authenticate(self.partner)
-        self.assertEqual(self.ids(self.client.get(URL)), {str(self.my_customer.id)})
-        self.assertEqual(self.ids(self.client.get(URL, {'search': 'רון'})), {str(self.my_customer.id)})
+        expected = {str(self.my_customer.id), str(self.office_customer.id)}
+        self.assertEqual(self.ids(self.client.get(URL)), expected)
+        self.assertEqual(self.ids(self.client.get(URL, {'search': 'רון'})), expected)
+        self.assertEqual(self.client.get(f'{URL}{self.office_customer.id}/').status_code, status.HTTP_200_OK)
 
-    def test_a_partner_cannot_open_change_or_delete_anyone_else(self):
+    def test_a_partner_cannot_open_change_or_delete_another_branchs_merchant(self):
         self.client.force_authenticate(self.partner)
-        for customer in (self.their_customer, self.office_customer):
-            url = f'{URL}{customer.id}/'
-            with self.subTest(customer=customer.last_name):
-                self.assertEqual(self.client.get(url).status_code, status.HTTP_404_NOT_FOUND)
-                self.assertEqual(self.client.patch(url, {'phone': '050'}, format='json').status_code, status.HTTP_404_NOT_FOUND)
-                self.assertEqual(self.client.delete(url).status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(BusinessCustomer.objects.count(), 3)
+        url = f'{URL}{self.their_customer.id}/'
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.patch(url, {'phone': '050'}, format='json').status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(BusinessCustomer.objects.get(pk=self.their_customer.pk).phone, '')
+
+    def test_a_partner_cannot_change_claim_or_delete_a_branchless_merchant(self):
+        # Its card is shared by every branch's documents: the office's to change.
+        self.client.force_authenticate(self.partner)
+        url = f'{URL}{self.office_customer.id}/'
+        for body in ({'phone': '050'}, {'branch_id': str(self.mine.id)}):
+            with self.subTest(body=body):
+                self.assertEqual(self.client.patch(url, body, format='json').status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.delete(url).status_code, status.HTTP_404_NOT_FOUND)
+        office = BusinessCustomer.objects.get(pk=self.office_customer.pk)
+        self.assertEqual((office.phone, office.branch_id), ('', None))
+        self.assertEqual(BusinessCustomer.objects.count(), 3)
 
     def test_a_partner_with_no_branch_sees_none(self):
         self.client.force_authenticate(make_user('partner-bc-none@test', UserProfile.ROLE_PARTNER))

@@ -18,7 +18,7 @@ from django.urls import reverse
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from apps.core.scoping import is_scoped_partner, partner_branch_ids, scope_branches
+from apps.core.scoping import is_scoped_partner, partner_branch_ids, scope_business_customers
 from apps.customers.models import BusinessCustomer
 from apps.rentals.contracts import contract_is_stale, current_contract
 from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, RentalContract, Tenancy
@@ -161,8 +161,10 @@ class TenancySerializer(serializers.ModelSerializer):
         user = _request_user(self)
         if user is not None:
             # A partner attaches only a merchant they can see: the same scope
-            # the business-customer list gives them. Anyone else is not found.
-            fields['tenant_id'].queryset = scope_branches(BusinessCustomer.objects.all(), user, 'branch')
+            # the business-customer list gives them — their branches' and the
+            # ones with no branch. Anyone else is not found. Editing that
+            # merchant's card through the tenancy stays narrower (validate).
+            fields['tenant_id'].queryset = scope_business_customers(BusinessCustomer.objects.all(), user)
         return fields
 
     def get_suggested_monthly_amount(self, obj) -> str:
