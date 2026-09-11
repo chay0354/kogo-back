@@ -32,8 +32,11 @@ class Signature(models.Model):
     ]
 
     SOURCE_WIDGET = 'widget'
+    # A rental contract signed by the tenant through its short link (apps/rentals/signing.py).
+    SOURCE_SIGNING_LINK = 'signing_link'
     SOURCE_CHOICES = [
         (SOURCE_WIDGET, "ווידג'ט הרשמה"),
+        (SOURCE_SIGNING_LINK, 'קישור לחתימה'),
     ]
 
     # The only field that may change after signing. A parent who registers two

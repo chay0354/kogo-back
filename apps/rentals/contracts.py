@@ -32,6 +32,10 @@ VOID_REASON_MAX_LENGTH = 500
 # Where the tenancies list keeps each tenancy's contracts that are not void, newest first.
 LIVE_CONTRACTS_ATTR = 'live_contracts'
 
+# A contract's large columns: the two PDFs and the terms. Lists and status
+# changes leave them in the database; only a download or a signing reads one.
+HEAVY_COLUMNS = ('pdf', 'terms', 'signed_pdf')
+
 
 class ContractError(ValueError):
     """A contract that cannot be issued or voided. The message is shown to the office as is."""
@@ -152,7 +156,7 @@ def void_contract(contract, reason='') -> RentalContract:
     if len(reason) > VOID_REASON_MAX_LENGTH:
         raise ContractError(f'סיבת הביטול ארוכה מדי (עד {VOID_REASON_MAX_LENGTH} תווים)')
     with transaction.atomic():
-        locked = RentalContract.objects.select_for_update().defer('pdf', 'terms').get(pk=contract.pk)
+        locked = RentalContract.objects.select_for_update().defer(*HEAVY_COLUMNS).get(pk=contract.pk)
         if locked.status == RentalContract.STATUS_SIGNED:
             raise ContractError('אי אפשר לבטל חוזה חתום')
         if locked.status == RentalContract.STATUS_VOID:
@@ -169,7 +173,7 @@ def live_contracts_prefetch() -> Prefetch:
     return Prefetch(
         'contracts',
         queryset=RentalContract.objects.exclude(status=RentalContract.STATUS_VOID)
-        .defer('pdf', 'terms')
+        .defer(*HEAVY_COLUMNS)
         .order_by('-version'),
         to_attr=LIVE_CONTRACTS_ATTR,
     )
@@ -182,7 +186,7 @@ def current_contract(tenancy):
         return live[0] if live else None
     return (
         tenancy.contracts.exclude(status=RentalContract.STATUS_VOID)
-        .defer('pdf', 'terms')
+        .defer(*HEAVY_COLUMNS)
         .order_by('-version')
         .first()
     )

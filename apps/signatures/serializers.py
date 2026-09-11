@@ -15,6 +15,8 @@ class SignatureListSerializer(serializers.ModelSerializer):
     kind_label = serializers.CharField(source='get_kind_display', read_only=True)
     family_id = serializers.UUIDField(read_only=True, allow_null=True)
     family_name = serializers.SerializerMethodField()
+    # A rental contract is signed by a merchant, not a family: its family is empty.
+    business_customer_name = serializers.SerializerMethodField()
     children = serializers.SerializerMethodField()
     branch_name = serializers.SerializerMethodField()
     pdf_url = serializers.SerializerMethodField()
@@ -24,13 +26,16 @@ class SignatureListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'kind', 'kind_label', 'signed_at',
             'signer_name', 'signer_id_number',
-            'family_id', 'family_name', 'children', 'branch_name',
+            'family_id', 'family_name', 'business_customer_name', 'children', 'branch_name',
             'document_title', 'document_sha256', 'consents', 'pdf_url',
         ]
         read_only_fields = fields
 
     def get_family_name(self, obj):
         return obj.family.name if obj.family_id else None
+
+    def get_business_customer_name(self, obj):
+        return obj.business_customer.full_name if obj.business_customer_id else None
 
     def get_children(self, obj):
         return [{'id': str(child.id), 'full_name': child.full_name} for child in obj.children.all()]

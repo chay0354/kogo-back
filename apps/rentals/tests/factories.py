@@ -70,6 +70,40 @@ def make_customer(first_name='דנה', last_name='לוי', **fields):
     return BusinessCustomer.objects.create(first_name=first_name, last_name=last_name, **fields)
 
 
+def sign_directly(contract, *, signer_name='דנה לוי'):
+    """
+    Sign a contract without going through its link: a Signature, and the one
+    save that writes it with the status (a bulk update may not sign). For tests
+    that need a signed contract, not a signing.
+    """
+    import hashlib
+
+    from django.utils import timezone
+
+    from apps.rentals.models import RentalContract, sha256_hex
+    from apps.signatures.models import Signature
+
+    png = b'\x89PNG\r\n\x1a\n-test'
+    signature = Signature.objects.create(
+        kind=Signature.KIND_RENTAL_CONTRACT,
+        signed_at=timezone.now(),
+        signer_name=signer_name,
+        document_title='חוזה שכירות',
+        document_html='<p>חוזה</p>',
+        document_sha256=hashlib.sha256(b'<p>\xd7\x97\xd7\x95\xd7\x96\xd7\x94</p>').hexdigest(),
+        signature_png=png,
+        signature_sha256=hashlib.sha256(png).hexdigest(),
+    )
+    contract = RentalContract.objects.get(pk=contract.pk)
+    contract.status = RentalContract.STATUS_SIGNED
+    contract.signed_at = signature.signed_at
+    contract.signature = signature
+    contract.signed_pdf = b'%PDF-1.4 signed'
+    contract.signed_pdf_sha256 = sha256_hex(contract.signed_pdf)
+    contract.save()
+    return contract
+
+
 def make_tenancy(branch, *, tenant=None, **fields):
     """A tenancy with everything a contract needs but its slots: dates, an agreed amount, a billing day."""
     if tenant is None:

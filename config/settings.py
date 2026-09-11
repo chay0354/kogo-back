@@ -242,6 +242,10 @@ REST_FRAMEWORK = {
         'payment_link_status': '120/min',
         'card_link_view': '30/min',
         'card_link_charge': '5/min',
+        # The tenant's rental-contract signing page (apps/rentals/public_views.py):
+        # reading it and its PDF, and submitting a signature.
+        'rental_sign_view': '30/min',
+        'rental_sign_submit': '5/min',
     },
 }
 

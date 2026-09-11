@@ -68,7 +68,7 @@ class SignatureViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = []
 
     def get_queryset(self):
-        qs = Signature.objects.select_related('family', 'branch').prefetch_related('children')
+        qs = Signature.objects.select_related('family', 'branch', 'business_customer').prefetch_related('children')
         qs = scope_signatures(qs, self.request.user)
         if self.action == 'list':
             # The image and the full text are for one signature at a time.

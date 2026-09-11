@@ -20,7 +20,7 @@ LIST_URL = '/api/v1/signatures/'
 
 LIST_KEYS = {
     'id', 'kind', 'kind_label', 'signed_at', 'signer_name', 'signer_id_number',
-    'family_id', 'family_name', 'children', 'branch_name', 'document_title',
+    'family_id', 'family_name', 'business_customer_name', 'children', 'branch_name', 'document_title',
     'document_sha256', 'consents', 'pdf_url',
 }
 DETAIL_KEYS = LIST_KEYS | {'document_text', 'signature_image', 'ip_address', 'user_agent', 'refs'}

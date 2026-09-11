@@ -9,10 +9,13 @@
     POST               tenancies/import/            {"groups": [...]}, in one transaction
     GET                contracts/{id}/pdf/          the stored PDF, checked against its fingerprint first
     POST               contracts/{id}/void/         {"reason": "..."}, a draft, sent or viewed contract
+    POST               contracts/{id}/signing-link/         a new signing link for the current open contract
+    POST               contracts/{id}/signing-link/cancel/  withdraw it; the contract is a draft again
+    GET                contracts/{id}/signed-pdf/   the signed copy, checked against its fingerprint first
 
 Managers and partners only. A partner reads and writes only the tenancies of
 their own branches and those tenancies' contracts; one with no branches
-assigned sees none.
+assigned sees none. The tenant's own page, with no login, is public_views.py.
 """
 from __future__ import annotations
 
@@ -32,15 +35,30 @@ from apps.core.permissions import IsManagerOrPartner
 from apps.core.scoping import scope_branches
 from apps.customers.phone_search import phone_query_digits
 from apps.rentals import slots as slot_rules
-from apps.rentals.contracts import ContractError, issue_contract, live_contracts_prefetch, void_contract
+from apps.rentals.contracts import (
+    HEAVY_COLUMNS,
+    ContractError,
+    issue_contract,
+    live_contracts_prefetch,
+    void_contract,
+)
 from apps.rentals.importer import GroupError, import_tenancies
 from apps.rentals.models import RentalContract, Tenancy
 from apps.rentals.serializers import RentalContractSerializer, SuggestionSerializer, TenancySerializer
+from apps.rentals.signing import cancel_signing_link, issue_signing_link
 from apps.scheduling.models import ScheduleEvent
 
 logger = logging.getLogger(__name__)
 
 _NON_DIGITS = re.compile(r'\D+')
+
+
+def contracts_for_display():
+    """Contracts as the office lists them: with the issuer and the signer, without the heavy columns."""
+    return (
+        RentalContract.objects.select_related('created_by', 'signature')
+        .defer(*HEAVY_COLUMNS, 'signature__signature_png', 'signature__document_html')
+    )
 
 
 def _search_tenancies(queryset, raw):
@@ -191,19 +209,16 @@ class TenancyViewSet(viewsets.ModelViewSet):
         new contract, or 400 with the reason none can be issued.
         """
         tenancy = self.get_object()
+        # The request builds each live contract's signing URL (signing_url).
+        context = {'request': request}
         if request.method == 'POST':
             try:
                 contract = issue_contract(tenancy, request.user)
             except ContractError as exc:
                 return _contract_error(exc)
-            return Response(RentalContractSerializer(contract).data, status=status.HTTP_201_CREATED)
-        contracts = (
-            RentalContract.objects.filter(tenancy=tenancy)
-            .select_related('created_by')
-            .defer('pdf', 'terms')
-            .order_by('-version')
-        )
-        return Response(RentalContractSerializer(contracts, many=True).data)
+            return Response(RentalContractSerializer(contract, context=context).data, status=status.HTTP_201_CREATED)
+        contracts = contracts_for_display().filter(tenancy=tenancy).order_by('-version')
+        return Response(RentalContractSerializer(contracts, many=True, context=context).data)
 
     @action(detail=False, methods=['get'])
     def suggestions(self, request):
@@ -235,7 +250,8 @@ class TenancyViewSet(viewsets.ModelViewSet):
 
 class RentalContractViewSet(viewsets.GenericViewSet):
     """
-    חוזי שכירות — one issued contract: download its stored PDF, or void it.
+    חוזי שכירות — one issued contract: download its stored PDF or its signed
+    copy, void it, or send it for signing (and withdraw the link).
 
     There is no list or edit here. A tenancy lists and issues its own contracts
     (TenancyViewSet.contracts), and a contract is never edited.
@@ -247,31 +263,73 @@ class RentalContractViewSet(viewsets.GenericViewSet):
     filter_backends = []
     lookup_value_regex = '[0-9a-fA-F-]{36}'
 
+    # The one heavy column each download reads; everything else leaves them all in the database.
+    _READS = {'pdf': 'pdf', 'signed_pdf': 'signed_pdf'}
+
     def get_queryset(self):
-        queryset = RentalContract.objects.select_related('created_by')
-        if self.action != 'pdf':
-            # The PDF and the terms are the heavy columns, and only the download reads one.
-            queryset = queryset.defer('pdf', 'terms')
+        reads = self._READS.get(self.action)
+        queryset = (
+            RentalContract.objects.select_related('created_by', 'signature')
+            .defer(*(column for column in HEAVY_COLUMNS if column != reads))
+            .defer('signature__signature_png', 'signature__document_html')
+        )
         # A partner reaches the contracts of their own branches' tenancies only.
         return scope_branches(queryset, self.request.user, 'tenancy__branch')
 
-    @action(detail=True, methods=['get'])
-    def pdf(self, request, pk=None):
-        """The PDF exactly as it was issued. A file that no longer matches its fingerprint is never served."""
-        contract = self.get_object()
-        if not contract.pdf_is_intact():
+    def _pdf_response(self, contract, data, intact: bool, filename: str, what: str):
+        """The stored file as a download. A file that no longer matches its fingerprint is never served."""
+        if not intact:
             logger.error(
-                'Rental contract %s (tenancy %s, version %s): the stored PDF does not match its '
-                'SHA-256 %s; refusing to serve it',
-                contract.pk, contract.tenancy_id, contract.version, contract.pdf_sha256,
+                'Rental contract %s (tenancy %s, version %s): the stored %s does not match its '
+                'SHA-256; refusing to serve it',
+                contract.pk, contract.tenancy_id, contract.version, what,
             )
             return Response(
                 {'error': 'קובץ החוזה השמור אינו תקין ולכן לא הורד. יש לפנות לתמיכה'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        response = HttpResponse(bytes(contract.pdf), content_type='application/pdf')
-        response['Content-Disposition'] = f'attachment; filename="rental-contract-v{contract.version}.pdf"'
+        response = HttpResponse(bytes(data), content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
+
+    @action(detail=True, methods=['get'])
+    def pdf(self, request, pk=None):
+        """The PDF exactly as it was issued."""
+        contract = self.get_object()
+        return self._pdf_response(
+            contract, contract.pdf, contract.pdf_is_intact(), f'rental-contract-v{contract.version}.pdf', 'PDF',
+        )
+
+    @action(detail=True, methods=['get'], url_path='signed-pdf')
+    def signed_pdf(self, request, pk=None):
+        """The signed copy exactly as it was signed. A contract that is not signed has none."""
+        contract = self.get_object()
+        if contract.status != RentalContract.STATUS_SIGNED:
+            return Response({'error': 'לחוזה הזה אין עותק חתום'}, status=status.HTTP_404_NOT_FOUND)
+        return self._pdf_response(
+            contract, contract.signed_pdf, contract.signed_pdf_is_intact(),
+            f'rental-contract-v{contract.version}-signed.pdf', 'signed copy',
+        )
+
+    @action(detail=True, methods=['post'], url_path='signing-link')
+    def signing_link(self, request, pk=None):
+        """A new signing link — the first, or one that retires the last. The contract comes back with its URL."""
+        contract = self.get_object()
+        try:
+            linked = issue_signing_link(contract)
+        except ContractError as exc:
+            return _contract_error(exc)
+        return Response(self.get_serializer(linked).data)
+
+    @action(detail=True, methods=['post'], url_path='signing-link/cancel')
+    def cancel_signing_link(self, request, pk=None):
+        """Withdraw the signing link. The URL stops working and the contract is a draft again."""
+        contract = self.get_object()
+        try:
+            withdrawn = cancel_signing_link(contract)
+        except ContractError as exc:
+            return _contract_error(exc)
+        return Response(self.get_serializer(withdrawn).data)
 
     @action(detail=True, methods=['post'])
     def void(self, request, pk=None):

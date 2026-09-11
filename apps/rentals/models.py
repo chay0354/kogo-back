@@ -137,19 +137,33 @@ CONTRACT_FROZEN_FIELDS = ('tenancy_id', 'version', 'terms', 'terms_sha256', 'pdf
 # Who issued it is fixed as well, except that it may be cleared: deleting the
 # user's account sets it to NULL (on_delete=SET_NULL), and the contract outlives the account.
 CONTRACT_ISSUER_FIELDS = ('created_by', 'created_by_id')
+# The link the tenant signs through (apps/rentals/signing.py). They move while
+# the contract is open — sent, rotated, opened, withdrawn — and never after.
+CONTRACT_LINK_FIELDS = ('sign_token', 'sign_token_created_at', 'sent_at', 'viewed_at')
+# What signing wrote. Set once, together with status 'signed', by the one save
+# that signs the contract, and never again.
+CONTRACT_SIGNED_FIELDS = ('signed_at', 'signature_id', 'signed_pdf', 'signed_pdf_sha256')
+# The rest of the contract's life.
+CONTRACT_LIFE_FIELDS = ('status', 'voided_at', 'void_reason')
+# Every field save() compares with the stored row.
+_TRACKED_FIELDS = (
+    *CONTRACT_FROZEN_FIELDS, 'created_by_id', *CONTRACT_LINK_FIELDS, *CONTRACT_SIGNED_FIELDS, *CONTRACT_LIFE_FIELDS,
+)
+# A bulk update names a foreign key either way.
+_FIELD_ALIASES = {'tenancy': 'tenancy_id', 'created_by': 'created_by_id', 'signature': 'signature_id'}
 
 
 def _frozen_value(name, value):
-    """A frozen field's value in one comparable form, however it was loaded or assigned."""
+    """A tracked field's value in one comparable form, however it was loaded or assigned."""
     if value is None:
         return None
-    if name == 'pdf':
+    if name in ('pdf', 'signed_pdf'):
         return bytes(value)
     if name == 'terms':
         return canonical_json(value)
     if name == 'version':
         return int(value)
-    if name == 'created_at':
+    if name.endswith('_at'):
         # Aware datetimes compare by the instant, whatever zone each was read in.
         return value
     return str(value)
@@ -166,13 +180,26 @@ def _refused_update_fields(values: dict) -> list[str]:
 
 class RentalContractQuerySet(models.QuerySet):
     def update(self, **kwargs):
-        # A bulk update skips save(). It is refused the frozen fields as well,
-        # so the rule has no side door in the ORM.
-        frozen = _refused_update_fields(kwargs)
-        if frozen:
+        # A bulk update skips save(). It is held to the same rules, so they
+        # have no side door in the ORM: the frozen fields never change, a
+        # contract is signed only by a save that writes its signature with it,
+        # a signed contract is never touched, and a void one never reopens.
+        refused = _refused_update_fields(kwargs)
+        refused += sorted(
+            name for name in kwargs if _FIELD_ALIASES.get(name, name) in CONTRACT_SIGNED_FIELDS
+        )
+        if kwargs.get('status') == RentalContract.STATUS_SIGNED:
+            refused.append('status')
+        if refused:
             raise FrozenContractError(
-                f'{", ".join(frozen)} of a rental contract never change once issued; issue a new version'
+                f'{", ".join(refused)} of a rental contract cannot be bulk-updated: the frozen fields never '
+                'change once issued, and a contract is signed only through apps/rentals/signing.py'
             )
+        if self.filter(status=RentalContract.STATUS_SIGNED).exists():
+            raise FrozenContractError('A signed rental contract never changes')
+        moves_link = any(_FIELD_ALIASES.get(name, name) in (*CONTRACT_LINK_FIELDS, 'status') for name in kwargs)
+        if moves_link and self.filter(status=RentalContract.STATUS_VOID).exists():
+            raise FrozenContractError('A void rental contract never reopens and gets no signing link')
         return super().update(**kwargs)
 
 
@@ -188,10 +215,14 @@ class RentalContract(models.Model):
     later must find it matching what is on file. So a contract is never edited:
     a mistake, or a change to the agreement, is corrected by issuing a new
     version, which voids the previous one unless it was signed. Only its life
-    moves on — the status, and when and why it was voided.
+    moves on — the status, when and why it was voided, and its signing link.
 
-    status: draft → sent → viewed → signed, or void. Phase 3 moves sent, viewed
-    and signed; phase 2 issues drafts and voids them.
+    status: draft → sent → viewed → signed, or void. Phase 2 issues drafts and
+    voids them; phase 3 (apps/rentals/signing.py) moves sent, viewed and
+    signed. While the contract is open its link may be sent, rotated, opened
+    and withdrawn (back to draft). The save that signs it writes the signature,
+    the time and the signed copy together, and from then on nothing changes at
+    all: no void, no new link. A void contract never reopens and gets no link.
 
     The PDF is kept in the database: the host is serverless and has no file
     storage that outlives a request.
@@ -211,6 +242,8 @@ class RentalContract(models.Model):
     ]
     # Still in play: may yet be sent, viewed or signed. A new version voids these.
     OPEN_STATUSES = (STATUS_DRAFT, STATUS_SENT, STATUS_VIEWED)
+    # Out with the tenant: a signing link has been sent and not withdrawn.
+    LINKED_STATUSES = (STATUS_SENT, STATUS_VIEWED)
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     # PROTECT: a contract issued to a tenant is part of the tenancy's record;
@@ -238,6 +271,36 @@ class RentalContract(models.Model):
     voided_at = models.DateTimeField(null=True, blank=True, verbose_name='תאריך ביטול')
     void_reason = models.TextField(blank=True, verbose_name='סיבת ביטול')
 
+    # The signing link, <frontend>/s/<sign_token>. Short, like a card link's,
+    # because the tenant reads it off a message. It lives 14 days from
+    # sign_token_created_at; rotating it replaces the token, withdrawing it
+    # clears it. A signed or void contract keeps the token it had, so the
+    # link still says what became of the contract.
+    sign_token = models.CharField(
+        max_length=32, unique=True, null=True, blank=True, editable=False, verbose_name='קוד קישור החתימה',
+    )
+    sign_token_created_at = models.DateTimeField(null=True, blank=True, verbose_name='מועד יצירת הקישור')
+    sent_at = models.DateTimeField(null=True, blank=True, verbose_name='נשלח לחתימה')
+    # When the current link was first opened. A new link starts it again.
+    viewed_at = models.DateTimeField(null=True, blank=True, verbose_name='נצפה לראשונה')
+    signed_at = models.DateTimeField(null=True, blank=True, verbose_name='מועד החתימה')
+    # PROTECT: the signature is the evidence this contract was signed, and the
+    # contract is the evidence of what the signature agreed to.
+    signature = models.ForeignKey(
+        'signatures.Signature',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='rental_contracts',
+        verbose_name='חתימה',
+    )
+    # The contract as signed: the issued PDF drawn again with the signature in
+    # its signature block. The unsigned `pdf` stays exactly as it was issued.
+    signed_pdf = models.BinaryField(null=True, blank=True, verbose_name='העותק החתום (PDF)')
+    signed_pdf_sha256 = models.CharField(
+        max_length=64, null=True, blank=True, editable=False, verbose_name='SHA-256 של העותק החתום',
+    )
+
     objects = RentalContractQuerySet.as_manager()
 
     class Meta:
@@ -261,6 +324,35 @@ class RentalContract(models.Model):
                 condition=models.Q(status='signed'),
                 name='rental_contract_one_signed_per_tenancy',
             ),
+            # Signed means signed with something to show for it: the signature,
+            # the moment and the signed copy, all of them — and a contract that
+            # is not signed holds none of them.
+            models.CheckConstraint(
+                check=(
+                    models.Q(
+                        status='signed',
+                        signed_at__isnull=False,
+                        signature__isnull=False,
+                        signed_pdf__isnull=False,
+                        signed_pdf_sha256__isnull=False,
+                    )
+                    | (
+                        ~models.Q(status='signed')
+                        & models.Q(
+                            signed_at__isnull=True,
+                            signature__isnull=True,
+                            signed_pdf__isnull=True,
+                            signed_pdf_sha256__isnull=True,
+                        )
+                    )
+                ),
+                name='rental_contract_signed_with_its_signature',
+            ),
+            # A link's 14 days are counted from sign_token_created_at.
+            models.CheckConstraint(
+                check=models.Q(sign_token__isnull=True) | models.Q(sign_token_created_at__isnull=False),
+                name='rental_contract_link_has_its_time',
+            ),
         ]
 
     def __str__(self):
@@ -278,22 +370,52 @@ class RentalContract(models.Model):
 
     def _refuse_frozen_changes(self) -> None:
         # A deferred field was never loaded, so it cannot have been changed.
-        loaded = [name for name in (*CONTRACT_FROZEN_FIELDS, 'created_by_id') if name in self.__dict__]
+        loaded = [name for name in _TRACKED_FIELDS if name in self.__dict__]
         if not loaded:
             return
-        stored = type(self)._base_manager.filter(pk=self.pk).values(*loaded).first()
+        # The stored status decides what may move, loaded or not on this instance.
+        stored = type(self)._base_manager.filter(pk=self.pk).values(*{*loaded, 'status'}).first()
         if stored is None:
             return
         changed = {
             name: getattr(self, name) for name in loaded
             if _frozen_value(name, stored[name]) != _frozen_value(name, getattr(self, name))
         }
-        changed = _refused_update_fields(changed)
-        if changed:
+        refused = _refused_update_fields(changed)
+        if refused:
             raise FrozenContractError(
-                f'Rental contract {self.pk}: {", ".join(changed)} never change once issued; issue a new version'
+                f'Rental contract {self.pk}: {", ".join(refused)} never change once issued; issue a new version'
+            )
+        # Clearing the issuer is the one change every contract accepts.
+        changed.pop('created_by_id', None)
+        if not changed:
+            return
+        was = stored['status']
+        if was == self.STATUS_SIGNED:
+            raise FrozenContractError(
+                f'Rental contract {self.pk} is signed and never changes again ({", ".join(sorted(changed))})'
+            )
+        if was == self.STATUS_VOID:
+            reopened = sorted(name for name in changed if name in ('status', *CONTRACT_LINK_FIELDS, *CONTRACT_SIGNED_FIELDS))
+            if reopened:
+                raise FrozenContractError(
+                    f'Rental contract {self.pk} is void: it never reopens and gets no link ({", ".join(reopened)})'
+                )
+            return
+        signing = sorted(name for name in changed if name in CONTRACT_SIGNED_FIELDS)
+        if signing and self.status != self.STATUS_SIGNED:
+            raise FrozenContractError(
+                f'Rental contract {self.pk}: {", ".join(signing)} are written only by the save that signs it'
             )
 
     def pdf_is_intact(self) -> bool:
         """The stored PDF still hashes to the fingerprint taken when it was issued."""
         return bool(self.pdf_sha256) and sha256_hex(self.pdf) == self.pdf_sha256
+
+    def signed_pdf_is_intact(self) -> bool:
+        """The signed copy still hashes to the fingerprint taken when it was signed."""
+        return (
+            self.signed_pdf is not None
+            and bool(self.signed_pdf_sha256)
+            and sha256_hex(self.signed_pdf) == self.signed_pdf_sha256
+        )

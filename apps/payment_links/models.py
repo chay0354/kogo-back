@@ -174,13 +174,18 @@ def money(value) -> Decimal:
 _TOKEN_ALPHABET = string.ascii_letters + string.digits
 
 
-def new_card_link_token() -> str:
+def short_token() -> str:
     """
     10 base-62 characters (~59 bits): short enough to read off a phone, far too
-    wide to guess — and the preview endpoint is throttled on top of that.
+    wide to guess — and the public endpoints behind it are throttled on top of
+    that. Uniqueness is the caller's to check, against its own table.
     """
+    return ''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(10))
+
+
+def new_card_link_token() -> str:
     while True:
-        token = ''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(10))
+        token = short_token()
         if not CardLink.objects.filter(token=token).exists():
             return token
 

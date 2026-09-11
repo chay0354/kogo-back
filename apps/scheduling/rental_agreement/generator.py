@@ -22,15 +22,20 @@ There is one renderer, generate_tenancy_contract_pdf(terms), and it reads no
 model: it draws what the terms (terms.py) say. A tenancy's stored contracts are
 drawn with it (apps/rentals/contracts.py), and so is the calendar's per-event
 download: generate_rental_agreement_pdf(event) builds the terms of its one
-event and hands them over, so the two documents cannot drift apart.
+event and hands them over, so the two documents cannot drift apart. The signed
+copy of a contract is the same drawing with the tenant's signature in the
+signature block (`signed=SignedBy(...)`), and text.py writes the same contract
+out as plain paragraphs for the signing page, from the same helpers below.
 """
 from __future__ import annotations
 
 import io
 import os
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal
 from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 from bidi.algorithm import get_display
 from reportlab.lib import colors
@@ -38,10 +43,11 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak,
+    Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak,
 )
 
 from . import content
@@ -67,6 +73,83 @@ MUTED_GRAY = colors.HexColor('#6b7280')
 # How much of terms_sha256 the foot of each page of a stored contract prints:
 # enough to tell two versions apart at a glance, short enough to read aloud.
 FOOTER_HASH_CHARS = 12
+
+# The signed copy states the time of signing in Israel, whatever zone the server runs in.
+ISRAEL_TZ = ZoneInfo('Asia/Jerusalem')
+# The box the tenant's signature is scaled into, inside the renter's column.
+SIGNATURE_IMAGE_MAX_WIDTH = 6.0 * cm
+SIGNATURE_IMAGE_MAX_HEIGHT = 2.2 * cm
+
+PAYMENT_TABLE_HEADING = '1. פירוט תשלומים ושעות פעילות - (טבלה שאפשר להוסיף עוד שורות)'
+STUDIO_PARTY_HEADING = 'שנערך ונחתם בין:'
+STUDIO_PARTY_ALIAS = '(להלן: "הסטודיו")'
+TENANT_PARTY_HEADING = 'לבין המפעיל:'
+TENANT_PARTY_ALIAS = '(להלן: "המפעיל" או "השוכר")'
+
+
+@dataclass(frozen=True)
+class SignedBy:
+    """The tenant's signature, as the signed copy draws it into the signature block."""
+
+    png: bytes
+    name: str
+    id_number: str
+    signed_at: datetime
+    signature_id: str
+    terms_sha256: str
+
+    def local_time(self, fmt: str) -> str:
+        return self.signed_at.astimezone(ISRAEL_TZ).strftime(fmt)
+
+
+def studio_contact_line(studio: dict) -> str:
+    return f'סטודיו קוגומלו | דוא"ל: {studio["email"]} | טלפון: {studio["phone"]}'
+
+
+def studio_party_line(studio: dict) -> str:
+    return f'{studio["name"]} (ח.פ. {studio["company_number"]})'
+
+
+def activity_line(terms: dict) -> str:
+    return f'הסטודיו נותן בזה רשות שימוש למפעיל באולם הסטודיו, למטרת הפעלת חוג בתחום: {terms["activity"]}.'
+
+
+def row_when(row: dict) -> str:
+    """A payment-table row's day: the weekday of a weekly slot, the date of a one-time rental."""
+    return DAY_NAMES_HE[row['weekday']] if row['kind'] == KIND_WEEKLY else _format_date(row['date'])
+
+
+def row_hours(row: dict) -> str:
+    return _format_hours(row['start_time'], row['end_time'])
+
+
+def row_place(row: dict, terms: dict) -> str:
+    branch_name = (terms.get('branch') or {}).get('name') or '-'
+    return f'{branch_name} · {row["studio"]}' if row.get('studio') else branch_name
+
+
+def shekels(amount) -> str:
+    return _shekels(amount)
+
+
+def vat_label(terms: dict) -> str:
+    return f'מע"מ {_percent(terms["vat_rate"])}%:'
+
+
+def pay_label(terms: dict) -> str:
+    return 'סה"כ לתשלום (כולל מע"מ):' if terms['period'] == PERIOD_ONCE else 'סה"כ לתשלום חודשי (כולל מע"מ):'
+
+
+def section_2_items(terms: dict) -> list[tuple[str, str | None, list[tuple[str, bool]]]]:
+    """Section 2 as (numbered text, its emphasized line or None, its bullets), with the months filled in."""
+    start_month = _hebrew_month_year(date.fromisoformat(terms['start_date']))
+    end_month = _hebrew_month_year(date.fromisoformat(terms['end_date']))
+    items = []
+    for i, (normal, emphasized) in enumerate(content.SECTION_2_ITEMS, start=1):
+        text = normal.format(start_month=start_month, end_month=end_month)
+        bullets = list(content.SECTION_2_ITEM_8_BULLETS) if i == 8 else []
+        items.append((f'{i}. {text}', emphasized, bullets))
+    return items
 
 
 def _ensure_fonts_registered() -> None:
@@ -191,6 +274,7 @@ def _build_styles() -> dict[str, ParagraphStyle]:
         'sig_label': ParagraphStyle('sig_label', fontName='Heebo-Bold', fontSize=9.5, alignment=TA_CENTER),
         'sig_line': ParagraphStyle('sig_line', fontName='Heebo', fontSize=9.5, alignment=TA_CENTER),
         'sig_sub': ParagraphStyle('sig_sub', fontName='Heebo', fontSize=8.5, alignment=TA_CENTER, textColor=colors.HexColor('#6b7280')),
+        'sig_proof': ParagraphStyle('sig_proof', fontName='Heebo', fontSize=7, alignment=TA_CENTER, leading=9.5, textColor=MUTED_GRAY),
     }
 
 
@@ -204,13 +288,20 @@ def generate_rental_agreement_pdf(event) -> bytes:
     return generate_tenancy_contract_pdf(event_terms(event))
 
 
-def generate_tenancy_contract_pdf(terms: dict, *, version: int | None = None) -> bytes:
+def generate_tenancy_contract_pdf(
+    terms: dict, *, version: int | None = None, signed: SignedBy | None = None,
+) -> bytes:
     """Draw a rental contract from its terms (terms.py) and return the PDF bytes.
 
     `version` is the stored contract's number. With it, every page carries a
     small line with the version and the first characters of terms_sha256, so a
     printed page names the exact terms it belongs to. The calendar's per-event
     download is no stored contract and passes none.
+
+    `signed` draws the signed copy: the date of signing at the top, and in the
+    tenant's column of the signature block their signature, name, ID and the
+    time, with the terms fingerprint and the signature's id beneath. Everything
+    else is the contract exactly as it was issued.
     """
     _ensure_fonts_registered()
 
@@ -227,32 +318,27 @@ def generate_tenancy_contract_pdf(terms: dict, *, version: int | None = None) ->
 
     story = []
 
-    story.append(_para('תאריך חתימה: ______________', s['signdate'], max_width))
+    sign_date = signed.local_time('%d/%m/%Y') if signed else '______________'
+    story.append(_para(f'תאריך חתימה: {sign_date}', s['signdate'], max_width))
     story.append(_para(content.AGREEMENT_TITLE, s['title'], max_width))
-    story.append(_para(
-        f'סטודיו קוגומלו | דוא"ל: {studio["email"]} | טלפון: {studio["phone"]}',
-        s['contact'], max_width,
-    ))
+    story.append(_para(studio_contact_line(studio), s['contact'], max_width))
 
-    story.append(_para('שנערך ונחתם בין:', s['heading'], max_width))
-    story.append(_para(f'{studio["name"]} (ח.פ. {studio["company_number"]})', s['bold'], max_width))
-    story.append(_para('(להלן: "הסטודיו")', s['body'], max_width))
+    story.append(_para(STUDIO_PARTY_HEADING, s['heading'], max_width))
+    story.append(_para(studio_party_line(studio), s['bold'], max_width))
+    story.append(_para(STUDIO_PARTY_ALIAS, s['body'], max_width))
     story.append(Spacer(1, 6))
-    story.append(_para('לבין המפעיל:', s['heading'], max_width))
-    story.append(_para(_tenant_line(tenant), s['bold'], max_width))
-    contact = _tenant_contact_line(tenant)
+    story.append(_para(TENANT_PARTY_HEADING, s['heading'], max_width))
+    story.append(_para(tenant_line(tenant), s['bold'], max_width))
+    contact = tenant_contact_line(tenant)
     if contact:
         story.append(_para(contact, s['body'], max_width))
-    story.append(_para('(להלן: "המפעיל" או "השוכר")', s['body'], max_width))
+    story.append(_para(TENANT_PARTY_ALIAS, s['body'], max_width))
     story.append(Spacer(1, 10))
 
-    story.append(_para(
-        f'הסטודיו נותן בזה רשות שימוש למפעיל באולם הסטודיו, למטרת הפעלת חוג בתחום: {terms["activity"]}.',
-        s['body'], max_width,
-    ))
+    story.append(_para(activity_line(terms), s['body'], max_width))
     story.append(Spacer(1, 8))
 
-    story.append(_para('1. פירוט תשלומים ושעות פעילות - (טבלה שאפשר להוסיף עוד שורות)', s['heading'], max_width))
+    story.append(_para(PAYMENT_TABLE_HEADING, s['heading'], max_width))
     story.extend(_build_payment_table(terms, s))
 
     story.append(PageBreak())
@@ -265,14 +351,14 @@ def generate_tenancy_contract_pdf(terms: dict, *, version: int | None = None) ->
     story.extend(_build_section_3(s, max_width))
 
     story.append(Spacer(1, 14))
-    story.extend(_build_signature_block(tenant['name'], s))
+    story.extend(_build_signature_block(tenant['name'], s, signed))
 
     decorate = _page_decorator(contract_footer_text(version, terms) if version is not None else None)
     doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
     return buffer.getvalue()
 
 
-def _tenant_line(tenant: dict) -> str:
+def tenant_line(tenant: dict) -> str:
     """'שם המפעיל: … | ת.ז: …', with the company number (ח.פ) for a company."""
     parts = [f'שם המפעיל: {tenant["name"]}']
     if tenant.get('company_number'):
@@ -283,7 +369,7 @@ def _tenant_line(tenant: dict) -> str:
     return ' | '.join(parts)
 
 
-def _tenant_contact_line(tenant: dict) -> str:
+def tenant_contact_line(tenant: dict) -> str:
     """The tenant's phone, email and address, those that are known. Empty when none is."""
     parts = [
         f'{label} {tenant[key]}'
@@ -320,18 +406,14 @@ def _build_payment_table(terms: dict, s: dict[str, ParagraphStyle]) -> list:
         sum_header, 'תעריף שעתי (לפני מע"מ)', 'שעות פעילות', when_header,
         'סניף / סטודיו' if with_studio else 'סניף',
     ]
-    branch_name = (terms.get('branch') or {}).get('name') or '-'
-
     body = []
     for row in rows:
-        when = DAY_NAMES_HE[row['weekday']] if row['kind'] == KIND_WEEKLY else _format_date(row['date'])
-        place = f'{branch_name} · {row["studio"]}' if row.get('studio') else branch_name
         body.append([
             t(_shekels(row['sum']), col_widths[0]),
             c(_shekels(row['rate']), col_widths[1]),
-            c(_format_hours(row['start_time'], row['end_time']), col_widths[2]),
-            c(when, col_widths[3]),
-            c(place, col_widths[4]),
+            c(row_hours(row), col_widths[2]),
+            c(row_when(row), col_widths[3]),
+            c(row_place(row, terms), col_widths[4]),
         ])
 
     header_row = [h(text, w) for text, w in zip(headers, col_widths)]
@@ -345,18 +427,14 @@ def _build_payment_table(terms: dict, s: dict[str, ParagraphStyle]) -> list:
         ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ]))
 
-    pay_label = 'סה"כ לתשלום (כולל מע"מ):' if terms['period'] == PERIOD_ONCE else 'סה"כ לתשלום חודשי (כולל מע"מ):'
     totals_col0_width = sum(col_widths[:4])
     # The terms' own amount, VAT and total, not the rows added up: a tenancy's
     # contract states the monthly amount the office agreed on, which may differ
     # from rate × 4 per row (apps/rentals/contracts.py build_terms).
     totals_data = [
         [t(_shekels(terms['monthly_amount']), totals_col0_width), t('סה"כ לפני מע"מ:', col_widths[4])],
-        [
-            t(_shekels(terms['vat_amount']), totals_col0_width),
-            t(f'מע"מ {_percent(terms["vat_rate"])}%:', col_widths[4]),
-        ],
-        [t(_shekels(terms['monthly_total']), totals_col0_width), t(pay_label, col_widths[4])],
+        [t(_shekels(terms['vat_amount']), totals_col0_width), t(vat_label(terms), col_widths[4])],
+        [t(_shekels(terms['monthly_total']), totals_col0_width), t(pay_label(terms), col_widths[4])],
     ]
     totals_table = Table(totals_data, colWidths=[totals_col0_width, col_widths[4]], hAlign='CENTER')
     totals_table.setStyle(TableStyle([
@@ -372,18 +450,14 @@ def _build_payment_table(terms: dict, s: dict[str, ParagraphStyle]) -> list:
 
 def _build_section_2(terms: dict, s: dict[str, ParagraphStyle], max_width: float) -> list:
     flowables = []
-    start_month = _hebrew_month_year(date.fromisoformat(terms['start_date']))
-    end_month = _hebrew_month_year(date.fromisoformat(terms['end_date']))
-    for i, (normal, emphasized) in enumerate(content.SECTION_2_ITEMS, start=1):
-        text = normal.format(start_month=start_month, end_month=end_month)
-        flowables.append(_para(f'{i}. {text}', s['body'], max_width))
+    bullet_width = max_width - 1 * cm
+    for text, emphasized, bullets in section_2_items(terms):
+        flowables.append(_para(text, s['body'], max_width))
         if emphasized:
             flowables.append(_para(emphasized, s['bold'], max_width))
-        if i == 8:
-            bullet_width = max_width - 1 * cm
-            for bullet_text, is_bold in content.SECTION_2_ITEM_8_BULLETS:
-                style = s['bold'] if is_bold else s['body']
-                flowables.append(_para(f'• {bullet_text}', style, bullet_width))
+        for bullet_text, is_bold in bullets:
+            style = s['bold'] if is_bold else s['body']
+            flowables.append(_para(f'• {bullet_text}', style, bullet_width))
     return flowables
 
 
@@ -401,19 +475,42 @@ def _build_section_3(s: dict[str, ParagraphStyle], max_width: float) -> list:
     return flowables
 
 
-def _build_signature_block(renter_name: str, s: dict[str, ParagraphStyle]) -> list:
+def _signature_image(png: bytes) -> Image:
+    """The tenant's signature scaled into its box. The signing checks the image reads before it gets here."""
+    width_px, height_px = ImageReader(io.BytesIO(png)).getSize()
+    scale = min(SIGNATURE_IMAGE_MAX_WIDTH / width_px, SIGNATURE_IMAGE_MAX_HEIGHT / height_px)
+    return Image(io.BytesIO(png), width=width_px * scale, height=height_px * scale)
+
+
+def signed_by_lines(signed: SignedBy) -> list[str]:
+    """
+    Who signed and when, then what exactly: the lines under the tenant's signature on the signed copy.
+
+    Plain "label: value", like the contract's other lines: bidi reordering moves
+    brackets and trailing dots around a Latin run, so the hash is not wrapped in any.
+    """
+    return [
+        f'{signed.name} · ת.ז./ח.פ: {signed.id_number}',
+        f'נחתם ב־{signed.local_time("%d/%m/%Y %H:%M")} (שעון ישראל)',
+        f'מזהה תנאים: {signed.terms_sha256}',
+        f'מזהה חתימה: {signed.signature_id}',
+    ]
+
+
+def _build_signature_block(renter_name: str, s: dict[str, ParagraphStyle], signed: SignedBy | None = None) -> list:
     col_width = 8.2 * cm
     inner_width = col_width - 8
 
     # Column order [renter, studio] renders renter physically on the left and
     # studio on the right, matching the reference template's layout.
+    renter_mark = _signature_image(signed.png) if signed else _para('______________________', s['sig_line'], inner_width)
     data = [
         [
             _para(f'המפעיל: {renter_name}', s['sig_label'], inner_width),
             _para(content.SIGNATURE_STUDIO_LABEL, s['sig_label'], inner_width),
         ],
         [
-            _para('______________________', s['sig_line'], inner_width),
+            renter_mark,
             _para('______________________', s['sig_line'], inner_width),
         ],
         [
@@ -425,5 +522,12 @@ def _build_signature_block(renter_name: str, s: dict[str, ParagraphStyle]) -> li
     table.setStyle(TableStyle([
         ('TOPPADDING', (0, 0), (-1, -1), 4),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
     ]))
-    return [table]
+    if not signed:
+        return [table]
+    # The signer, the time and the fingerprints, the full width under the
+    # block: the hash is 64 characters and would not fit in one column.
+    proof = [_para(line, s['sig_proof'], 2 * col_width) for line in signed_by_lines(signed)]
+    return [table, Spacer(1, 6), *proof]
