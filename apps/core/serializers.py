@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueTogetherValidator, UniqueValidator
 from apps.core.models import Business, BusinessCategory, City, Branch, Room, BranchFile
 
 
@@ -189,6 +190,13 @@ class BusinessCategorySerializer(serializers.ModelSerializer):
         model = BusinessCategory
         fields = ['id', 'business', 'name', 'is_active', 'sort_order', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
+        validators = [
+            UniqueTogetherValidator(
+                queryset=BusinessCategory.objects.all(),
+                fields=['business', 'name'],
+                message='כבר קיימת קטגוריה בשם הזה בעסק הזה',
+            ),
+        ]
 
     def validate_name(self, value):
         name = (value or '').strip()
@@ -204,6 +212,11 @@ class BusinessSerializer(serializers.ModelSerializer):
         model = Business
         fields = ['id', 'name', 'is_active', 'sort_order', 'categories', 'created_at', 'updated_at']
         read_only_fields = ['id', 'categories', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'name': {'validators': [
+                UniqueValidator(queryset=Business.objects.all(), message='כבר קיים עסק בשם הזה'),
+            ]},
+        }
 
     def validate_name(self, value):
         name = (value or '').strip()
