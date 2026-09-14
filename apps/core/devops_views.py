@@ -86,6 +86,14 @@ class EnvInfoView(APIView):
             'active_env_file': getattr(settings, 'ACTIVE_ENV_FILE', 'unknown'),
             'tranzila_iframe_terminal': settings.TRANZILA_TERMINAL,
             'tranzila_charge_terminal': settings.TRANZILA_PROD_TERMINAL,
+            # Tenant billing charges on its own terminals when they are set.
+            'rental_billing_enabled': getattr(settings, 'RENTAL_BILLING_ENABLED', False),
+            'rental_charge_terminal': (
+                getattr(settings, 'RENTAL_TRANZILA_TERMINAL', '') or settings.TRANZILA_PROD_TERMINAL
+            ),
+            'rental_token_terminal': (
+                getattr(settings, 'RENTAL_TRANZILA_TOKEN_TERMINAL', '') or settings.TRANZILA_PROD_TOKEN_TERMINAL
+            ),
         })
 
 

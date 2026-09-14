@@ -32,6 +32,7 @@ Cron — the courses' cron auth (CRON_TOKEN / CRON_SECRET):
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date
 
@@ -55,6 +56,8 @@ from apps.rental_billing.links import rotate_card_link
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
 from apps.rental_billing.serializers import StandingOrderSerializer, TenantChargeSerializer, card_link_payload
 from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, Tenancy
+
+logger = logging.getLogger(__name__)
 
 UUID_REGEX = '[0-9a-fA-F-]{36}'
 CHARGES_LIST_CAP = 500
@@ -126,9 +129,16 @@ class StandingOrderViewSet(viewsets.GenericViewSet):
 
     def get_queryset(self):
         queryset = TenantStandingOrder.objects.select_related(
-            'tenant', 'branch', 'business', 'business_category', 'created_by',
+            'tenant', 'branch', 'business', 'business_category', 'created_by', 'tenancy',
         ).prefetch_related(
             Prefetch('card_links', queryset=TenantCardLink.objects.order_by('-created_at'), to_attr='recent_card_links'),
+            # The tenancy's charges, for what blocks the order and what it never
+            # billed: one query for the page, not one per order.
+            Prefetch(
+                'tenancy__rental_charges',
+                queryset=TenantCharge.objects.only('id', 'tenancy_id', 'period', 'status').order_by('period'),
+                to_attr='all_charges',
+            ),
         )
         # A partner reaches their own branches' orders only, none without a branch.
         return scope_branches(queryset, self.request.user, 'branch')
@@ -137,6 +147,8 @@ class StandingOrderViewSet(viewsets.GenericViewSet):
         return self.get_serializer(self.get_queryset().get(pk=order.pk)).data
 
     def list(self, request):
+        # So a month that never heard back reads as what it is on the orders screen too.
+        billing.sweep_stale_reservations()
         queryset = self.get_queryset()
         params = request.query_params
         tenancy_id = _uuid_param(params, 'tenancy')
@@ -151,6 +163,7 @@ class StandingOrderViewSet(viewsets.GenericViewSet):
         return Response(self.get_serializer(queryset, many=True).data)
 
     def retrieve(self, request, pk=None):
+        billing.sweep_stale_reservations()
         return Response(self.get_serializer(self.get_object()).data)
 
     def create(self, request):
@@ -379,21 +392,22 @@ class PublicCardView(APIView):
         return super().get_throttles()
 
     def get(self, request, token: str):
-        billing.sweep_stale_reservations()
         try:
             link = resolve_link(token)
         except CardEntryError as exc:
             return _card_error(exc)
+        # Only once the token is a real link: an unknown one writes nothing.
+        billing.sweep_stale_reservations()
         return Response(preview_payload(link))
 
     def post(self, request, token: str):
-        billing.sweep_stale_reservations()
         try:
             resolve_link(token)
             if not billing.billing_enabled():
                 raise CardEntryError(DISABLED_MESSAGE, status_code=503, disabled=True)
         except CardEntryError as exc:
             return _card_error(exc)
+        billing.sweep_stale_reservations()
         body = _body(request)
         try:
             card = validate_card_details(body.get('card_details') or {})
@@ -404,6 +418,31 @@ class PublicCardView(APIView):
         except CardEntryError as exc:
             return _card_error(exc)
         return Response(result)
+
+
+def _record_heartbeat(request, summary: dict) -> None:
+    """
+    Keep the run: what it charged, and — the part nobody would find otherwise —
+    the months it left behind and the tenancies it could not touch. The courses'
+    cron keeps its runs the same way (apps/customers/views.py). Never fails the
+    run: the money is already charged by the time this is written.
+    """
+    from apps.customers.models import CronHeartbeat
+
+    try:
+        agent = (request.headers.get('User-Agent') or request.META.get('HTTP_USER_AGENT') or '')[:300]
+        schedule = (
+            request.headers.get('X-Vercel-Cron-Schedule') or request.META.get('HTTP_X_VERCEL_CRON_SCHEDULE') or ''
+        )[:80]
+        CronHeartbeat.objects.create(
+            user_agent=agent,
+            schedule_header=schedule,
+            dry_run=False,
+            is_vercel_cron='vercel-cron' in agent.lower(),
+            summary={'rental_billing': summary},
+        )
+    except Exception:
+        logger.exception('Rental billing: the run could not be recorded (it did run)')
 
 
 @api_view(['GET', 'POST'])
@@ -426,4 +465,5 @@ def cron_charge(request):
     except (TypeError, ValueError):
         limit = 40
     summary = billing.charge_due(limit=limit)
+    _record_heartbeat(request, summary)
     return Response({'ok': bool(summary.get('ok')), 'summary': summary})

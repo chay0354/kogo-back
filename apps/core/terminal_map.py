@@ -76,6 +76,25 @@ FLOWS = [
         'code': 'apps/payment_links/public_views.py',
     },
     {
+        'id': 'rental_billing',
+        'title': 'הוראת קבע של שוכר',
+        'detail': 'הקרון מחייב את הטוקן השמור של השוכר בכל חודש (apps/rental_billing). '
+                  'כבוי עד ש-RENTAL_BILLING_ENABLED נדלק.',
+        'setting': 'RENTAL_TRANZILA_TOKEN_TERMINAL',
+        'fallback': 'TRANZILA_PROD_TOKEN_TERMINAL',
+        'method': 'charge_with_token',
+        'code': 'apps/rental_billing/billing.py',
+    },
+    {
+        'id': 'rental_card_page',
+        'title': 'עמוד הכרטיס של השוכר',
+        'detail': 'השוכר מקליד כרטיס בקישור; החודש הראשון נגבה מיד ונשמר טוקן.',
+        'setting': 'RENTAL_TRANZILA_TERMINAL',
+        'fallback': 'TRANZILA_PROD_TERMINAL',
+        'method': 'charge_with_card / verify_card',
+        'code': 'apps/rental_billing/card.py',
+    },
+    {
         'id': 'documents',
         'title': 'הפקת חשבוניות וקבלות',
         'detail': 'מסמכי מס. כל עוד המסוף ריק — לא מופק שום מסמך, לאף חיוב.',
@@ -91,6 +110,8 @@ SETTING_NOTES = {
     'TRANZILA_PROD_TERMINAL': 'מסוף ה-REST להקלדת כרטיס.',
     'TRANZILA_PROD_TOKEN_TERMINAL': 'מסוף ה-REST לחיוב טוקן שמור (הוראות קבע).',
     'TRANZILA_BILLING_TERMINAL': 'מסוף הפקת מסמכים. ריק = אין חשבוניות.',
+    'RENTAL_TRANZILA_TERMINAL': 'מסוף להקלדת כרטיס בחיוב שכירויות בלבד. ריק = כמו החוגים (TRANZILA_PROD_TERMINAL).',
+    'RENTAL_TRANZILA_TOKEN_TERMINAL': 'מסוף לחיוב טוקן בשכירויות בלבד. ריק = כמו החוגים (TRANZILA_PROD_TOKEN_TERMINAL).',
 }
 
 ALL_SETTINGS = [
@@ -99,6 +120,9 @@ ALL_SETTINGS = [
     'TRANZILA_PROD_TERMINAL',
     'TRANZILA_PROD_TOKEN_TERMINAL',
     'TRANZILA_BILLING_TERMINAL',
+    # Empty until tenant billing is pointed at a terminal of its own.
+    'RENTAL_TRANZILA_TERMINAL',
+    'RENTAL_TRANZILA_TOKEN_TERMINAL',
 ]
 
 
@@ -112,11 +136,18 @@ def terminal_map() -> dict:
     """
     flows = []
     for flow in FLOWS:
-        terminal = _value(flow['setting'])
+        # A flow may be pointed at a terminal of its own (tenant billing), and
+        # falls back to another setting while that one is empty. What is
+        # reported is the setting actually in effect, with the override named.
+        override = flow.get('fallback') and flow['setting']
+        in_effect = flow['setting'] if not override or _value(flow['setting']) else flow['fallback']
         flows.append({
             **flow,
-            'terminal': terminal,
-            'configured': _configured(flow['setting']),
+            'setting': in_effect,
+            'override_setting': override or '',
+            'overridden': bool(override and in_effect == flow['setting']),
+            'terminal': _value(in_effect),
+            'configured': _configured(in_effect),
         })
 
     settings_rows = []

@@ -12,7 +12,8 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from apps.core.frontend_url import public_frontend_url
-from apps.rental_billing.billing import is_undecided, shekels, split_amount
+from apps.rental_billing import billing
+from apps.rental_billing.billing import UNDECIDED_STATUSES, is_undecided, shekels, split_amount
 from apps.rental_billing.links import expires_at, is_expired, public_url
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
 
@@ -60,6 +61,8 @@ class StandingOrderSerializer(serializers.ModelSerializer):
     card_expiry = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     card_link = serializers.SerializerMethodField()
+    blocked_by_charge = serializers.SerializerMethodField()
+    months_never_charged = serializers.SerializerMethodField()
 
     class Meta:
         model = TenantStandingOrder
@@ -70,6 +73,7 @@ class StandingOrderSerializer(serializers.ModelSerializer):
             'next_charge_date', 'status', 'status_label', 'source', 'source_label',
             'has_card', 'card_last4', 'card_expiry', 'last_error', 'failed_at', 'notes',
             'created_by_name', 'created_at', 'updated_at', 'card_link',
+            'blocked_by_charge', 'months_never_charged',
         ]
         read_only_fields = fields
 
@@ -103,6 +107,47 @@ class StandingOrderSerializer(serializers.ModelSerializer):
 
     def get_created_by_name(self, obj) -> str:
         return _name(obj.created_by)
+
+    def _tenancy_charges(self, obj):
+        """The tenancy's charges, prefetched by the view (never a query per order)."""
+        return getattr(getattr(obj, 'tenancy', None), 'all_charges', None)
+
+    def get_blocked_by_charge(self, obj):
+        """
+        The month holding this order up: while one of its tenancy's months is
+        reserved or in review, nothing on that tenancy is charged. None when
+        there is none. The office screen badges it.
+        """
+        charges = self._tenancy_charges(obj)
+        if charges is None:
+            charges = obj.tenancy.rental_charges.all()
+        undecided = sorted(
+            (charge for charge in charges if charge.status in UNDECIDED_STATUSES), key=lambda c: c.period,
+        )
+        if not undecided:
+            return None
+        charge = undecided[0]
+        return {
+            'id': str(charge.id),
+            'period': charge.period.isoformat(),
+            'status': charge.status,
+            'status_label': charge.get_status_display(),
+        }
+
+    def get_months_never_charged(self, obj) -> list:
+        """
+        Months of this order, before the current one, that carry no charge at
+        all — skipped by a run that found them too old, or passed while it was
+        paused or waiting for a card. Never charged by themselves; the office
+        decides what to do with them.
+        """
+        charges = self._tenancy_charges(obj)
+        if charges is None:
+            charges = list(obj.tenancy.rental_charges.all())
+        return [
+            month.isoformat()
+            for month in billing.months_never_charged(obj, billing.today_local(), charges=charges)
+        ]
 
     def get_card_link(self, obj):
         # The newest link, whatever its state; a URL only while it can still be used.

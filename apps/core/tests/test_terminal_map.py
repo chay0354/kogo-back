@@ -80,10 +80,35 @@ class TerminalMapTests(APITestCase):
         self.client.force_authenticate(self.manager)
         res = self.client.get(URL)
         self.assertEqual(res.status_code, 200, res.content)
-        self.assertEqual(len(res.json()['flows']), 7)
+        self.assertEqual(len(res.json()['flows']), 9)
 
         self.client.force_authenticate(self.worker)
         self.assertEqual(self.client.get(URL).status_code, 403)
+
+    def test_tenant_billing_rides_the_courses_terminal_until_it_is_given_its_own(self):
+        # Tenant billing (apps/rental_billing) charges the courses' terminals
+        # while RENTAL_TRANZILA_* are empty, and the map says so.
+        flows = {f['id']: f for f in terminal_map()['flows']}
+
+        self.assertEqual(flows['rental_billing']['terminal'], 'restmain')
+        self.assertEqual(flows['rental_billing']['setting'], 'TRANZILA_PROD_TOKEN_TERMINAL')
+        self.assertEqual(flows['rental_billing']['override_setting'], 'RENTAL_TRANZILA_TOKEN_TERMINAL')
+        self.assertFalse(flows['rental_billing']['overridden'])
+        self.assertIn('RENTAL_TRANZILA_TOKEN_TERMINAL', terminal_map()['unused_settings'])
+
+    @override_settings(RENTAL_TRANZILA_TOKEN_TERMINAL='rentaltest', RENTAL_TRANZILA_TERMINAL='rentaltest')
+    def test_the_1_shekel_test_moves_tenant_billing_alone(self):
+        report = terminal_map()
+        flows = {f['id']: f for f in report['flows']}
+
+        self.assertEqual(flows['rental_billing']['terminal'], 'rentaltest')
+        self.assertTrue(flows['rental_billing']['overridden'])
+        self.assertEqual(flows['rental_card_page']['terminal'], 'rentaltest')
+        # The courses' money does not move with it.
+        self.assertEqual(flows['recurring']['terminal'], 'restmain')
+        self.assertEqual(flows['widget_signup']['terminal'], 'restmain')
+        rows = {r['terminal']: r for r in report['terminals']}
+        self.assertEqual(set(rows['rentaltest']['settings']), {'RENTAL_TRANZILA_TOKEN_TERMINAL', 'RENTAL_TRANZILA_TERMINAL'})
 
     def test_no_key_ever_leaves_the_endpoint(self):
         self.client.force_authenticate(self.manager)

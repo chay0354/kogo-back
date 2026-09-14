@@ -172,9 +172,13 @@ class RentalTranzila(TranzilaService):
     """
 
     last_response = None
+    # How many requests this instance actually put on the wire. A call that
+    # never got that far (no token, credentials missing) moved no money.
+    requests_made = 0
 
     def _make_api_request(self, params, endpoint='/v1/transactions'):
         self.last_response = None
+        self.requests_made += 1
         response = super()._make_api_request(params, endpoint)
         self.last_response = response
         return response
@@ -355,21 +359,40 @@ def reserve_month(order, period: date, *, business, trigger: str, allowed_status
         return _insert_reservation(locked, period, business=business, trigger=trigger)
 
 
-def reclaim_failed(charge_id, *, trigger: str, order=None, allowed_statuses=None):
+def sent_to_the_gateway_today(tenancy_id, today: date, *, apart_from=None) -> bool:
+    """Whether a month of this tenancy was already sent to Tranzila today — the once-a-day guard."""
+    queryset = Charge.objects.filter(tenancy_id=tenancy_id, reserved_at__date=today)
+    if apart_from is not None:
+        queryset = queryset.exclude(pk=apart_from)
+    return queryset.exists()
+
+
+def reclaim_failed(charge_id, *, trigger: str, order=None, allowed_statuses=None, today: date | None = None):
     """
     A failed month back to 'reserved' for one more attempt, committed before
-    the gateway is called. With `order`, that order is locked and checked
-    again, and pays the month: a month an earlier order on the tenancy failed
-    to charge moves to the order that pays it now.
+    the gateway is called. The order is locked and checked again — the one
+    given, or the charge's own — and with `order` it also pays the month: a
+    month an earlier order on the tenancy failed to charge moves to the order
+    that pays it now.
+
+    The office's retry keeps the once-a-day guard the monthly run keeps: a
+    tenancy already sent to Tranzila today is refused (409), so a retry cannot
+    put a second charge on the same card the same day.
     """
     with transaction.atomic(durable=True):
         charge = Charge.objects.select_for_update().get(pk=charge_id)
         if charge.status != Charge.STATUS_FAILED:
             return None
         fields = ['status', 'trigger', 'attempts', 'reserved_at', 'error', 'response_code', 'updated_at']
+        # Always under the order's lock, as the card page's path is: nothing may
+        # end or pause the order between this check and the charge.
+        locked = Order.objects.select_for_update().get(pk=(order.pk if order is not None else charge.standing_order_id))
+        _recheck(locked, charge.period, allowed_statuses)
+        if trigger == Charge.TRIGGER_RETRY and sent_to_the_gateway_today(
+            charge.tenancy_id, today or today_local(), apart_from=charge.pk,
+        ):
+            raise BillingError('הוראת הקבע כבר נשלחה היום לטרנזילה. אפשר לנסות שוב מחר.', status_code=409)
         if order is not None:
-            locked = Order.objects.select_for_update().get(pk=order.pk)
-            _recheck(locked, charge.period, allowed_statuses)
             if locked.tenancy_id != charge.tenancy_id:
                 raise BillingError('החודש שייך להסכם אחר', status_code=409)
             if charge.standing_order_id != locked.pk:
@@ -391,18 +414,24 @@ def call_gateway(call, tranzila=None) -> dict:
     may be charged. The JSON Tranzila answered with (RentalTranzila keeps it) is
     attached as 'tranzila_json', so outcome_of reads Tranzila's own words.
     """
+    before = getattr(tranzila, 'requests_made', None) if tranzila is not None else None
     if tranzila is not None:
         tranzila.last_response = None
     try:
         result = call()
     except Exception as exc:
         logger.exception('Rental billing: the Tranzila call raised')
-        return {'success': False, 'error': str(exc) or exc.__class__.__name__, 'uncertain': True}
+        result = {'success': False, 'error': str(exc) or exc.__class__.__name__, 'uncertain': True}
     if not isinstance(result, dict):
-        return {'success': False, 'error': 'Invalid gateway response', 'uncertain': True}
+        result = {'success': False, 'error': 'Invalid gateway response', 'uncertain': True}
     raw = getattr(tranzila, 'last_response', None) if tranzila is not None else None
     if isinstance(raw, dict):
         result = {**result, 'tranzila_json': raw}
+    after = getattr(tranzila, 'requests_made', None) if tranzila is not None else None
+    if isinstance(before, int) and isinstance(after, int) and after == before and not result.get('success'):
+        # The client refused before it reached Tranzila (no token, no credentials):
+        # nothing was sent, so nothing was charged.
+        result = {**result, 'never_sent': True}
     return result
 
 
@@ -425,8 +454,11 @@ def explicit_decline(raw) -> bool:
     return error_code not in (None, '', False) and not is_tranzila_rest_ok(error_code)
 
 
-# Codes a locally built failure carries; never the code of a decline.
-_NOT_A_DECLINE_CODE = frozenset({'', '999', 'N/A', 'NONE'})
+# Codes that never stand for a decline: the ones a locally built failure
+# carries, and '000' — the processor's approval, which the parser puts here when
+# Tranzila sent no error_code of its own. (An error_code of 0 arrives as '0',
+# and with a "Charge failed" message it is the processor saying no.)
+_NOT_A_DECLINE_CODE = frozenset({'', '999', 'N/A', 'NONE', '000'})
 
 
 def _parsed_as_decline(result: dict) -> bool:
@@ -439,7 +471,11 @@ def _parsed_as_decline(result: dict) -> bool:
     if 'uncertain' in result:
         return False
     code = str(result.get('response_code') or '').strip().upper()
-    return str(result.get('message') or '').startswith('Charge failed: ') and code not in _NOT_A_DECLINE_CODE
+    if code in _NOT_A_DECLINE_CODE:
+        # Nothing certain in the code, and the JSON reading calls such an answer
+        # review: the two readings must not disagree.
+        return False
+    return str(result.get('message') or '').startswith('Charge failed: ')
 
 
 def outcome_of(result: dict, raw=None) -> str:
@@ -448,7 +484,13 @@ def outcome_of(result: dict, raw=None) -> str:
     Everything else is 'review': whatever happened, the card may be charged.
     """
     if result.get('success'):
-        return OUTCOME_CHARGED
+        # A yes with nothing to identify the transaction by is not something the
+        # office could ever check in Tranzila, nor a receipt could name: ambiguous.
+        if str(result.get('transaction_id') or '').strip():
+            return OUTCOME_CHARGED
+        return OUTCOME_REVIEW
+    if result.get('never_sent'):
+        return OUTCOME_FAILED
     if raw is None:
         for key in ('tranzila_json', 'raw_response'):
             if isinstance(result.get(key), dict):
@@ -583,6 +625,53 @@ def _next_due_order(today: date, seen: list):
     )
 
 
+def months_never_charged(order, today: date, charges=None) -> list:
+    """
+    The order's months, before the current one, that carry no charge at all —
+    never billed and never decided on. Read by the office's screen long after
+    the run that skipped them. `charges` may be the tenancy's rows, already loaded.
+    """
+    taken = {charge.period for charge in charges} if charges is not None else tenancy_periods(order.tenancy_id)
+    month = first_of_month(order.start_date)
+    last = first_of_month(today)
+    if order.end_date:
+        last = min(last, add_months(first_of_month(order.end_date), 1))
+    out = []
+    while month < last:
+        if month not in taken:
+            out.append(month)
+        month = add_months(month, 1)
+    return out
+
+
+def blocked_orders(today: date) -> list:
+    """
+    Due orders the run cannot touch because a month of their tenancy is
+    undecided. Reported by every run, so a tenancy never stops billing quietly.
+    """
+    undecided = Charge.objects.filter(tenancy_id=OuterRef('tenancy_id'), status__in=UNDECIDED_STATUSES)
+    orders = (
+        Order.objects.filter(status=Order.STATUS_ACTIVE, next_charge_date__lte=today)
+        .filter(Exists(undecided))
+        .order_by('next_charge_date', 'created_at')
+    )
+    out = []
+    for order in orders:
+        charge = (
+            Charge.objects.filter(tenancy_id=order.tenancy_id, status__in=UNDECIDED_STATUSES)
+            .order_by('period').first()
+        )
+        out.append({
+            'standing_order': str(order.pk),
+            'tenancy': str(order.tenancy_id),
+            'due': order.next_charge_date.isoformat(),
+            'period': charge.period.isoformat() if charge else '',
+            'charge': str(charge.pk) if charge else '',
+            'status': charge.status if charge else '',
+        })
+    return out
+
+
 def _missed_months(order, due: date, today: date) -> list:
     """The months from `due` (never before the order's start) to the one before the current that the tenancy has no charge for."""
     taken = tenancy_periods(order.tenancy_id)
@@ -659,7 +748,7 @@ def charge_due(*, today: date | None = None, limit: int = 40) -> dict:
     """
     summary = {
         'ok': True, 'enabled': billing_enabled(), 'checked': 0, 'charged': 0, 'failed': 0, 'review': 0,
-        'skipped': 0, 'ended': 0, 'receipts': 0, 'stale_to_review': 0, 'missed': [], 'errors': [],
+        'skipped': 0, 'ended': 0, 'receipts': 0, 'stale_to_review': 0, 'missed': [], 'blocked': [], 'errors': [],
     }
     if not summary['enabled']:
         summary.update(disabled=True, message=DISABLED_MESSAGE)
@@ -676,6 +765,13 @@ def charge_due(*, today: date | None = None, limit: int = 40) -> dict:
 
     today = today or today_local()
     summary['stale_to_review'] = sweep_stale_reservations()
+    # Read after the sweep, so a reservation that never heard back is named as
+    # what it is: a month waiting for the office, holding up its tenancy.
+    summary['blocked'] = blocked_orders(today)
+    for row in summary['blocked']:
+        summary['errors'].append(
+            f"{row['standing_order']}: חסום — החיוב של {row['period']} ממתין להכרעת המשרד"
+        )
     batch = max(1, min(int(limit or 40), 200))
     seen: list = []
     while summary['checked'] < batch:
@@ -727,7 +823,10 @@ def retry_charge(charge, *, user=None) -> tuple[str, Charge]:
     if credential_error:
         raise BillingError(f'טרנזילה אינה מוגדרת: {credential_error}')
 
-    claimed = reclaim_failed(charge.pk, trigger=Charge.TRIGGER_RETRY)
+    claimed = reclaim_failed(
+        charge.pk, trigger=Charge.TRIGGER_RETRY, order=order,
+        allowed_statuses=(Order.STATUS_ACTIVE, Order.STATUS_PAUSED, Order.STATUS_FAILED),
+    )
     if claimed is None:
         raise BillingError('החיוב כבר אינו במצב נדחה', status_code=409)
     logger.info('Rental charge %s: retried by %s', claimed.pk, getattr(user, 'pk', None))

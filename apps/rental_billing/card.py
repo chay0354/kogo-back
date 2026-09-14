@@ -299,7 +299,7 @@ def apply_card(token: str, card: dict, *, today: date | None = None) -> dict:
     try:
         if plan['mode'] == MODE_CHARGE:
             return _charge(link, order, card, plan, business, tranzila, attempt, today)
-        return _verify(link, order, card, plan, tranzila)
+        return _verify(link, order, card, plan, tranzila, today)
     except CardEntryError as exc:
         _settle(link.pk, attempt, exc.message)
         raise
@@ -389,7 +389,7 @@ def _charge(link, order, card: dict, plan: dict, business, tranzila, attempt: _A
     raise CardEntryError(UNCERTAIN_MESSAGE, status_code=409, processing=True)
 
 
-def _verify(link, order, card: dict, plan: dict, tranzila) -> dict:
+def _verify(link, order, card: dict, plan: dict, tranzila, today: date) -> dict:
     """Check the card with the issuer and keep its token. No money moves (J2)."""
     _net, _vat, total = billing.split_amount(order.amount_before_vat)
     amount = max(billing.shekels(total), Decimal('1.00'))
@@ -419,7 +419,12 @@ def _verify(link, order, card: dict, plan: dict, tranzila) -> dict:
         if locked.status not in CARD_STATUSES:
             raise CardEntryError(CHANGED_MESSAGE)
         _store_card(locked, token, card)
-        locked.next_charge_date = plan['next']
+        # Computed again here, under the lock, and only ever forward: the plan's
+        # date was worked out before the gateway call, and a month may have been
+        # charged in between.
+        computed = billing.next_open_billing_date(locked, today)
+        stored = locked.next_charge_date
+        locked.next_charge_date = stored if stored and stored > computed else computed
         locked.save()
         _mark_used(link.pk)
     return {

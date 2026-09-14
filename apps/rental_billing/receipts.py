@@ -101,14 +101,21 @@ def issue_receipt(charge_id) -> FormalDocument:
         DocumentLineItem.objects.create(
             document=doc, description=line[:500], quantity=Decimal('1'), unit_price=net,
         )
+        # What the office looks the charge up by in Tranzila. A charge that
+        # carries neither (one the office marked charged without a code) says so
+        # rather than printing "עסקה " with nothing after it.
         confirmation = charge.confirmation_code or ''
+        reference = (
+            f'אישור {confirmation}' if confirmation
+            else (f'עסקה {charge.transaction_id}' if charge.transaction_id else 'חיוב בכרטיס אשראי')
+        )
         DocumentPayment.objects.create(
             document=doc,
             payment_method='credit_card',
             amount=total,
             card_last_four=(charge.card_last4 or '')[:4],
             card_installments=1,
-            reference=(f'אישור {confirmation}' if confirmation else f'עסקה {charge.transaction_id}')[:200],
+            reference=reference[:200],
             notes=f'טרנזילה · עסקה {charge.transaction_id}' if charge.transaction_id else '',
         )
         TenantCharge.objects.filter(pk=charge.pk).update(receipt=doc, receipt_error='', updated_at=timezone.now())
