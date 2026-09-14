@@ -32,6 +32,13 @@ class BusinessTaxonomyTests(APITestCase):
     def test_seeded_vocabulary_exists(self):
         names = set(Business.objects.values_list('name', flat=True))
         self.assertTrue({'לקוחות', 'סוחרים', 'ספקים', 'חוגים', 'מותג קוגומלו', 'מותג געגע'} <= names)
+        self.assertIn('הצגות חיצוניות', names)
+
+    def test_every_business_can_be_invoiced_from_the_first_day(self):
+        # The document wizard will not move past the business-customer step
+        # until a category is picked, so a business with none is unusable.
+        for business in Business.objects.all():
+            self.assertTrue(business.categories.exists(), f'{business.name} — אין קטגוריה')
 
     def test_manager_manages_businesses_and_categories(self):
         self.client.force_authenticate(self.manager)
@@ -45,6 +52,19 @@ class BusinessTaxonomyTests(APITestCase):
         self.assertEqual([c['name'] for c in row['categories']], ['יום הולדת'])
         res = self.client.post('/api/v1/core/businesses/', {'name': '  '}, format='json')
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_a_duplicate_says_so_in_hebrew(self):
+        # 'השמירה נכשלה' with no reason is what sent the manager looking for a bug.
+        self.client.force_authenticate(self.manager)
+        business = Business.objects.get(name='חוגים')
+        BusinessCategory.objects.get_or_create(business=business, name='קפוארה')
+        res = self.client.post('/api/v1/core/business-categories/',
+                               {'business': str(business.id), 'name': 'קפוארה'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('כבר קיימת קטגוריה בשם הזה בעסק הזה', str(res.data))
+        res = self.client.post('/api/v1/core/businesses/', {'name': 'חוגים'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('כבר קיים עסק בשם הזה', str(res.data))
 
     def test_partner_may_read_but_not_write(self):
         self.client.force_authenticate(self.partner)
