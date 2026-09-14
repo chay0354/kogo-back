@@ -505,11 +505,16 @@ def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, br
     """
     Fold every income source into business → category buckets.
 
-    The rule set by the owner: a private customer's course, a studio rental
-    and a pickup sale belong to their branch, so branches are one business
-    with a category per branch; a website delivery belongs to the brand; a
-    business customer's document belongs to the business and category on
-    it; a course carrying its own tags goes under those.
+    The rule set by the owner: a private customer's course, an untagged studio
+    rental and a pickup sale belong to their branch, so branches are one
+    business with a category per branch; a website delivery belongs to the
+    brand; a business customer's document belongs to the business and category
+    on it; a course carrying its own tags goes under those.
+
+    `rental_by_branch` is only the rentals that are still the branch's: a slot
+    held by a tenant who carries a business comes in as a document row instead
+    (aggregate_income_by_business), under that tenant's own business and
+    category, so their rent and their invoices are one line.
     """
     buckets: dict = {}
 
@@ -553,6 +558,24 @@ def _combine_income(lesson, rental_by_branch, store_by_branch, document_rows, br
     return out
 
 
+def rental_income_rows(rental) -> list:
+    """
+    A tenant's studio income as income rows, the shape a document's is in.
+
+    Only the slots whose tenant carries a business: those land on the same line
+    as that tenant's invoices and their RT receipts. The rest stays the
+    branch's, in `untagged_by_branch_id` — which is also why this must never
+    take the whole of `rows`, or an untagged rental would be counted twice.
+    """
+    return [{
+        'business_id': str(row.business_id),
+        'business_name': row.business_name,
+        'category_id': str(row.category_id) if row.category_id else '',
+        'category_name': row.category_name,
+        'amount': row.amount,
+    } for row in rental.get('rows', []) if row.is_tagged]
+
+
 def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=None) -> list:
     """Lesson, rental, store and business-customer income, each under its business and category."""
     from apps.core.models import Branch, Business
@@ -586,12 +609,20 @@ def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=
     from apps.payment_links.finance import aggregate_payment_link_revenue, card_link_one_time_rows
     document_rows.extend(aggregate_payment_link_revenue(date_from, date_to, branch_id, branch_ids=branch_ids))
     document_rows.extend(card_link_one_time_rows(date_from, date_to, branch_id, branch_ids=branch_ids))
+    # A studio tenant is a business customer, so their rent lands on the same
+    # line as their documents rather than in the branch bucket (phase 6). A
+    # month whose RT receipt is already in `docs` above is not in here.
+    document_rows.extend(rental_income_rows(rental))
 
-    branch_keys = set(lesson.get('by_branch_untagged', {})) | set(rental['by_branch_id']) | set(store['by_branch_id'])
+    branch_keys = (
+        set(lesson.get('by_branch_untagged', {}))
+        | set(rental['untagged_by_branch_id'])
+        | set(store['by_branch_id'])
+    )
     branch_names = {str(b.id): b.name for b in Branch.objects.filter(pk__in=[k for k in branch_keys if k and k != '__online__'])}
     delivery_business = Business.objects.filter(name=DELIVERY_BUSINESS_LABEL).first()
     delivery_category = None
     if delivery_business:
         delivery_category = delivery_business.categories.filter(name=DELIVERY_CATEGORY_LABEL).first()
-    return _combine_income(lesson, rental['by_branch_id'], store['by_branch_id'], document_rows,
+    return _combine_income(lesson, rental['untagged_by_branch_id'], store['by_branch_id'], document_rows,
                            branch_names, delivery_business, delivery_category)

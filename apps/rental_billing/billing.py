@@ -26,8 +26,10 @@ B. Only an explicit decline in Tranzila's own JSON is 'failed'. Everything
 C. The cron takes one due order at a time under select_for_update(skip_locked=True),
    so overlapping runs never hold the same order; a tenancy is sent to the
    gateway at most once a day, and never while one of its months is undecided.
-E. A decline stops the order ('failed') and opens a card link for the tenant;
-   the office can retry the month, or the tenant's new card pays it.
+E. A decline stops the order ('failed') and opens a card link for the tenant,
+   and the run then sends them that link on WhatsApp (card_whatsapp.py, which
+   never fails the run); the office can retry the month, or the tenant's new
+   card pays it.
 
 No month is charged in arrears by itself. The next charge date is never set to
 a month before the current one, and the cron charges only a billing date that
@@ -797,6 +799,13 @@ def charge_due(*, today: date | None = None, limit: int = 40) -> dict:
         elif outcome == OUTCOME_FAILED:
             summary['failed'] += 1
             summary['errors'].append(f'{order.pk}: {charge.period:%Y-%m} נדחה — {_error_text(result)}')
+            # record_result has just opened the tenant a card link; this sends
+            # it. After the money is settled, and swallowing everything — as
+            # the courses' run does on a decline (apps/customers/recurring_billing.py).
+            # Imported here: card_whatsapp reads this module for the amount.
+            from apps.rental_billing.card_whatsapp import send_card_link_after_decline
+
+            send_card_link_after_decline(Order.objects.get(pk=order.pk))
         else:
             summary['review'] += 1
             summary['errors'].append(f'{order.pk}: {charge.period:%Y-%m} בבדיקה — {_error_text(result)}')

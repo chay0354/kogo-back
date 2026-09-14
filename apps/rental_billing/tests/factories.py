@@ -3,6 +3,11 @@
 Tranzila is always a mock here. The service class the app reaches it through is
 replaced by a MagicMock, and the real client's request method is made to fail
 the test, so nothing can leave the machine even by a path the mock missed.
+
+ManyChat is held the same way (phase 5: a decline sends the tenant their card
+link). The send is a MagicMock on `self.whatsapp`, answering as an unconfigured
+ManyChat does, and the HTTP client underneath it fails the test if anything
+reaches it.
 """
 from datetime import date
 from unittest.mock import MagicMock, patch
@@ -87,6 +92,26 @@ def patch_tranzila(testcase, gateway) -> MagicMock:
     return tranzila_class
 
 
+NOT_CONFIGURED = {'sent': False, 'reason': 'manychat_not_configured'}
+
+
+def patch_manychat(testcase) -> MagicMock:
+    """The tenant sends, mocked at the seam every other send is mocked at, plus a net under it."""
+    send = patch(
+        'apps.rental_billing.card_whatsapp.ManyChatService.notify_registration',
+        return_value=dict(NOT_CONFIGURED),
+    )
+    mock = send.start()
+    testcase.addCleanup(send.stop)
+    real = patch(
+        'apps.core.manychat_service.ManyChatService._request',
+        side_effect=AssertionError('a real ManyChat request was made'),
+    )
+    real.start()
+    testcase.addCleanup(real.stop)
+    return mock
+
+
 class BillingFixture:
     """A branch, a tenancy with its agreed amount, the rentals business, and a mocked gateway."""
 
@@ -99,6 +124,7 @@ class BillingFixture:
         self.manager = make_user('manager-rental-billing@test', UserProfile.ROLE_MANAGER)
         self.gateway = mocked_gateway()
         self.tranzila_class = patch_tranzila(self, self.gateway)
+        self.whatsapp = patch_manychat(self)
         # "Today" for everything that does not take it as an argument: a fixed
         # day, so the schedule the tests read does not move with the calendar.
         today = patch('apps.rental_billing.billing.today_local', return_value=date(2026, 9, 11))

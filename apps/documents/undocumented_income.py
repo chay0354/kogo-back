@@ -10,7 +10,15 @@ take and say plainly which part of it has no document behind it:
   into the document totals would misstate both. Such a store sale that got a
   Tranzila document is listed by that document instead;
 * a charge that went through and never got even an Invoice row;
-* a payment through a payment link that issued no document.
+* a payment through a payment link that issued no document;
+* a month of a studio rental that has no receipt behind it (phase 6). The
+  studio's tenants are billed by apps/rental_billing, which issues an RT
+  receipt for every month it charges — but that is switched off until the owner
+  turns it on, and a month it did not charge is still rent that came in. Such a
+  month is read off the calendar, which is where a rental's price lives, and
+  filed under its tenant's business and category, so a tenant's rent and their
+  invoices sit on one line. A month whose receipt is in this period is left out
+  of it: the receipt is a document, and the documents half counts it.
 
 Read-only by construction, like period_report: every figure is a stored column.
 """
@@ -41,18 +49,20 @@ from apps.documents.period_report import (
 
 SOURCE_LESSONS = 'lessons'
 SOURCE_STORE = 'store'
+SOURCE_RENTALS = 'rentals'
 SOURCE_ORPHAN_CHARGES = 'orphan_charges'
 SOURCE_PAYMENT_LINKS = 'payment_links'
 
 SOURCE_LABELS = {
     SOURCE_LESSONS: 'חיובי חוגים במספור הישן — נשלח מייל, לא מסמך במספר עוקב',
     SOURCE_STORE: 'מכירות חנות במספור הישן — ללא מסמך טרנזילה',
+    SOURCE_RENTALS: 'שכירויות סטודיו לפי היומן — לא הופקה להן קבלה',
     SOURCE_ORPHAN_CHARGES: 'חיובים שנגבו ואין להם אפילו רשומת חשבונית',
     SOURCE_PAYMENT_LINKS: 'תשלומים בקישור — לא הופק מסמך',
 }
 # The order the sources read in inside a group: the regular thing first, the
 # store next, the oddity last.
-SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_ORPHAN_CHARGES, SOURCE_PAYMENT_LINKS)
+SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_RENTALS, SOURCE_ORPHAN_CHARGES, SOURCE_PAYMENT_LINKS)
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
 # completed charges plus confirmed website orders whose stock was already taken.
@@ -475,6 +485,46 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
     return rows
 
 
+def _rental_rows(branch_ids, start: date, end: date) -> list:
+    """
+    A month of studio rent with no receipt behind it, one row per tenant a month.
+
+    The sum is the calendar's — price per session × the sessions that fall in
+    the period — because that is where a rental's price is kept and where the
+    contract itself reads it from. Nothing is guessed about who it belongs to:
+    a tenancy's tenant carries a business and a category exactly as the
+    business customer on an invoice does, and an untagged rental stays its
+    branch's, which is where it was filed before.
+    """
+    from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
+
+    rental = aggregate_studio_rental_revenue(start, end, branch_ids=branch_ids)
+    rows = []
+    for row in rental['rows']:
+        tags = {}
+        if row.is_tagged:
+            tags = {'business_id': row.business_id, 'business_name': row.business_name}
+            if row.category_id is not None:
+                tags['category_id'] = row.category_id
+                tags['category_name'] = row.category_name
+        sessions = f'{row.sessions} מפגשים' if row.sessions != 1 else 'מפגש אחד'
+        rows.append(UndocumentedRow(
+            source=SOURCE_RENTALS,
+            customer=row.customer,
+            reference=f'{row.period:%m/%Y}',
+            row_date=row.first_date,
+            detail=f'שכירות סטודיו · {sessions}',
+            branch_id=row.branch_id,
+            branch_name=row.branch_name or UNASSIGNED_BRANCH_LABEL,
+            amount=row.amount,
+            # No child, so merge_against_documents never folds one of these into
+            # a receipt issued for a child of the same sum.
+            child_ids=[],
+            **tags,
+        ))
+    return rows
+
+
 def _payment_link_rows(branch_ids, start: date, end: date) -> list:
     """Money paid through a payment link with no document behind it (child_ids empty: nothing merges by guess)."""
     from apps.payment_links.finance import completed_link_payments
@@ -573,6 +623,7 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
     for source, rows in (
         (SOURCE_LESSONS, _lesson_rows(branch_ids, start, end)),
         (SOURCE_STORE, _store_rows(branch_ids, start, end, delivery)),
+        (SOURCE_RENTALS, _rental_rows(branch_ids, start, end)),
         (SOURCE_ORPHAN_CHARGES, _orphan_charge_rows(branch_ids, start, end)),
         (SOURCE_PAYMENT_LINKS, _payment_link_rows(branch_ids, start, end)),
     ):

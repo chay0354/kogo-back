@@ -22,6 +22,16 @@ FIELD_SETTLE_SECONDS = 1.5
 # are often mapped to those copies, which stay empty if we only write the original.
 _TIMESTAMPED_FIELD = re.compile(r'^(.+?) \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)$')
 
+# Printed at the end of a free-text fallback, and written to kogo_support_phone.
+SUPPORT_PHONE = '050-9424755'
+
+
+class _Blanks(dict):
+    """A placeholder the caller did not fill reads as nothing, never as a crash."""
+
+    def __missing__(self, key):
+        return ''
+
 
 class ManyChatError(Exception):
     def __init__(self, message: str, status_code: int | None = None, payload: Any = None):
@@ -374,6 +384,11 @@ class ManyChatService:
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
         'MANYCHAT_REGISTER_LESSON_FLOW_NS': ('register-missing', 'register missing'),
         'MANYCHAT_REGISTER_MORNING_FLOW_NS': ('register-morning', 'register morning'),
+        # The studio tenants (apps/rentals, apps/rental_billing). Two automations
+        # of their own: the tenant is a merchant, not a parent, and the courses'
+        # templates name a child and a course.
+        'MANYCHAT_RENTAL_CONTRACT_FLOW_NS': ('rental-contract', 'rental contract'),
+        'MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS': ('rental-card-update', 'rental card update'),
     }
 
     def resolve_flow_for(self, config_entry: dict) -> str:
@@ -427,6 +442,8 @@ class ManyChatService:
     REGISTRATION_KIND_CARD_UPDATE = 'card_update'
     REGISTRATION_KIND_DIDNT_ARRIVE = 'didnt_arrive'
     REGISTRATION_KIND_CARD_LINK = 'card_link'
+    REGISTRATION_KIND_RENTAL_CONTRACT = 'rental_contract'
+    REGISTRATION_KIND_RENTAL_CARD_UPDATE = 'rental_card_update'
 
     _REGISTRATION_KINDS = {
         REGISTRATION_KIND_SUBSCRIPTION: {
@@ -503,6 +520,31 @@ class ManyChatService:
                 'אם לא מסתדר, אפשר לפנות לצוות קוגומלו ב-050-9424755.'
             ),
         },
+        # A studio tenant's contract is ready to sign: the link to /s/<token>.
+        # No fallback_flow_setting on purpose — every other automation here
+        # speaks to a parent about a child, and a merchant must never be sent
+        # one of those. With no automation of its own the send drops to the
+        # text below, which WhatsApp delivers only inside the 24-hour window.
+        REGISTRATION_KIND_RENTAL_CONTRACT: {
+            'flow_setting': 'MANYCHAT_RENTAL_CONTRACT_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'חוזה השכירות{branch_suffix} מוכן לחתימה.\n'
+                'לקריאה ולחתימה: {sign_url}\n'
+                'לשאלות אפשר לפנות לצוות קוגומלו ב-{support_phone}.'
+            ),
+        },
+        # A tenant's monthly charge was declined: the link to enter another card.
+        # Deliberately not falling back to card-update either, for the same reason.
+        REGISTRATION_KIND_RENTAL_CARD_UPDATE: {
+            'flow_setting': 'MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'החיוב החודשי עבור שכירות הסטודיו{branch_suffix} על סך ₪{amount} לא עבר.\n'
+                'להזנת כרטיס אשראי: {card_update_url}\n'
+                'לשאלות אפשר לפנות לצוות קוגומלו ב-{support_phone}.'
+            ),
+        },
         # 3 consecutive times not marked present (didnt_arrive automation).
         REGISTRATION_KIND_DIDNT_ARRIVE: {
             'flow_setting': 'MANYCHAT_DIDNT_ARRIVE_FLOW_NS',
@@ -525,6 +567,8 @@ class ManyChatService:
         REGISTRATION_KIND_CARD_UPDATE: 'עדכון כרטיס (הוראת קבע נכשלה)',
         REGISTRATION_KIND_DIDNT_ARRIVE: 'לא הגיע (3 פעמים)',
         REGISTRATION_KIND_CARD_LINK: 'קישור להזנת כרטיס',
+        REGISTRATION_KIND_RENTAL_CONTRACT: 'שוכר — חוזה לחתימה',
+        REGISTRATION_KIND_RENTAL_CARD_UPDATE: 'שוכר — עדכון כרטיס',
     }
 
     def list_available_automations(self) -> list[dict]:
@@ -741,7 +785,12 @@ class ManyChatService:
 
         # Fallback (only delivers if user is within 24h customer-service window).
         extras = extra_fields or {}
-        text = config_entry['fallback_template'].format(
+        # format_map over a defaulting mapping, not format(**names): a template
+        # naming a placeholder this call does not fill reads as nothing rather
+        # than raising KeyError in the middle of a send. ({course_suffix} in the
+        # card-link template did exactly that, unnoticed because that kind falls
+        # back to the card-update automation before it ever reaches the text.)
+        text = config_entry['fallback_template'].format_map(_Blanks(
             parent_name=parent_name,
             child_name=child_name,
             course_name=course_name,
@@ -750,7 +799,11 @@ class ManyChatService:
             time_range=time_range,
             card_update_url=extras.get('kogo_card_update_url', ''),
             amount=extras.get('kogo_amount', ''),
-        )
+            sign_url=extras.get('kogo_rental_sign_url', ''),
+            support_phone=extras.get('kogo_support_phone', SUPPORT_PHONE),
+            # ' בסניף X', or nothing at all when there is no branch to name.
+            branch_suffix=f' בסניף {branch_name}' if branch_name and branch_name != '—' else '',
+        ))
         try:
             self.send_whatsapp_text(sid, text)
             return {'sent': True, 'method': 'text', 'kind': kind, 'subscriber_id': sid, 'phone': phone, 'whatsapp_phone': whatsapp_phone, 'parent_name': parent_name, 'child_name': child_name}

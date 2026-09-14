@@ -11,6 +11,7 @@ managers' only, as issuing a document is in apps/documents (a partner: 403).
     POST        standing-orders/{id}/resume/        paused → active; the paused months are not charged
     POST        standing-orders/{id}/end/           → ended; its waiting card link is cancelled
     POST        standing-orders/{id}/card-link/     a new card link; the previous URL stops working
+    POST        standing-orders/{id}/send-card-link/  send the live card link to the tenant on WhatsApp
     GET         standing-orders/{id}/charges/       the order's charges, newest month first
     GET         charges/                            across orders (?status= ?branch= ?standing_order= ?tenancy=
                                                     ?period=YYYY-MM ?needs_receipt=1), newest 500
@@ -245,6 +246,36 @@ class StandingOrderViewSet(viewsets.GenericViewSet):
         except BillingError as exc:
             return _billing_error(exc)
         return Response(card_link_payload(link, request), status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='send-card-link')
+    def send_card_link(self, request, pk=None):
+        """
+        Send the tenant the card link the order already has, on WhatsApp (rental-card-update).
+
+        No link is made here, for the same reason card_link/ is a separate
+        call: the office decides when a URL the tenant may be holding stops
+        working. What is missing — a link, a phone — is a 400 the office can
+        fix; anything ManyChat said is a 502, as the courses' send-card-update
+        answers.
+
+        Not behind RENTAL_BILLING_ENABLED: a message is not a charge, and the
+        page the link opens refuses on its own while the switch is off.
+        """
+        from apps.rental_billing.card_whatsapp import NO_LINK, NO_PHONE, send_card_link_whatsapp
+
+        order = self.get_object()
+        result = send_card_link_whatsapp(order, request)
+        body = {'whatsapp': result, 'standing_order': self._read(order)}
+        if result.get('sent'):
+            return Response(body)
+        reason = result.get('reason')
+        if reason in (NO_LINK, NO_PHONE):
+            body['error'] = (
+                'אין קישור פעיל לכרטיס. צרו קישור ואז שלחו.' if reason == NO_LINK
+                else 'לשוכר לא הוזן טלפון. הוסיפו טלפון בעריכת השוכר ואז שלחו.'
+            )
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
+        return Response(body, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=True, methods=['get'])
     def charges(self, request, pk=None):

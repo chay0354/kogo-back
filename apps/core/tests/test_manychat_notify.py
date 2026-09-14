@@ -74,6 +74,133 @@ class AvailableAutomationsTests(SimpleTestCase):
             svc.list_available_automations()
 
 
+class RentalFlowTests(SimpleTestCase):
+    """
+    The two automations the studio tenants send through, resolved by their
+    exact ManyChat names: 'rental-contract' and 'rental-card-update'.
+
+    A tenant is a merchant, not a parent, so neither may ever borrow one of the
+    courses' templates: those name a child and a course.
+    """
+
+    KINDS = (
+        ('MANYCHAT_RENTAL_CONTRACT_FLOW_NS', 'rental-contract',
+         ManyChatService.REGISTRATION_KIND_RENTAL_CONTRACT),
+        ('MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS', 'rental-card-update',
+         ManyChatService.REGISTRATION_KIND_RENTAL_CARD_UPDATE),
+    )
+
+    def test_the_settings_are_declared_so_the_environment_reaches_them(self):
+        # Declaring them is what lets the owner pin a flow ns in Vercel; the
+        # card-link setting was read for weeks without being declared.
+        for setting, _name, _kind in self.KINDS:
+            self.assertTrue(hasattr(settings, setting), setting)
+
+    def test_the_configured_flow_ns_wins_without_asking_manychat(self):
+        for setting, _name, _kind in self.KINDS:
+            with self.subTest(setting=setting), override_settings(**{setting: 'content_pinned'}):
+                svc = ManyChatService(api_key='x')
+                svc.get_flows = MagicMock()
+                self.assertEqual(svc.resolve_flow_ns(setting), 'content_pinned')
+                svc.get_flows.assert_not_called()
+
+    def test_without_one_the_automation_is_found_by_its_exact_name(self):
+        flows = [
+            {'name': 'card-update', 'ns': 'content_courses_update'},
+            {'name': 'card-link', 'ns': 'content_courses_link'},
+            {'name': 'rental-contract', 'ns': 'content_rental_contract'},
+            {'name': 'rental-card-update', 'ns': 'content_rental_card'},
+        ]
+        for setting, name, _kind in self.KINDS:
+            with self.subTest(name=name), override_settings(**{setting: ''}):
+                svc = ManyChatService(api_key='x')
+                svc.get_flows = MagicMock(return_value=flows)
+                expected = next(f['ns'] for f in flows if f['name'] == name)
+                self.assertEqual(svc.resolve_flow_ns(setting), expected)
+
+    @override_settings(MANYCHAT_RENTAL_CONTRACT_FLOW_NS='', MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS='',
+                       MANYCHAT_CARD_UPDATE_FLOW_NS='', MANYCHAT_CARD_LINK_FLOW_NS='')
+    def test_a_tenant_send_never_borrows_a_courses_automation(self):
+        # The card-link kind falls back to card-update on purpose. A tenant's
+        # kinds must not: 'החיוב החודשי עבור ילד בחוג' to a merchant is wrong.
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock(return_value=[
+            {'name': 'card-update', 'ns': 'content_courses_update'},
+            {'name': 'card-link', 'ns': 'content_courses_link'},
+        ])
+        for _setting, _name, kind in self.KINDS:
+            with self.subTest(kind=kind):
+                entry = svc._REGISTRATION_KINDS[kind]
+                self.assertNotIn('fallback_flow_setting', entry)
+                self.assertEqual(svc.resolve_flow_for(entry), '')
+
+    def test_both_kinds_are_listed_for_the_office_with_a_hebrew_label(self):
+        for _setting, _name, kind in self.KINDS:
+            self.assertIn(kind, ManyChatService._REGISTRATION_KINDS)
+            self.assertTrue(ManyChatService.AUTOMATION_LABELS.get(kind))
+
+
+class FallbackTextTests(SimpleTestCase):
+    """
+    The free text a send drops to when no automation exists. WhatsApp only
+    delivers it inside the 24-hour window, but when it does it must read like
+    a message and carry the link — never raise on the way out.
+    """
+
+    def _svc(self):
+        svc = ManyChatService(api_key='x')
+        svc.lookup_or_create = MagicMock(return_value={'subscriber_id': 7})
+        svc.get_subscriber = MagicMock(return_value={'whatsapp_phone': '972501234567'})
+        svc.set_custom_fields = MagicMock(return_value={'status': 'success'})
+        svc.resolve_flow_ns = MagicMock(return_value='')
+        svc.send_whatsapp_text = MagicMock(return_value={'status': 'success'})
+        return svc
+
+    def _send(self, svc, kind, extra_fields):
+        return svc.notify_registration(
+            phone='0501234567', parent_name='סטודיו אור', child_name='סטודיו אור',
+            course_name='שכירות סטודיו', day_name='', start_time='', end_time='',
+            branch_name='פלורנטין', kind=kind, extra_fields=extra_fields,
+        )
+
+    def test_the_contract_text_carries_the_signing_link_and_the_branch(self):
+        svc = self._svc()
+        result = self._send(
+            svc, ManyChatService.REGISTRATION_KIND_RENTAL_CONTRACT,
+            {'kogo_rental_sign_url': 'https://kogo.example/s/abc123', 'kogo_amount': '1,456.78'},
+        )
+        self.assertEqual(result['method'], 'text')
+        text = svc.send_whatsapp_text.call_args[0][1]
+        self.assertIn('https://kogo.example/s/abc123', text)
+        self.assertIn('סטודיו אור', text)
+        self.assertIn('בסניף פלורנטין', text)
+
+    def test_the_card_text_carries_the_card_link_and_the_amount(self):
+        svc = self._svc()
+        result = self._send(
+            svc, ManyChatService.REGISTRATION_KIND_RENTAL_CARD_UPDATE,
+            {'kogo_card_update_url': 'https://kogo.example/rc/tok', 'kogo_amount': '1456.78'},
+        )
+        self.assertEqual(result['method'], 'text')
+        text = svc.send_whatsapp_text.call_args[0][1]
+        self.assertIn('https://kogo.example/rc/tok', text)
+        self.assertIn('1456.78', text)
+
+    def test_a_placeholder_nobody_filled_reads_as_nothing_instead_of_crashing(self):
+        # {course_suffix} in the card-link template had no value passed to
+        # format(); the fallback raised KeyError mid-send instead of sending.
+        svc = self._svc()
+        result = svc.notify_registration(
+            phone='0501234567', parent_name='הורה', child_name='ילד', course_name='קפוארה',
+            day_name='ראשון', start_time='18:00', end_time='19:00', branch_name='פלורנטין',
+            kind=ManyChatService.REGISTRATION_KIND_CARD_LINK,
+            extra_fields={'kogo_card_update_url': 'https://kogo.example/c/tok', 'kogo_amount': '250'},
+        )
+        self.assertTrue(result['sent'])
+        self.assertEqual(result['method'], 'text')
+        self.assertIn('https://kogo.example/c/tok', svc.send_whatsapp_text.call_args[0][1])
+
+
 class SetCustomFieldsFallbackTests(SimpleTestCase):
     def test_retries_fields_one_by_one_when_batch_fails(self):
         svc = ManyChatService(api_key='x')
