@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.documents.models import FormalDocument, DocumentLineItem, DocumentPayment, CheckPlan, CheckItem
+from apps.documents.models import CashPlan, CashPlanMonth, FormalDocument, DocumentLineItem, DocumentPayment, CheckPlan, CheckItem
 
 
 class DocumentLineItemSerializer(serializers.ModelSerializer):
@@ -240,3 +240,53 @@ class CreateCheckPlanSerializer(serializers.Serializer):
     lesson_id = serializers.UUIDField(required=False, allow_null=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
     checks = serializers.ListField(child=serializers.DictField(), allow_empty=False)
+
+
+# ── Cash plans ───────────────────────────────────────────────────────────────
+
+class CashPlanMonthSerializer(serializers.ModelSerializer):
+    document_number = serializers.CharField(source='document.document_number', read_only=True, default='')
+    document_type = serializers.CharField(source='document.document_type', read_only=True, default='')
+
+    class Meta:
+        model = CashPlanMonth
+        fields = ['id', 'due_date', 'amount', 'status', 'invoiced_at', 'document_number', 'document_type']
+
+
+class CashPlanSerializer(serializers.ModelSerializer):
+    child_name = serializers.CharField(source='child.full_name', read_only=True, default='')
+    course_name = serializers.CharField(source='lesson.course.name', read_only=True, default='')
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
+    receipt_number = serializers.CharField(source='receipt.document_number', read_only=True, default='')
+    months = CashPlanMonthSerializer(many=True, read_only=True)
+    months_paid = serializers.SerializerMethodField()
+    months_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CashPlan
+        fields = [
+            'id', 'child', 'child_name', 'lesson', 'course_name', 'branch', 'branch_name',
+            'description', 'status', 'total_amount', 'monthly_amount',
+            'monthly_document_type', 'receipt', 'receipt_number',
+            'months', 'months_paid', 'months_total', 'created_at',
+        ]
+
+    def get_months_paid(self, obj):
+        return sum(1 for m in obj.months.all() if m.status == 'invoiced')
+
+    def get_months_total(self, obj):
+        return obj.months.count()
+
+
+class CreateCashPlanSerializer(serializers.Serializer):
+    child_id = serializers.UUIDField()
+    lesson_id = serializers.UUIDField(required=False, allow_null=True)
+    total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    monthly_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    start_month = serializers.DateField(required=False, allow_null=True)
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+    monthly_document_type = serializers.ChoiceField(
+        choices=[c[0] for c in CashPlan.MONTHLY_DOCUMENT_CHOICES],
+        required=False,
+        default='combined',
+    )
