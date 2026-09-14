@@ -247,6 +247,118 @@ class DocumentPayment(models.Model):
         verbose_name_plural = "תשלומים במסמך"
 
 
+class CashPlan(models.Model):
+    """
+    מנוי במזומן — cash paid up front, recognised month by month.
+
+    A parent pays the whole year in cash. The money arrives once, so a receipt
+    for the whole sum is issued the moment it is taken; the income belongs to
+    the months it covers, so a document is issued on the 1st of each of them.
+    This is the same shape the office already uses for a series of post-dated
+    checks (CheckPlan), with one difference: a check carries its own date and
+    amount, while cash is one sum split into equal months.
+
+    `monthly_document_type` is a choice and not a constant. The check series
+    issues a tax invoice for each month precisely because the money was already
+    receipted once, and receipting it again would count the same shekels twice;
+    the owner asked for חשבונית מס/קבלה here, so that is the default, and the
+    other option is one field away when their accountant rules on it.
+    """
+    STATUS_CHOICES = [
+        ('active', 'פעיל'),
+        ('completed', 'הושלם'),
+        ('cancelled', 'בוטל'),
+    ]
+    MONTHLY_DOCUMENT_CHOICES = [
+        ('combined', 'חשבונית מס/קבלה'),
+        ('tax_invoice', 'חשבונית מס'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    child = models.ForeignKey(
+        'customers.Child', on_delete=models.CASCADE,
+        related_name='cash_plans', verbose_name="ילד",
+    )
+    lesson = models.ForeignKey(
+        'courses.Lesson', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cash_plans', verbose_name="שיעור",
+    )
+    description = models.CharField(max_length=300, blank=True, verbose_name="תיאור")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active', verbose_name="סטטוס")
+
+    total_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, verbose_name="סכום ששולם במזומן",
+    )
+    monthly_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, verbose_name="סכום חודשי",
+        help_text="מחיר החוג הרגיל — הסכום שיופיע על המסמך של כל חודש.",
+    )
+    monthly_document_type = models.CharField(
+        max_length=20, choices=MONTHLY_DOCUMENT_CHOICES, default='combined',
+        verbose_name="סוג המסמך החודשי",
+    )
+
+    # The receipt for the whole sum, issued at registration.
+    receipt = models.ForeignKey(
+        FormalDocument, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cash_plan_receipt', verbose_name="קבלה",
+    )
+    branch = models.ForeignKey(
+        'core.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="סניף",
+    )
+    created_by = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cash_plans_created', verbose_name="נרשם על ידי",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'cash_plans'
+        verbose_name = "מנוי במזומן"
+        verbose_name_plural = "מנויים במזומן"
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['child', 'status'])]
+
+    def __str__(self):
+        return f"מזומן {self.child.full_name} - ₪{self.total_amount}"
+
+
+class CashPlanMonth(models.Model):
+    """One month of a cash plan, and the document issued for it."""
+    STATUS_CHOICES = [
+        ('pending', 'ממתין'),
+        ('invoiced', 'הופקה חשבונית'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(
+        CashPlan, on_delete=models.CASCADE, related_name='months', verbose_name="תוכנית",
+    )
+    due_date = models.DateField(verbose_name="תאריך המסמך")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="סכום")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name="סטטוס")
+    document = models.ForeignKey(
+        FormalDocument, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cash_plan_month', verbose_name="מסמך",
+    )
+    invoiced_at = models.DateTimeField(null=True, blank=True, verbose_name="מועד ההפקה")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+
+    class Meta:
+        db_table = 'cash_plan_months'
+        verbose_name = "חודש במנוי מזומן"
+        verbose_name_plural = "חודשים במנוי מזומן"
+        ordering = ['due_date']
+        # One document per month per plan: the cron and beat can overlap.
+        unique_together = [('plan', 'due_date')]
+        indexes = [models.Index(fields=['status', 'due_date'])]
+
+    def __str__(self):
+        return f"{self.plan.child.full_name} · {self.due_date:%m/%Y} · ₪{self.amount}"
+
+
 class CheckPlan(models.Model):
     """Office check series for a child who cannot pay by card."""
 

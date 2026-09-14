@@ -266,4 +266,26 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
         logger.exception('Check invoice issuance failed')
         summary['check_invoices'] = {'checked': 0, 'issued': 0, 'errors': [str(exc)]}
 
+    # Cash paid up front is recognised on the 1st of each month it covers. It
+    # rides the same run as the checks and, like them, a failure here must not
+    # touch anybody's card billing.
+    try:
+        from apps.documents.cash_plans import issue_due_cash_documents
+        from apps.documents.models import CashPlanMonth
+
+        if dry_run:
+            summary['cash_documents'] = {
+                'checked': CashPlanMonth.objects.filter(
+                    status='pending', due_date__lte=today, plan__status='active',
+                ).count(),
+                'issued': 0,
+                'errors': [],
+                'dry_run': True,
+            }
+        else:
+            summary['cash_documents'] = issue_due_cash_documents(today=today, limit=batch)
+    except Exception as exc:
+        logger.exception('Cash plan document issuance failed')
+        summary['cash_documents'] = {'checked': 0, 'issued': 0, 'errors': [str(exc)]}
+
     return summary

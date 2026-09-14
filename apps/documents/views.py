@@ -1,5 +1,5 @@
 import logging
-from rest_framework import viewsets, filters, status
+from rest_framework import viewsets, filters, serializers, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -10,12 +10,14 @@ from django.http import HttpResponse
 
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.customers.models import Child
-from apps.documents.models import FormalDocument, CheckPlan
+from apps.documents.models import FormalDocument, CheckPlan, CashPlan
 from apps.documents.serializers import (
     FormalDocumentSerializer,
     FormalDocumentListSerializer,
     CreateDocumentSerializer,
+    CashPlanSerializer,
     CheckPlanSerializer,
+    CreateCashPlanSerializer,
     CreateCheckPlanSerializer,
 )
 from apps.documents import service
@@ -473,3 +475,85 @@ class MissingReceiptsViewSet(viewsets.ViewSet):
             return Response({'error': 'מזהה תשלום לא תקין.'}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(issue_missing_receipts(payment_ids, user=request.user))
+
+
+class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Cash paid up front: list the plans and register a new one.
+
+    Registering issues the receipt for the whole sum immediately and lays out
+    the months; any month already due gets its document in the same breath, and
+    the rest are picked up by the monthly run.
+    """
+
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    serializer_class = CashPlanSerializer
+    pagination_class = None
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['description', 'child__first_name', 'child__last_name']
+    ordering_fields = ['created_at']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        qs = (
+            CashPlan.objects
+            .select_related('child', 'branch', 'receipt', 'lesson', 'lesson__course')
+            .prefetch_related('months', 'months__document')
+        )
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        child_id = self.request.query_params.get('child_id')
+        if child_id:
+            qs = qs.filter(child_id=child_id)
+        branch_id = self.request.query_params.get('branch')
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+        return qs
+
+    @action(detail=False, methods=['post'], url_path='preview')
+    def preview_plan(self, request):
+        """The months and amounts, before anything is issued."""
+        from apps.documents.cash_plans import preview
+
+        try:
+            return Response(preview(
+                total_amount=request.data.get('total_amount'),
+                monthly_amount=request.data.get('monthly_amount'),
+                start_month=serializers.DateField().to_internal_value(request.data['start_month'])
+                if request.data.get('start_month') else None,
+            ))
+        except (ValueError, ArithmeticError) as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def create(self, request):
+        from apps.documents.cash_plans import register_cash_plan
+
+        serializer = CreateCashPlanSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        data = serializer.validated_data
+        try:
+            plan = register_cash_plan(
+                child_id=str(data['child_id']),
+                total_amount=data['total_amount'],
+                monthly_amount=data['monthly_amount'],
+                lesson_id=str(data['lesson_id']) if data.get('lesson_id') else None,
+                start_month=data.get('start_month'),
+                description=data.get('description') or '',
+                monthly_document_type=data.get('monthly_document_type') or 'combined',
+                actor=request.user,
+            )
+        except Child.DoesNotExist:
+            return Response({'error': 'הילד לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.error('Cash plan registration failed: %s', exc, exc_info=True)
+            return Response(
+                {'error': f'שגיאה ברישום המזומן: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        plan.refresh_from_db()
+        return Response(CashPlanSerializer(plan).data, status=status.HTTP_201_CREATED)
