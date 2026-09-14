@@ -230,14 +230,20 @@ class ReceiptEmailTest(TestCase):
 
 
 class CardLinkRegenerateTest(CardLinkBase):
-    def test_a_regenerated_link_gets_its_fourteen_days_again(self):
+    def test_an_old_link_still_opens_and_regenerating_closes_it(self):
+        # Age closes nothing any more: a link sent twenty days ago still opens.
+        # Regenerating is the lever that closes one — it mints a new token, and
+        # leaves created_at alone, because that is when the office made the link.
         link = self._one_time_link()
         old_token = build_card_link_token(link)
         CardLink.objects.filter(id=link.id).update(created_at=timezone.now() - timedelta(days=20))
         public = APIClient()
-        self.assertEqual(public.get(f'/api/v1/customers/card-link/{old_token}/').status_code, 400)
+        self.assertEqual(public.get(f'/api/v1/customers/card-link/{old_token}/').status_code, 200)
 
+        made_at = CardLink.objects.values_list('created_at', flat=True).get(id=link.id)
         res = self.client.post(f'/api/v1/customers/card-links/{link.id}/regenerate/')
         self.assertEqual(res.status_code, 200, res.content)
         new_token = res.data['public_url'].split('/c/')[1]
+        self.assertEqual(public.get(f'/api/v1/customers/card-link/{old_token}/').status_code, 400)
         self.assertEqual(public.get(f'/api/v1/customers/card-link/{new_token}/').status_code, 200)
+        self.assertEqual(CardLink.objects.values_list('created_at', flat=True).get(id=link.id), made_at)
