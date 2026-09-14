@@ -401,16 +401,10 @@ class CardLinkApiTest(_Base):
         res = self.client.post('/api/v1/customers/card-links/', {'kind': 'one_time', 'child_id': str(self.child.id), 'amount': '20', 'description': ''}, format='json')
         self.assertEqual(res.status_code, 400)
 
-    def test_send_cancel_regenerate(self):
+    def test_cancel_and_regenerate(self):
+        # Sending is covered per kind below: a standing order goes on WhatsApp,
+        # a one-time charge is copied by hand.
         link = self._one_time_link()
-        with patch('apps.customers.card_link.ManyChatService.notify_registration', return_value={'sent': True, 'method': 'flow'}) as send:
-            res = self.client.post(f'/api/v1/customers/card-links/{link.id}/send/')
-        self.assertEqual(res.status_code, 200, res.content)
-        self.assertTrue(res.data['whatsapp']['sent'])
-        kwargs = send.call_args.kwargs
-        self.assertEqual(kwargs['kind'], 'card_link')
-        self.assertIn('/c/', kwargs['extra_fields']['kogo_card_update_url'])
-        self.assertEqual(kwargs['extra_fields']['kogo_amount'], '150.00')
         old_token = build_card_link_token(link)
         res = self.client.post(f'/api/v1/customers/card-links/{link.id}/cancel/')
         self.assertEqual(res.data['status'], 'cancelled')
@@ -418,6 +412,28 @@ class CardLinkApiTest(_Base):
         res = self.client.post(f'/api/v1/customers/card-links/{link.id}/regenerate/')
         self.assertEqual(res.data['status'], 'pending')
         self.assertEqual(APIClient().get(f"/api/v1/customers/card-link/{res.data['public_url'].split('/c/')[1]}/").status_code, 200)
+
+    def test_a_one_time_link_is_not_sent_on_whatsapp(self):
+        # The only approved template speaks of updating a card on file; a one-time
+        # charge would read as "your standing order failed" over a shirt.
+        link = self._one_time_link()
+        with patch('apps.customers.card_link.ManyChatService.notify_registration') as send:
+            res = self.client.post(f'/api/v1/customers/card-links/{link.id}/send/')
+        self.assertEqual(res.status_code, 400, res.content)
+        self.assertIn('העתקת הקישור', res.data['error'])
+        send.assert_not_called()
+
+    def test_a_standing_order_link_still_sends(self):
+        link = self._sto_link()
+        with patch('apps.customers.card_link.ManyChatService.notify_registration',
+                   return_value={'sent': True, 'method': 'flow'}) as send:
+            res = self.client.post(f'/api/v1/customers/card-links/{link.id}/send/')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.data['whatsapp']['sent'])
+        send.assert_called_once()
+        kwargs = send.call_args.kwargs
+        self.assertEqual(kwargs['kind'], 'card_link')
+        self.assertIn('/c/', kwargs['extra_fields']['kogo_card_update_url'])
 
     def test_public_preview_and_charge(self):
         link = self._one_time_link()
