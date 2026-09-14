@@ -25,6 +25,7 @@ from apps.core.scoping import (
     partner_branch_ids,
 )
 from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
+from apps.documents.numbering import is_rental_number
 
 GROUP_BY_BRANCH = 'branch'
 GROUP_BY_BUSINESS = 'business'
@@ -455,7 +456,9 @@ def _row_from(doc) -> ReportRow:
     store_sale = next(iter(doc.store_invoices.all()), None)
     payment = next(iter(doc.payments.all()), None)
     return ReportRow(
-        channel='manual',
+        # A tenant's receipt is a FormalDocument as well, numbered in the RT run;
+        # the register files it under a channel of its own (register.CHANNEL_RENTALS).
+        channel='rentals' if is_rental_number(doc.document_number) else 'manual',
         source_id=str(doc.id),
         reference=store_sale.invoice_number if store_sale else (doc.linked_document_number or ''),
         payment_method=payment.payment_method if payment else '',

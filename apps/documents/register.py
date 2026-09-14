@@ -1,12 +1,15 @@
 """The documents register — every document issued in a period, from every channel.
 
-Three channels issue documents to customers:
+Four channels issue documents to customers:
 
 * the documents module (FormalDocument): what the office issues by hand, every
   credit note, and the local copy of a store sale's Tranzila document;
 * lesson charges (customers.Invoice): the חשבונית מס/קבלה each charge issues;
 * the store (StoreInvoice): the חשבונית מס/קבלה of a sale paid on the spot, or the
-  חשבונית עסקה of a sale put on monthly billing.
+  חשבונית עסקה of a sale put on monthly billing;
+* studio rentals (apps/rental_billing): the חשבונית מס/קבלה each tenant charge
+  issues. It is a FormalDocument numbered in the RT run, read with the first
+  channel's documents and filed under a channel of its own.
 
 The period report used to read the first channel only and list the other two as
 income without a document, because they were numbered from a payment's UUID
@@ -47,11 +50,14 @@ from apps.documents.undocumented_income import (
 CHANNEL_MANUAL = 'manual'
 CHANNEL_LESSONS = 'lessons'
 CHANNEL_STORE = 'store'
+# A tenant's receipt (the RT run). period_report._row_from sets it by the number.
+CHANNEL_RENTALS = 'rentals'
 
 CHANNEL_LABELS = {
     CHANNEL_MANUAL: 'מסמכים',
     CHANNEL_LESSONS: 'חוגים',
     CHANNEL_STORE: 'חנות',
+    CHANNEL_RENTALS: 'שכירויות',
 }
 
 # מבנה אחיד, נספח 1: the code each document type is reported under.

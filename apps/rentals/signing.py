@@ -480,12 +480,61 @@ def sign_contract(contract, token: str, signing: SigningInput, request) -> Renta
     return locked
 
 
-def after_signing(contract) -> dict:
+def after_signing(contract, request=None) -> dict:
     """
     What the signing page does once the contract is signed, merged into its answer.
 
-    Phase 4 (the tenant's card and standing order) continues from here: it will
-    answer {'next': 'card', ...} for a tenancy that still needs one. Until
-    then the page is done.
+    With rental billing on (apps/rental_billing), a tenancy that still needs a
+    card goes on to its card page: its standing order is opened from the
+    signing (source 'signing'; the open one is reused when there is one), a
+    new card link is issued, and the answer is
+    {'next': 'card', 'card_url': '<frontend>/rc/<token>'}. An order that
+    already holds a card (active, paused) needs no card step.
+
+    Otherwise — billing off, the rentals business missing, or anything here
+    failing — the page is done: {'next': 'done'}.
+
+    The signature is already committed when this runs: sign_contract's
+    transaction closed before it returned, and the view calls this after it.
+    Nothing here can undo the signing, so a failure is logged and answered
+    with 'done', never raised.
     """
-    return {'next': 'done'}
+    from apps.rental_billing.billing import billing_enabled, missing_business_message, rental_business
+    from apps.rental_billing.links import public_url
+
+    if not billing_enabled():
+        return {'next': 'done'}
+    try:
+        if rental_business() is None:
+            logger.warning(
+                'Rental contract %s signed; no card step: %s', contract.pk, missing_business_message(),
+            )
+            return {'next': 'done'}
+        # One transaction (a savepoint when called inside one): the order and
+        # its link are opened together or not at all.
+        with transaction.atomic():
+            link = _card_link_after_signing(contract)
+        if link is None:
+            return {'next': 'done'}
+        return {'next': 'card', 'card_url': public_url(link, public_frontend_url(request))}
+    except Exception:
+        logger.exception(
+            'Rental contract %s signed; its card step could not be opened (the signature stands)', contract.pk,
+        )
+        return {'next': 'done'}
+
+
+def _card_link_after_signing(contract):
+    """The tenancy's open standing order (opened now if it has none) and a new card link, or None when it needs no card."""
+    from apps.rental_billing import links, orders
+    from apps.rental_billing.models import TenantStandingOrder
+
+    order = TenantStandingOrder.objects.filter(
+        tenancy_id=contract.tenancy_id, status__in=TenantStandingOrder.OPEN_STATUSES,
+    ).first()
+    if order is None:
+        tenancy = Tenancy.objects.get(pk=contract.tenancy_id)
+        order = orders.open_standing_order(tenancy, source=TenantStandingOrder.SOURCE_SIGNING)
+    if order.status not in links.LINKABLE_STATUSES:
+        return None
+    return links.rotate_card_link(order)

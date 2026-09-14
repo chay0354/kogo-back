@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     'apps.external_students',
     'apps.signatures',
     'apps.rentals',
+    'apps.rental_billing',
 ]
 
 MIDDLEWARE = [
@@ -246,6 +247,9 @@ REST_FRAMEWORK = {
         # reading it and its PDF, and submitting a signature.
         'rental_sign_view': '30/min',
         'rental_sign_submit': '5/min',
+        # The tenant's public card page (apps/rental_billing): the same limits as card links.
+        'rental_card_view': '30/min',
+        'rental_card_charge': '5/min',
     },
 }
 
@@ -299,6 +303,26 @@ TRANZILA_DCDISABLE_ENABLED = config('TRANZILA_DCDISABLE_ENABLED', default=False,
 # Leave TRANZILA_BILLING_TERMINAL empty until activated by Tranzila — document issuance will be skipped.
 TRANZILA_BILLING_TERMINAL = config('TRANZILA_BILLING_TERMINAL', default='')
 TRANZILA_BILLING_BASE_URL = config('TRANZILA_BILLING_BASE_URL', default='https://billing5.tranzila.com')
+
+# Studio tenants' monthly standing orders (apps/rental_billing).
+# Off by default and switched on by the owner after a ₪1 test charge. While off,
+# nothing in that app reaches Tranzila: the cron, the tenant's card page and the
+# office's "retry now" all answer "disabled". Standing orders can still be
+# created and edited.
+RENTAL_BILLING_ENABLED = config('RENTAL_BILLING_ENABLED', default=False, cast=bool)
+# The Business every rental charge and receipt is tagged to, found by name.
+# Seeded by apps/core/migrations/0018_seed_businesses.py; when it is missing,
+# charging is refused rather than the business being created on the fly.
+RENTAL_BILLING_BUSINESS_NAME = config('RENTAL_BILLING_BUSINESS_NAME', default='סוחרים')
+# The Tranzila terminal set tenant billing charges on. Each is empty by default
+# and then falls back to its TRANZILA_PROD_* value — the terminals the courses'
+# standing orders, card links and widget use. Set them to point tenant billing
+# alone at another terminal (the ₪1 test) without moving the courses' charges.
+RENTAL_TRANZILA_TERMINAL = config('RENTAL_TRANZILA_TERMINAL', default='')
+RENTAL_TRANZILA_TOKEN_TERMINAL = config('RENTAL_TRANZILA_TOKEN_TERMINAL', default='')
+RENTAL_TRANZILA_SUPPLIER = config('RENTAL_TRANZILA_SUPPLIER', default='')
+RENTAL_TRANZILA_PUBLIC_KEY = config('RENTAL_TRANZILA_PUBLIC_KEY', default='')
+RENTAL_TRANZILA_SECRET_KEY = config('RENTAL_TRANZILA_SECRET_KEY', default='')
 
 # Public base URL of this API. Used to build the Tranzila notify_url_address, without
 # which iframe payments are never confirmed. Verify with `manage.py check_tranzila`.
