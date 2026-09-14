@@ -741,6 +741,110 @@ class DashboardViewSet(viewsets.ViewSet):
             'attendance_by_month': attendance_by_month,
         })
     
+    @action(detail=False, methods=['get'], url_path='trial-not-converted')
+    def trial_not_converted(self, request):
+        """
+        Children booked for a trial who never signed up for a course.
+
+        GET /api/v1/core/dashboard/trial-not-converted/
+            ?branch_id=&city_id=&course_id=&outcome=attended|no_show
+
+        The outcome is read off the register and not off `Child.status`:
+        `trial_completed` only ever meant that the date went by, so it says
+        nothing about whether the child was in the room. Both outcomes are
+        listed because they are two different calls to make — one asks how the
+        lesson was, the other asks why they did not come — and each row says
+        which one it is.
+
+        `unmarked` is left out on purpose: a register nobody filled in is not a
+        fact about the child.
+
+        "Never signed up" is the absence of a paying enrollment, which is what
+        `paying_enrollments` already decides for capacity and revenue. Using the
+        same rule keeps this list from disagreeing with the counts beside it.
+        """
+        from apps.enrollments.enrollment_counts import paying_enrollments
+        from apps.enrollments.models import LessonEnrollment
+
+        branch_id = request.query_params.get('branch_id', 'all')
+        city_id = request.query_params.get('city_id', 'all')
+        course_id = request.query_params.get('course_id', 'all')
+
+        scoped, scoped_course_ids, _b, _i = self._scope(request)
+
+        outcome = (request.query_params.get('outcome') or '').strip()
+        wanted = [outcome] if outcome in ('attended', 'no_show') else ['attended', 'no_show']
+
+        trials = (
+            LessonEnrollment.objects
+            .filter(trial_outcome__in=wanted)
+            .select_related(
+                'child', 'child__family',
+                'lesson', 'lesson__course', 'lesson__course__branch',
+                'lesson__instructor',
+            )
+        )
+        if scoped:
+            trials = trials.filter(lesson__course_id__in=scoped_course_ids)
+        if course_id != 'all':
+            trials = trials.filter(lesson__course_id=course_id)
+        if branch_id != 'all':
+            trials = trials.filter(lesson__course__branch_id=branch_id)
+        if city_id != 'all':
+            trials = trials.filter(lesson__course__branch__city_id=city_id)
+
+        converted_ids = set(
+            paying_enrollments().values_list('child_id', flat=True)
+        )
+
+        today = timezone.now().date()
+        rows = []
+        seen = set()
+        for enrollment in trials.order_by('-trial_lesson_date', '-created_at'):
+            child = enrollment.child
+            if child is None or child.id in converted_ids:
+                continue
+            # One row per child: the most recent trial they attended. A child the
+            # office booked twice is one lead to call, not two.
+            if child.id in seen:
+                continue
+            seen.add(child.id)
+
+            family = getattr(child, 'family', None)
+            parent = family.parents.filter(is_primary=True).first() if family else None
+            lesson = enrollment.lesson
+            course = lesson.course if lesson else None
+            trial_date = enrollment.trial_lesson_date
+            rows.append({
+                'child_id': str(child.id),
+                'child_name': child.full_name,
+                'child_status': child.status,
+                'family_id': str(family.id) if family else '',
+                'parent_name': (
+                    f'{parent.first_name} {parent.last_name}'.strip() if parent
+                    else (family.name if family else '')
+                ),
+                'parent_phone': (parent.phone if parent else '') or (family.phone if family else ''),
+                'course_name': course.name if course else '',
+                'branch_id': str(course.branch_id) if course and course.branch_id else '',
+                'branch_name': course.branch.name if course and course.branch_id else '',
+                'instructor_name': (
+                    lesson.instructor.full_name if lesson and lesson.instructor_id else ''
+                ),
+                'trial_date': trial_date.isoformat() if trial_date else None,
+                'days_since_trial': (today - trial_date).days if trial_date else None,
+                'trial_number': enrollment.trial_number or 1,
+                'outcome': enrollment.trial_outcome,
+                'outcome_label': enrollment.get_trial_outcome_display(),
+            })
+
+        return Response({
+            'count': len(rows),
+            'attended': sum(1 for r in rows if r['outcome'] == 'attended'),
+            'no_show': sum(1 for r in rows if r['outcome'] == 'no_show'),
+            'results': rows,
+        })
+
     @action(detail=False, methods=['get'], url_path='courses')
     def courses_data(self, request):
         """
