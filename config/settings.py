@@ -342,6 +342,12 @@ MANYCHAT_PHONE_FIELD_ID = config('MANYCHAT_PHONE_FIELD_ID', default='')
 # One-time fee (ILS) added to each new lesson subscription's first charge.
 REGISTRATION_FEE_ILS = config('REGISTRATION_FEE_ILS', default=120, cast=int)
 
+# מספר הקצאה — the net (before VAT) amount from which a tax document needs an
+# allocation number from the Israel Tax Authority. The figure steps down year by
+# year and is decided outside this code; it is printed on real invoices, so it
+# lives here and not in a constant.
+ALLOCATION_THRESHOLD_ILS = config('ALLOCATION_THRESHOLD_ILS', default='5000')
+
 # Registrations made before this date pay only דמי רישום on signup; the monthly
 # subscription itself starts on this date at the full monthly price (no proration for
 # the signup month). Set empty to charge the first month on signup as usual.

@@ -174,6 +174,23 @@ class FormalDocument(models.Model):
     pdf_url = models.URLField(blank=True, verbose_name="קישור PDF")
     tranzila_issued = models.BooleanField(default=False, verbose_name="הופק בטרנזילה")
 
+    # מספר הקצאה — Israel Tax Authority allocation number.
+    #
+    # Above the threshold the customer cannot deduct input VAT without it, and
+    # the number is obtained from the Tax Authority, not invented here. Until
+    # there is an API integration it is fetched by hand from their portal and
+    # typed in, which is why it lives on the document rather than being derived:
+    # a number nobody can reproduce from the invoice must be stored with it.
+    allocation_number = models.CharField(
+        max_length=20, blank=True, verbose_name="מספר הקצאה",
+        help_text="9 הספרות שהתקבלו מרשות המסים. מודפס על המסמך ומדווח ב-PCN874.",
+    )
+    allocation_entered_at = models.DateTimeField(null=True, blank=True, verbose_name="מועד הזנת ההקצאה")
+    allocation_entered_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='allocation_numbers_entered', verbose_name="מי הזין",
+    )
+
     # Meta
     branch = models.ForeignKey(
         'core.Branch',
