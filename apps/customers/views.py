@@ -2083,7 +2083,13 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
     serializer_class = BusinessCustomerSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['first_name', 'last_name', 'company_number', 'email', 'phone']
+    # Every detail printed on the card is a way back to it. Somebody who has the
+    # invoice in front of them knows the ת"ז or the address, not necessarily how
+    # the name was spelled when it was typed in.
+    search_fields = [
+        'first_name', 'last_name', 'company_number', 'email', 'phone',
+        'id_number', 'address',
+    ]
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
