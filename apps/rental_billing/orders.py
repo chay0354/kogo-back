@@ -10,10 +10,11 @@ from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError, transaction
 
-from apps.rental_billing.billing import next_open_billing_date, rental_business, today_local
+from apps.rental_billing import billing
 from apps.rental_billing.errors import BillingError
 from apps.rental_billing.links import cancel_live_links
-from apps.rental_billing.models import TenantStandingOrder
+from apps.rental_billing.models import TenantCharge, TenantStandingOrder
+from apps.rental_billing.schedule import add_months, first_of_month
 from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, Tenancy
 
 Order = TenantStandingOrder
@@ -45,6 +46,23 @@ def _billing_day(value) -> int:
     return day
 
 
+def default_start(tenancy, today) -> 'date':
+    """
+    Where a new order on the tenancy starts: the first month the tenancy has
+    no charged, reserved or in-review charge for — by any earlier order — and
+    never a month before the current one. A tenancy whose agreement began
+    months ago is not charged for them; one whose September was charged by a
+    standing order that ended starts its next order in October.
+    """
+    taken = billing.tenancy_periods(
+        tenancy.pk, statuses=(TenantCharge.STATUS_CHARGED, TenantCharge.STATUS_RESERVED, TenantCharge.STATUS_REVIEW),
+    )
+    month = max(first_of_month(today), first_of_month(tenancy.start_date))
+    while month in taken:
+        month = add_months(month, 1)
+    return max(tenancy.start_date, month)
+
+
 def open_standing_order(
     tenancy,
     *,
@@ -56,13 +74,15 @@ def open_standing_order(
     end_date=_UNSET,
     notes: str = '',
     business_category=None,
+    today=None,
 ) -> Order:
     """
     A standing order for a tenancy, waiting for the tenant's card.
 
-    Amount, billing day and dates default to the tenancy's. The business is
-    the rental one (RENTAL_BILLING_BUSINESS_NAME) when it exists; when it does
-    not, the order is still opened and charging refuses until it does.
+    Amount, billing day and end date default to the tenancy's; the start to
+    default_start(). The business is the rental one (RENTAL_BILLING_BUSINESS_NAME)
+    when it exists; when it does not, the order is still opened and charging
+    refuses until it does.
     """
     if tenancy.status in (Tenancy.STATUS_CANCELLED, Tenancy.STATUS_ENDED):
         raise BillingError('ההסכם בוטל או הסתיים')
@@ -70,13 +90,16 @@ def open_standing_order(
         raise BillingError('מקור לא מוכר')
     amount = _amount(tenancy.monthly_amount if amount_before_vat is None else amount_before_vat)
     day = _billing_day(tenancy.billing_day if billing_day is None else billing_day)
-    start = start_date or tenancy.start_date
-    if not start:
+    if start_date:
+        start = start_date
+    elif tenancy.start_date:
+        start = default_start(tenancy, today or billing.today_local())
+    else:
         raise BillingError('יש להזין תאריך תחילה להסכם או להוראת הקבע')
     end = tenancy.end_date if end_date is _UNSET else end_date
     if end and end < start:
-        raise BillingError('תאריך הסיום לא יכול להיות לפני תאריך ההתחלה')
-    business = rental_business()
+        raise BillingError('אין חודש פתוח לחיוב בתקופת ההסכם' if not start_date else 'תאריך הסיום לא יכול להיות לפני תאריך ההתחלה')
+    business = billing.rental_business()
     if business_category is not None and (business is None or business_category.business_id != business.id):
         raise BillingError('הקטגוריה אינה שייכת לעסק של השכירויות')
     try:
@@ -156,16 +179,17 @@ def pause_order(order) -> Order:
 def resume_order(order, *, today=None) -> Order:
     """
     Back to active. The months that passed while it was paused are not
-    charged: the next charge is the first billing day from today (or the
-    one it had, if that is later) whose month has no charge yet.
+    charged: the next charge is the billing day of the first open month from
+    the current one (or the date it had, if that is later).
     """
-    today = today or today_local()
+    today = today or billing.today_local()
     with transaction.atomic():
         locked = Order.objects.select_for_update().get(pk=order.pk)
         if locked.status != Order.STATUS_PAUSED:
             raise BillingError('אפשר לחדש רק הוראת קבע מושהית')
-        base = max(today, locked.next_charge_date) if locked.next_charge_date else today
-        locked.next_charge_date = next_open_billing_date(locked, max(base, locked.start_date))
+        computed = billing.next_open_billing_date(locked, today)
+        stored = locked.next_charge_date
+        locked.next_charge_date = stored if stored and stored > computed else computed
         locked.status = Order.STATUS_ACTIVE
         if locked.end_date and locked.next_charge_date > locked.end_date:
             locked.status = Order.STATUS_ENDED

@@ -11,7 +11,6 @@ from apps.core.models import Business
 from apps.rental_billing.billing import charge_due, issue_receipt_safely, split_amount
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
 from apps.rental_billing.orders import pause_order, resume_order, update_standing_order
-from apps.rental_billing.schedule import add_months, first_of_month
 from apps.rental_billing.tests.factories import (
     DECLINE, NET_AGOROT, OK_TOKEN_CHARGE, TIMEOUT, TOTAL_AGOROT, VAT_AGOROT, BillingFixture,
 )
@@ -218,15 +217,30 @@ class CronChargingTests(BillingFixture, TestCase):
         self.assertEqual(charge_due(today=date(2026, 10, 10))['checked'], 0)
         self.assertEqual(charge_due(today=date(2026, 10, 20))['charged'], 1)
 
-    def test_months_behind_are_caught_up_one_a_day(self):
-        today = timezone.localdate()
-        behind = add_months(first_of_month(today), -2).replace(day=10)
-        order = self.active_order(next_charge_date=behind)
-        charge_due(today=today)
-        charge_due(today=today)
-        self.assertEqual(self.gateway.charge_with_token.call_count, 1)
+    def test_months_that_went_by_are_listed_never_charged(self):
+        # Billing switched on in December for an order last due in October:
+        # October and November go to the office; December, due, is charged.
+        order = self.active_order(next_charge_date=date(2026, 10, 10))
+        summary = charge_due(today=date(2026, 12, 15))
+        self.assertEqual(
+            [row['period'] for row in summary['missed']], ['2026-10-01', '2026-11-01'],
+        )
+        self.assertEqual(summary['charged'], 1)
+        self.assertEqual(
+            [call.kwargs['duplicate_guard_key'] for call in self.gateway.charge_with_token.call_args_list],
+            [f'rental-{order.pk}-2026-12'],
+        )
+        self.assertEqual(list(Charge.objects.values_list('period', flat=True)), [date(2026, 12, 1)])
         order.refresh_from_db()
-        self.assertEqual(order.next_charge_date, add_months(first_of_month(behind), 1).replace(day=10))
+        self.assertEqual(order.next_charge_date, date(2027, 1, 10))
+
+    def test_a_missed_month_before_the_billing_day_waits_for_it(self):
+        order = self.active_order(next_charge_date=date(2026, 10, 10))
+        summary = charge_due(today=date(2026, 12, 5))
+        self.assertEqual(summary['charged'], 0)
+        self.assertEqual(len(summary['missed']), 2)
+        order.refresh_from_db()
+        self.assertEqual(order.next_charge_date, date(2026, 12, 10))
 
     def test_a_missing_business_refuses_the_whole_run(self):
         self.active_order(next_charge_date=date(2026, 10, 10))

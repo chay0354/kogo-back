@@ -16,7 +16,7 @@ from apps.rental_billing.tests.factories import (
 @override_settings(RENTAL_BILLING_ENABLED=False, CRON_TOKEN='cron-secret')
 class KillSwitchTests(BillingFixture, APITestCase):
     def assert_tranzila_untouched(self):
-        self.tranzila_class.production.assert_not_called()
+        self.tranzila_class.assert_not_called()
         self.assertEqual(self.gateway_calls(), 0)
 
     def test_the_gateway_itself_refuses(self):

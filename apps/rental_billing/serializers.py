@@ -8,6 +8,7 @@ The card token is never in any response.
 from __future__ import annotations
 
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.core.frontend_url import public_frontend_url
@@ -148,7 +149,7 @@ class TenantChargeSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_tenancy_id(self, obj) -> str:
-        return str(obj.standing_order.tenancy_id)
+        return str(obj.tenancy_id)
 
     def get_tenant_name(self, obj) -> str:
         return obj.standing_order.tenant.full_name
@@ -178,10 +179,13 @@ class TenantChargeSerializer(serializers.ModelSerializer):
         if not obj.receipt_id:
             return None
         doc = obj.receipt
+        charged_on = timezone.localdate(obj.charged_at) if obj.charged_at else doc.document_date
         return {
             'id': str(doc.id),
             'document_number': doc.document_number,
             'document_date': doc.document_date.isoformat(),
+            # Issued on a later day than the charge (marked "הופק באיחור" on the receipt).
+            'issued_late': doc.document_date != charged_on,
             # The documents module serves the PDF; the screen downloads it with its own credentials.
             'pdf_url': reverse('document-pdf', args=[doc.pk]),
         }

@@ -25,12 +25,6 @@ SEP = date(2026, 9, 1)
 
 @override_settings(RENTAL_BILLING_ENABLED=True)
 class CardPageTests(BillingFixture, APITestCase):
-    def setUp(self):
-        super().setUp()
-        today = patch('apps.rental_billing.billing.today_local', return_value=date(2026, 9, 11))
-        self.today = today.start()
-        self.addCleanup(today.stop)
-
     def submit(self, link, card=CARD):
         return self.client.post(card_url(link), {'card_details': card}, format='json')
 

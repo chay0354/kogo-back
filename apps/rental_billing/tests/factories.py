@@ -55,6 +55,8 @@ def sign_contract(tenancy) -> RentalContract:
 
 def mocked_gateway() -> MagicMock:
     gateway = MagicMock(name='tranzila')
+    # No JSON kept: outcomes are read from the result, as TranzilaService shapes it.
+    gateway.last_response = None
     gateway.credential_error.return_value = None
     gateway.charge_with_token.return_value = dict(OK_TOKEN_CHARGE)
     gateway.charge_with_card.return_value = dict(OK_CARD_CHARGE)
@@ -64,9 +66,9 @@ def mocked_gateway() -> MagicMock:
 
 def patch_tranzila(testcase, gateway) -> MagicMock:
     """Route the app's gateway() to `gateway`, and make any real Tranzila request fail the test."""
-    service = patch('apps.rental_billing.billing.TranzilaService')
+    service = patch('apps.rental_billing.billing.RentalTranzila')
     tranzila_class = service.start()
-    tranzila_class.production.return_value = gateway
+    tranzila_class.return_value = gateway
     testcase.addCleanup(service.stop)
     real = patch(
         'apps.core.tranzila_service.TranzilaService._make_api_request',
@@ -97,6 +99,11 @@ class BillingFixture:
         self.manager = make_user('manager-rental-billing@test', UserProfile.ROLE_MANAGER)
         self.gateway = mocked_gateway()
         self.tranzila_class = patch_tranzila(self, self.gateway)
+        # "Today" for everything that does not take it as an argument: a fixed
+        # day, so the schedule the tests read does not move with the calendar.
+        today = patch('apps.rental_billing.billing.today_local', return_value=date(2026, 9, 11))
+        self.today = today.start()
+        self.addCleanup(today.stop)
 
     def gateway_calls(self) -> int:
         return (
@@ -124,7 +131,9 @@ class BillingFixture:
             'amount_before_vat': NET_AGOROT, 'vat_amount': VAT_AGOROT, 'total': TOTAL_AGOROT,
             'business': self.business, 'trigger': TenantCharge.TRIGGER_CRON, 'attempts': 1, **fields,
         }
-        return TenantCharge.objects.create(standing_order=order, period=period, status=status, **values)
+        return TenantCharge.objects.create(
+            standing_order=order, tenancy_id=order.tenancy_id, period=period, status=status, **values,
+        )
 
     def link(self, order, **fields) -> TenantCardLink:
         link = TenantCardLink.objects.create(standing_order=order, token=new_token())

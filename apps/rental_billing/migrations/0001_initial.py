@@ -99,6 +99,7 @@ class Migration(migrations.Migration):
                 ('receipt', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='tenant_charge', to='documents.formaldocument', verbose_name='חשבונית מס/קבלה')),
                 ('resolved_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL, verbose_name='הוכרע על ידי')),
                 ('standing_order', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='charges', to='rental_billing.tenantstandingorder', verbose_name='הוראת קבע')),
+                ('tenancy', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='rental_charges', to='rentals.tenancy', verbose_name='הסכם שכירות')),
             ],
             options={
                 'verbose_name': 'חיוב שוכר',
@@ -156,7 +157,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='tenantcharge',
-            constraint=models.UniqueConstraint(fields=('standing_order', 'period'), name='tenant_charge_one_per_order_month'),
+            constraint=models.UniqueConstraint(fields=('tenancy', 'period'), name='tenant_charge_one_per_tenancy_month'),
         ),
         migrations.AddConstraint(
             model_name='tenantcharge',

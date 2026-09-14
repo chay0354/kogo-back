@@ -55,7 +55,19 @@ def issue_receipt(charge_id) -> FormalDocument:
 
         order = charge.standing_order
         tenant = order.tenant
-        charged_at = charge.charged_at or timezone.now()
+        # Dated the day it is issued, and numbered from that day's year: a
+        # receipt issued after the charge day (a retry of a failed receipt, the
+        # office's issue-receipt) must not carry an earlier date than documents
+        # already numbered before it. Issued late, it says so, with both dates,
+        # as apps/documents/missing_receipts.py marks a late lesson receipt.
+        issued_at = timezone.now()
+        issued_on = timezone.localdate(issued_at)
+        charged_on = timezone.localdate(charge.charged_at) if charge.charged_at else issued_on
+        late_note = ''
+        if charged_on != issued_on:
+            late_note = (
+                f'הופק באיחור · התשלום התקבל ב־{charged_on:%d/%m/%Y} · המסמך הופק ב־{issued_on:%d/%m/%Y}'
+            )
         period = month_label(charge.period)
         net = shekels(charge.amount_before_vat)
         vat = shekels(charge.vat_amount)
@@ -63,7 +75,7 @@ def issue_receipt(charge_id) -> FormalDocument:
         line = f'{LINE_LABEL} · {period}' + (f' · {order.branch.name}' if order.branch_id else '')
 
         doc = FormalDocument.objects.create(
-            document_number=next_document_number(SERIES_RENTAL, charged_at),
+            document_number=next_document_number(SERIES_RENTAL, issued_at),
             document_type='combined',
             client_type='business',
             business_customer=tenant,
@@ -71,7 +83,7 @@ def issue_receipt(charge_id) -> FormalDocument:
             business_id=charge.business_id,
             business_category_id=charge.business_category_id,
             branch_id=order.branch_id,
-            document_date=timezone.localtime(charged_at).date(),
+            document_date=issued_on,
             description=f'{LINE_LABEL} לחודש {period}',
             currency='ILS',
             prices_include_vat=False,
@@ -82,7 +94,9 @@ def issue_receipt(charge_id) -> FormalDocument:
             discount_percent=Decimal('0'),
             vat_amount=vat,
             total_amount=total,
-            internal_notes=f'הופק אוטומטית עם חיוב שכירות {charge.pk}',
+            # Printed on the receipt (the payment panel) and kept for the office.
+            customer_notes=late_note,
+            internal_notes=f'הופק אוטומטית עם חיוב שכירות {charge.pk}' + (f' · {late_note}' if late_note else ''),
         )
         DocumentLineItem.objects.create(
             document=doc, description=line[:500], quantity=Decimal('1'), unit_price=net,

@@ -314,6 +314,15 @@ RENTAL_BILLING_ENABLED = config('RENTAL_BILLING_ENABLED', default=False, cast=bo
 # Seeded by apps/core/migrations/0018_seed_businesses.py; when it is missing,
 # charging is refused rather than the business being created on the fly.
 RENTAL_BILLING_BUSINESS_NAME = config('RENTAL_BILLING_BUSINESS_NAME', default='סוחרים')
+# The Tranzila terminal set tenant billing charges on. Each is empty by default
+# and then falls back to its TRANZILA_PROD_* value — the terminals the courses'
+# standing orders, card links and widget use. Set them to point tenant billing
+# alone at another terminal (the ₪1 test) without moving the courses' charges.
+RENTAL_TRANZILA_TERMINAL = config('RENTAL_TRANZILA_TERMINAL', default='')
+RENTAL_TRANZILA_TOKEN_TERMINAL = config('RENTAL_TRANZILA_TOKEN_TERMINAL', default='')
+RENTAL_TRANZILA_SUPPLIER = config('RENTAL_TRANZILA_SUPPLIER', default='')
+RENTAL_TRANZILA_PUBLIC_KEY = config('RENTAL_TRANZILA_PUBLIC_KEY', default='')
+RENTAL_TRANZILA_SECRET_KEY = config('RENTAL_TRANZILA_SECRET_KEY', default='')
 
 # Public base URL of this API. Used to build the Tranzila notify_url_address, without
 # which iframe payments are never confirmed. Verify with `manage.py check_tranzila`.

@@ -8,11 +8,11 @@
 The rules that keep a card from being charged twice live in billing.py; the
 database holds the ones it can hold on its own:
 
-* UNIQUE(standing_order, period) on TenantCharge. The row is committed as
-  'reserved' before Tranzila is called, so a second run, a retry or a double
-  click finds the month taken and never reaches the gateway.
-* One open standing order per tenancy. Two orders on one tenancy would each
-  bill the same month under a different key, which the guard above cannot see.
+* UNIQUE(tenancy, period) on TenantCharge. The row is committed as 'reserved'
+  before Tranzila is called, so a second run, a retry, a double click — or a
+  second standing order on the same tenancy, after the first one ended —
+  finds the month taken and never reaches the gateway.
+* One open standing order per tenancy.
 * total = amount_before_vat + vat_amount, all in agorot, and the period is the
   first of a month.
 
@@ -175,6 +175,11 @@ class TenantCharge(models.Model):
     standing_order = models.ForeignKey(
         TenantStandingOrder, on_delete=models.PROTECT, related_name='charges', verbose_name='הוראת קבע',
     )
+    # The order's tenancy, copied when the month is reserved. The month guard is
+    # per tenancy: whichever of its orders charges a month, no other ever does.
+    tenancy = models.ForeignKey(
+        'rentals.Tenancy', on_delete=models.PROTECT, related_name='rental_charges', verbose_name='הסכם שכירות',
+    )
     # The billing month, as its first day.
     period = models.DateField(verbose_name='חודש החיוב')
     # In agorot, computed with apps.core.vat when the month is reserved.
@@ -225,8 +230,9 @@ class TenantCharge(models.Model):
         ordering = ['-period', '-created_at']
         indexes = [models.Index(fields=['status', 'reserved_at'], name='tenant_charge_status_idx')]
         constraints = [
-            # The idempotency guard: one row per order and month, whatever its state.
-            models.UniqueConstraint(fields=['standing_order', 'period'], name='tenant_charge_one_per_order_month'),
+            # The idempotency guard: one row per tenancy and month, whatever its
+            # state and whichever of the tenancy's orders made it.
+            models.UniqueConstraint(fields=['tenancy', 'period'], name='tenant_charge_one_per_tenancy_month'),
             models.CheckConstraint(check=Q(period__day=1), name='tenant_charge_period_first_of_month'),
             models.CheckConstraint(
                 check=Q(total=F('amount_before_vat') + F('vat_amount')), name='tenant_charge_total_is_net_plus_vat',

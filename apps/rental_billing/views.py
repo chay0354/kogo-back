@@ -2,6 +2,8 @@
 
 Office — managers and partners. A partner reaches the orders and charges of
 their own branches only (another branch's is 404); a worker is refused (403).
+The four decisions on money — retry, mark-charged, void, issue-receipt — are
+managers' only, as issuing a document is in apps/documents (a partner: 403).
 
     GET, POST   standing-orders/                    list (?tenancy= ?status=a,b ?branch=) / open one from a tenancy
     GET, PATCH  standing-orders/{id}/               one order / amount_before_vat, billing_day, end_date, notes
@@ -44,7 +46,7 @@ from rest_framework.views import APIView
 
 from apps.core.card_validation import CardValidationError, validate_card_details
 from apps.core.models import BusinessCategory
-from apps.core.permissions import IsManagerOrPartner
+from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.core.scoping import scope_branches
 from apps.rental_billing import billing, orders
 from apps.rental_billing.card import CardEntryError, apply_card, preview_payload, resolve_link
@@ -234,6 +236,7 @@ class StandingOrderViewSet(viewsets.GenericViewSet):
     @action(detail=True, methods=['get'])
     def charges(self, request, pk=None):
         order = self.get_object()
+        billing.sweep_stale_reservations()
         queryset = _charges_queryset(request.user).filter(standing_order=order).order_by('-period', '-created_at')
         return Response(TenantChargeSerializer(queryset, many=True, context=self.get_serializer_context()).data)
 
@@ -254,6 +257,8 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
         return self.get_serializer(self.get_queryset().get(pk=charge.pk)).data
 
     def list(self, request):
+        # A reservation that never heard back shows as what it is: in review.
+        billing.sweep_stale_reservations()
         queryset = self.get_queryset()
         params = request.query_params
         statuses = [value for value in (params.get('status') or '').split(',') if value]
@@ -277,9 +282,10 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
         return Response(self.get_serializer(queryset, many=True).data)
 
     def retrieve(self, request, pk=None):
+        billing.sweep_stale_reservations()
         return Response(self.get_serializer(self.get_object()).data)
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsManager])
     def retry(self, request, pk=None):
         """Charge a failed month again, now, on the order's card. {"outcome", "charge"}."""
         charge = self.get_object()
@@ -289,7 +295,7 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
             return _billing_error(exc)
         return Response({'outcome': outcome, 'charge': self._read(fresh)})
 
-    @action(detail=True, methods=['post'], url_path='mark-charged')
+    @action(detail=True, methods=['post'], url_path='mark-charged', permission_classes=[IsAuthenticated, IsManager])
     def mark_charged(self, request, pk=None):
         charge = self.get_object()
         body = _body(request)
@@ -305,7 +311,7 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
             return _billing_error(exc)
         return Response(self._read(fresh))
 
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, IsManager])
     def void(self, request, pk=None):
         charge = self.get_object()
         try:
@@ -314,7 +320,7 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
             return _billing_error(exc)
         return Response(self._read(fresh))
 
-    @action(detail=True, methods=['post'], url_path='issue-receipt')
+    @action(detail=True, methods=['post'], url_path='issue-receipt', permission_classes=[IsAuthenticated, IsManager])
     def issue_receipt(self, request, pk=None):
         """The receipt of a charged month that has none. Issuing twice returns the first one."""
         charge = self.get_object()
@@ -341,6 +347,8 @@ class BillingStatusView(APIView):
             'business_name': billing.business_name(),
             'business_found': business is not None,
             'business_id': str(business.id) if business else None,
+            # Which terminals tenant billing charges on — names only, never a key.
+            'tranzila': billing.terminal_report(),
         })
 
 
@@ -371,6 +379,7 @@ class PublicCardView(APIView):
         return super().get_throttles()
 
     def get(self, request, token: str):
+        billing.sweep_stale_reservations()
         try:
             link = resolve_link(token)
         except CardEntryError as exc:
@@ -378,6 +387,7 @@ class PublicCardView(APIView):
         return Response(preview_payload(link))
 
     def post(self, request, token: str):
+        billing.sweep_stale_reservations()
         try:
             resolve_link(token)
             if not billing.billing_enabled():

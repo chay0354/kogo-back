@@ -11,26 +11,35 @@ docs/12-RECURRING-BILLING-CHAIN.md lists how the courses' chain can charge a car
 twice. Each of those weaknesses is closed here, and each has a test:
 
 A. The row that says a month is taken is written and committed *before* the
-   gateway is called: TenantCharge 'reserved', under UNIQUE(standing_order,
-   period). The gateway's answer is written in a transaction of its own
-   (record_result), and the receipt only after that, in its own try/except.
-   Nothing that fails later can roll the reservation back, so nothing can
-   make the month look unpaid again. The blocks are durable: they refuse to
-   run inside an outer transaction that could still undo them.
-B. A timeout, a connection error or an exception is 'review', never a
-   decline. A month in review is never sent again by itself; the office checks
-   Tranzila and decides. A reservation that never heard back goes to review too.
+   gateway is called: TenantCharge 'reserved', under UNIQUE(tenancy, period) —
+   one row per tenancy and month, whichever of the tenancy's orders made it,
+   so a second order on the same tenancy can never charge a month again. The
+   gateway's answer is written in a transaction of its own (record_result),
+   and the receipt only after that, in its own try/except. The blocks are
+   durable: they refuse to run inside an outer transaction that could still
+   undo them.
+B. Only an explicit decline in Tranzila's own JSON is 'failed'. Everything
+   else — a timeout, an HTTP error page, a broken body, a dropped connection,
+   an exception — is 'review': the card may have been charged. A month in
+   review is never sent again by itself; the office checks Tranzila and
+   decides. A reservation that never heard back goes to review too.
 C. The cron takes one due order at a time under select_for_update(skip_locked=True),
-   so overlapping runs never hold the same order, and an order is charged at
-   most once a day.
+   so overlapping runs never hold the same order; a tenancy is sent to the
+   gateway at most once a day, and never while one of its months is undecided.
 E. A decline stops the order ('failed') and opens a card link for the tenant;
    the office can retry the month, or the tenant's new card pays it.
+
+No month is charged in arrears by itself. The next charge date is never set to
+a month before the current one, and the cron charges only a billing date that
+falls in the current month; a month that went by uncharged is listed for the
+office, never charged automatically.
 
 The month key is also sent to Tranzila as DCdisable (duplicate_guard_key). It
 is off in production (docs/12), so nothing here relies on it.
 
 Every Tranzila call goes through gateway(), which refuses while
-RENTAL_BILLING_ENABLED is off.
+RENTAL_BILLING_ENABLED is off, and charges on the rental terminal set
+(RENTAL_TRANZILA_*, each falling back to the production value).
 """
 from __future__ import annotations
 
@@ -44,12 +53,18 @@ from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
 from apps.core.models import Business
-from apps.core.tranzila_service import TranzilaService, extract_card_token, is_tranzila_uncertain_gateway_error
+from apps.core.tranzila_service import (
+    TranzilaService,
+    extract_card_token,
+    is_tranzila_approved,
+    is_tranzila_rest_ok,
+)
 from apps.core.vat import add_vat
 from apps.rental_billing.errors import DISABLED_MESSAGE, BillingDisabled, BillingError
 from apps.rental_billing.links import cancel_live_links, ensure_card_link
 from apps.rental_billing.models import TenantCharge, TenantStandingOrder
 from apps.rental_billing.schedule import (
+    add_months,
     billing_date_after,
     first_billing_on_or_after,
     first_of_month,
@@ -72,6 +87,10 @@ OUTCOME_FAILED = 'failed'
 OUTCOME_REVIEW = 'review'
 # The gateway answered after the month was already decided on (the stale sweep, the office).
 OUTCOME_LATE = 'late'
+
+# A month whose outcome only the office may decide on. While a tenancy has one,
+# nothing else of it is sent to the gateway.
+UNDECIDED_STATUSES = (Charge.STATUS_RESERVED, Charge.STATUS_REVIEW)
 
 
 # --------------------------------------------------------------- the switch
@@ -101,13 +120,73 @@ def require_business() -> Business:
     return business
 
 
+# ----------------------------------------------------------------- terminal
+
+# The terminal set tenant billing charges on, setting by setting. Each falls
+# back to the production value the courses' standing orders, card links and
+# widget charge on, so by default nothing differs — and the owner can point
+# tenant billing alone at another terminal (the ₪1 test) without moving the
+# courses' charges.
+RENTAL_TERMINAL_SETTINGS = (
+    ('terminal', 'RENTAL_TRANZILA_TERMINAL', 'TRANZILA_PROD_TERMINAL'),
+    ('token_terminal', 'RENTAL_TRANZILA_TOKEN_TERMINAL', 'TRANZILA_PROD_TOKEN_TERMINAL'),
+    ('supplier', 'RENTAL_TRANZILA_SUPPLIER', 'TRANZILA_PROD_SUPPLIER'),
+    ('public_key', 'RENTAL_TRANZILA_PUBLIC_KEY', 'TRANZILA_PROD_PUBLIC_KEY'),
+    ('secret_key', 'RENTAL_TRANZILA_SECRET_KEY', 'TRANZILA_PROD_SECRET_KEY'),
+)
+
+
+def rental_credentials() -> tuple[dict, list]:
+    """(TranzilaService kwargs, the names of the RENTAL_TRANZILA_* settings that are set)."""
+    values, overridden = {}, []
+    for kwarg, own, fallback in RENTAL_TERMINAL_SETTINGS:
+        mine = str(getattr(settings, own, '') or '').strip()
+        if mine:
+            overridden.append(own)
+        values[kwarg] = mine or getattr(settings, fallback, '')
+    return values, overridden
+
+
+def terminal_report() -> dict:
+    """Which terminal set tenant billing charges on. Names only: the keys never leave the server."""
+    values, overridden = rental_credentials()
+    if not overridden:
+        kind = 'production'
+    elif len(overridden) == len(RENTAL_TERMINAL_SETTINGS):
+        kind = 'rental'
+    else:
+        kind = 'mixed'
+    return {
+        'terminal_set': kind,
+        'terminal': values['terminal'],
+        'token_terminal': values['token_terminal'],
+        'overridden': overridden,
+    }
+
+
+class RentalTranzila(TranzilaService):
+    """
+    The REST client on the rental terminal set. It keeps the JSON Tranzila last
+    answered with, so a charge's outcome is read from Tranzila's own words and
+    not from how a failure happened to be worded on the way back.
+    """
+
+    last_response = None
+
+    def _make_api_request(self, params, endpoint='/v1/transactions'):
+        self.last_response = None
+        response = super()._make_api_request(params, endpoint)
+        self.last_response = response
+        return response
+
+
 def gateway() -> TranzilaService:
     """The only way this app reaches Tranzila. Refuses while the switch is off."""
     if not billing_enabled():
         raise BillingDisabled()
-    # The REST terminals the courses' standing orders charge on: charge_with_token
-    # bills the token terminal, charge_with_card and verify_card the card terminal.
-    return TranzilaService.production()
+    values, _overridden = rental_credentials()
+    # charge_with_token bills the token terminal, charge_with_card and verify_card the card terminal.
+    return RentalTranzila(**values)
 
 
 def today_local() -> date:
@@ -158,14 +237,41 @@ def card_token(result: dict) -> str:
 
 # ----------------------------------------------------------------- schedule
 
-def advance(order, period: date) -> None:
+def tenancy_periods(tenancy_id, statuses=None) -> set:
+    """The months the tenancy has a charge row for — any of its orders, any state unless `statuses` narrows it."""
+    queryset = Charge.objects.filter(tenancy_id=tenancy_id)
+    if statuses is not None:
+        queryset = queryset.filter(status__in=statuses)
+    return set(queryset.values_list('period', flat=True))
+
+
+def next_open_billing_date(order, today: date, *, after_period: date | None = None) -> date:
     """
-    Move the order's next charge past `period`, and end it once that passes
-    its end date. Changes the instance; the caller saves.
+    The date this order charges next: the billing day of the first month the
+    tenancy has no charge for (by any of its orders) — never in a month before
+    the current one, never before the order's start, and after `after_period`
+    when given. It may be earlier this month than today: the current month is
+    still due, and the next run charges it.
     """
-    after = billing_date_after(period, order.billing_day)
-    if order.next_charge_date is None or first_of_month(order.next_charge_date) <= period:
-        order.next_charge_date = after
+    taken = tenancy_periods(order.tenancy_id)
+    base = max(first_of_month(today), order.start_date)
+    if after_period is not None:
+        base = max(base, add_months(after_period, 1))
+    candidate = first_billing_on_or_after(base, order.billing_day)
+    while first_of_month(candidate) in taken:
+        candidate = billing_date_after(first_of_month(candidate), order.billing_day)
+    return candidate
+
+
+def advance(order, period: date, today: date | None = None) -> None:
+    """
+    Move the order's next charge past `period` — to the next open month, never
+    to one before the current — and end it once that passes its end date.
+    Changes the instance; the caller saves.
+    """
+    nxt = next_open_billing_date(order, today or today_local(), after_period=period)
+    if order.next_charge_date is None or order.next_charge_date < nxt:
+        order.next_charge_date = nxt
     if (
         order.end_date
         and order.next_charge_date
@@ -173,15 +279,6 @@ def advance(order, period: date) -> None:
         and order.status in Order.OPEN_STATUSES
     ):
         order.status = Order.STATUS_ENDED
-
-
-def next_open_billing_date(order, on_or_after: date) -> date:
-    """The first billing date on or after the day whose month this order has no charge for yet."""
-    taken = set(Charge.objects.filter(standing_order_id=order.pk).values_list('period', flat=True))
-    candidate = first_billing_on_or_after(on_or_after, order.billing_day)
-    while first_of_month(candidate) in taken:
-        candidate = billing_date_after(first_of_month(candidate), order.billing_day)
-    return candidate
 
 
 def is_undecided(charge, now=None) -> bool:
@@ -192,7 +289,11 @@ def is_undecided(charge, now=None) -> bool:
 
 
 def sweep_stale_reservations(now=None) -> int:
-    """Reservations that never heard back, to review. Their outcome is unknown: the card may be charged."""
+    """
+    Reservations that never heard back, to review — their outcome is unknown,
+    the card may be charged. Run by the cron, when the office lists charges,
+    and when the card page opens, so none sits as 'reserved' for long.
+    """
     now = now or timezone.now()
     return Charge.objects.filter(
         status=Charge.STATUS_RESERVED, reserved_at__lt=now - STALE_RESERVATION,
@@ -202,7 +303,7 @@ def sweep_stale_reservations(now=None) -> int:
 # -------------------------------------------------------------------- rails
 
 def _insert_reservation(order, period: date, *, business, trigger: str):
-    """The month's row as 'reserved', or None when the month already has a row. Inside the caller's transaction."""
+    """The month's row as 'reserved', or None when the tenancy already has a row for it. Inside the caller's transaction."""
     net, vat, total = split_amount(order.amount_before_vat)
     category = order.business_category if order.business_category_id else None
     if category is not None and category.business_id != business.id:
@@ -215,6 +316,7 @@ def _insert_reservation(order, period: date, *, business, trigger: str):
         with transaction.atomic():
             return Charge.objects.create(
                 standing_order=order,
+                tenancy_id=order.tenancy_id,
                 period=period,
                 amount_before_vat=net,
                 vat_amount=vat,
@@ -228,35 +330,69 @@ def _insert_reservation(order, period: date, *, business, trigger: str):
                 reserved_at=timezone.now(),
             )
     except IntegrityError:
-        if not Charge.objects.filter(standing_order_id=order.pk, period=period).exists():
+        if not Charge.objects.filter(tenancy_id=order.tenancy_id, period=period).exists():
             raise  # not the month guard: a bug, never swallowed
         return None
 
 
-def reserve_month(order, period: date, *, business, trigger: str):
-    """Reserve the month and commit it, before anything calls the gateway. None when it is taken."""
+def _recheck(order, period: date, allowed_statuses) -> None:
+    """The order, locked, looked at again: still in a state that may be charged, and the month inside its agreement."""
+    if allowed_statuses is not None and order.status not in allowed_statuses:
+        raise BillingError('הוראת הקבע השתנתה בינתיים', status_code=409)
+    if order.end_date and period > order.end_date:
+        raise BillingError('החודש הזה אחרי סיום ההסכם', status_code=409)
+
+
+def reserve_month(order, period: date, *, business, trigger: str, allowed_statuses=None):
+    """
+    Reserve the month and commit it, before anything calls the gateway. None
+    when the tenancy has the month already. The order is locked and checked
+    again first (BillingError when it changed meanwhile).
+    """
     with transaction.atomic(durable=True):
-        return _insert_reservation(order, period, business=business, trigger=trigger)
+        locked = Order.objects.select_for_update().get(pk=order.pk)
+        _recheck(locked, period, allowed_statuses)
+        return _insert_reservation(locked, period, business=business, trigger=trigger)
 
 
-def reclaim_failed(charge_id, *, trigger: str):
-    """A failed month back to 'reserved' for one more attempt, committed before the gateway is called."""
+def reclaim_failed(charge_id, *, trigger: str, order=None, allowed_statuses=None):
+    """
+    A failed month back to 'reserved' for one more attempt, committed before
+    the gateway is called. With `order`, that order is locked and checked
+    again, and pays the month: a month an earlier order on the tenancy failed
+    to charge moves to the order that pays it now.
+    """
     with transaction.atomic(durable=True):
         charge = Charge.objects.select_for_update().get(pk=charge_id)
         if charge.status != Charge.STATUS_FAILED:
             return None
+        fields = ['status', 'trigger', 'attempts', 'reserved_at', 'error', 'response_code', 'updated_at']
+        if order is not None:
+            locked = Order.objects.select_for_update().get(pk=order.pk)
+            _recheck(locked, charge.period, allowed_statuses)
+            if locked.tenancy_id != charge.tenancy_id:
+                raise BillingError('החודש שייך להסכם אחר', status_code=409)
+            if charge.standing_order_id != locked.pk:
+                charge.standing_order = locked
+                fields.append('standing_order')
         charge.status = Charge.STATUS_RESERVED
         charge.trigger = trigger
         charge.attempts += 1
         charge.reserved_at = timezone.now()
         charge.error = ''
         charge.response_code = ''
-        charge.save(update_fields=['status', 'trigger', 'attempts', 'reserved_at', 'error', 'response_code', 'updated_at'])
+        charge.save(update_fields=fields)
         return charge
 
 
-def call_gateway(call) -> dict:
-    """The gateway's answer. An exception is the uncertain answer it is: the card may be charged."""
+def call_gateway(call, tranzila=None) -> dict:
+    """
+    The gateway's answer. An exception is the uncertain answer it is: the card
+    may be charged. The JSON Tranzila answered with (RentalTranzila keeps it) is
+    attached as 'tranzila_json', so outcome_of reads Tranzila's own words.
+    """
+    if tranzila is not None:
+        tranzila.last_response = None
     try:
         result = call()
     except Exception as exc:
@@ -264,22 +400,71 @@ def call_gateway(call) -> dict:
         return {'success': False, 'error': str(exc) or exc.__class__.__name__, 'uncertain': True}
     if not isinstance(result, dict):
         return {'success': False, 'error': 'Invalid gateway response', 'uncertain': True}
+    raw = getattr(tranzila, 'last_response', None) if tranzila is not None else None
+    if isinstance(raw, dict):
+        result = {**result, 'tranzila_json': raw}
     return result
 
 
-def outcome_of(result: dict) -> str:
+def explicit_decline(raw) -> bool:
+    """
+    Tranzila's JSON says, in so many words, that the card was not charged: an
+    application error_code other than 0, or a transaction_result whose
+    processor response code is not 000. A dict with neither — an error built
+    locally from an HTTP error page, a broken body or a dropped connection —
+    is not a decline.
+    """
+    if not isinstance(raw, dict):
+        return False
+    txn = raw.get('transaction_result')
+    if isinstance(txn, dict):
+        code = txn.get('processor_response_code') or txn.get('Response')
+        if code not in (None, '') and not is_tranzila_approved(code):
+            return True
+    error_code = raw.get('error_code')
+    return error_code not in (None, '', False) and not is_tranzila_rest_ok(error_code)
+
+
+# Codes a locally built failure carries; never the code of a decline.
+_NOT_A_DECLINE_CODE = frozenset({'', '999', 'N/A', 'NONE'})
+
+
+def _parsed_as_decline(result: dict) -> bool:
+    """
+    A result with no JSON attached (a caller that did not come through
+    RentalTranzila) is read by the one shape TranzilaService gives an explicit
+    decline: its parser's 'Charge failed: …' with the code Tranzila sent. Its
+    local failures carry an 'uncertain' key and code 999, and are not declines.
+    """
+    if 'uncertain' in result:
+        return False
+    code = str(result.get('response_code') or '').strip().upper()
+    return str(result.get('message') or '').startswith('Charge failed: ') and code not in _NOT_A_DECLINE_CODE
+
+
+def outcome_of(result: dict, raw=None) -> str:
+    """
+    'charged' on a yes. 'failed' only on an explicit decline in Tranzila's JSON.
+    Everything else is 'review': whatever happened, the card may be charged.
+    """
     if result.get('success'):
         return OUTCOME_CHARGED
-    if is_tranzila_uncertain_gateway_error(result):
-        return OUTCOME_REVIEW
-    return OUTCOME_FAILED
+    if raw is None:
+        for key in ('tranzila_json', 'raw_response'):
+            if isinstance(result.get(key), dict):
+                raw = result[key]
+                break
+    if raw is not None:
+        return OUTCOME_FAILED if explicit_decline(raw) else OUTCOME_REVIEW
+    return OUTCOME_FAILED if _parsed_as_decline(result) else OUTCOME_REVIEW
 
 
 def _error_text(result: dict) -> str:
     return str(result.get('error') or result.get('message') or 'החיוב נכשל')[:1000]
 
 
-def record_result(charge_id, result: dict, *, on_charged=None, fail_order: bool = True, card_last4: str = '') -> str:
+def record_result(charge_id, result: dict, *, on_charged=None, fail_order: bool = True, card_last4: str = '',
+                  today: date | None = None) -> str:
     """
     Write the gateway's answer, in a transaction of its own. Returns the outcome.
 
@@ -292,6 +477,7 @@ def record_result(charge_id, result: dict, *, on_charged=None, fail_order: bool 
     another card.
     """
     outcome = outcome_of(result)
+    today = today or today_local()
     now = timezone.now()
     with transaction.atomic(durable=True):
         charge = Charge.objects.select_for_update().get(pk=charge_id)
@@ -317,7 +503,7 @@ def record_result(charge_id, result: dict, *, on_charged=None, fail_order: bool 
             charge.error = ''
             if card_last4:
                 charge.card_last4 = card_last4
-            advance(order, charge.period)
+            advance(order, charge.period, today)
             if on_charged is not None:
                 on_charged(order)
             elif order.status == Order.STATUS_FAILED:
@@ -373,52 +559,89 @@ def _charge_saved_card(tranzila, order, charge) -> dict:
         expire_month=order.card_expire_month,
         expire_year=order.card_expire_year,
         duplicate_guard_key=guard_key(order.pk, charge.period),
-    ))
+    ), tranzila)
 
 
 # --------------------------------------------------------------------- cron
 
 def _next_due_order(today: date, seen: list):
-    """The next due active order nobody else holds, locked. Never one that was charged today already."""
-    touched_today = Charge.objects.filter(standing_order=OuterRef('pk'), created_at__date=today)
+    """
+    The next due active order nobody else holds, locked. Never a tenancy that
+    was sent to the gateway today already, nor one with a month undecided.
+    """
+    sent_today = Charge.objects.filter(tenancy_id=OuterRef('tenancy_id'), reserved_at__date=today)
+    undecided = Charge.objects.filter(tenancy_id=OuterRef('tenancy_id'), status__in=UNDECIDED_STATUSES)
     return (
         Order.objects.select_for_update(skip_locked=True, of=('self',))
         .select_related('tenant')
         .filter(status=Order.STATUS_ACTIVE, next_charge_date__lte=today)
         .exclude(pk__in=seen)
-        .exclude(Exists(touched_today))
+        .exclude(Exists(sent_today))
+        .exclude(Exists(undecided))
         .order_by('next_charge_date', 'created_at')
         .first()
     )
 
 
-def _reserve_due_month(order, business, summary: dict):
+def _missed_months(order, due: date, today: date) -> list:
+    """The months from `due` (never before the order's start) to the one before the current that the tenancy has no charge for."""
+    taken = tenancy_periods(order.tenancy_id)
+    month = max(first_of_month(due), first_of_month(order.start_date))
+    current, out = first_of_month(today), []
+    while month < current:
+        if month not in taken:
+            out.append(month)
+        month = add_months(month, 1)
+    return out
+
+
+def _end(order, summary: dict) -> None:
+    order.status = Order.STATUS_ENDED
+    order.save(update_fields=['status', 'updated_at'])
+    cancel_live_links(order)
+    summary['ended'] += 1
+
+
+def _reserve_due_month(order, business, summary: dict, today: date):
     """Inside the order's transaction: end it, skip it, or reserve its month."""
     if not order.has_card:
         summary['skipped'] += 1
         summary['errors'].append(f'{order.pk}: אין כרטיס שמור בהוראת הקבע')
         return None
-    if order.end_date and order.next_charge_date > order.end_date:
-        order.status = Order.STATUS_ENDED
-        order.save(update_fields=['status', 'updated_at'])
-        cancel_live_links(order)
-        summary['ended'] += 1
+    due = order.next_charge_date
+    if due < first_of_month(today):
+        # A month that went by uncharged is never charged by itself: it is
+        # listed for the office, and the order moves on to the current month.
+        for month in _missed_months(order, due, today):
+            summary['missed'].append({'standing_order': str(order.pk), 'period': month.isoformat()})
+        order.next_charge_date = next_open_billing_date(order, today)
+        order.save(update_fields=['next_charge_date', 'updated_at'])
+        due = order.next_charge_date
+        if order.end_date and due > order.end_date:
+            _end(order, summary)
+            return None
+        if due > today:
+            summary['skipped'] += 1
+            return None
+    if order.end_date and due > order.end_date:
+        _end(order, summary)
         return None
-    period = first_of_month(order.next_charge_date)
+    period = first_of_month(due)
     charge = _insert_reservation(order, period, business=business, trigger=Charge.TRIGGER_CRON)
     if charge is not None:
         charge.standing_order = order
         return charge
-    existing = Charge.objects.get(standing_order=order, period=period)
-    if existing.status in (Charge.STATUS_CHARGED, Charge.STATUS_VOIDED):
-        # The month was settled elsewhere (the card page, the office) and the
-        # schedule had not moved on: move it, charge nothing.
-        advance(order, period)
+    existing = Charge.objects.get(tenancy_id=order.tenancy_id, period=period)
+    if existing.status in (Charge.STATUS_CHARGED, Charge.STATUS_VOIDED, Charge.STATUS_FAILED):
+        # The month was settled elsewhere (the card page, the office, an earlier
+        # order), or failed and waits for the office. Move on; charge nothing.
+        advance(order, period, today)
         order.save(update_fields=['next_charge_date', 'status', 'updated_at'])
         if order.status == Order.STATUS_ENDED:
             cancel_live_links(order)
+        if existing.status == Charge.STATUS_FAILED:
+            summary['errors'].append(f'{order.pk}: {period:%Y-%m} נדחה — ממתין להכרעת המשרד')
     else:
-        # Reserved, in review or failed: an outcome nobody has decided on. Never sent again by itself.
         summary['errors'].append(f'{order.pk}: {period:%Y-%m} {existing.get_status_display()} — ממתין להכרעת המשרד')
     summary['skipped'] += 1
     return None
@@ -426,16 +649,17 @@ def _reserve_due_month(order, business, summary: dict):
 
 def charge_due(*, today: date | None = None, limit: int = 40) -> dict:
     """
-    Charge every active standing order due on or before `today`, up to `limit`.
+    Charge every active standing order due in the current month, up to `limit`.
 
     Refuses as a whole — before any row is touched — while the switch is off,
     when the business to tag the charges to is missing, or when Tranzila is
     not configured. `limit` keeps one cron call under the function's time
-    limit; what is left stays due for the next call.
+    limit; what is left stays due for the next call. `missed` lists the months
+    that went by uncharged: the office decides on them.
     """
     summary = {
         'ok': True, 'enabled': billing_enabled(), 'checked': 0, 'charged': 0, 'failed': 0, 'review': 0,
-        'skipped': 0, 'ended': 0, 'receipts': 0, 'stale_to_review': 0, 'errors': [],
+        'skipped': 0, 'ended': 0, 'receipts': 0, 'stale_to_review': 0, 'missed': [], 'errors': [],
     }
     if not summary['enabled']:
         summary.update(disabled=True, message=DISABLED_MESSAGE)
@@ -462,12 +686,12 @@ def charge_due(*, today: date | None = None, limit: int = 40) -> dict:
                 break
             seen.append(order.pk)
             summary['checked'] += 1
-            charge = _reserve_due_month(order, business, summary)
+            charge = _reserve_due_month(order, business, summary, today)
         if charge is None:
             continue
 
         result = _charge_saved_card(tranzila, order, charge)
-        outcome = record_result(charge.pk, result, fail_order=True)
+        outcome = record_result(charge.pk, result, fail_order=True, today=today)
         if outcome == OUTCOME_CHARGED:
             summary['charged'] += 1
             if issue_receipt_safely(charge.pk):
@@ -553,9 +777,9 @@ def mark_charged(charge, *, transaction_id: str, confirmation_code: str = '', no
 
 def void_charge(charge, *, reason: str, user=None) -> Charge:
     """
-    The month is not charged by this order: a charge in review that the office
-    found never went through, or a failed one they settle another way. Final:
-    the month is not charged again, and the schedule moves past it.
+    The month is not charged: a charge in review that the office found never
+    went through, or a failed one they settle another way. Final: no order on
+    the tenancy charges the month again, and the schedule moves past it.
     """
     reason = str(reason or '').strip()
     if not reason:
