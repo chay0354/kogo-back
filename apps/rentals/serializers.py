@@ -22,7 +22,7 @@ from apps.core.scoping import is_scoped_partner, partner_branch_ids, scope_busin
 from apps.customers.models import BusinessCustomer
 from apps.rentals.contracts import contract_is_stale, current_contract
 from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, RentalContract, Tenancy
-from apps.rentals.signing import link_expires_at, link_is_live, signing_url
+from apps.rentals.signing import link_is_live, signing_url
 from apps.rentals.slots import suggested_monthly_amount
 from apps.rentals.tenants import create_tenant, update_tenant
 from apps.scheduling.models import ScheduleEvent
@@ -99,9 +99,10 @@ class RentalContractSerializer(serializers.ModelSerializer):
     """
     One issued contract, as the tenancy's contracts list shows it. Read only.
 
-    signing_url and signing_expires_at are there only while the link is live
-    (sent or viewed, and within its 14 days); the URL is built from the
-    request in the context, the way card links build theirs.
+    signing_url is there only while the link is live (sent or viewed); the URL
+    is built from the request in the context, the way card links build theirs.
+    signing_expires_at stays in the shape, always null: a link to sign does not
+    expire any more, and the screens print nothing when there is no date.
     """
 
     status_label = serializers.CharField(source='get_status_display', read_only=True)
@@ -139,9 +140,8 @@ class RentalContractSerializer(serializers.ModelSerializer):
         return signing_url(obj, self.context.get('request'))
 
     def get_signing_expires_at(self, obj):
-        if not link_is_live(obj):
-            return None
-        return serializers.DateTimeField().to_representation(link_expires_at(obj))
+        # Always null: the link a tenant signs through has no expiry.
+        return None
 
     def get_signer_name(self, obj) -> str:
         return obj.signature.signer_name if obj.signature_id else ''

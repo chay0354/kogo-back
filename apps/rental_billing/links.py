@@ -1,9 +1,14 @@
 """The public link a tenant enters their card through — `<crm>/rc/<token>`.
 
 The token is the whole credential: 12 random base-62 characters (about 71
-bits), unique in the table, and the page is throttled on top of that. A link is
-good for 14 days from when it was issued and is used once. Issuing a new one
-takes the previous one out of play; the database holds one live link per order.
+bits), unique in the table, and the page is throttled on top of that. A link
+does not expire: it is used once, and it stops working when the office issues
+a new one in its place or cancels it — the database holds one live link per
+order. A tenant who comes back days later must reach the card form, not a dead
+end, and a link that has not been used has taken no money and holds nothing of
+theirs worth closing by the clock. (The signing link's 30-day close, in
+apps/rentals/signing.py, is the other case: there the job is done and the page
+still shows the tenant's ID, phone and e-mail.)
 
 Links open only for an order waiting for a card or one whose charge failed.
 Sending the link (WhatsApp, e-mail) is not done here: the office copies the URL,
@@ -22,7 +27,6 @@ from apps.core.frontend_url import public_frontend_url
 from apps.rental_billing.errors import BillingError
 from apps.rental_billing.models import TenantCardLink, TenantStandingOrder
 
-LINK_MAX_AGE = timedelta(days=14)
 # A submit that has not come back in this long never will (the function was
 # killed mid-call). Money may have moved, so it goes to review, never back to pending.
 PROCESSING_STALE_AFTER = timedelta(seconds=90)
@@ -42,14 +46,6 @@ def new_token() -> str:
 
 def public_url(link: TenantCardLink, base: str | None = None) -> str:
     return f'{(base or public_frontend_url()).rstrip("/")}/{PUBLIC_PATH}/{link.token}'
-
-
-def expires_at(link: TenantCardLink):
-    return link.created_at + LINK_MAX_AGE
-
-
-def is_expired(link: TenantCardLink, now=None) -> bool:
-    return (now or timezone.now()) > expires_at(link)
 
 
 def is_in_flight(link: TenantCardLink, now=None) -> bool:
@@ -84,23 +80,20 @@ def cancel_live_links(order) -> int:
 
 def ensure_card_link(order, user=None) -> TenantCardLink:
     """
-    The order's live link, or a new one when it has none (or it expired).
+    The order's live link, or a new one when it has none.
 
-    Runs inside the caller's transaction with the order row locked: a decline
-    on the monthly run opens a link for the tenant this way.
+    Idempotent: the link already out is handed back as it is, never replaced,
+    so an address the tenant was sent keeps working. Runs inside the caller's
+    transaction with the order row locked: a decline on the monthly run opens
+    a link for the tenant this way, and so does the signed contract's page.
     """
-    now = timezone.now()
     live = (
         TenantCardLink.objects.select_for_update()
         .filter(standing_order_id=order.pk, status__in=TenantCardLink.LIVE_STATUSES)
         .first()
     )
-    if live is not None and not is_expired(live, now):
-        return live
     if live is not None:
-        if is_in_flight(live, now):
-            return live
-        _retire(live)
+        return live
     return TenantCardLink.objects.create(standing_order_id=order.pk, token=new_token(), created_by=_user_or_none(user))
 
 

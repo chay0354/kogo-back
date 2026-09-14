@@ -20,8 +20,9 @@ and never reaches Tranzila. Only an explicit decline lets the tenant try another
 card; any other failure freezes the link and the month for the office.
 
 Refused, before any gateway call: while the switch is off, when the link is
-unknown, expired, used or cancelled, and — for an order the signing page opened
-— while the tenancy's current contract is not signed.
+unknown, used or cancelled, and — for an order the signing page opened — while
+the tenancy's current contract is not signed. A link does not go stale with
+time: a tenant who comes back days later still gets the form.
 
 Card numbers pass straight to Tranzila; they are never stored or logged. What
 is kept is the token Tranzila returns, its expiry and the last four digits.
@@ -37,7 +38,7 @@ from django.utils import timezone
 
 from apps.rental_billing import billing
 from apps.rental_billing.errors import DISABLED_MESSAGE, BillingError
-from apps.rental_billing.links import PROCESSING_STALE_AFTER, expires_at, is_expired
+from apps.rental_billing.links import PROCESSING_STALE_AFTER
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
 from apps.rental_billing.schedule import billing_date, first_of_month
 
@@ -101,8 +102,6 @@ def resolve_link(token: str) -> Link:
         raise CardEntryError('הקישור כבר לא בתוקף. בקשו מהמשרד קישור חדש.')
     if link.status == Link.STATUS_REVIEW:
         raise CardEntryError('הניסיון הקודם נמצא בבדיקה במשרד. אל תנסו שוב.', status_code=409, processing=True)
-    if is_expired(link):
-        raise CardEntryError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.')
     return link
 
 
@@ -231,7 +230,8 @@ def preview_payload(link: Link, *, today: date | None = None) -> dict:
         'billing_day': order.billing_day,
         'start_date': order.start_date.isoformat(),
         'end_date': order.end_date.isoformat() if order.end_date else None,
-        'expires_at': expires_at(link).isoformat(),
+        # The link has no expiry; the field stays, always null, so the page prints no date.
+        'expires_at': None,
         'charge_now': False,
         'charge_amount': '0.00',
         'charge_period': None,

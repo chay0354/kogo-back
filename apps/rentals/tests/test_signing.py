@@ -39,7 +39,6 @@ SIGN = '/api/v1/rentals/sign/'
 STALE = 'ההסכם השתנה אחרי שהחוזה הופק — הפיקו גרסה חדשה'
 UPDATED = 'החוזה עודכן — בקשו מהמשרד קישור חדש'
 WITHDRAWN = 'הקישור בוטל — בקשו מהמשרד קישור חדש'
-EXPIRED = 'פג תוקף הקישור — בקשו מהמשרד קישור חדש'
 
 PAGE_KEYS = {
     'state', 'version', 'tenant', 'branch_name', 'studio', 'slots', 'monthly_amount', 'vat_rate',
@@ -140,8 +139,8 @@ class LinkLifecycleTests(SigningTestCase):
         self.assertEqual(data['status'], 'sent')
         self.assertEqual(data['status_label'], 'נשלח')
         self.assertEqual(data['signing_url'], f'{FRONTEND}/s/{contract.sign_token}')
-        expires = timezone.datetime.fromisoformat(data['signing_expires_at'])
-        self.assertEqual(expires, contract.sign_token_created_at + timedelta(days=14))
+        # The link does not expire, so the office is given no date to print.
+        self.assertIsNone(data['signing_expires_at'])
         self.assertIsNotNone(data['sent_at'])
         self.assertEqual(
             (data['viewed_at'], data['signed_at'], data['signer_name'], data['signature_id'], data['signed_pdf_url']),
@@ -192,26 +191,26 @@ class LinkLifecycleTests(SigningTestCase):
         self.send_link()
         self.assertEqual(self.fresh().status, 'sent')
 
-    def test_the_link_lives_fourteen_days(self):
+    def test_the_link_never_expires(self):
+        """Time closes nothing: only signing, a cancellation or a new version does."""
         self.send_link()
         token = self.token()
-        self.age_link(timedelta(days=14) - timedelta(minutes=1))
-        self.assertEqual(self.public.get(page_url(token)).data['state'], 'open')
+        self.age_link(timedelta(days=400))
 
-        self.age_link(timedelta(days=14, seconds=1))
         page = self.public.get(page_url(token))
         self.assertEqual(page.status_code, status.HTTP_200_OK)
-        self.assertEqual(page.data, {'state': 'expired', 'message': EXPIRED, 'version': 1})
-        refused = self.sign(token)
-        self.assertEqual(refused.status_code, status.HTTP_410_GONE)
-        self.assertEqual(refused.data, {'error': EXPIRED, 'state': 'expired'})
-        self.assertEqual(self.public.get(page_pdf_url(token)).status_code, status.HTTP_410_GONE)
-        # The office no longer sees a live link, and can send a new one.
+        self.assertEqual(page.data['state'], 'open')
+        self.assertIsNone(page.data['expires_at'])
+        self.assertEqual(self.public.get(page_pdf_url(token)).status_code, status.HTTP_200_OK)
+        # The office still sees the link it sent, with no date on it.
         listed = self.client.get(f'{TENANCIES}{self.tenancy.pk}/contracts/').data[0]
-        # Opened on day 13, so 'viewed' — but no live link any more.
-        self.assertEqual((listed['status'], listed['signing_url'], listed['signing_expires_at']), ('viewed', None, None))
-        self.send_link()
-        self.assertEqual(self.public.get(page_url(self.token())).data['state'], 'open')
+        self.assertEqual(
+            (listed['status'], listed['signing_url'], listed['signing_expires_at']),
+            ('viewed', f'{FRONTEND}/s/{token}', None),
+        )
+        # And a year-old link still signs.
+        self.assertEqual(self.sign(token).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.fresh().status, 'signed')
 
     def test_refuses_a_contract_that_cannot_be_sent(self):
         self.send_link()
@@ -286,7 +285,8 @@ class PublicPageTests(SigningTestCase):
         self.assertIn('שם המפעיל: סטודיו אור | ח.פ: 512345678', page['document'])
         self.assertEqual((page['signed_at'], page['signer_name']), (None, ''))
         self.assertEqual(page['pdf_url'], page_pdf_url(token))
-        self.assertIsNotNone(page['expires_at'])
+        # No expiry on a link to sign, so no date on the page.
+        self.assertIsNone(page['expires_at'])
 
         # The page stays open on what was sent; the signing is what refuses it.
         refused = self.sign(token)
@@ -618,15 +618,14 @@ class SigningRefusalTests(SigningTestCase):
         )
         self.assert_nothing_signed()
 
-    def test_expired_while_the_page_was_open(self):
+    def test_an_old_link_left_open_still_signs(self):
+        """The page sat open for weeks: age alone never turns a signing into a refusal."""
         token = self.token()
         opened = signing.resolve_sign_token(token)
         signing_input = signing.clean_signing_input(submission())
-        self.age_link(timedelta(days=15))
-        with self.assertRaises(signing.SigningError) as refused:
-            signing.sign_contract(opened, token, signing_input, mock.Mock(META={}))
-        self.assertEqual((refused.exception.status_code, refused.exception.state), (410, 'expired'))
-        self.assert_nothing_signed()
+        self.age_link(timedelta(days=90))
+        signing.sign_contract(opened, token, signing_input, mock.Mock(META={}))
+        self.assertEqual(self.fresh().status, 'signed')
 
     def test_terms_changed_behind_the_applications_back_are_never_signed(self):
         with connection.cursor() as cursor:
