@@ -8,6 +8,9 @@ from apps.core.card_validation import CardValidationError, validate_card_details
 from apps.customers.card_update import (
     CardUpdateError,
     apply_new_card,
+    note_card_update_declined,
+    note_card_update_finished,
+    note_card_update_opened,
     preview_payload,
     resolve_card_update_intent,
 )
@@ -22,6 +25,10 @@ class CardUpdatePreviewView(APIView):
             intent = resolve_card_update_intent(token)
         except CardUpdateError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        # The link resolved, so the parent is looking at the page. Noted here and
+        # not inside `resolve_card_update_intent`: the resolver is what every link
+        # ever signed goes through, and it must stay a pure read of the signature.
+        note_card_update_opened(token)
         return Response(
             preview_payload(intent.recurring, already_done=intent.already_done, intent=intent)
         )
@@ -61,5 +68,10 @@ class CardUpdateChargeView(APIView):
                     'mode': intent.mode,
                     'message': 'הכרטיס כבר עודכן.',
                 })
+            note_card_update_declined(token, str(exc))
             return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        # After `apply_new_card`, never inside it: the money and the new token are
+        # already committed, so nothing the log does can roll them back and hand
+        # the parent an error for a card that was charged.
+        note_card_update_finished(token, result)
         return Response(result)

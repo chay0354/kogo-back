@@ -276,3 +276,92 @@ class CardLink(models.Model):
 
     def __str__(self) -> str:
         return f'{self.get_kind_display()} — {self.child_id} ({self.status})'
+
+
+class CardUpdateLink(models.Model):
+    """
+    The trace a standing-order card link leaves behind.
+
+    A card-update link is a signed token and nothing else: everything it is
+    allowed to do is inside the signature, and `resolve_card_update_intent`
+    reads it without ever consulting a database row. This table changes none of
+    that. It is a **log**, never a gate — a token signed before this table
+    existed has no row here and still resolves, opens and charges exactly as it
+    did, and a row that failed to be written is a missing line in a report, not
+    a link the parent cannot use.
+
+    It exists for one question the office could not answer: "I sent the link —
+    what happened with it?" So it keeps what the link was for, what it was
+    allowed to charge, when the parent first opened it, and how it ended.
+
+    ``token`` is the URL's token, kept in full so the office can copy the link
+    again and so the public page can find its own row. That is the same choice
+    `CardLink.token` already makes; the token is a bearer credential either way,
+    and anyone who could read this column could mint one from the signing key.
+    """
+
+    # `created` and `opened` are both "nothing yet" — they differ only in
+    # whether the parent ever reached the page, which is exactly the difference
+    # the office is calling to ask about.
+    STATUS_CREATED = 'created'
+    STATUS_OPENED = 'opened'
+    STATUS_CARD_SAVED = 'card_saved'
+    STATUS_CHARGED = 'charged'
+    STATUS_DECLINED = 'declined'
+    STATUS_CHOICES = [
+        (STATUS_CREATED, 'נשלח'),
+        (STATUS_OPENED, 'נפתח'),
+        (STATUS_CARD_SAVED, 'כרטיס עודכן'),
+        (STATUS_CHARGED, 'חויב'),
+        (STATUS_DECLINED, 'נדחה'),
+    ]
+
+    # How the link left the office. A link the office copies has no send time —
+    # we never learn when it was pasted — and saying so is better than guessing.
+    CHANNEL_WHATSAPP = 'whatsapp'
+    CHANNEL_COPY = 'copy'
+    CHANNEL_CHOICES = [(CHANNEL_WHATSAPP, 'וואטסאפ'), (CHANNEL_COPY, 'העתקה')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    recurring_payment = models.ForeignKey(
+        'customers.RecurringPayment', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='card_update_links',
+    )
+    # Denormalised from the standing order so the list keeps a name to show
+    # after a standing order is replaced or detached.
+    child = models.ForeignKey(
+        'customers.Child', on_delete=models.CASCADE, null=True, blank=True,
+        related_name='card_update_links',
+    )
+    # '' is a link with no mode — every link issued before modes existed, and
+    # still a shape a token may legitimately carry.
+    mode = models.CharField(max_length=20, blank=True)
+    # What the link named at the moment it was made. The charge recomputes from
+    # the months that are *still* outstanding, so this is what the parent was
+    # shown, not a promise about what will be taken.
+    amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    months = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_CREATED)
+    channel = models.CharField(max_length=12, choices=CHANNEL_CHOICES, blank=True)
+    token = models.CharField(max_length=512, blank=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='card_update_links_created',
+    )
+    sent_at = models.DateTimeField(null=True, blank=True)
+    sent_result = models.JSONField(default=dict, blank=True)
+    first_opened_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    # What was actually taken, which is not always what `amount` named: a month
+    # collected by the monthly run between sending and paying is dropped.
+    charged_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'card_update_links'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'card-update {self.mode or "legacy"} — {self.child_id} ({self.status})'
