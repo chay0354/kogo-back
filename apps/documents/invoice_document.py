@@ -1,0 +1,118 @@
+"""The parts every customer-facing document says, whatever produced it.
+
+The business block, the footer line and the statutory small print are the same
+sentences on a lesson receipt, a store sale and a hand-issued invoice, so they
+are written once here. ``invoice_layout`` draws them; this module decides what
+they say.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+
+from django.utils import timezone
+
+from apps.documents.invoice_layout import Field, Note
+from apps.documents.issuer import (
+    COMPUTERIZED_MARK,
+    ISSUER_ADDRESS,
+    ISSUER_COMPANY_NUMBER,
+    ISSUER_EMAIL,
+    ISSUER_NAME,
+    ISSUER_PHONE,
+)
+
+# Allocation number threshold (net, before VAT) — Israel Tax Authority, from
+# 1 June 2026. Below it a transaction needs no allocation number, and the
+# document says so rather than leaving the reader to guess.
+ALLOCATION_THRESHOLD = Decimal('5000')
+
+
+def business_fields() -> list[Field]:
+    """
+    פרטי העסק, as תקנה 9א(א)(1) wants them: the words "עוסק מורשה", the
+    registration number, the business's name and its address — printed on the
+    face of the document, not carried by a letterhead graphic.
+    """
+    return [
+        Field('שם העסק', ISSUER_NAME),
+        Field('עוסק מורשה / ח.פ.', ISSUER_COMPANY_NUMBER),
+        Field('כתובת', ISSUER_ADDRESS),
+        Field('טלפון', ISSUER_PHONE),
+    ]
+
+
+def footer_line() -> str:
+    return f'{ISSUER_NAME} - {ISSUER_ADDRESS}  |  {ISSUER_PHONE}  |  {ISSUER_EMAIL}'
+
+
+def issue_stamp(moment) -> str:
+    """A timestamp as the document shows it, or '' when the record has none."""
+    if moment is None:
+        return ''
+    if isinstance(moment, datetime):
+        try:
+            moment = timezone.localtime(moment)
+        except (ValueError, TypeError):       # a naive datetime on an old row
+            pass
+        return moment.strftime('%d/%m/%Y %H:%M')
+    return date_stamp(moment)
+
+
+def date_stamp(day) -> str:
+    if day is None:
+        return ''
+    if isinstance(day, str):
+        parts = day[:10].split('-')
+        return f'{parts[2]}/{parts[1]}/{parts[0]}' if len(parts) == 3 else day
+    if isinstance(day, (date, datetime)):
+        return day.strftime('%d/%m/%Y')
+    return str(day)
+
+
+def allocation_note(net_before_vat: Decimal) -> Note:
+    """
+    The §5,000 allocation-number line the owner's sample carries.
+
+    Above the threshold the document says the number is required and has not
+    been entered; below it, that none is needed — either way the reader is told.
+    """
+    net = Decimal(str(net_before_vat or 0))
+    if net >= ALLOCATION_THRESHOLD:
+        return Note('מספר הקצאה:', 'נדרש לעסקה זו (סכום לפני מע"מ מעל 5,000 ₪) — טרם הוזן.')
+    return Note('מספר הקצאה:', 'לא נדרש לעסקה זו - סכום העסקה לפני מע"מ נמוך מ-5,000 ₪.')
+
+
+def computerized_note() -> Note:
+    """סעיף 18ב(א): a document sent by computer says so, בצורה בולטת לעין."""
+    return Note(f'{COMPUTERIZED_MARK}:', 'מסמך זה הופק באופן דיגיטלי.')
+
+
+def late_note(issued_at, received_at) -> Note | None:
+    """
+    A receipt issued after the money came in says so on its face, with both
+    dates — the one thing an accountant needs to place it in the right period.
+    """
+    issued = date_stamp(issued_at)
+    received = date_stamp(received_at)
+    if not issued and not received:
+        return None
+    return Note(
+        'הופק באיחור:',
+        f'המסמך הופק ביום {issued}; התשלום התקבל ביום {received}.',
+    )
+
+
+def credit_reference_note(document_number: str, document_date, reason: str) -> Note | None:
+    """סעיף 9(ה): a credit note names the document it credits, its date and why."""
+    parts = []
+    if document_number:
+        parts.append(f'מסמך מקורי {document_number}')
+    stamp = date_stamp(document_date)
+    if stamp:
+        parts.append(f'מיום {stamp}')
+    if reason:
+        parts.append(f'סיבת הזיכוי: {reason}')
+    if not parts:
+        return None
+    return Note('זיכוי עבור:', ' · '.join(parts) + '.')

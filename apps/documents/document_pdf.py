@@ -1,43 +1,32 @@
-"""Locally rendered formal document PDF (drafts, credit invoices, unissued documents)."""
+"""Documents issued by hand — חשבונית מס, חשבונית מס/קבלה, קבלה, חשבונית עסקה,
+הודעת זיכוי and the draft that is none of them yet.
+
+What the document says is decided here; how it looks is decided once, in
+``apps.documents.invoice_layout``, so this and the two other customer-facing
+generators cannot drift apart.
+"""
 from __future__ import annotations
 
-import io
-import os
 from decimal import Decimal
 
-from django.utils import timezone
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-from apps.documents.issuer import (
-    ISSUER_ADDRESS, ISSUER_COMPANY_NUMBER, ISSUER_EMAIL, ISSUER_LINE, ISSUER_NAME, ISSUER_PHONE,
+from apps.documents.invoice_document import (
+    ALLOCATION_THRESHOLD,
+    allocation_note,
+    business_fields,
+    computerized_note,
+    credit_reference_note,
+    date_stamp,
+    footer_line,
+    issue_stamp,
 )
+from apps.documents.invoice_layout import (
+    Field, InvoiceLayout, LineItem, Note, money, render_invoice_pdf,
+)
+from apps.documents.issuer import ISSUER_NAME, ORIGINAL_MARK
 from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
-from apps.documents.numbering import is_rental_number
-from apps.store.invoice_pdf import (
-    BORDER, BRAND_NAVY, BRAND_ORANGE, BRAND_PURPLE, PANEL_BG, _ensure_fonts_registered, _money, _rtl,
-)
-
-PAGE_WIDTH, PAGE_HEIGHT = A4
-SIDE_MARGIN = 1.6 * cm
-TOP_MARGIN = 1.2 * cm
-BOTTOM_MARGIN = 2.8 * cm
-CONTENT_WIDTH = PAGE_WIDTH - 2 * SIDE_MARGIN
-RADIUS = 8
 
 TYPE_LABELS = dict(DOCUMENT_TYPE_CHOICES)
-# Allocation number threshold (net, before VAT) — Israel Tax Authority, from 1 June 2026.
-ALLOCATION_THRESHOLD = Decimal('5000')
 TAX_DOCUMENT_TYPES = ('tax_invoice', 'combined', 'credit_invoice')
-
-_LOGO_IMAGE = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), 'store', 'assets', 'letterhead', 'image2.png'
-)
-LOGO_RATIO = 524 / 656
 
 PAYMENT_METHOD_LABELS = {
     'cash': 'מזומן', 'credit_card': 'כרטיס אשראי', 'card': 'כרטיס אשראי',
@@ -45,333 +34,228 @@ PAYMENT_METHOD_LABELS = {
 }
 
 
-def _styles() -> dict:
-    return {
-        'title': ParagraphStyle('DocTitle', fontName='Heebo-Bold', fontSize=19, leading=24,
-                                textColor=BRAND_NAVY, alignment=TA_CENTER),
-        'origin': ParagraphStyle('DocOrigin', fontName='Heebo-Bold', fontSize=10, leading=13,
-                                 textColor=BRAND_NAVY, alignment=TA_CENTER),
-        'section': ParagraphStyle('DocSection', fontName='Heebo-Bold', fontSize=11, leading=14,
-                                  textColor=BRAND_NAVY, alignment=TA_RIGHT),
-        'label': ParagraphStyle('DocLabel', fontName='Heebo-Bold', fontSize=8.5, leading=12,
-                                textColor=BRAND_NAVY, alignment=TA_RIGHT),
-        'value': ParagraphStyle('DocValue', fontName='Heebo', fontSize=8.5, leading=12,
-                                textColor=colors.HexColor('#2a2d4a'), alignment=TA_LEFT),
-        'th': ParagraphStyle('DocTh', fontName='Heebo-Bold', fontSize=8.5, leading=11,
-                             textColor=colors.white, alignment=TA_CENTER),
-        'td': ParagraphStyle('DocTd', fontName='Heebo', fontSize=8.5, leading=11,
-                             textColor=colors.HexColor('#2a2d4a'), alignment=TA_RIGHT),
-        'td_num': ParagraphStyle('DocTdNum', fontName='Heebo', fontSize=8.5, leading=11,
-                                 textColor=colors.HexColor('#2a2d4a'), alignment=TA_CENTER),
-        'td_bold': ParagraphStyle('DocTdBold', fontName='Heebo-Bold', fontSize=8.5, leading=11,
-                                  textColor=BRAND_NAVY, alignment=TA_CENTER),
-        'sub': ParagraphStyle('DocSub', fontName='Heebo', fontSize=7.5, leading=10,
-                              textColor=colors.HexColor('#6b6f8a'), alignment=TA_RIGHT),
-        'grand_label': ParagraphStyle('DocGrandL', fontName='Heebo-Bold', fontSize=11, leading=14,
-                                      textColor=BRAND_NAVY, alignment=TA_RIGHT),
-        'grand_value': ParagraphStyle('DocGrandV', fontName='Heebo-Bold', fontSize=15, leading=18,
-                                      textColor=BRAND_NAVY, alignment=TA_LEFT),
-        'note': ParagraphStyle('DocNote', fontName='Heebo', fontSize=7.5, leading=11,
-                               textColor=colors.HexColor('#4a4e6a'), alignment=TA_RIGHT),
-        'credit': ParagraphStyle('DocCredit', fontName='Heebo-Bold', fontSize=8.5, leading=12,
-                                 textColor=BRAND_ORANGE, alignment=TA_RIGHT),
-    }
+def _quantity_text(quantity: Decimal) -> str:
+    value = Decimal(str(quantity or 0)).normalize()
+    return str(int(value)) if value == value.to_integral() else f'{value:f}'
 
 
-def _p(text: str, style: ParagraphStyle) -> Paragraph:
-    return Paragraph(_rtl(text or ''), style)
+def _vat_rate_text(doc: FormalDocument) -> str:
+    if doc.vat_exempt:
+        return 'פטור'
+    percent = Decimal(str(doc.vat_percent or 0)).normalize()
+    percent_text = str(int(percent)) if percent == percent.to_integral() else f'{percent:f}'
+    return f'{percent_text}%'
 
 
-def _card(extra=None, padding=(5, 5, 8, 8)) -> TableStyle:
-    top, bottom, left, right = padding
-    base = [
-        ('ROUNDEDCORNERS', [RADIUS] * 4),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), top),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), bottom),
-        ('LEFTPADDING', (0, 0), (-1, -1), left),
-        ('RIGHTPADDING', (0, 0), (-1, -1), right),
-    ]
-    return TableStyle(base + list(extra or []))
+def _net_and_gross(amount: Decimal, doc: FormalDocument) -> tuple[Decimal, Decimal]:
+    """
+    (before VAT, with VAT) for a stored line amount.
+
+    Whether the stored number already includes VAT is the document's own
+    `prices_include_vat`; nothing here changes that, it only shows both sides.
+    """
+    value = Decimal(str(amount or 0))
+    if doc.vat_exempt:
+        return value, value
+    rate = Decimal(str(doc.vat_percent or 0)) / Decimal('100')
+    if doc.prices_include_vat:
+        net = (value / (Decimal('1') + rate)).quantize(Decimal('0.01')) if rate else value
+        return net, value
+    return value, (value * (Decimal('1') + rate)).quantize(Decimal('0.01'))
 
 
-# --- who the document is for ------------------------------------------------
+def _customer_fields(doc: FormalDocument) -> list[Field]:
+    """
+    The customer, from whichever record the document points at.
 
-def _customer_details(doc: FormalDocument) -> list[tuple[str, str]]:
-    rows = []
+    A document may name a business customer, a child, or only a typed name — and
+    an old one may carry no company number, phone or email at all. Empty values
+    are dropped by the layout rather than printed as a bare label.
+    """
     if doc.business_customer_id and doc.business_customer:
-        bc = doc.business_customer
-        rows.append(('שם הלקוח', bc.full_name or ''))
-        for attr, label in (('company_number', 'ח.פ. / ע.מ.'), ('phone', 'טלפון'), ('email', 'אימייל'), ('address', 'כתובת')):
-            value = getattr(bc, attr, '') or ''
-            if value:
-                rows.append((label, str(value)))
-        # A tenant is often a person, with an ID number and no company number:
-        # a rental receipt names them by whichever they have.
-        if is_rental_number(doc.document_number) and bc.id_number:
-            rows.insert(2 if bc.company_number else 1, ('ת.ז.', str(bc.id_number)))
-    elif doc.child_id and doc.child:
-        child = doc.child
-        rows.append(('שם הלקוח', child.full_name or ''))
-        family = getattr(child, 'family', None)
-        if family is not None:
-            for attr, label in (('phone', 'טלפון'), ('email', 'אימייל')):
-                value = getattr(family, attr, '') or ''
-                if value:
-                    rows.append((label, str(value)))
-    elif doc.customer_name:
-        rows.append(('שם הלקוח', doc.customer_name))
-    return rows
+        customer = doc.business_customer
+        return [
+            Field('שם הלקוח', customer.full_name or ''),
+            Field('ח.פ. / ע.מ.', str(getattr(customer, 'company_number', '') or '')),
+            Field('ת.ז.', str(getattr(customer, 'id_number', '') or '')),
+            Field('טלפון', str(getattr(customer, 'phone', '') or '')),
+            Field('אימייל', str(getattr(customer, 'email', '') or '')),
+            Field('כתובת', str(getattr(customer, 'address', '') or '')),
+        ]
+    if doc.child_id and doc.child:
+        family = getattr(doc.child, 'family', None)
+        return [
+            Field('שם הלקוח', doc.child.full_name or ''),
+            Field('טלפון', str(getattr(family, 'phone', '') or '')),
+            Field('אימייל', str(getattr(family, 'email', '') or '')),
+        ]
+    return [Field('שם הלקוח', doc.customer_name or '')]
 
 
-def _pairs_table(pairs: list[tuple[str, str]], styles: dict, width: float) -> Table:
-    label_w = 2.6 * cm
-    data = [[_p(value, styles['value']), _p(label, styles['label'])] for label, value in pairs]
-    table = Table(data, colWidths=[width - label_w, label_w])
-    table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 2), ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-        ('LEFTPADDING', (0, 0), (-1, -1), 2), ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-    ]))
-    return table
-
-
-def _header_card(doc: FormalDocument, styles: dict) -> Table:
-    issued_at = doc.document_date.strftime('%d/%m/%Y')
-    if doc.created_at:
-        issued_at += ' ' + timezone.localtime(doc.created_at).strftime('%H:%M')
-    doc_pairs = [('מספר מסמך', doc.document_number), ('תאריך ושעה', issued_at)]
-    doc_pairs += _customer_details(doc)
-    if doc.due_date:
-        doc_pairs.append(('תאריך פירעון', doc.due_date.strftime('%d/%m/%Y')))
-    if doc.description:
-        doc_pairs.append(('פרטים', doc.description))
+def _document_fields(doc: FormalDocument) -> list[Field]:
+    fields = [
+        # Printed exactly as issued — TI-…, CR-…, or an older shape.
+        Field('מספר מסמך', doc.document_number),
+        Field('תאריך המסמך', date_stamp(doc.document_date)),
+        Field('תאריך ושעה', issue_stamp(doc.created_at)),
+        *_customer_fields(doc),
+        Field('תאריך פירעון', date_stamp(doc.due_date)),
+        Field('פרטים', doc.description or ''),
+    ]
     if doc.document_type == 'credit_invoice':
         linked = doc.linked_document.document_number if doc.linked_document_id else doc.linked_document_number
-        if linked:
-            doc_pairs.append(('זיכוי עבור מסמך', linked))
-        linked_date = doc.linked_document_date or (doc.linked_document.document_date if doc.linked_document_id else None)
-        if linked_date:
-            doc_pairs.append(('תאריך המסמך המקורי', linked_date.strftime('%d/%m/%Y')))
+        linked_date = doc.linked_document_date or (
+            doc.linked_document.document_date if doc.linked_document_id else None
+        )
+        fields += [
+            Field('זיכוי עבור מסמך', linked or ''),
+            Field('תאריך המסמך המקורי', date_stamp(linked_date)),
+            Field('סיבת הזיכוי', doc.credit_reason or ''),
+        ]
     if doc.document_type == 'draft':
-        doc_pairs.append(('יהפוך ל', TYPE_LABELS.get(doc.draft_target_type, doc.draft_target_type or '')))
-
-    biz_pairs = [
-        ('שם העסק', ISSUER_NAME),
-        ('עוסק מורשה / ח.פ.', ISSUER_COMPANY_NUMBER),
-        ('כתובת', ISSUER_ADDRESS),
-        ('טלפון', ISSUER_PHONE),
-    ]
-    # Wide enough for the address to stay on one line (wrapped RTL text scrambles).
-    biz_w = CONTENT_WIDTH * 0.55
-    doc_w = CONTENT_WIDTH - biz_w
-    left = [_p('פרטי העסק', styles['section']), Spacer(1, 0.15 * cm), _pairs_table(biz_pairs, styles, biz_w - 0.5 * cm)]
-    right = [_p('פרטי המסמך והלקוח', styles['section']), Spacer(1, 0.15 * cm), _pairs_table(doc_pairs, styles, doc_w - 0.5 * cm)]
-    card = Table([[left, right]], colWidths=[biz_w, doc_w])
-    card.setStyle(_card([('BACKGROUND', (0, 0), (-1, -1), PANEL_BG)], padding=(9, 9, 10, 10)))
-    return card
+        fields.append(Field('יהפוך ל', TYPE_LABELS.get(doc.draft_target_type, doc.draft_target_type or '')))
+    return fields
 
 
-# --- what was sold ------------------------------------------------------------
-
-def _items_table(doc: FormalDocument, styles: dict) -> Table:
-    # Last column renders at the right edge.
-    widths = [3.0 * cm, 3.0 * cm, 1.8 * cm, CONTENT_WIDTH - 7.8 * cm]
-    header = [
-        _p('סה"כ שורה', styles['th']),
-        _p('מחיר יחידה', styles['th']),
-        _p('כמות', styles['th']),
-        _p('תיאור פריט / שירות', styles['th']),
-    ]
-    data = [header]
-    items = list(doc.line_items.all())
-    for item in items:
-        desc = item.description or item.sku or 'פריט'
-        cell = [_p(desc, styles['td'])]
-        if item.sku and item.description:
-            cell.append(_p(f'מק"ט {item.sku}', styles['sub']))
-        qty = item.quantity.normalize()
-        qty_text = f'{qty:f}' if qty != qty.to_integral() else str(int(qty))
-        data.append([
-            _p(_money(item.line_total), styles['td_bold']),
-            _p(_money(item.unit_price), styles['td_num']),
-            _p(qty_text, styles['td_num']),
-            cell,
-        ])
+def _items(doc: FormalDocument) -> list[LineItem]:
+    rate = _vat_rate_text(doc)
+    items: list[LineItem] = []
+    for item in doc.line_items.all():
+        unit_net, _unit_gross = _net_and_gross(item.unit_price, doc)
+        line_net, line_gross = _net_and_gross(item.line_total, doc)
+        items.append(LineItem(
+            description=item.description or item.sku or 'פריט',
+            sub=f'מק"ט {item.sku}' if (item.sku and item.description) else '',
+            quantity=_quantity_text(item.quantity),
+            unit_price=money(unit_net),
+            line_net=money(line_net),
+            vat_rate=rate,
+            line_gross=money(line_gross),
+        ))
     if not items:
-        data.append([
-            _p(_money(doc.subtotal), styles['td_bold']), _p(_money(doc.subtotal), styles['td_num']),
-            _p('1', styles['td_num']), _p(doc.description or 'שירות', styles['td']),
-        ])
-    table = Table(data, colWidths=widths, repeatRows=1)
-    table.setStyle(_card([
-        ('BACKGROUND', (0, 0), (-1, 0), BRAND_NAVY),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, PANEL_BG]),
-        ('LINEBELOW', (0, 1), (-1, -2), 0.35, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ], padding=(6, 6, 6, 6)))
-    return table
+        line_net, line_gross = _net_and_gross(doc.subtotal, doc)
+        items.append(LineItem(
+            description=doc.description or 'שירות',
+            quantity='1',
+            unit_price=money(line_net),
+            line_net=money(line_net),
+            vat_rate=rate,
+            line_gross=money(line_gross),
+        ))
+    return items
 
 
-# --- money ----------------------------------------------------------------------
-
-def _totals_card(doc: FormalDocument, styles: dict, width: float) -> Table:
+def _totals(doc: FormalDocument) -> list[Field]:
     net = doc.subtotal - doc.discount_amount
     rows = []
     if doc.discount_amount:
-        rows.append(('סכום לפני הנחה', _money(doc.subtotal)))
-        rows.append(('הנחה', '-' + _money(doc.discount_amount)))
-    rows.append(('סה"כ לפני מע"מ', _money(net)))
+        rows.append(Field('סכום לפני הנחה', money(doc.subtotal)))
+        rows.append(Field('הנחה', '-' + money(doc.discount_amount)))
+    rows.append(Field('סה"כ לפני מע"מ', money(net)))
     if doc.vat_exempt:
-        rows.append(('מע"מ', 'פטור / ללא מע"מ'))
+        rows.append(Field('מע"מ', 'פטור / ללא מע"מ'))
     else:
-        pct = doc.vat_percent.normalize()
-        pct_text = f'{pct:f}' if pct != pct.to_integral() else str(int(pct))
-        rows.append((f'מע"מ {pct_text}%', _money(doc.vat_amount)))
-    data = [[_p(value, styles['value']), _p(label, styles['label'])] for label, value in rows]
-    grand_word = 'סה"כ זיכוי' if doc.document_type == 'credit_invoice' else 'סה"כ לתשלום'
-    data.append([_p(_money(doc.total_amount), styles['grand_value']), _p(grand_word, styles['grand_label'])])
-    table = Table(data, colWidths=[width * 0.45, width * 0.55])
-    table.setStyle(_card([
-        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#ecebf7')),
-        ('LINEABOVE', (0, -1), (-1, -1), 0.8, BRAND_PURPLE),
-        ('TOPPADDING', (0, -1), (-1, -1), 8),
-    ], padding=(4, 4, 10, 10)))
-    return table
+        rows.append(Field(f'מע"מ {_vat_rate_text(doc)}', money(doc.vat_amount)))
+    return rows
 
 
-def _payment_card(doc: FormalDocument, styles: dict, width: float) -> Table:
+def _payment_fields(doc: FormalDocument) -> list[Field]:
     payments = list(doc.payments.all())
-    rows: list[tuple[str, str]] = []
     if doc.document_type == 'draft':
-        rows.append(('סטטוס', 'טיוטה — טרם הופק'))
-    elif doc.document_type == 'credit_invoice':
-        rows.append(('סטטוס', 'זיכוי'))
-        if doc.credit_reason:
-            rows.append(('סיבת הזיכוי', doc.credit_reason))
-    elif payments:
-        rows.append(('סטטוס', 'שולם'))
-        for p in payments:
-            label = PAYMENT_METHOD_LABELS.get(p.payment_method, p.get_payment_method_display() if hasattr(p, 'get_payment_method_display') else p.payment_method)
-            detail = label
-            if p.card_last_four:
-                detail += f' ****{p.card_last_four}'
-            if p.card_installments and p.card_installments > 1:
-                detail += f' · {p.card_installments} תשלומים'
-            if p.reference:
-                detail += f' · {p.reference}'
-            rows.append((_money(p.amount), detail))
-        paid = sum((p.amount for p in payments), Decimal('0'))
-        rows.append(('יתרה לתשלום', _money(max(doc.total_amount - paid, Decimal('0')))))
-    else:
-        rows.append(('סטטוס', 'ממתין לתשלום'))
-        if doc.payment_terms:
-            rows.append(('תנאי תשלום', doc.payment_terms))
-        rows.append(('יתרה לתשלום', _money(doc.total_amount)))
-    body = [_p('פרטי תשלום', styles['section']), Spacer(1, 0.1 * cm), _pairs_table(rows, styles, width - 0.6 * cm)]
-    if doc.customer_notes:
-        body += [Spacer(1, 0.1 * cm), _p(doc.customer_notes, styles['note'])]
-    table = Table([[body]], colWidths=[width])
-    table.setStyle(_card([('BACKGROUND', (0, 0), (-1, -1), PANEL_BG)], padding=(8, 8, 10, 10)))
-    return table
+        return [Field('סטטוס', 'טיוטה — טרם הופק')]
+    if doc.document_type == 'credit_invoice':
+        return [
+            Field('סטטוס', 'זיכוי'),
+            Field('סיבת הזיכוי', doc.credit_reason or ''),
+            Field('סה"כ זיכוי', money(doc.total_amount)),
+        ]
+    if not payments:
+        return [
+            Field('סטטוס', 'ממתין לתשלום'),
+            Field('תנאי תשלום', doc.payment_terms or ''),
+            Field('יתרה לתשלום', money(doc.total_amount)),
+        ]
+
+    # One row per fact rather than one sentence per payment: the card's last
+    # four and the confirmation number have to be findable, and a Hebrew phrase
+    # with digits buried in it is neither easy to read nor easy to search.
+    fields = [Field('סטטוס', 'שולם')]
+    for index, payment in enumerate(payments, start=1):
+        suffix = f' ({index})' if len(payments) > 1 else ''
+        label = PAYMENT_METHOD_LABELS.get(
+            payment.payment_method,
+            payment.get_payment_method_display()
+            if hasattr(payment, 'get_payment_method_display') else payment.payment_method,
+        )
+        installments = payment.card_installments or 0
+        fields += [
+            Field(f'אמצעי תשלום{suffix}', label or ''),
+            Field(f'4 ספרות אחרונות{suffix}', payment.card_last_four or ''),
+            Field(f'מספר תשלומים{suffix}', str(installments) if installments > 1 else ''),
+            Field(f'אסמכתא / אישור{suffix}', payment.reference or ''),
+            Field(f'סכום ששולם{suffix}', money(payment.amount)),
+        ]
+    paid = sum((p.amount for p in payments), Decimal('0'))
+    fields.append(Field('יתרה לתשלום', money(max(doc.total_amount - paid, Decimal('0')))))
+    return fields
 
 
-# --- the small print -----------------------------------------------------------
-
-def _notes(doc: FormalDocument, styles: dict) -> list:
-    out = []
+def _notes(doc: FormalDocument) -> list[Note]:
+    notes: list[Note] = []
+    if doc.document_type == 'credit_invoice':
+        linked = doc.linked_document.document_number if doc.linked_document_id else doc.linked_document_number
+        linked_date = doc.linked_document_date or (
+            doc.linked_document.document_date if doc.linked_document_id else None
+        )
+        reference = credit_reference_note(linked or '', linked_date, doc.credit_reason or '')
+        if reference is not None:
+            notes.append(reference)
     if doc.document_type == 'draft':
-        out.append(_p('טיוטה: מסמך זה אינו חשבונית ואינו מסמך מס. הוא יקבל מספר רק לאחר אישור.', styles['credit']))
+        notes.append(Note('טיוטה:', 'מסמך זה אינו חשבונית ואינו מסמך מס. הוא יקבל מספר רק לאחר אישור.'))
     elif doc.document_type in TAX_DOCUMENT_TYPES:
-        net = doc.subtotal - doc.discount_amount
-        if net >= ALLOCATION_THRESHOLD:
-            out.append(_p('מספר הקצאה: נדרש לעסקה זו (סכום לפני מע"מ מעל 5,000 ₪) — טרם הוזן.', styles['credit']))
-        else:
-            out.append(_p('מספר הקצאה: לא נדרש לעסקה זו — סכום העסקה לפני מע"מ נמוך מ-5,000 ₪.', styles['note']))
+        notes.append(allocation_note(doc.subtotal - doc.discount_amount))
     elif doc.document_type == 'transaction_invoice':
-        out.append(_p('חשבון עסקה אינו חשבונית מס. חשבונית מס תופק עם התשלום.', styles['note']))
+        notes.append(Note('חשבון עסקה:', 'אינו חשבונית מס. חשבונית מס תופק עם התשלום.'))
     if doc.document_type != 'draft':
-        out.append(_p('מסמך ממוחשב: מסמך זה הופק באופן דיגיטלי.', styles['note']))
-    return out
+        notes.append(computerized_note())
+    return notes
 
 
-def _draw_page(doc_obj: FormalDocument):
-    def on_page(canvas, document):
-        canvas.saveState()
-        canvas.setStrokeColor(BRAND_PURPLE)
-        canvas.setLineWidth(0.8)
-        y = BOTTOM_MARGIN - 0.35 * cm
-        canvas.line(SIDE_MARGIN, y, PAGE_WIDTH - SIDE_MARGIN, y)
-        canvas.setFillColor(BRAND_NAVY)
-        canvas.setFont('Heebo-Bold', 11)
-        canvas.drawCentredString(PAGE_WIDTH / 2, y - 0.55 * cm, _rtl(f'{ISSUER_NAME} · ח.פ. {ISSUER_COMPANY_NUMBER}'))
-        canvas.setFont('Heebo', 10)
-        canvas.drawCentredString(PAGE_WIDTH / 2, y - 1.05 * cm, _rtl(f'{ISSUER_ADDRESS} · {ISSUER_PHONE} · {ISSUER_EMAIL}'))
-        canvas.setFont('Heebo', 7.5)
-        canvas.setFillColor(colors.HexColor('#8a8da3'))
-        canvas.drawRightString(PAGE_WIDTH - SIDE_MARGIN, y - 1.5 * cm, _rtl(f'עמוד {document.page}'))
-        if doc_obj.document_type == 'draft':
-            canvas.setFont('Heebo-Bold', 92)
-            canvas.setFillColor(colors.Color(0.55, 0.55, 0.65, alpha=0.2))
-            canvas.translate(PAGE_WIDTH / 2, PAGE_HEIGHT / 2)
-            canvas.rotate(35)
-            canvas.drawCentredString(0, 0, _rtl('טיוטה'))
-        canvas.restoreState()
-    return on_page
+def build_document_layout(doc: FormalDocument) -> InvoiceLayout:
+    """The design's data for one hand-issued document. Separated out so tests can read it."""
+    label = TYPE_LABELS.get(doc.document_type, doc.document_type)
+    is_draft = doc.document_type == 'draft'
+    is_credit = doc.document_type == 'credit_invoice'
+    price_word = 'כולל מע"מ' if doc.prices_include_vat else 'לפני מע"מ'
+    return InvoiceLayout(
+        title=f'{label} - {doc.document_number}',
+        copy_mark='טיוטה — אינו מסמך מס' if is_draft else ORIGINAL_MARK,
+        document_fields=_document_fields(doc),
+        business_fields=business_fields(),
+        items=_items(doc),
+        items_heading=f'פירוט העסקה (מחירים {price_word})',
+        payment_fields=_payment_fields(doc),
+        payment_note=doc.customer_notes or '',
+        totals=_totals(doc),
+        grand_label='סה"כ זיכוי' if is_credit else 'סה"כ לתשלום',
+        grand_value=money(doc.total_amount),
+        notes=_notes(doc),
+        footer=footer_line(),
+        watermark='טיוטה' if is_draft else '',
+        pdf_title=f'{label} {doc.document_number}',
+        pdf_author=ISSUER_NAME,
+    )
 
 
 def generate_document_pdf(doc: FormalDocument) -> bytes:
-    _ensure_fonts_registered()
-    styles = _styles()
-    label = TYPE_LABELS.get(doc.document_type, doc.document_type)
+    return render_invoice_pdf(build_document_layout(doc))
 
-    story = []
-    if os.path.isfile(_LOGO_IMAGE):
-        logo_w = 4.8 * cm
-        logo = Image(_LOGO_IMAGE, width=logo_w, height=logo_w * LOGO_RATIO)
-        logo.hAlign = 'CENTER'
-        story += [logo, Spacer(1, 0.4 * cm)]
 
-    story.append(_p(f'{label} - {doc.document_number}', styles['title']))
-    if doc.document_type == 'draft':
-        story.append(_p('טיוטה — אינו מסמך מס', styles['origin']))
-    else:
-        story.append(_p('מקור', styles['origin']))
-        if is_rental_number(doc.document_number):
-            # תקנה 9א(א)(1): "עוסק מורשה" and the number, printed on the face,
-            # as the lesson and store receipts print it.
-            story.append(_p(ISSUER_LINE, styles['origin']))
-    story.append(Spacer(1, 0.5 * cm))
-
-    story.append(_header_card(doc, styles))
-    story.append(Spacer(1, 0.55 * cm))
-
-    price_word = 'כולל מע"מ' if doc.prices_include_vat else 'לפני מע"מ'
-    story.append(_p(f'פירוט העסקה (מחירים {price_word})', styles['section']))
-    story.append(Spacer(1, 0.15 * cm))
-    story.append(_items_table(doc, styles))
-    story.append(Spacer(1, 0.5 * cm))
-
-    half = (CONTENT_WIDTH - 0.6 * cm) / 2
-    bottom = Table(
-        [[_totals_card(doc, styles, half), _payment_card(doc, styles, half)]],
-        colWidths=[half + 0.3 * cm, half + 0.3 * cm],
-    )
-    bottom.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-        ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    story.append(bottom)
-    story.append(Spacer(1, 0.7 * cm))
-    story.extend(_notes(doc, styles))
-
-    buffer = io.BytesIO()
-    pdf = SimpleDocTemplate(
-        buffer, pagesize=A4, leftMargin=SIDE_MARGIN, rightMargin=SIDE_MARGIN,
-        topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN,
-        title=f'{label} {doc.document_number}', author=ISSUER_NAME,
-    )
-    on_page = _draw_page(doc)
-    pdf.build(story, onFirstPage=on_page, onLaterPages=on_page)
-    return buffer.getvalue()
+__all__ = [
+    'ALLOCATION_THRESHOLD',
+    'PAYMENT_METHOD_LABELS',
+    'TAX_DOCUMENT_TYPES',
+    'TYPE_LABELS',
+    'build_document_layout',
+    'generate_document_pdf',
+]

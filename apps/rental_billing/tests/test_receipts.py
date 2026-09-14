@@ -94,8 +94,11 @@ class RentalReceiptTests(BillingFixture, APITestCase):
         )
         office.refresh_from_db()  # the stored columns, as the documents module reads them
         office_text = pdf_text(generate_document_pdf(office))
-        self.assertEqual(text.count(ISSUER_NAME), office_text.count(ISSUER_NAME) + 1)
-        self.assertNotIn('ת.ז', office_text)
+        # The design the owner asked for (14.9) prints the business block — the issuer,
+        # עוסק מורשה and the number — on every document it draws, so a rental receipt no
+        # longer carries that line one time more than a document issued by hand.
+        self.assertEqual(text.count(ISSUER_NAME), office_text.count(ISSUER_NAME))
+        self.assertIn('עוסק מורשה', office_text)
 
     @override_settings(RESEND_API_KEY='', EMAIL_HOST='smtp.test')
     def test_the_receipt_is_emailed_to_the_tenant_after_commit(self):
