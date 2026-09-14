@@ -2106,7 +2106,10 @@ class PaymentService:
             logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
 
             if invoice.website_order_number:
-                from apps.store.website_integration import notify_website_order_status, push_product_to_website
+                from apps.store.website_integration import (
+                    notify_website_order_status,
+                    push_products_batch_to_website,
+                )
                 from apps.store.invoice_email import send_store_invoice_email
                 notify_website_order_status(
                     website_order_number=invoice.website_order_number,
@@ -2115,12 +2118,13 @@ class PaymentService:
                     status='paid',
                     provider_txn_id=tranzila_response.get('transaction_id', ''),
                 )
-                for item in product_items:
-                    try:
-                        product = StoreProduct.objects.get(id=item['product_id'])
-                        push_product_to_website(product)
-                    except StoreProduct.DoesNotExist:
-                        pass
+                sold_products = list(
+                    StoreProduct.objects.filter(
+                        id__in=[item['product_id'] for item in product_items]
+                    )
+                )
+                # One call for the whole order, not one per line item.
+                push_products_batch_to_website(sold_products)
                 try:
                     from apps.store.tranzila_store_invoice import issue_store_tranzila_document
                     issue_store_tranzila_document(invoice)

@@ -44,7 +44,7 @@ from apps.store.website_fulfillment import (
 from apps.store.website_integration import (
     link_product_to_website,
     product_in_stock,
-    push_product_to_website,
+    schedule_product_push,
     unlink_product_from_website,
     update_product_from_website,
 )
@@ -701,7 +701,9 @@ class WidgetStoreWebsiteOrderView(APIView):
                     )
                     decrement_product_stock(product, item)
                     product.refresh_from_db(fields=['stock_quantity'])
-                    push_product_to_website(product)
+                    # Deferred to COMMIT: no outbound call while the order's
+                    # rows are locked, and one call for the whole cart.
+                    schedule_product_push(product)
 
         except (KeyError, TypeError, ValueError) as exc:
             return Response({'error': str(exc)}, status=400)

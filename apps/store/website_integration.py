@@ -7,6 +7,8 @@ CRM calls it whenever a linked product's stock or sale price changes.
 from __future__ import annotations
 
 import logging
+import threading
+from contextlib import contextmanager
 from decimal import Decimal
 
 import requests
@@ -16,6 +18,18 @@ from django.db import transaction
 from apps.store.models import StoreProduct
 
 logger = logging.getLogger(__name__)
+
+# One outbound call per transaction, not one per saved row. Saving a product
+# with size rows fires post_save many times (the product, every size row, and
+# the retotal each size row triggers), so pushing on each of them turned a
+# single "ערוך מוצר" save into 2N+3 HTTP calls to the shop — made from inside
+# the open transaction — and a slow shop then ran the browser past its own
+# request timeout.
+_pending = threading.local()
+
+# Outbound push timeout. Kept well under the browser client's 30s budget so one
+# hanging shop request cannot swallow the whole save.
+PUSH_TIMEOUT_SECONDS = 12
 
 
 def _integration_configured() -> bool:
@@ -40,7 +54,74 @@ def normalize_website_image_url(path: str) -> str:
 
 
 def push_product_to_website(product: StoreProduct) -> bool:
+    """Push one product now. Prefer schedule_product_push from save paths."""
     return push_products_batch_to_website([product]) > 0
+
+
+@contextmanager
+def suspend_website_pushes():
+    """
+    Drop the pushes that post_save would schedule inside this block.
+
+    For callers that already push the batch themselves at the end (the catalog
+    sync), so importing hundreds of products does not also make hundreds of
+    single-product calls.
+    """
+    previous = getattr(_pending, 'suspended', False)
+    _pending.suspended = True
+    try:
+        yield
+    finally:
+        _pending.suspended = previous
+
+
+def _flush_scheduled_pushes(product_ids: set) -> None:
+    """Send every product collected during the transaction in one call."""
+    if not product_ids:
+        return
+    try:
+        products = list(StoreProduct.objects.filter(pk__in=product_ids))
+        push_products_batch_to_website(products)
+    except Exception:
+        # Runs after COMMIT: the save already succeeded and must stay
+        # successful. A shop that is down only leaves the shop stale, and the
+        # catalog sync reconciles it.
+        logger.exception('Scheduled website push failed for %s product(s)', len(product_ids))
+
+
+def schedule_product_push(product: StoreProduct) -> None:
+    """
+    Queue a product for this transaction's single website push.
+
+    Every product saved in the transaction lands in one shared batch, and the
+    first on_commit callback to run drains it — so however many rows a save
+    touches, the shop gets one call, and it is made after COMMIT rather than
+    while the rows are still locked. Outside a transaction on_commit runs the
+    flush immediately, as before.
+
+    A rolled-back transaction leaves its ids in the batch (its callbacks are
+    dropped, so nothing drains them). They ride along with the next push, which
+    reads the products fresh from the database — so the shop is told what is
+    actually stored, never the values that were rolled back.
+    """
+    if not product.website_legacy_id:
+        return
+    if getattr(_pending, 'suspended', False):
+        return
+
+    batch = getattr(_pending, 'batch', None)
+    if batch is None:
+        batch = _pending.batch = set()
+    batch.add(product.pk)
+
+    def flush():
+        if getattr(_pending, 'batch', None) is batch:
+            _pending.batch = None
+        product_ids = set(batch)
+        batch.clear()
+        _flush_scheduled_pushes(product_ids)
+
+    transaction.on_commit(flush)
 
 
 def push_products_batch_to_website(products: list[StoreProduct]) -> int:
@@ -75,7 +156,7 @@ def push_products_batch_to_website(products: list[StoreProduct]) -> int:
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
         try:
-            resp = requests.post(url, json={'items': chunk}, headers=headers, timeout=30)
+            resp = requests.post(url, json={'items': chunk}, headers=headers, timeout=PUSH_TIMEOUT_SECONDS)
             if resp.status_code >= 400:
                 logger.error(
                     'Website batch push failed: HTTP %s legacy_ids=%s body=%s',
@@ -179,85 +260,88 @@ def sync_products_from_website() -> dict:
     errors: list[str] = []
     to_push: list[StoreProduct] = []
 
-    for brand in ('cogo', 'gaga'):
-        try:
-            resp = requests.get(f'{base}/api/products?brand={brand}', timeout=45)
-            resp.raise_for_status()
-            items = resp.json().get('products') or []
-        except requests.RequestException as exc:
-            errors.append(f'{brand}: fetch failed ({exc})')
-            continue
-
-        default_category = 'געגע' if brand == 'gaga' else 'קוגומלו'
-
-        for wp in items:
+    # Every product saved below would otherwise schedule its own push. This
+    # function already pushes the whole catalog in one batch at the end.
+    with suspend_website_pushes():
+        for brand in ('cogo', 'gaga'):
             try:
-                legacy_id = int(wp['id'])
-            except (KeyError, TypeError, ValueError):
+                resp = requests.get(f'{base}/api/products?brand={brand}', timeout=45)
+                resp.raise_for_status()
+                items = resp.json().get('products') or []
+            except requests.RequestException as exc:
+                errors.append(f'{brand}: fetch failed ({exc})')
                 continue
 
-            name = (wp.get('name') or '').strip()
-            if not name:
-                continue
+            default_category = 'געגע' if brand == 'gaga' else 'קוגומלו'
 
-            price = Decimal(str(wp.get('price') or 0))
-            in_stock = bool(wp.get('inStock', True))
-            images = wp.get('images') or []
-            image_url = normalize_website_image_url((images[0] if images else '') or '')
-            categories = wp.get('categories') or []
-            category = (categories[0] if categories else default_category) or default_category
-            branch_only = not bool(wp.get('purchasable', True))
+            for wp in items:
+                try:
+                    legacy_id = int(wp['id'])
+                except (KeyError, TypeError, ValueError):
+                    continue
 
-            product = StoreProduct.objects.filter(website_legacy_id=legacy_id).first()
-            is_new = product is None
-            if is_new:
-                product = (
-                    StoreProduct.objects.filter(
-                        website_legacy_id__isnull=True,
+                name = (wp.get('name') or '').strip()
+                if not name:
+                    continue
+
+                price = Decimal(str(wp.get('price') or 0))
+                in_stock = bool(wp.get('inStock', True))
+                images = wp.get('images') or []
+                image_url = normalize_website_image_url((images[0] if images else '') or '')
+                categories = wp.get('categories') or []
+                category = (categories[0] if categories else default_category) or default_category
+                branch_only = not bool(wp.get('purchasable', True))
+
+                product = StoreProduct.objects.filter(website_legacy_id=legacy_id).first()
+                is_new = product is None
+                if is_new:
+                    product = (
+                        StoreProduct.objects.filter(
+                            website_legacy_id__isnull=True,
+                            name=name,
+                            is_active=True,
+                        ).first()
+                    )
+
+                if product:
+                    # Only touch catalog metadata — never sale_price on existing rows.
+                    # Use update_fields so a concurrent staff price edit is not overwritten
+                    # by a stale in-memory sale_price from when this row was loaded.
+                    product.name = name
+                    product.website_legacy_id = legacy_id
+                    product.category = category
+                    product.branch = None
+                    product.is_active = True
+                    product.branch_only = branch_only
+                    update_fields = [
+                        'name', 'website_legacy_id', 'category', 'branch',
+                        'is_active', 'branch_only', 'updated_at',
+                    ]
+                    if image_url:
+                        product.image_url = image_url
+                        update_fields.append('image_url')
+                    product.save(update_fields=update_fields)
+                    updated += 1
+                else:
+                    sale = price if price >= Decimal('0.01') else Decimal('0.01')
+                    cost = Decimal('0.00')
+                    qty = 10 if in_stock else 0
+                    product = StoreProduct.objects.create(
                         name=name,
+                        category=category,
+                        sale_price=sale,
+                        cost_price=cost,
+                        stock_quantity=qty,
+                        website_legacy_id=legacy_id,
+                        image_url=image_url,
+                        branch=None,
                         is_active=True,
-                    ).first()
-                )
+                        branch_only=branch_only,
+                        notes=f'יובא מהאתר ({brand})',
+                    )
+                    created += 1
 
-            if product:
-                # Only touch catalog metadata — never sale_price on existing rows.
-                # Use update_fields so a concurrent staff price edit is not overwritten
-                # by a stale in-memory sale_price from when this row was loaded.
-                product.name = name
-                product.website_legacy_id = legacy_id
-                product.category = category
-                product.branch = None
-                product.is_active = True
-                product.branch_only = branch_only
-                update_fields = [
-                    'name', 'website_legacy_id', 'category', 'branch',
-                    'is_active', 'branch_only', 'updated_at',
-                ]
-                if image_url:
-                    product.image_url = image_url
-                    update_fields.append('image_url')
-                product.save(update_fields=update_fields)
-                updated += 1
-            else:
-                sale = price if price >= Decimal('0.01') else Decimal('0.01')
-                cost = Decimal('0.00')
-                qty = 10 if in_stock else 0
-                product = StoreProduct.objects.create(
-                    name=name,
-                    category=category,
-                    sale_price=sale,
-                    cost_price=cost,
-                    stock_quantity=qty,
-                    website_legacy_id=legacy_id,
-                    image_url=image_url,
-                    branch=None,
-                    is_active=True,
-                    branch_only=branch_only,
-                    notes=f'יובא מהאתר ({brand})',
-                )
-                created += 1
-
-            to_push.append(product)
+                to_push.append(product)
 
     pushed = push_products_batch_to_website(to_push)
 
