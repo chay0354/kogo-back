@@ -7,6 +7,7 @@ from django.contrib.auth import authenticate
 from django.db.models import F
 from django.utils import timezone
 from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.authtoken.models import Token
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -145,6 +146,10 @@ class MeView(APIView):
 class UserViewSet(viewsets.ModelViewSet):
     """
     Manager-only CRUD for internal users.
+
+    Deletion goes through apps.core.user_deletion: it refuses your own account
+    and the last manager who can still sign in, and it answers `deletion-preview`
+    first so nobody presses delete without seeing what it costs.
     """
 
     queryset = User.objects.all().select_related('profile').order_by('email')
@@ -155,6 +160,24 @@ class UserViewSet(viewsets.ModelViewSet):
         ctx = super().get_serializer_context()
         ctx['request'] = self.request
         return ctx
+
+    @action(detail=True, methods=['get'], url_path='deletion-preview')
+    def deletion_preview(self, request, pk=None):
+        from apps.core.user_deletion import deletion_preview
+
+        return Response(deletion_preview(self.get_object(), actor=request.user))
+
+    def destroy(self, request, *args, **kwargs):
+        from apps.core.user_deletion import UserDeletionRefused, delete_user
+
+        try:
+            result = delete_user(self.get_object(), actor=request.user)
+        except UserDeletionRefused as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        logger.warning(
+            'User %s deleted by %s', result['email'], getattr(request.user, 'email', request.user),
+        )
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class CompleteTourView(APIView):
