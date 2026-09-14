@@ -49,8 +49,15 @@ class DiscountCalculation:
 
 
 class DiscountService:
-    """Service for evaluating and calculating discounts"""
-    
+    """Service for evaluating and calculating discounts.
+
+    A built-in discount sitting at value 0 is one nobody has configured yet —
+    the CRM creates the rows on first view with value 0, and setting a שקל
+    discount back to 0 is how the CRM documents turning it off. Either way it
+    is not a discount: a 0 here must never reach a payment as a ₪0 discount
+    line, and a 0 on a "מחיר סופי קבוע" discount must never make the lesson free.
+    """
+
     EARLY_SIGNUP_IDENTIFIER = "רישום מוקדם"
     SECOND_CHILD_IDENTIFIER = "ילד שני"
     ADDITIONAL_LESSON_IDENTIFIER = "שיעור נוסף"
@@ -184,6 +191,7 @@ class DiscountService:
         return Discount.objects.filter(
             is_active=True,
             is_built_in=True,
+            value__gt=0,
             name__contains=self.EARLY_SIGNUP_IDENTIFIER,
             start_date__lte=payment_date,
             end_date__gte=payment_date
@@ -243,6 +251,7 @@ class DiscountService:
         return Discount.objects.filter(
             is_active=True,
             is_built_in=True,
+            value__gt=0,
             name__contains=self.SECOND_CHILD_IDENTIFIER
         ).first()
     
@@ -298,6 +307,7 @@ class DiscountService:
                 return Discount.objects.filter(
                     is_active=True,
                     is_built_in=True,
+                    value__gt=0,
                     name__contains=self.ADDITIONAL_LESSON_IDENTIFIER
                 ).first()
             
