@@ -1,37 +1,165 @@
-"""Generate branded letterhead PDF for CRM subscription invoices (financial Invoice)."""
+"""The receipt a family gets for a lesson charge, drawn by the shared layout.
+
+This is the most common document the business issues. What it says is decided
+here — the lines come from the checkout log where there is one, and from the
+invoice's children where there is not, exactly as before. How it looks is
+decided once, in ``apps.documents.invoice_layout``.
+"""
 from __future__ import annotations
 
-import io
 from decimal import Decimal
 
-from bidi.algorithm import get_display
-from django.utils import timezone
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-from apps.customers.financial_models import Invoice
-from apps.core.vat import DOCUMENT_TITLE, split_vat_inclusive
-from apps.documents.issuer import COMPUTERIZED_MARK, ISSUER_LINE, ORIGINAL_MARK
-from apps.store.invoice_pdf import (
-    BORDER,
-    BRAND_NAVY,
-    BRAND_PURPLE,
-    CONTENT_BOTTOM,
-    CONTENT_LEFT,
-    CONTENT_RIGHT,
-    CONTENT_TOP,
-    PAGE_HEIGHT,
-    PAGE_WIDTH,
-    PANEL_BG,
-    _draw_letterhead,
-    _ensure_fonts_registered,
-    _money,
-    _rtl,
+from apps.core.vat import (
+    DOCUMENT_TITLE, VAT_PERCENT_DISPLAY, split_vat_inclusive, split_vat_inclusive_lines,
 )
+from apps.customers.financial_models import Invoice
+from apps.documents.invoice_document import (
+    allocation_note, business_fields, computerized_note, date_stamp, footer_line, issue_stamp,
+    late_note,
+)
+from apps.documents.invoice_layout import (
+    Field, InvoiceLayout, LineItem, money, render_invoice_pdf,
+)
+from apps.documents.issuer import ISSUER_NAME, ORIGINAL_MARK
+
+STATUS_LABELS = {
+    'paid': 'שולם',
+    'pending': 'ממתין לתשלום',
+    'failed': 'נכשל',
+    'refunded': 'זוכה',
+    'cancelled': 'בוטל',
+}
+
+
+def _charged_lines(invoice: Invoice) -> list[tuple[str, str, Decimal]]:
+    """
+    (description, child, amount) for each line, as the existing code works them out.
+
+    The checkout log is the source when the invoice has one; otherwise the
+    invoice's children are, with the registration fee split off the single-child
+    case. Nothing here is new — only the shape it is handed on in.
+    """
+    checkout_log = invoice.activity_logs.filter(action='checkout_lines').order_by('-created_at').first()
+    checkout_lines = []
+    if checkout_log and isinstance(checkout_log.details, dict):
+        checkout_lines = checkout_log.details.get('lines') or []
+
+    rows: list[tuple[str, str, Decimal]] = []
+    if checkout_lines:
+        for line in checkout_lines:
+            child_name = str(line.get('child_name') or '')
+            desc = str(line.get('description') or 'מנוי חוג')
+            amount = Decimal(str(line.get('amount') or '0'))
+            fee = Decimal(str(line.get('registration_fee') or '0'))
+            lesson_part = amount - fee
+            if fee > 0 and lesson_part > 0:
+                rows.append((f'מנוי חודשי — {desc}', child_name, lesson_part))
+                rows.append(('דמי רישום (חד-פעמי)', child_name, fee))
+            else:
+                rows.append((desc if fee <= 0 else f'דמי רישום — {desc}', child_name, amount))
+        return rows
+
+    payment = invoice.payment
+    registration_fee = Decimal('0')
+    if payment and payment.registration_fee:
+        registration_fee = payment.registration_fee
+
+    child_count = invoice.children.count()
+    for entry in invoice.children.all():
+        child_name = entry.child.full_name if entry.child_id else ''
+        if entry.lesson_id and entry.course_id:
+            desc = f'{entry.course.name} — {entry.lesson.get_day_of_week_display()}'
+        elif entry.course_id:
+            desc = entry.course.name
+        else:
+            desc = 'מנוי חוג'
+        if registration_fee > 0 and payment and child_count <= 1:
+            rows.append((f'מנוי חודשי — {desc}', child_name, payment.final_amount - registration_fee))
+            rows.append(('דמי רישום (חד-פעמי)', child_name, registration_fee))
+        else:
+            rows.append((desc, child_name, invoice.amount if child_count <= 1 else Decimal('0')))
+
+    if not rows:
+        rows.append(('מנוי חוג', '', invoice.amount))
+    return rows
+
+
+def _items(invoice: Invoice) -> list[LineItem]:
+    rows = _charged_lines(invoice)
+    splits = split_vat_inclusive_lines([amount for _d, _c, amount in rows])
+    rate = f'{VAT_PERCENT_DISPLAY:g}%'
+    items = []
+    for (desc, child, amount), (net, _vat) in zip(rows, splits):
+        items.append(LineItem(
+            description=desc,
+            sub=child,
+            quantity='1',
+            unit_price=money(net),
+            line_net=money(net),
+            vat_rate=rate,
+            line_gross=money(amount),
+        ))
+    return items
+
+
+def _late_dates(invoice: Invoice) -> tuple[str, str]:
+    """(issued, money received) from the 'issued late' log, or ('', '')."""
+    entry = next((log for log in invoice.activity_logs.all() if log.action == 'issued_late'), None)
+    if entry is None:
+        return '', ''
+    details = entry.details or {}
+    return (details.get('document_issued_at') or '')[:10], (details.get('money_received_at') or '')[:10]
+
+
+def build_subscription_invoice_layout(invoice: Invoice) -> InvoiceLayout:
+    """The design's data for one lesson receipt. Separated out so tests can read it."""
+    before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
+    payer = (invoice.payer_name or invoice.family.name or '').strip()
+    email = (invoice.payer_email or invoice.family.email or '').strip()
+    phone = (invoice.payer_phone or invoice.family.phone or '').strip()
+    paid = invoice.status == 'paid'
+
+    notes = [allocation_note(before_vat), computerized_note()]
+    issued_late, money_received = _late_dates(invoice)
+    if issued_late or money_received:
+        notes.insert(0, late_note(issued_late, money_received))
+
+    return InvoiceLayout(
+        # Whatever the record holds — INV-20260815-A1B2C3D4 as readily as
+        # IR-2026-000123. The number is never reshaped for the page.
+        title=f'{DOCUMENT_TITLE} - {invoice.invoice_number}',
+        copy_mark=ORIGINAL_MARK,
+        document_fields=[
+            Field('מספר מסמך', invoice.invoice_number),
+            Field('תאריך ושעה', issue_stamp(invoice.invoice_date)),
+            Field('שם הלקוח', payer or 'לקוח/ה'),
+            Field('טלפון', phone),
+            Field('אימייל', email),
+            Field('סניף', invoice.branch.name if invoice.branch_id else ''),
+            # Where the payment date differs from the issue date, both are rows
+            # of their own — an accountant reads them, and so does a search.
+            Field('תאריך הפקת המסמך', date_stamp(issued_late)),
+            Field('תאריך קבלת התשלום', date_stamp(money_received)),
+        ],
+        business_fields=business_fields(),
+        items=_items(invoice),
+        payment_fields=[
+            Field('סטטוס', STATUS_LABELS.get(invoice.status, invoice.status or '')),
+            Field('אמצעי תשלום', invoice.get_payment_method_display() if invoice.payment_method else ''),
+            Field('אישור תשלום', (invoice.tranzila_transaction_id or '').strip()),
+            Field('יתרה לתשלום', money(Decimal('0') if paid else invoice.amount)),
+        ],
+        totals=[
+            Field('סה"כ לפני מע"מ', money(before_vat)),
+            Field(f'מע"מ {VAT_PERCENT_DISPLAY:g}%', money(vat_amount)),
+        ],
+        grand_label='סה"כ לתשלום',
+        grand_value=money(gross),
+        notes=notes,
+        footer=footer_line(),
+        pdf_title=invoice.invoice_number,
+        pdf_author=ISSUER_NAME,
+    )
 
 
 def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
@@ -41,232 +169,4 @@ def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
         .prefetch_related('children__child', 'children__course', 'children__lesson', 'activity_logs')
         .get(pk=invoice.pk)
     )
-
-    _ensure_fonts_registered()
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=CONTENT_LEFT,
-        leftMargin=PAGE_WIDTH - CONTENT_RIGHT,
-        topMargin=PAGE_HEIGHT - CONTENT_TOP,
-        bottomMargin=CONTENT_BOTTOM,
-        title=invoice.invoice_number,
-    )
-
-    title_style = ParagraphStyle(
-        'SubInvTitle', fontName='Heebo-Bold', fontSize=22,
-        textColor=BRAND_PURPLE, alignment=TA_CENTER, leading=26,
-    )
-    label_style = ParagraphStyle(
-        'SubInvLabel', fontName='Heebo-Bold', fontSize=10,
-        textColor=BRAND_NAVY, alignment=TA_RIGHT, leading=14,
-    )
-    value_style = ParagraphStyle(
-        'SubInvValue', fontName='Heebo', fontSize=10,
-        textColor=BRAND_NAVY, alignment=TA_RIGHT, leading=14,
-    )
-
-    issue = timezone.localtime(invoice.invoice_date).strftime('%d/%m/%Y %H:%M')
-    payer = (invoice.payer_name or invoice.family.name or 'לקוח/ה').strip()
-    email = (invoice.payer_email or invoice.family.email or '').strip()
-    phone = (invoice.payer_phone or invoice.family.phone or '').strip()
-
-    # תקנה 9א(א)(1)–(2) and סעיף 18ב(א): the registration line, "מקור" and
-    # "מסמך ממוחשב" have to appear on the document itself, not just the letterhead.
-    statutory_style = ParagraphStyle(
-        'SubStatutory', fontName='Heebo-Bold', fontSize=10,
-        textColor=BRAND_NAVY, alignment=TA_CENTER, leading=13,
-    )
-
-    story = [
-        Paragraph(_rtl(DOCUMENT_TITLE), title_style),
-        Paragraph(_rtl(ORIGINAL_MARK), ParagraphStyle(
-            'SubOrigin', fontName='Heebo-Bold', fontSize=11,
-            textColor=BRAND_NAVY, alignment=TA_CENTER, leading=14,
-        )),
-        Paragraph(_rtl(ISSUER_LINE), statutory_style),
-        Paragraph(_rtl('קוגומלו — מנוי לחוג'), ParagraphStyle(
-            'Sub', fontName='Heebo', fontSize=11, textColor=BRAND_NAVY, alignment=TA_CENTER,
-        )),
-        Paragraph(_rtl('המחירים כוללים מע"מ'), ParagraphStyle(
-            'SubVat', fontName='Heebo', fontSize=10, textColor=BRAND_NAVY, alignment=TA_CENTER,
-        )),
-        Spacer(1, 0.35 * cm),
-    ]
-
-    meta_rows = [
-        [Paragraph(_rtl('פרטי חשבונית'), label_style)],
-        [Paragraph(_rtl(f'מספר: {invoice.invoice_number}'), value_style)],
-        [Paragraph(_rtl(f'תאריך: {issue}'), value_style)],
-        [Paragraph(_rtl('שולם'), value_style)],
-    ]
-    payer_rows = [
-        [Paragraph(_rtl('פרטי משלם'), label_style)],
-        [Paragraph(_rtl(payer), value_style)],
-    ]
-    if phone:
-        payer_rows.append([Paragraph(_rtl(f'טלפון: {phone}'), value_style)])
-    if email:
-        payer_rows.append([Paragraph(_rtl(f'אימייל: {email}'), value_style)])
-
-    meta = Table(
-        [[Table(meta_rows, colWidths=[7.8 * cm]), Table(payer_rows, colWidths=[7.8 * cm])]],
-        colWidths=[8.3 * cm, 8.3 * cm],
-        hAlign='RIGHT',
-    )
-    meta.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), PANEL_BG),
-        ('BOX', (0, 0), (-1, -1), 0.75, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
-        ('LEFTPADDING', (0, 0), (-1, -1), 10),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-    ]))
-    story.extend([meta, Spacer(1, 0.45 * cm)])
-
-    rows = [[
-        Paragraph(_rtl('פריט'), label_style),
-        Paragraph(_rtl('ילד'), label_style),
-        Paragraph(_rtl('סה"כ'), label_style),
-    ]]
-    checkout_log = invoice.activity_logs.filter(action='checkout_lines').order_by('-created_at').first()
-    checkout_lines = []
-    if checkout_log and isinstance(checkout_log.details, dict):
-        checkout_lines = checkout_log.details.get('lines') or []
-
-    if checkout_lines:
-        for line in checkout_lines:
-            child_name = str(line.get('child_name') or '—')
-            desc = str(line.get('description') or 'מנוי חוג')
-            amount = Decimal(str(line.get('amount') or '0'))
-            fee = Decimal(str(line.get('registration_fee') or '0'))
-            lesson_part = amount - fee
-            if fee > 0 and lesson_part > 0:
-                rows.append([
-                    Paragraph(_rtl(f'מנוי חודשי — {desc}'), value_style),
-                    Paragraph(_rtl(child_name), value_style),
-                    Paragraph(_rtl(_money(lesson_part)), value_style),
-                ])
-                rows.append([
-                    Paragraph(_rtl('דמי רישום (חד-פעמי)'), value_style),
-                    Paragraph(_rtl(child_name), value_style),
-                    Paragraph(_rtl(_money(fee)), value_style),
-                ])
-            else:
-                rows.append([
-                    Paragraph(_rtl(desc if fee <= 0 else f'דמי רישום — {desc}'), value_style),
-                    Paragraph(_rtl(child_name), value_style),
-                    Paragraph(_rtl(_money(amount)), value_style),
-                ])
-    else:
-        payment = invoice.payment
-        registration_fee = Decimal('0')
-        if payment and payment.registration_fee:
-            registration_fee = payment.registration_fee
-
-        for entry in invoice.children.all():
-            child_name = entry.child.full_name if entry.child_id else '—'
-            if entry.lesson_id and entry.course_id:
-                desc = f'{entry.course.name} — {entry.lesson.get_day_of_week_display()}'
-            elif entry.course_id:
-                desc = entry.course.name
-            else:
-                desc = 'מנוי חוג'
-            line_amount = invoice.amount
-            if registration_fee > 0 and payment and invoice.children.count() <= 1:
-                lesson_part = payment.final_amount - registration_fee
-                rows.append([
-                    Paragraph(_rtl(f'מנוי חודשי — {desc}'), value_style),
-                    Paragraph(_rtl(child_name), value_style),
-                    Paragraph(_rtl(_money(lesson_part)), value_style),
-                ])
-                rows.append([
-                    Paragraph(_rtl('דמי רישום (חד-פעמי)'), value_style),
-                    Paragraph(_rtl(child_name), value_style),
-                    Paragraph(_rtl(_money(registration_fee)), value_style),
-                ])
-            else:
-                rows.append([
-                    Paragraph(_rtl(desc), value_style),
-                    Paragraph(_rtl(child_name), value_style),
-                    Paragraph(_rtl(_money(line_amount if invoice.children.count() <= 1 else Decimal('0'))), value_style),
-                ])
-
-    if len(rows) == 1:
-        rows.append([
-            Paragraph(_rtl('מנוי חוג'), value_style),
-            Paragraph('', value_style),
-            Paragraph(_rtl(_money(invoice.amount)), value_style),
-        ])
-
-    table = Table(rows, colWidths=[9.5 * cm, 3.5 * cm, 2.5 * cm], hAlign='RIGHT')
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, PANEL_BG]),
-        ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    story.extend([Paragraph(_rtl('פירוט'), label_style), Spacer(1, 0.12 * cm), table, Spacer(1, 0.35 * cm)])
-
-    before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
-    total_box = Table(
-        [
-            [Paragraph(_rtl('סה"כ לפני מע"מ'), label_style),
-             Paragraph(_rtl(_money(before_vat)), value_style)],
-            [Paragraph(_rtl('מע"מ 18%'), label_style),
-             Paragraph(_rtl(_money(vat_amount)), value_style)],
-            [Paragraph(_rtl('סה"כ כולל מע"מ'), label_style),
-             Paragraph(_rtl(_money(gross)), ParagraphStyle(
-                 'Tot', fontName='Heebo-Bold', fontSize=14, textColor=BRAND_PURPLE, alignment=TA_RIGHT,
-             ))],
-        ],
-        colWidths=[4.2 * cm, 2.8 * cm],
-        hAlign='RIGHT',
-    )
-    total_box.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), PANEL_BG),
-        ('BOX', (0, 0), (-1, -1), 1, BRAND_PURPLE),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (-1, -1), 12),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ]))
-    story.append(total_box)
-
-    txn = (invoice.tranzila_transaction_id or '').strip()
-    if txn:
-        story.extend([
-            Spacer(1, 0.25 * cm),
-            Paragraph(_rtl(f'אישור תשלום: {txn}'), value_style),
-        ])
-
-    # A receipt issued after the money came in says so on its face, with both
-    # dates — the one thing an accountant needs to place it in the right period.
-    late = next((log for log in invoice.activity_logs.all() if log.action == 'issued_late'), None)
-    if late is not None:
-        details = late.details or {}
-        received = (details.get('money_received_at') or '')[:10]
-        issued = (details.get('document_issued_at') or '')[:10]
-
-        def _dmy(iso: str) -> str:
-            parts = iso.split('-')
-            return f'{parts[2]}/{parts[1]}/{parts[0]}' if len(parts) == 3 else iso
-
-        story.extend([
-            Spacer(1, 0.3 * cm),
-            Paragraph(_rtl(f'הופק באיחור ביום {_dmy(issued)}; התשלום התקבל ביום {_dmy(received)}.'), value_style),
-        ])
-
-    story.extend([
-        Spacer(1, 0.45 * cm),
-        Paragraph(_rtl(COMPUTERIZED_MARK), statutory_style),
-    ])
-
-    doc.build(story, onFirstPage=_draw_letterhead, onLaterPages=_draw_letterhead)
-    return buffer.getvalue()
+    return render_invoice_pdf(build_subscription_invoice_layout(invoice))
