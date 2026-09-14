@@ -149,6 +149,13 @@ def card_update_public_url(
     amount: Decimal | None = None,
     months: Iterable[date] | None = None,
 ) -> str:
+    """
+    A URL and nothing else — it leaves no trace.
+
+    Anything the office actually hands to a parent should go through
+    `issue_card_update_link` instead, or it will not appear on the links screen
+    and nobody will be able to say what happened with it.
+    """
     token = build_card_update_token(recurring, mode=mode, amount=amount, months=months)
     return card_update_public_url_for_token(token)
 
