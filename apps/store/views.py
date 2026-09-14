@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from collections import defaultdict
 
 from django.db import transaction as db_transaction
-from django.db.models import Sum, F, Q, Count
+from django.db.models import Sum, F, Q, Count, Exists, OuterRef
 from django.http import HttpResponse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -44,6 +44,11 @@ class StoreProductViewSet(viewsets.ModelViewSet):
     queryset = StoreProduct.objects.filter(is_active=True).prefetch_related('size_stocks__branch')
     serializer_class = StoreProductSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+
+    SORTABLE_FIELDS = frozenset({
+        'name', 'category', 'cost_price', 'sale_price', 'delivery_price',
+        'stock_quantity', 'min_stock_alert', 'created_at', 'updated_at',
+    })
     
     def get_queryset(self):
         """Filter products by query parameters."""
@@ -57,13 +62,25 @@ class StoreProductViewSet(viewsets.ModelViewSet):
                 Q(name__icontains=search) | Q(category__icontains=search)
             )
         
-        # Filter by branch
+        # Filter by location. A product's own `branch` only ever holds the
+        # branch of its FIRST size row (and is left empty altogether for
+        # everything synced from the website), so filtering on it alone hides
+        # every product whose stock lives in size rows. Ask the rows too — the
+        # same thing scope_store_products and the city filter already do.
         branch_id = self.request.query_params.get('branch')
         if branch_id and branch_id != 'all':
+            size_rows = StoreProductSize.objects.filter(product=OuterRef('pk'))
             if branch_id == 'delivery':
-                queryset = queryset.filter(branch__isnull=True)
+                # Delivery means a row with no branch — or, for a product with
+                # no rows at all, the product itself sitting outside a branch.
+                queryset = queryset.filter(
+                    Q(Exists(size_rows.filter(branch__isnull=True)))
+                    | Q(~Exists(size_rows), branch__isnull=True)
+                )
             else:
-                queryset = queryset.filter(branch_id=branch_id)
+                queryset = queryset.filter(
+                    Q(branch_id=branch_id) | Q(Exists(size_rows.filter(branch_id=branch_id)))
+                )
         
         # Filter by stock status
         stock_filter = self.request.query_params.get('stock_filter')
@@ -72,10 +89,14 @@ class StoreProductViewSet(viewsets.ModelViewSet):
         elif stock_filter == 'normal':
             queryset = queryset.filter(stock_quantity__gt=F('min_stock_alert'))
         
-        # Sorting
+        # Sorting. Only over a fixed set of columns: the raw parameter used to
+        # reach order_by(), where an unknown name is a FieldError — a 500 any
+        # caller could trigger with a typo.
         sort_by = self.request.query_params.get('sort_by', 'name')
+        if sort_by not in self.SORTABLE_FIELDS:
+            sort_by = 'name'
         sort_order = self.request.query_params.get('sort_order', 'asc')
-        
+
         order_prefix = '' if sort_order == 'asc' else '-'
         queryset = queryset.order_by(f'{order_prefix}{sort_by}')
         
