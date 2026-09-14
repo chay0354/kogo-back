@@ -19,6 +19,7 @@ from typing import Any
 
 from django.core.signing import BadSignature, SignatureExpired, loads
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
@@ -660,6 +661,52 @@ def send_card_link_whatsapp(link: CardLink, base: str | None = None) -> dict:
 # Options — what the office can send this child a standing-order link for
 # ---------------------------------------------------------------------------
 
+def standing_order_for_lessons(child, lessons):
+    """
+    The live standing order that bills any of these lessons, newest first.
+
+    Wider than `child_has_standing_order_for_lessons`, which only knows
+    active/paused: a `failed` order is exactly the one the office renews, and
+    only a cancelled one is gone for good.
+    """
+    lesson_ids = [getattr(item, 'id', item) for item in lessons if item is not None]
+    if not child or not lesson_ids:
+        return None
+    return (
+        RecurringPayment.objects
+        .filter(child=child)
+        .exclude(status='cancelled')
+        .filter(
+            Q(initial_payment__lesson_id__in=lesson_ids)
+            | Q(initial_payment__bundle__lessons__id__in=lesson_ids)
+        )
+        .select_related('child', 'initial_payment', 'initial_payment__lesson',
+                        'initial_payment__lesson__course')
+        .order_by('-created_at')
+        .distinct()
+        .first()
+    )
+
+
+def _standing_order_payload(recurring) -> dict:
+    """What the popup needs to offer חידוש or a card-only link, priced."""
+    from apps.customers.card_update import month_key, month_label, months_label, renew_quote
+
+    quote = renew_quote(recurring)
+    months = quote['months']
+    return {
+        'id': str(recurring.id),
+        'status': recurring.status,
+        'monthly_amount': str(quote['monthly_amount']),
+        'next_billing_date': recurring.next_billing_date.isoformat() if recurring.next_billing_date else None,
+        'last_charge_date': recurring.last_charge_date.isoformat() if recurring.last_charge_date else None,
+        'months': [{'month': month_key(row), 'label': month_label(row)} for row in months],
+        'months_label': months_label(months),
+        'renew_amount': str(quote['amount']),
+        'can_renew': bool(months),
+    }
+
+
 def _option(child, *, lesson, bundle, enrolled: bool, is_trial: bool) -> dict:
     members = unit_lessons(lesson=lesson, bundle=bundle)
     primary = members[0] if members else lesson
@@ -678,6 +725,11 @@ def _option(child, *, lesson, bundle, enrolled: bool, is_trial: bool) -> dict:
         'is_trial': is_trial,
         'has_standing_order': child_has_standing_order_for_lessons(child, covered),
     }
+    # A standing order on this unit — live or stopped — is what the office renews
+    # or re-cards. It is no longer a dead end, so the option carries it.
+    existing = standing_order_for_lessons(child, covered)
+    if existing is not None:
+        option['standing_order'] = _standing_order_payload(existing)
     if option['has_standing_order']:
         return option
     probe = CardLink(
