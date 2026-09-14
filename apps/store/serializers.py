@@ -134,6 +134,11 @@ class StoreProductSerializer(serializers.ModelSerializer):
     size_stocks = StoreProductSizeSerializer(many=True, required=False)
     # B2C sync often stores site-relative paths (/images/...) — not strict URLs.
     image_url = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    # The model has a default but no blank=True, so DRF rejected ''. Both product
+    # dialogs always send the field, and the add dialog's placeholder is the
+    # default itself — clearing the box read as "use the default" and got
+    # "This field may not be blank" instead. Empty now means the default.
+    category = serializers.CharField(required=False, allow_blank=True, max_length=50)
 
     class Meta:
         model = StoreProduct
@@ -154,17 +159,38 @@ class StoreProductSerializer(serializers.ModelSerializer):
         return _normalize_size_stocks(value)
 
     def validate(self, data):
-        """Validate product data."""
-        # Ensure sale price is greater than cost price
-        sale_price = data.get('sale_price', getattr(self.instance, 'sale_price', None))
-        cost_price = data.get('cost_price', getattr(self.instance, 'cost_price', None))
+        """
+        Sale price must beat cost price — but only for prices being set.
 
-        if sale_price and cost_price and sale_price <= cost_price:
+        Falling back to the stored values unconditionally meant a product that
+        already had sale <= cost could never be saved again: renaming it, or
+        fixing a note, re-ran the check against its own stored prices and was
+        refused. The rule now applies to an actual price change, so such a
+        product can still be edited (and repaired), while no save is allowed to
+        put the pair into that state.
+        """
+        stored_sale = getattr(self.instance, 'sale_price', None)
+        stored_cost = getattr(self.instance, 'cost_price', None)
+        sale_price = data.get('sale_price', stored_sale)
+        cost_price = data.get('cost_price', stored_cost)
+
+        prices_changed = (
+            self.instance is None
+            or ('sale_price' in data and data['sale_price'] != stored_sale)
+            or ('cost_price' in data and data['cost_price'] != stored_cost)
+        )
+
+        if prices_changed and sale_price and cost_price and sale_price <= cost_price:
             raise serializers.ValidationError(
                 "מחיר מכירה חייב להיות גבוה ממחיר עלות (Sale price must be higher than cost price)"
             )
 
         return data
+
+    def validate_category(self, value):
+        """An empty category means the model default, not a rejected save."""
+        cleaned = (value or '').strip()
+        return cleaned or StoreProduct._meta.get_field('category').default
 
     def validate_image_url(self, value):
         if value is None:
