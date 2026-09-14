@@ -142,15 +142,36 @@ class ParentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'full_name']
 
 
+class FamilyChildSlimSerializer(serializers.ModelSerializer):
+    """
+    Who is already in the family, as the add-a-child screen needs to show it.
+
+    Deliberately narrow: a name, an age and a status are what tell somebody they
+    picked the right family. Everything else about a child belongs to the child's
+    own card, and putting it in every family row would make a list that most of
+    the system loads carry it for nothing.
+    """
+    full_name = serializers.CharField(read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = Child
+        fields = ['id', 'full_name', 'first_name', 'last_name', 'birth_date', 'status', 'status_display']
+
+
 class FamilySerializer(serializers.ModelSerializer):
     """משפחה"""
     parents = ParentSerializer(many=True, read_only=True)
+    # The children already on the card: the add-a-child screen shows them so the
+    # office can see it picked the right family before it adds another one.
+    children = FamilyChildSlimSerializer(many=True, read_only=True)
     accepts_computerized_documents = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Family
         fields = [
             'id', 'name', 'phone', 'email', 'address', 'parent_id_number', 'branch', 'notes', 'parents',
+            'children',
             'computerized_docs_consent_at', 'computerized_docs_consent_source',
             'computerized_docs_consent_revoked_at', 'accepts_computerized_documents',
         ]
@@ -158,7 +179,7 @@ class FamilySerializer(serializers.ModelSerializer):
         # widget, families/{id}/computerized-consent/), never typed into the
         # card: when and where it was given is the record סעיף 18ב(ג) asks for.
         read_only_fields = [
-            'id', 'parents', 'accepts_computerized_documents',
+            'id', 'parents', 'children', 'accepts_computerized_documents',
             'computerized_docs_consent_at', 'computerized_docs_consent_source',
             'computerized_docs_consent_revoked_at',
         ]
