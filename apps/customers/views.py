@@ -1853,6 +1853,95 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                 'error': f'שגיאה בביטול מנוי: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=True, methods=['post'], url_path='card-update-link')
+    def card_update_link(self, request, pk=None):
+        """
+        The URL for this standing order's card page — made, not sent.
+
+        POST /api/v1/customers/recurring-payments/{id}/card-update-link/
+        Body: { "mode": "renew" | "card_only", "amount": "500.00" (renew only) }
+
+        `renew`     — charge the months that were never collected, each at the
+                      standing order's full monthly amount, and reactivate.
+                      `amount` overrides that total; the months do not change.
+        `card_only` — swap the card and charge nothing, whatever is outstanding.
+
+        The mode and the amount are signed into the token, so the URL the office
+        copies cannot be edited into a different charge.
+        """
+        from decimal import Decimal, InvalidOperation
+
+        from apps.customers.card_update import (
+            CARD_UPDATE_MODES,
+            MAX_RENEW_AMOUNT,
+            MODE_RENEW,
+            CardUpdateError,
+            card_update_public_url,
+            month_key,
+            month_label,
+            months_label,
+            renew_quote,
+        )
+
+        recurring = self.get_object()
+        if recurring.status == 'cancelled':
+            return Response(
+                {'error': 'לא ניתן ליצור קישור להוראת קבע מבוטלת'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # The parent's page needs the lesson to name the course and to bill it;
+        # better the office learns that here than the parent at the card form.
+        if not (recurring.initial_payment_id and recurring.initial_payment.lesson_id):
+            return Response(
+                {'error': 'להוראת הקבע אין חוג משויך — לא ניתן ליצור קישור'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        mode = (request.data.get('mode') or '').strip() if isinstance(request.data, dict) else ''
+        if mode not in CARD_UPDATE_MODES:
+            return Response(
+                {'error': "mode חייב להיות renew או card_only"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        months = []
+        amount = None
+        if mode == MODE_RENEW:
+            quote = renew_quote(recurring)
+            months = quote['months']
+            if not months:
+                return Response(
+                    {
+                        'error': 'אין חודשים פתוחים לחידוש. לעדכון הכרטיס בלבד בחרו שינוי פרטי אשראי.',
+                        'months': [],
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            amount = quote['amount']
+            raw = request.data.get('amount')
+            if raw not in (None, ''):
+                try:
+                    amount = Decimal(str(raw)).quantize(Decimal('0.01'))
+                except (InvalidOperation, ValueError):
+                    return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+                if amount < Decimal('1.00') or amount > MAX_RENEW_AMOUNT:
+                    return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            url = card_update_public_url(recurring, mode=mode, amount=amount, months=months)
+        except CardUpdateError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'url': url,
+            'mode': mode,
+            'amount': str(amount) if amount is not None else '0.00',
+            'months': [{'month': month_key(row), 'label': month_label(row)} for row in months],
+            'months_label': months_label(months),
+            'monthly_amount': str(recurring.amount),
+            'child_name': recurring.child.full_name if recurring.child_id else '',
+            'standing_order_status': recurring.status,
+        })
+
     @action(detail=True, methods=['post'], url_path='send-card-update')
     def send_card_update(self, request, pk=None):
         """Send the ManyChat card-update link for one standing order."""

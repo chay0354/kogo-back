@@ -9,7 +9,7 @@ from apps.customers.card_update import (
     CardUpdateError,
     apply_new_card,
     preview_payload,
-    resolve_card_update_token,
+    resolve_card_update_intent,
 )
 
 
@@ -19,10 +19,12 @@ class CardUpdatePreviewView(APIView):
 
     def get(self, request, token: str):
         try:
-            recurring, already_done = resolve_card_update_token(token)
+            intent = resolve_card_update_intent(token)
         except CardUpdateError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(preview_payload(recurring, already_done=already_done))
+        return Response(
+            preview_payload(intent.recurring, already_done=intent.already_done, intent=intent)
+        )
 
 
 class CardUpdateChargeView(APIView):
@@ -31,14 +33,16 @@ class CardUpdateChargeView(APIView):
 
     def post(self, request, token: str):
         try:
-            recurring, already_done = resolve_card_update_token(token)
+            intent = resolve_card_update_intent(token)
         except CardUpdateError as exc:
             return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        if already_done:
+        if intent.already_done:
             return Response({
                 'success': True,
                 'already_done': True,
                 'charged': False,
+                'mode': intent.mode,
+                'message': 'הכרטיס כבר עודכן.',
             })
 
         try:
@@ -47,7 +51,15 @@ class CardUpdateChargeView(APIView):
             return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            result = apply_new_card(recurring, card)
+            result = apply_new_card(intent.recurring, card, intent=intent)
         except CardUpdateError as exc:
+            if exc.already_done:
+                return Response({
+                    'success': True,
+                    'already_done': True,
+                    'charged': False,
+                    'mode': intent.mode,
+                    'message': 'הכרטיס כבר עודכן.',
+                })
             return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result)
