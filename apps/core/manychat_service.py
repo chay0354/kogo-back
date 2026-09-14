@@ -376,6 +376,22 @@ class ManyChatService:
         'MANYCHAT_REGISTER_MORNING_FLOW_NS': ('register-morning', 'register morning'),
     }
 
+    def resolve_flow_for(self, config_entry: dict) -> str:
+        """The automation this kind sends through, or the one it falls back to."""
+        ns = self.resolve_flow_ns(config_entry['flow_setting'])
+        if ns:
+            return ns
+        fallback = config_entry.get('fallback_flow_setting')
+        if not fallback:
+            return ''
+        ns = self.resolve_flow_ns(fallback)
+        if ns:
+            logger.info(
+                'ManyChat: no automation for %s; sending through %s instead',
+                config_entry['flow_setting'], fallback,
+            )
+        return ns
+
     def resolve_flow_ns(self, setting_name: str) -> str:
         """Return flow ns from settings, or match automation name via getFlows."""
         configured = (getattr(settings, setting_name, '') or '').strip()
@@ -473,12 +489,17 @@ class ManyChatService:
         },
         # The office sends a link to enter a card (standing order or a one-time charge).
         # Same field names as card_update, so one ManyChat flow can serve both.
+        # The owner's rule (14.9): a parent is asked for a card only when there was a
+        # problem with the one on file, so the card-update wording fits this send too.
+        # With no automation of its own, this falls back to that one rather than
+        # dropping to free text, which WhatsApp delivers only inside the 24-hour window.
         REGISTRATION_KIND_CARD_LINK: {
             'flow_setting': 'MANYCHAT_CARD_LINK_FLOW_NS',
+            'fallback_flow_setting': 'MANYCHAT_CARD_UPDATE_FLOW_NS',
             'fallback_template': (
                 'שלום {parent_name}!\n'
-                'להסדרת התשלום עבור {child_name}{course_suffix} על סך ₪{amount}, '
-                'הזינו כרטיס אשראי בקישור: {card_update_url}\n'
+                'לעדכון פרטי האשראי עבור {child_name}{course_suffix} על סך ₪{amount}, '
+                'הזינו כרטיס בקישור: {card_update_url}\n'
                 'אם לא מסתדר, אפשר לפנות לצוות קוגומלו ב-050-9424755.'
             ),
         },
@@ -686,7 +707,7 @@ class ManyChatService:
                     custom_fields[key] = text
         fields_ok = self._set_custom_fields_with_retry(sid, custom_fields)
 
-        flow_ns = self.resolve_flow_ns(config_entry['flow_setting'])
+        flow_ns = self.resolve_flow_for(config_entry)
         if flow_ns and fields_ok:
             if FIELD_SETTLE_SECONDS > 0:
                 time.sleep(FIELD_SETTLE_SECONDS)

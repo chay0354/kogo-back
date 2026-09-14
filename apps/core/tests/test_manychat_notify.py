@@ -8,7 +8,14 @@ from apps.core.manychat_service import ManyChatError, ManyChatService
 
 
 class CardLinkFlowTests(SimpleTestCase):
-    """The card link goes by its own WhatsApp template — never the failed-charge one."""
+    """
+    The office's card link sends through a WhatsApp template, not free text.
+
+    The owner's rule (14.9): a parent is asked for a card only when the card on
+    file stopped working, so one template — the card-update one — covers both the
+    charge that failed and the link the office sends. An automation of its own is
+    still honoured if one is ever created.
+    """
 
     def test_the_setting_is_declared_so_the_environment_reaches_it(self):
         # It was read but never declared, so setting it in Vercel changed nothing
@@ -32,10 +39,30 @@ class CardLinkFlowTests(SimpleTestCase):
         self.assertEqual(svc.resolve_flow_ns('MANYCHAT_CARD_LINK_FLOW_NS'), 'content_link')
 
     @override_settings(MANYCHAT_CARD_LINK_FLOW_NS='')
-    def test_the_failed_charge_template_is_never_borrowed(self):
+    def test_the_name_lookup_alone_never_borrows_another_automation(self):
+        # Name matching stays strict: 'card-update' is not a card-link automation.
         svc = ManyChatService(api_key='x')
         svc.get_flows = MagicMock(return_value=[{'name': 'card-update', 'ns': 'content_update'}])
         self.assertEqual(svc.resolve_flow_ns('MANYCHAT_CARD_LINK_FLOW_NS'), '')
+
+    @override_settings(MANYCHAT_CARD_LINK_FLOW_NS='', MANYCHAT_CARD_UPDATE_FLOW_NS='')
+    def test_with_no_card_link_automation_the_send_uses_the_card_update_one(self):
+        # One template for both, by the owner's rule — and never free text, which
+        # WhatsApp delivers only inside the 24-hour window.
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock(return_value=[{'name': 'card-update', 'ns': 'content_update'}])
+        entry = svc._REGISTRATION_KINDS[ManyChatService.REGISTRATION_KIND_CARD_LINK]
+        self.assertEqual(svc.resolve_flow_for(entry), 'content_update')
+
+    @override_settings(MANYCHAT_CARD_LINK_FLOW_NS='', MANYCHAT_CARD_UPDATE_FLOW_NS='')
+    def test_an_automation_of_its_own_still_wins(self):
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock(return_value=[
+            {'name': 'card-update', 'ns': 'content_update'},
+            {'name': 'card-link', 'ns': 'content_link'},
+        ])
+        entry = svc._REGISTRATION_KINDS[ManyChatService.REGISTRATION_KIND_CARD_LINK]
+        self.assertEqual(svc.resolve_flow_for(entry), 'content_link')
 
 
 class SetCustomFieldsFallbackTests(SimpleTestCase):

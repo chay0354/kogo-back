@@ -169,6 +169,14 @@ class CardLinkActionView(APIView):
         if action == 'send':
             if link.status not in (CardLink.STATUS_PENDING,):
                 return Response({'error': 'אפשר לשלוח רק קישור שממתין'}, status=status.HTTP_400_BAD_REQUEST)
+            # WhatsApp carries one approved template, and it speaks of updating a card
+            # on file. A one-time charge is copied from the popup and sent by hand,
+            # so nobody tells a parent their standing order failed over a shirt.
+            if link.kind == CardLink.KIND_ONE_TIME:
+                return Response(
+                    {'error': 'חיוב חד-פעמי נשלח בהעתקת הקישור, לא בוואטסאפ'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             result = send_card_link_whatsapp(link, public_frontend_url(request))
             link.refresh_from_db()
             return Response({**_serialize(link, request), 'whatsapp': result})
