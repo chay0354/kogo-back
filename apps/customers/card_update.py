@@ -37,7 +37,10 @@ from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 logger = logging.getLogger(__name__)
 
 SIGN_SALT = 'kogo-card-update'
-CARD_UPDATE_TOKEN_MAX_AGE = 14 * 24 * 3600
+# A card-update link does not expire either — see card_link.py. A link with no
+# mode is still closed by the `updated_at` stamp below; a `renew` link is held
+# to the months it names, recomputed against what is still outstanding at the
+# moment the parent pays; `card_only` never charges at all.
 
 MODE_RENEW = 'renew'
 MODE_CARD_ONLY = 'card_only'
@@ -185,9 +188,7 @@ def resolve_card_update_intent(token: str) -> CardUpdateIntent:
     if not raw:
         raise CardUpdateError('קישור לא תקין')
     try:
-        payload = loads(raw, salt=SIGN_SALT, max_age=CARD_UPDATE_TOKEN_MAX_AGE)
-    except SignatureExpired as exc:
-        raise CardUpdateError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.') from exc
+        payload = loads(raw, salt=SIGN_SALT)
     except BadSignature as exc:
         raise CardUpdateError('קישור לא תקין') from exc
 

@@ -201,10 +201,9 @@ class CardLinkActionView(APIView):
             link.status = CardLink.STATUS_PENDING
             link.rotate_token()
             link.last_error = ''
-            # The 14 days run from when a URL was issued, so a new URL starts them
-            # again — as it did when the signed token carried its own timestamp.
-            link.created_at = timezone.now()
-            link.save(update_fields=['status', 'token', 'token_version', 'last_error', 'created_at', 'updated_at'])
+            # `created_at` is left alone now that nothing expires: it is when the
+            # office first made this link, which is what the screen reports.
+            link.save(update_fields=['status', 'token', 'token_version', 'last_error', 'updated_at'])
             return Response(_serialize(link, request))
         return Response({'error': 'פעולה לא מוכרת'}, status=status.HTTP_400_BAD_REQUEST)
 

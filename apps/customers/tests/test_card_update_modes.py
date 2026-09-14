@@ -11,6 +11,7 @@ Money rules under test, in the order they matter:
 """
 from datetime import date, timedelta
 from decimal import Decimal
+import time
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -397,6 +398,17 @@ class RenewChargeTests(TestCase):
         mock_charge.assert_not_called()
         recurring.refresh_from_db()
         self.assertEqual(recurring.tranzila_token, 'Ynewtoken4580')
+
+    def test_a_card_update_link_does_not_expire_with_age(self):
+        # Signed a year ago and still good: nothing about a card-update link is
+        # closed by the clock. What closes one is the standing order being
+        # cancelled, the stamp (mode-less links), or the months being settled.
+        recurring = make_sto(next_billing=month_start(-1))
+        # Sign the token as it would have been signed 400 days ago.
+        with patch('django.core.signing.time.time', return_value=time.time() - 400 * 24 * 3600):
+            token, _ = self._renew_token(recurring)
+        intent = resolve_card_update_intent(token)
+        self.assertTrue(intent.is_renew)
 
     def test_a_link_with_no_mode_still_expires_on_the_old_stamp(self):
         recurring = make_sto(status='failed', next_billing=month_start(0))
