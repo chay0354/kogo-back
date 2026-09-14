@@ -213,7 +213,7 @@ def _notes(doc: FormalDocument) -> list[Note]:
     if doc.document_type == 'draft':
         notes.append(Note('טיוטה:', 'מסמך זה אינו חשבונית ואינו מסמך מס. הוא יקבל מספר רק לאחר אישור.'))
     elif doc.document_type in TAX_DOCUMENT_TYPES:
-        notes.append(allocation_note(doc.subtotal - doc.discount_amount))
+        notes.append(allocation_note(doc.subtotal - doc.discount_amount, doc.allocation_number))
     elif doc.document_type == 'transaction_invoice':
         notes.append(Note('חשבון עסקה:', 'אינו חשבונית מס. חשבונית מס תופק עם התשלום.'))
     if doc.document_type != 'draft':

@@ -20,6 +20,15 @@ class DocumentPaymentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
 
+def _allocation_required(obj) -> bool:
+    from apps.documents.invoice_document import allocation_required
+    from apps.documents.document_pdf import TAX_DOCUMENT_TYPES
+
+    if obj.document_type not in TAX_DOCUMENT_TYPES:
+        return False
+    return allocation_required(obj.subtotal - obj.discount_amount)
+
+
 class FormalDocumentSerializer(serializers.ModelSerializer):
     line_items = DocumentLineItemSerializer(many=True, read_only=True)
     payments = DocumentPaymentSerializer(many=True, read_only=True)
@@ -27,6 +36,8 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
 
     business_name = serializers.CharField(source='business.name', read_only=True, default='')
     business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
+    allocation_required = serializers.SerializerMethodField()
+
     class Meta:
         model = FormalDocument
         fields = [
@@ -40,10 +51,15 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
             'customer_notes', 'internal_notes',
             'linked_document', 'linked_document_number', 'credit_reason',
             'tranzila_doc_id', 'pdf_url', 'tranzila_issued',
+            'allocation_number', 'allocation_required', 'allocation_entered_at',
             'branch', 'created_at', 'updated_at',
             'line_items', 'payments',
         ]
         read_only_fields = ['id', 'document_number', 'created_at', 'updated_at']
+
+    def get_allocation_required(self, obj):
+        return _allocation_required(obj)
+
 
 
 class FormalDocumentListSerializer(serializers.ModelSerializer):
@@ -53,6 +69,8 @@ class FormalDocumentListSerializer(serializers.ModelSerializer):
 
     business_name = serializers.CharField(source='business.name', read_only=True, default='')
     business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
+    allocation_required = serializers.SerializerMethodField()
+
     class Meta:
         model = FormalDocument
         fields = [
@@ -60,7 +78,11 @@ class FormalDocumentListSerializer(serializers.ModelSerializer):
             'document_date', 'total_amount', 'currency', 'tranzila_issued', 'pdf_url',
             'customer_name', 'tranzila_doc_id',
             'business_name', 'business_category_name',
+            'allocation_number', 'allocation_required',
         ]
+
+    def get_allocation_required(self, obj):
+        return _allocation_required(obj)
 
     def get_customer_name(self, obj):
         if obj.child_id:

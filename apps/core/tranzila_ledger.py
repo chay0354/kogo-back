@@ -159,6 +159,16 @@ def normalize_tranzila_document(row: dict, customer_name: str = '') -> dict:
     }
 
 
+def _allocation_required(doc) -> bool:
+    """True when this tax document is above the Tax Authority threshold."""
+    from apps.documents.document_pdf import TAX_DOCUMENT_TYPES
+    from apps.documents.invoice_document import allocation_required
+
+    if doc.document_type not in TAX_DOCUMENT_TYPES:
+        return False
+    return allocation_required(doc.subtotal - doc.discount_amount)
+
+
 def normalize_tranzila_transaction(row: dict) -> dict:
     index = str(
         row.get('index')
@@ -246,6 +256,11 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'source': 'tranzila' if doc.tranzila_issued else 'local',
             'tranzila_issued': doc.tranzila_issued,
             'is_draft': doc.document_type == 'draft',
+            # מספר הקצאה: the number itself, and whether this row is one that
+            # needs one. The threshold lives in one place; the screen reads the
+            # answer rather than recomputing it.
+            'allocation_number': doc.allocation_number,
+            'allocation_required': _allocation_required(doc),
             'origin': ORIGIN_MANUAL,
             'origin_label': ORIGIN_LABELS[ORIGIN_MANUAL],
             **row_dimensions(branch=doc.branch, business=doc.business),

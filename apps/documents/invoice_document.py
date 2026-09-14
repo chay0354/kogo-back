@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
+from django.conf import settings
 from django.utils import timezone
 
 from apps.documents.invoice_layout import Field, Note
@@ -22,10 +23,12 @@ from apps.documents.issuer import (
     ISSUER_PHONE,
 )
 
-# Allocation number threshold (net, before VAT) — Israel Tax Authority, from
-# 1 June 2026. Below it a transaction needs no allocation number, and the
-# document says so rather than leaving the reader to guess.
-ALLOCATION_THRESHOLD = Decimal('5000')
+# Allocation number threshold (net, before VAT) — Israel Tax Authority.
+#
+# A setting rather than a constant because the figure steps down year by year
+# and is decided outside this code. It is printed on real invoices, so getting
+# it wrong is visible to customers: it must be changeable without a release.
+ALLOCATION_THRESHOLD = Decimal(str(getattr(settings, 'ALLOCATION_THRESHOLD_ILS', '5000')))
 
 
 def business_fields() -> list[Field]:
@@ -70,17 +73,35 @@ def date_stamp(day) -> str:
     return str(day)
 
 
-def allocation_note(net_before_vat: Decimal) -> Note:
-    """
-    The §5,000 allocation-number line the owner's sample carries.
+def allocation_required(net_before_vat) -> bool:
+    return Decimal(str(net_before_vat or 0)) >= ALLOCATION_THRESHOLD
 
-    Above the threshold the document says the number is required and has not
-    been entered; below it, that none is needed — either way the reader is told.
+
+def _threshold_label() -> str:
+    value = ALLOCATION_THRESHOLD.quantize(Decimal('1'))
+    return f'{value:,}'
+
+
+def allocation_note(net_before_vat: Decimal, allocation_number: str = '') -> Note:
     """
-    net = Decimal(str(net_before_vat or 0))
-    if net >= ALLOCATION_THRESHOLD:
-        return Note('מספר הקצאה:', 'נדרש לעסקה זו (סכום לפני מע"מ מעל 5,000 ₪) — טרם הוזן.')
-    return Note('מספר הקצאה:', 'לא נדרש לעסקה זו - סכום העסקה לפני מע"מ נמוך מ-5,000 ₪.')
+    The allocation-number line on the document.
+
+    Three states, and the reader is told which one they are looking at: the
+    number itself once it has been entered, that one is needed and is still
+    missing, or that this transaction needs none.
+    """
+    number = (allocation_number or '').strip()
+    if number:
+        return Note('מספר הקצאה:', number)
+    if allocation_required(net_before_vat):
+        return Note(
+            'מספר הקצאה:',
+            f'נדרש לעסקה זו (סכום לפני מע"מ מעל {_threshold_label()} ₪) — טרם הוזן.',
+        )
+    return Note(
+        'מספר הקצאה:',
+        f'לא נדרש לעסקה זו - סכום העסקה לפני מע"מ נמוך מ-{_threshold_label()} ₪.',
+    )
 
 
 def computerized_note() -> Note:

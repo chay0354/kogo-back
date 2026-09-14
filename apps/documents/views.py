@@ -33,6 +33,52 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields = ['document_date', 'created_at', 'total_amount']
     ordering = ['-created_at']
 
+    @action(detail=True, methods=['post'], url_path='allocation-number')
+    def set_allocation_number(self, request, pk=None):
+        """
+        Type in the number fetched by hand from the Tax Authority portal.
+
+        There is no API integration yet, so the number arrives through a person.
+        It is still checked: nine digits, and only on a document type that can
+        carry one. Clearing it is allowed — a number entered on the wrong row
+        has to be removable.
+        """
+        from django.utils import timezone
+
+        from apps.documents.document_pdf import TAX_DOCUMENT_TYPES
+
+        doc = self.get_object()
+        if doc.document_type not in TAX_DOCUMENT_TYPES:
+            return Response(
+                {'error': 'מספר הקצאה נרשם על חשבונית מס בלבד'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        raw = str(request.data.get('allocation_number') or '').strip()
+        digits = ''.join(ch for ch in raw if ch.isdigit())
+        if raw and len(digits) != 9:
+            return Response(
+                {'error': 'מספר הקצאה הוא 9 ספרות'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        doc.allocation_number = digits
+        doc.allocation_entered_at = timezone.now() if digits else None
+        doc.allocation_entered_by = request.user if digits else None
+        doc.save(update_fields=[
+            'allocation_number', 'allocation_entered_at', 'allocation_entered_by', 'updated_at',
+        ])
+        logger.info(
+            'Allocation number %s on %s by %s',
+            'set' if digits else 'cleared', doc.document_number,
+            getattr(request.user, 'email', request.user),
+        )
+        return Response({
+            'id': str(doc.id),
+            'allocation_number': doc.allocation_number,
+            'allocation_entered_at': doc.allocation_entered_at,
+        })
+
     def get_queryset(self):
         qs = FormalDocument.objects.select_related('child', 'business_customer', 'branch')
 
