@@ -35,6 +35,7 @@ from apps.rentals.signing import (
     public_pdf_path,
     resolve_sign_token,
     sign_contract,
+    signed_next_step,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,13 @@ class SigningPageView(_PublicSigningView):
         state = link_state(contract)
         if state.state == STATE_OPEN and not _opened_by_staff(request):
             mark_viewed(contract)
-        return Response(public_payload(contract, state))
+        payload = public_payload(contract, state)
+        if state.state == STATE_SIGNED:
+            # A tenant who signed and came back on the same link is taken on to
+            # their card page, the same answer the signing itself gave. Never
+            # raises: the signed contract keeps opening whatever billing does.
+            payload.update(signed_next_step(contract, request))
+        return Response(payload)
 
     def post(self, request, token: str):
         contract = resolve_sign_token(token)

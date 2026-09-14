@@ -14,7 +14,7 @@ from rest_framework import serializers
 from apps.core.frontend_url import public_frontend_url
 from apps.rental_billing import billing
 from apps.rental_billing.billing import UNDECIDED_STATUSES, is_undecided, shekels, split_amount
-from apps.rental_billing.links import expires_at, is_expired, public_url
+from apps.rental_billing.links import public_url
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
 
 
@@ -27,14 +27,16 @@ def _name(user) -> str:
 def card_link_payload(link: TenantCardLink | None, request=None) -> dict | None:
     if link is None:
         return None
-    live = link.status in TenantCardLink.LIVE_STATUSES and not is_expired(link)
+    live = link.status in TenantCardLink.LIVE_STATUSES
     return {
         'id': str(link.id),
         'status': link.status,
         'status_label': link.get_status_display(),
         'url': public_url(link, public_frontend_url(request)) if live else '',
-        'expired': is_expired(link),
-        'expires_at': expires_at(link).isoformat(),
+        # A card link no longer closes with time. Both stay in the shape — always
+        # False and null — so the office's screens keep reading the same fields.
+        'expired': False,
+        'expires_at': None,
         'attempts': link.attempts,
         'last_error': link.last_error,
         'review_reason': link.review_reason,

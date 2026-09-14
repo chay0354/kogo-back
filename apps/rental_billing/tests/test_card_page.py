@@ -200,17 +200,14 @@ class CardPageTests(BillingFixture, APITestCase):
 
     # ------------------------------------------------------------ refusals
 
-    def test_an_expired_link_is_refused(self):
-        link = self.link(self.order(), created_at=timezone.now() - timedelta(days=15))
+    def test_an_old_link_still_takes_a_card(self):
+        """A card link has no expiry: a tenant who comes back weeks later gets the form, not a dead end."""
+        link = self.link(self.order(), created_at=timezone.now() - timedelta(days=400))
         preview = self.client.get(card_url(link))
-        self.assertEqual(preview.status_code, 400)
-        self.assertIn('פג תוקף', preview.data['error'])
-        self.assertEqual(self.submit(link).status_code, 400)
-        self.assertEqual(self.gateway_calls(), 0)
-
-    def test_a_link_still_inside_its_14_days_works(self):
-        link = self.link(self.order(), created_at=timezone.now() - timedelta(days=13))
-        self.assertEqual(self.client.get(card_url(link)).status_code, 200)
+        self.assertEqual(preview.status_code, 200, preview.data)
+        self.assertNotIn('error', preview.data)
+        self.assertIsNone(preview.data['expires_at'])
+        self.assertEqual(self.submit(link).status_code, 200)
 
     def test_a_used_or_cancelled_link_is_refused(self):
         order = self.order()

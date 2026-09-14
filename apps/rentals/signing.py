@@ -8,12 +8,14 @@
     mark_viewed(contract)                the first open of a sent link
     clean_signing_input(data)            the tenant's name, ID and signature, checked
     sign_contract(contract, token, ...)  record the signature and the signed copy, in one transaction
-    after_signing(contract)              what the page does next
+    after_signing(contract)              what the page does next, once it is signed
+    signed_next_step(contract)           ... and again, every time the signed page is opened
 
 The link is <frontend>/s/<sign_token>, built the way card links are built, and
-lives 14 days from sign_token_created_at. The page shows the contract from its
-frozen terms only — never from the live tenancy — because that is what the
-tenant signs, and the signature is bound to their fingerprint (terms_sha256).
+does not expire: it closes when the contract is signed, when the office
+withdraws it, or when a new version retires it. The page shows the contract
+from its frozen terms only — never from the live tenancy — because that is what
+the tenant signs, and the signature is bound to their fingerprint (terms_sha256).
 
 Signing re-checks everything under the same locks, in the same order, as
 issuing a version (tenancy first, then the contract): a signature can never
@@ -52,12 +54,17 @@ from apps.signatures.models import Signature
 
 logger = logging.getLogger(__name__)
 
-# The same lifetime as a card link: long enough for a tenant to get round to
-# it, short enough that an old message does not open a contract for ever.
-LINK_LIFETIME = timedelta(days=14)
-# After signing, the link keeps showing the signed contract for a while, then
-# closes: the page carries the tenant's ID, phone and email, and a forwarded
-# message should not open them for ever. The office keeps the signed copy.
+# A link to sign has no lifetime. A tenant who gets round to it a month later
+# still opens their contract; the office cancels or re-sends when it wants the
+# old link dead. Nothing is at stake in an unsigned link that time protects:
+# it shows the version the office chose to send, and signing it is what the
+# office asked for whenever it happens.
+#
+# The 30 days below are the opposite case, and are kept deliberately: once the
+# contract is signed there is nothing left for the tenant to do on the page,
+# and what stays on it is their ID, phone and e-mail. A message forwarded on
+# should not open those for ever, so the signed link — and only the signed one
+# — closes. The office keeps the signed copy and re-sends it by hand.
 SIGNED_LINK_LIFETIME = timedelta(days=30)
 # A token is short_token(): 10 letters and digits. Anything else is not looked up at all.
 _TOKEN_PATTERN = re.compile(r'[A-Za-z0-9]{6,32}')
@@ -69,7 +76,6 @@ STATE_CANCELLED = 'cancelled'
 
 # What the tenant reads.
 NOT_FOUND = 'הקישור לא נמצא. בדקו שהועתק במלואו, או בקשו מהמשרד קישור חדש'
-EXPIRED = 'פג תוקף הקישור — בקשו מהמשרד קישור חדש'
 UPDATED = 'החוזה עודכן — בקשו מהמשרד קישור חדש'
 WITHDRAWN = 'הקישור בוטל — בקשו מהמשרד קישור חדש'
 ALREADY_SIGNED = 'החוזה כבר נחתם'
@@ -117,21 +123,14 @@ def new_sign_token() -> str:
             return token
 
 
-def link_expires_at(contract):
-    if contract.sign_token_created_at is None:
-        return None
-    return contract.sign_token_created_at + LINK_LIFETIME
+def link_is_live(contract) -> bool:
+    """
+    Out with the tenant: sent or viewed, with a token that still resolves.
 
-
-def link_is_live(contract, now=None) -> bool:
-    """Out with the tenant and not expired. Whether the agreement changed since is not checked here."""
-    expires_at = link_expires_at(contract)
-    return (
-        contract.status in RentalContract.LINKED_STATUSES
-        and bool(contract.sign_token)
-        and expires_at is not None
-        and (now or timezone.now()) < expires_at
-    )
+    Time does not close it. Whether the agreement changed since is not checked
+    here either — only the signing refuses a stale contract.
+    """
+    return contract.status in RentalContract.LINKED_STATUSES and bool(contract.sign_token)
 
 
 def signing_url(contract, request=None) -> str:
@@ -225,7 +224,8 @@ def link_state(contract, *, now=None) -> LinkState:
     cancelled — the contract is out of play: a newer version replaced it
                 ("updated") or the office voided it ("withdrawn") — 409 to a
                 signing attempt — or its link was withdrawn (410).
-    expired   — 14 days have passed since the link was made (410).
+    expired   — only the 30-day close of a link that was already signed (410).
+                An unsigned link is never closed by time.
     open      — the page shows it and the tenant may try to sign.
 
     Whether the tenancy changed since the contract was issued (is_stale) is
@@ -241,10 +241,8 @@ def link_state(contract, *, now=None) -> LinkState:
     replaced = RentalContract.objects.filter(tenancy_id=contract.tenancy_id, version__gt=contract.version).exists()
     if replaced or contract.status == RentalContract.STATUS_VOID:
         return LinkState(STATE_CANCELLED, UPDATED if replaced else WITHDRAWN, 409)
-    if contract.status not in RentalContract.LINKED_STATUSES or not contract.sign_token:
+    if not link_is_live(contract):
         return LinkState(STATE_CANCELLED, WITHDRAWN, 410)
-    if not link_is_live(contract, now):
-        return LinkState(STATE_EXPIRED, EXPIRED, 410)
     return LinkState(STATE_OPEN, '', 200)
 
 
@@ -302,7 +300,9 @@ def public_payload(contract, state: LinkState) -> dict:
         'document': contract_paragraphs(terms),
         'signed_at': _iso(contract.signed_at),
         'signer_name': signature.signer_name if signature else '',
-        'expires_at': _iso(link_expires_at(contract)) if state.state == STATE_OPEN else None,
+        # A link to sign no longer expires, so the page has no date to print.
+        # The field stays, always null, so nothing downstream has to change.
+        'expires_at': None,
         'pdf_url': public_pdf_path(contract.sign_token),
     }
 
@@ -499,6 +499,27 @@ def after_signing(contract, request=None) -> dict:
     Nothing here can undo the signing, so a failure is logged and answered
     with 'done', never raised.
     """
+    return _next_step(contract, request, _card_link_after_signing)
+
+
+def signed_next_step(contract, request=None) -> dict:
+    """
+    The same answer, for a signed contract's page opened again — the GET of /sign/{token}/.
+
+    A tenant who closed the page after signing and came back on the same link
+    is taken on to their card page while there is still a card to enter:
+    {'next': 'card', 'card_url': ...} for a standing order the signing already
+    opened that is still waiting for one, and {'next': 'done'} otherwise —
+    billing off, a card on file, no order, or anything here failing.
+
+    It never raises and never signs anything: the signed contract must keep
+    opening whatever billing does.
+    """
+    return _next_step(contract, request, _card_link_for_signed)
+
+
+def _next_step(contract, request, card_link) -> dict:
+    """Where the tenant goes from a signed contract, the one way for both answers. Never raises."""
     from apps.rental_billing.billing import billing_enabled, missing_business_message, rental_business
     from apps.rental_billing.links import public_url
 
@@ -510,10 +531,11 @@ def after_signing(contract, request=None) -> dict:
                 'Rental contract %s signed; no card step: %s', contract.pk, missing_business_message(),
             )
             return {'next': 'done'}
-        # One transaction (a savepoint when called inside one): the order and
-        # its link are opened together or not at all.
+        # One transaction (a savepoint when called inside one): whatever the
+        # step writes — an order and its link on the signing, a replacement
+        # link on a page opened again — lands together or not at all.
         with transaction.atomic():
-            link = _card_link_after_signing(contract)
+            link = card_link(contract)
         if link is None:
             return {'next': 'done'}
         return {'next': 'card', 'card_url': public_url(link, public_frontend_url(request))}
@@ -538,3 +560,46 @@ def _card_link_after_signing(contract):
     if order.status not in links.LINKABLE_STATUSES:
         return None
     return links.rotate_card_link(order)
+
+
+def _card_link_for_signed(contract):
+    """
+    The live card link of a signed tenancy's standing order, or None when it needs no card.
+
+    Unlike _card_link_after_signing this opens nothing and rotates nothing, and
+    that is what makes it safe on a page the tenant may open again and again:
+
+    * the signing token is the tenant's own key and resolves to one contract,
+      and the order is looked up by that contract's tenancy_id alone — the
+      tenant's own tenancy, never another;
+    * ensure_card_link hands back the link that is already out; a fresh one is
+      issued only when there is none left live — none was ever made, or the one
+      there was has been used or cancelled. So a URL already sent by WhatsApp is
+      never rotated out from under the tenant by a page load, and reloading the
+      page twice gives the same address;
+    * no standing order is opened here. An order the office ended stays ended,
+      and reading a signed contract never puts a tenancy into billing;
+    * the order row is locked first and its links second — the order
+      rotate_card_link locks them in — so the two can never deadlock;
+    * the page this link opens is itself behind RENTAL_BILLING_ENABLED, and
+      nothing on this path reaches Tranzila. The GET keeps its own throttle
+      (rental_sign_view), so a flood of reloads is refused before it gets here.
+
+    "Still needs a card" is pending_card or failed: the two statuses a card is
+    taken for everywhere else (links.LINKABLE_STATUSES, card.CARD_STATUSES).
+    An order holding a card the gateway accepted is active (or paused by the
+    office); a failed one's stored card is precisely the one that was declined,
+    and it only becomes active again once a charge goes through
+    (billing.record_result), so it is never a usable card.
+    """
+    from apps.rental_billing import links
+    from apps.rental_billing.models import TenantStandingOrder
+
+    order = (
+        TenantStandingOrder.objects.select_for_update()
+        .filter(tenancy_id=contract.tenancy_id, status__in=TenantStandingOrder.OPEN_STATUSES)
+        .first()
+    )
+    if order is None or order.status not in links.LINKABLE_STATUSES:
+        return None
+    return links.ensure_card_link(order)
