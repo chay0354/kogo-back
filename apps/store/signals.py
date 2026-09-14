@@ -3,18 +3,20 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 from apps.store.models import StoreProduct, StoreProductSize
-from apps.store.website_integration import push_product_to_website
+from apps.store.website_integration import schedule_product_push
 
 
 @receiver(post_save, sender=StoreProduct)
 def push_store_product_to_website(sender, instance: StoreProduct, **kwargs):
-    if instance.website_legacy_id:
-        push_product_to_website(instance)
+    schedule_product_push(instance)
 
 
 @receiver(post_save, sender=StoreProductSize)
 def push_size_stock_to_website(sender, instance: StoreProductSize, **kwargs):
     product = instance.product
-    if product.website_legacy_id:
-        product.recalculate_total_stock(save=True)
-        push_product_to_website(product)
+    if not product.website_legacy_id:
+        return
+    # The retotal saves the product, whose own post_save schedules the push;
+    # scheduling here too is harmless — the batch keeps one entry per product.
+    product.recalculate_total_stock(save=True)
+    schedule_product_push(product)
