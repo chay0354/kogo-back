@@ -250,6 +250,8 @@ REST_FRAMEWORK = {
         # The tenant's public card page (apps/rental_billing): the same limits as card links.
         'rental_card_view': '30/min',
         'rental_card_charge': '5/min',
+        'card_replace_view': '30/min',
+        'card_replace': '5/min',
     },
 }
 
@@ -347,6 +349,16 @@ REGISTRATION_FEE_ILS = config('REGISTRATION_FEE_ILS', default=120, cast=int)
 # year and is decided outside this code; it is printed on real invoices, so it
 # lives here and not in a constant.
 ALLOCATION_THRESHOLD_ILS = config('ALLOCATION_THRESHOLD_ILS', default='5000')
+
+# Card brands the terminal cannot clear. Comma-separated, matched against
+# apps.core.card_validation.card_brand. Refused at every card entry point with a
+# Hebrew message, before anything reaches Tranzila. Empty = accept every brand.
+BLOCKED_CARD_BRANDS = config('BLOCKED_CARD_BRANDS', default='diners')
+
+# Chasing a standing order that failed and was never fixed. Every N days, at
+# most M times; after that the row is left for somebody to phone.
+CARD_UPDATE_REMINDER_DAYS = config('CARD_UPDATE_REMINDER_DAYS', default=14, cast=int)
+CARD_UPDATE_REMINDER_MAX = config('CARD_UPDATE_REMINDER_MAX', default=3, cast=int)
 
 # Registrations made before this date pay only דמי רישום on signup; the monthly
 # subscription itself starts on this date at the full monthly price (no proration for

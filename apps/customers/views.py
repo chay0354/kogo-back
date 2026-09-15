@@ -2053,6 +2053,30 @@ def cron_recurring_billing(request):
     return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
 
 
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def cron_card_update_reminders(request):
+    """
+    Chase the standing orders that failed and were never fixed.
+
+    Auth: the same X-Cron-Token / ?token= / Bearer as the billing cron.
+
+    Its own endpoint rather than a passenger on the billing run: it is a
+    messaging job, it runs on a different rhythm, and a ManyChat outage must
+    never be able to interrupt anybody's card billing.
+    """
+    if not _cron_request_authorized(request):
+        return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    from apps.customers.card_update import send_card_update_reminders
+
+    try:
+        limit = int(request.query_params.get('limit') or 80)
+    except (TypeError, ValueError):
+        limit = 80
+    return Response({'ok': True, 'summary': send_card_update_reminders(limit=limit)})
+
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def cron_recurring_billing_status(request):
