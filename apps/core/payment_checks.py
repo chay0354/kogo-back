@@ -13,6 +13,7 @@ from apps.core.tranzila_service import is_mock_credential
 PLACEHOLDER_ID = 'payments.W001'
 MISSING_KEYS_ID = 'payments.W002'
 NOTIFY_URL_ID = 'payments.W003'
+FRONTEND_URL_ID = 'payments.W004'
 
 
 def _running_tests() -> bool:
@@ -26,6 +27,13 @@ def check_payment_configuration(app_configs, **kwargs):
         return []
 
     issues = []
+
+    if not (getattr(settings, 'CRM_FRONTEND_URL', '') or '').strip():
+        issues.append(CheckWarning(
+            'CRM_FRONTEND_URL is not set: parent-facing links fall back to the built-in production host.',
+            hint='Set it to the CRM origin, e.g. https://kogo-front.vercel.app — every WhatsApp link is built from it.',
+            id=FRONTEND_URL_ID,
+        ))
 
     placeholders = [
         name for name, value in (

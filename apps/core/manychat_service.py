@@ -10,7 +10,12 @@ import requests
 from django.conf import settings
 from django.db import transaction
 
+from apps.core.password_reset_email import is_dev_host
+
 logger = logging.getLogger(__name__)
+
+# Every User Field that carries a URL a parent or tenant is meant to open.
+LINK_FIELDS = ('kogo_card_update_url', 'kogo_card_link_url', 'kogo_rental_sign_url')
 
 MANYCHAT_API_BASE = 'https://api.manychat.com'
 
@@ -976,6 +981,20 @@ class ManyChatService:
           4. If fields were written and a flow ns is configured → trigger it.
              Otherwise fall back to free-text so the parent still gets details.
         """
+        # A link only a developer's machine can open must never reach a parent.
+        # The failure message once went out as http://localhost:3000/update-card/…
+        # on a deployment without CRM_FRONTEND_URL: the parent tapped it, got
+        # "refused to connect", and the office never heard about it. Refusing
+        # here — before any field is written or any automation fired — is what
+        # turns that silence into a reason the caller can show.
+        dead_links = [
+            name for name in LINK_FIELDS
+            if (extra_fields or {}).get(name) and is_dev_host((extra_fields or {})[name])
+        ]
+        if dead_links and not getattr(settings, 'DEBUG', False):
+            logger.error('ManyChat %s not sent to %s: link host is not configured (%s)', kind, phone, ', '.join(dead_links))
+            return {'sent': False, 'reason': 'link_host_not_configured', 'fields': dead_links}
+
         if not self.is_configured:
             return {'sent': False, 'reason': 'manychat_not_configured'}
 
