@@ -1583,3 +1583,77 @@ class InstructorBonusViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(bonus_type=bonus_type)
         
         return queryset
+
+
+class MyTrialsView(APIView):
+    """
+    The trial students on this instructor's own lessons, in one place.
+
+    Same scoping as the dashboard beside it — the subject's branches, then the
+    lessons their login actually teaches — so this exposes nothing an
+    instructor could not already reach by opening each register on each date.
+    What it adds is the only thing that was missing: all of them at once, with
+    what became of each, and the number to ring.
+
+    The default window looks back ninety days and forward far enough to catch
+    everything already booked: a trial that has not happened yet is the row an
+    instructor most wants to see, and it is the one a backward-looking range
+    would hide.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.core.models import UserProfile
+        from apps.core.scoping import (
+            instructor_for_user,
+            instructor_login_q,
+            resolve_viewable_user,
+        )
+        from apps.instructors.trials import OUTCOME_LABELS, trials_for_lessons
+
+        subject = resolve_viewable_user(request, request.query_params.get('as_user'))
+
+        today = date.today()
+        date_from = parse_date(request.query_params.get('date_from') or '') or (
+            today - timedelta(days=90)
+        )
+        date_to = parse_date(request.query_params.get('date_to') or '') or (
+            today + timedelta(days=60)
+        )
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+
+        empty = {
+            'counts': {key: 0 for key in OUTCOME_LABELS},
+            'total': 0,
+            'trials': [],
+            'labels': OUTCOME_LABELS,
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+        }
+
+        lessons = Lesson.objects.filter(subject.branch_q(), course__is_active=True)
+
+        caller_role = getattr(getattr(request.user, 'profile', None), 'role', None)
+        instructor = instructor_for_user(subject.user)
+        if instructor is not None:
+            lessons = lessons.filter(instructor_login_q(subject.user))
+        elif caller_role != UserProfile.ROLE_MANAGER:
+            # No instructor identity and no manager standing: nothing to show,
+            # rather than everything.
+            return Response(empty)
+
+        branch_id = request.query_params.get('branch_id')
+        if branch_id and branch_id != 'all':
+            lessons = lessons.filter(course__branch_id=branch_id)
+
+        payload = trials_for_lessons(
+            list(lessons.values_list('id', flat=True)), date_from, date_to, today=today,
+        )
+        payload.update({
+            'labels': OUTCOME_LABELS,
+            'date_from': date_from.isoformat(),
+            'date_to': date_to.isoformat(),
+        })
+        return Response(payload)
