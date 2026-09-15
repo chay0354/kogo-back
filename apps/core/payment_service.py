@@ -1993,12 +1993,26 @@ class PaymentService:
             Dict with success status and transaction details
         """
         from apps.store.models import StoreProduct, StoreSale
+        from apps.store.stock_utils import available_stock_for_item as _available_stock_for_item
         
         # Build items list for Tranzila API
         # Only include required fields to avoid validation errors
         tranzila_items = []
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
+            # Asked before the card is charged, and of the row this line draws
+            # on (a size at a location), not the product total: a size that had
+            # run out passed on the strength of the other sizes, the card was
+            # charged, and the sale was recorded for a unit that did not exist.
+            if _available_stock_for_item(product, item) < int(item['quantity']):
+                invoice.payment_status = 'failed'
+                invoice.notes = f"Insufficient stock for {product.name}"
+                invoice.save()
+                log_payment_operation("STORE_CHARGE_FAILED", invoice=invoice.invoice_number, error='insufficient stock')
+                return {
+                    'success': False,
+                    'error': f'אין מספיק מלאי עבור {product.name}'
+                }
             tranzila_items.extend(tranzila_items_for_cart_line(product, item))
         
         # Charge the token using new REST API
@@ -2044,7 +2058,7 @@ class PaymentService:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
                     
                     # Validate stock
-                    if product.stock_quantity < item['quantity']:
+                    if _available_stock_for_item(product, item) < int(item['quantity']):
                         logger.error(f"Insufficient stock for product {product.name}")
                         # Refund if this fails mid-transaction
                         invoice.payment_status = 'failed'
@@ -2122,22 +2136,64 @@ class PaymentService:
         except StoreInvoice.DoesNotExist:
             logger.error(f"Invoice not found: {invoice_id}")
             return {'success': False, 'error': 'Invoice not found'}
+
+        if invoice.payment_status == 'completed':
+            # Never sold again and never downgraded, whatever a repeated or
+            # late notify says: Tranzila retries, and a second call used to
+            # create the sales, take the stock and issue the document again.
+            logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
+            return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
         
         if tranzila_response['is_successful']:
-            # Parse product items from invoice notes
-            product_items = parse_store_cart_notes(invoice.notes) or []
-            
-            # Update invoice
-            invoice.payment_status = 'completed'
-            invoice.tranzila_transaction_id = tranzila_response.get('transaction_id', '')
-            invoice.tranzila_confirmation_code = tranzila_response.get('confirmation_code', '')
-            invoice.save()
-            
-            # Create sales and update stock
+            from types import SimpleNamespace
+            from apps.payment_links.public_views import verify_transaction_with_tranzila
+
             with transaction.atomic():
+                # Locked for the whole completion, so two notifies arriving
+                # together cannot both sell the cart.
+                invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
+                if invoice.payment_status == 'completed':
+                    logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
+                    return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+
+                # The notify POST is public and unsigned: anyone who knows an
+                # invoice id can send `Response=000`. Only Tranzila's own ledger
+                # — an approved transaction with this index and this sum, the
+                # same check the payment links make — turns it into a sale. The
+                # helper reads `id` and `amount` off the row it is handed.
+                txn_index = str(tranzila_response.get('transaction_id') or '').strip()
+                verdict, _txn_row = verify_transaction_with_tranzila(
+                    SimpleNamespace(id=invoice.id, amount=invoice.total_amount), txn_index,
+                )
+                if verdict != 'verified':
+                    # Stays pending — nothing sold, no stock moved, no document —
+                    # with what was reported kept so a person can check the terminal.
+                    invoice.tranzila_transaction_id = txn_index[:100]
+                    invoice.tranzila_confirmation_code = str(tranzila_response.get('confirmation_code') or '')[:100]
+                    invoice.save(update_fields=['tranzila_transaction_id', 'tranzila_confirmation_code'])
+                    logger.error(
+                        "Store webhook for invoice %s not confirmed by Tranzila (%s); left pending",
+                        invoice.invoice_number, verdict,
+                    )
+                    return {
+                        'success': False,
+                        'error': 'התשלום לא אומת מול טרנזילה',
+                        'status': invoice.payment_status,
+                    }
+
+                # Parse product items from invoice notes
+                product_items = parse_store_cart_notes(invoice.notes) or []
+
+                # Update invoice
+                invoice.payment_status = 'completed'
+                invoice.tranzila_transaction_id = tranzila_response.get('transaction_id', '')
+                invoice.tranzila_confirmation_code = tranzila_response.get('confirmation_code', '')
+                invoice.save()
+
+                # Create sales and update stock
                 for item in product_items:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
-                    
+
                     unit, total = sale_unit_and_total(product, item)
                     StoreSale.objects.create(
                         invoice=invoice,
@@ -2238,6 +2294,7 @@ class PaymentService:
         """
         from apps.store.models import StoreProduct, StoreInvoice, StoreSale
         from apps.store.serializers import StoreInvoiceSerializer
+        from apps.store.stock_utils import available_stock_for_item as _available_stock_for_item
         from apps.customers.recurring_amount import (
             active_recurring_for_child,
             add_to_month_override,
@@ -2256,30 +2313,36 @@ class PaymentService:
                     'לילד אין הוראת קבע פעילה, ולכן לא ניתן לגבות את הרכישה דרך הוראת קבע'
                 )
 
-        # Calculate total
+        # Calculate total, and refuse before anything is written: the row each
+        # line draws on (a size at a location) must hold the units, not just the
+        # product total — a size that had run out passed on the strength of the
+        # other sizes, and the sale was recorded for a unit that did not exist.
         total_amount = Decimal('0.00')
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
+            if _available_stock_for_item(product, item) < int(item['quantity']):
+                raise ValueError(f'אין מספיק מלאי עבור {product.name}')
             total_amount += line_charge_amount(product, item['quantity'], item)
-        
-        # Create completed invoice
-        invoice = StoreInvoice.objects.create(
-            child=child,
-            total_amount=total_amount,
-            payment_method=payment_method,
-            payment_status='completed',
-            charged_with_token=False
-        )
-        
-        # Create sales and update stock
+
+        # Invoice, sales and stock commit together: the invoice used to be
+        # created before this block, so a line refused inside it left a paid
+        # invoice with no lines, and a consumed number, behind.
         with transaction.atomic():
+            invoice = StoreInvoice.objects.create(
+                child=child,
+                total_amount=total_amount,
+                payment_method=payment_method,
+                payment_status='completed',
+                charged_with_token=False
+            )
+
             for item in product_items:
                 product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
-                
-                # Validate stock
-                if product.stock_quantity < item['quantity']:
+
+                # Validate stock again under the lock
+                if _available_stock_for_item(product, item) < int(item['quantity']):
                     raise ValueError(f'אין מספיק מלאי עבור {product.name}')
-                
+
                 unit, total = sale_unit_and_total(product, item)
                 StoreSale.objects.create(
                     invoice=invoice,
