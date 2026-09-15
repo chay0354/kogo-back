@@ -195,7 +195,9 @@ class ChangeLessonEnrollmentTest(TestCase):
         self.child.refresh_from_db()
         self.assertEqual(self.enrollment.status, 'inactive')
         self.assertEqual(self.recurring.status, 'cancelled')
-        self.assertEqual(self.child.status, 'inactive')
+        # There is no "לא פעיל" child status any more. The child keeps what the
+        # record says about them — here money that is still paid up.
+        self.assertEqual(self.child.status, 'active')
         self.assertEqual(res.data['cancelled_recurring_ids'], [str(self.recurring.id)])
 
     def test_drop_one_course_keeps_other_standing_order(self):
@@ -322,7 +324,7 @@ class ChangeLessonEnrollmentTest(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn('בודד', res.data.get('error', ''))
 
-    def test_drop_last_trial_inactivates_child(self):
+    def test_drop_last_trial_leaves_a_paid_child_active(self):
         self._trial_enrollment()
         res = self.client.post(
             f'/api/v1/enrollments/lesson-enrollments/{self.enrollment.id}/drop-course/',
@@ -334,5 +336,7 @@ class ChangeLessonEnrollmentTest(TestCase):
         self.child.refresh_from_db()
         self.recurring.refresh_from_db()
         self.assertEqual(self.enrollment.status, 'inactive')
-        self.assertEqual(self.child.status, 'inactive')
+        # No "לא פעיל" any more. This child's registration payment went
+        # through, so they are still פעיל — dropping a trial does not un-pay them.
+        self.assertEqual(self.child.status, 'active')
         self.assertEqual(self.recurring.status, 'cancelled')

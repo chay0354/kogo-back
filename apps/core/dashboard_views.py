@@ -31,6 +31,7 @@ from apps.core.models import (
 )
 from apps.instructors.models import Instructor
 from apps.courses.models import Course, Lesson, CourseType
+from apps.customers.child_status import CHILD_STATUS_LABELS, STATUS_PAYMENT_PROBLEM, canonical_status
 from apps.customers.models import Child, Family
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.external_students.roster import external_counts_by_branch, external_counts_by_course
@@ -470,10 +471,9 @@ class DashboardViewSet(viewsets.ViewSet):
         # KPI 1: Active Students
         active_students = children.filter(status='active').count()
         
-        # KPI 2: Credit Problems (not_paid OR payment_problem)
-        credit_problems = children.filter(
-            Q(status='not_paid') | Q(status='payment_problem')
-        ).count()
+        # KPI 2: Credit Problems. 'not_paid' was folded into payment_problem —
+        # it was never written by any code, only counted here beside it.
+        credit_problems = children.filter(status=STATUS_PAYMENT_PROBLEM).count()
         
         # KPI 3: Ghost Students
         ghost_students = children.filter(status='ghost').count()
@@ -541,20 +541,10 @@ class DashboardViewSet(viewsets.ViewSet):
             count=Count('id')
         ).order_by('-count')
         
-        # Hebrew status labels mapping - comprehensive list
-        status_labels = {
-            'active': 'פעיל',
-            'ghost': 'רפאים',
-            'non_active': 'לא פעיל',
-            'inactive': 'לא פעיל',
-            'payment_problem': 'בעיית תשלום',
-            'not_paid': 'לא שולם',
-            'trial_signed': 'נרשם לניסיון',
-            'trial_completed': 'השלים ניסיון',
-            'paused': 'מושהה',
-            'sign_in': 'הרשמה',
-            'pending': 'ממתין',
-        }
+        # The labels come from the one list. This map used to carry its own
+        # spellings ("בעיית תשלום", "ממתין") plus three statuses that never
+        # existed anywhere else — non_active, paused, sign_in.
+        status_labels = dict(CHILD_STATUS_LABELS)
         
         total_quit = status_changes.count()
         status_change_rows = list(status_changes.select_related('child'))
@@ -575,8 +565,12 @@ class DashboardViewSet(viewsets.ViewSet):
                 for change in changes_by_status.get(status_key, [])
             ]
 
+            # History rows keep whatever name was current when they were
+            # written, so a churn row from before the list was settled still
+            # gets a readable label.
+            label_key = canonical_status(status_key) or status_key
             quit_data.append({
-                'status': status_labels.get(status_key, status_key),
+                'status': status_labels.get(label_key, status_key),
                 'status_key': status_key,
                 'count': item['count'],
                 'percentage': round(percentage, 1),

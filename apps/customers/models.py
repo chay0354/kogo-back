@@ -3,6 +3,12 @@ from decimal import Decimal
 from django.db import models
 from django.utils import timezone
 from apps.core.models import Branch
+from apps.customers.child_status import (
+    CHILD_STATUS_CHOICES,
+    STATUS_ACTIVE,
+    STATUS_PAYMENT_PROBLEM,
+    resolve_child_status,
+)
 
 
 class Family(models.Model):
@@ -92,16 +98,8 @@ class Child(models.Model):
         ('female', 'נקבה'),
     ]
     
-    STATUS_CHOICES = [
-        ('active', 'פעיל'),
-        ('trial_signed', 'נרשם לניסיון'),
-        ('trial_completed', 'ביצע ניסיון'),
-        ('payment_problem', 'בעיות באשראי'),
-        ('not_paid', 'לא שולם'),
-        ('pending', 'בתהליך רישום'),
-        ('ghost', 'רפאים'),
-        ('inactive', 'לא פעיל'),
-    ]
+    # The one list, defined in apps/customers/child_status.py.
+    STATUS_CHOICES = CHILD_STATUS_CHOICES
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     family = models.ForeignKey(Family, on_delete=models.CASCADE, related_name='children', verbose_name="משפחה")
@@ -182,33 +180,33 @@ class Child(models.Model):
     def calculate_status(self):
         """
         מחשב את הסטטוס האמיתי על סמך תאריכים ותשלומים
-        
+
+        Returns one of Child.STATUS_CHOICES and nothing else. It used to answer
+        'expired' and 'trial' — neither a choice, so every screen showed
+        "לא מוגדר" for a child this had touched.
+
         USAGE: Called by update_status() method
         USAGE: Used in tests (test_child_status.py)
         """
         from datetime import date
         today = date.today()
-        
-        # Priority 1: Subscription expired (black)
-        if self.subscription_end_date and today > self.subscription_end_date:
-            return 'expired'
-        
+
         # A subscription starting in the future was registered with a deferred first
         # charge, so nothing is owed yet and it must not read as a payment problem.
         if self.subscription_start_date and self.subscription_start_date > today:
-            return 'active'
+            return STATUS_ACTIVE
 
-        # Priority 2: Has subscription but no paid_until_date or overdue (red)
-        if self.subscription_start_date:
-            if not self.paid_until_date or today > self.paid_until_date:
-                return 'payment_problem'
-            
-            # Priority 3: Has subscription and paid (green)
-            if today <= self.paid_until_date:
-                return 'active'
-        
-        # Priority 4: No subscription = trial (orange)
-        return 'trial'
+        # A subscription that has ended, or one that is not paid up, is not
+        # money in the system — what the child is instead comes from the record.
+        subscription_over = bool(
+            self.subscription_end_date and today > self.subscription_end_date
+        )
+        if self.subscription_start_date and not subscription_over:
+            if self.paid_until_date and today <= self.paid_until_date:
+                return STATUS_ACTIVE
+            return STATUS_PAYMENT_PROBLEM
+
+        return resolve_child_status(self)
     
     def update_status(self, save=True):
         """

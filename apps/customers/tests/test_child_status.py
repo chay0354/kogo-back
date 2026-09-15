@@ -25,14 +25,11 @@ class ChildStatusCalculationTests(TestCase):
     
     def test_calculate_status_trial_no_subscription(self):
         """
-        Test: Child with no subscription dates should have 'trial' status
-        
-        Scenario:
-        - No subscription_start_date
-        - No subscription_end_date
-        - No paid_until_date
-        
-        Expected: status = 'trial'
+        Test: a child with no subscription and nothing paid is 'pending'.
+
+        This used to answer 'trial' — a value that is not one of the model's
+        choices, so every screen showed the child as "לא מוגדר". Nothing paid
+        and no trial booked is בתהליך רישום.
         """
         child = create_test_child(
             family=self.family,
@@ -42,7 +39,7 @@ class ChildStatusCalculationTests(TestCase):
         )
         
         status = child.calculate_status()
-        self.assertEqual(status, 'trial')
+        self.assertEqual(status, 'pending')
     
     def test_calculate_status_active_paid_current(self):
         """
@@ -127,12 +124,11 @@ class ChildStatusCalculationTests(TestCase):
     
     def test_calculate_status_expired_subscription(self):
         """
-        Test: Child with expired subscription should be 'expired'
-        
-        Scenario:
-        - subscription_end_date is in the past
-        
-        Expected: status = 'expired' (highest priority)
+        Test: an ended subscription that is still paid up is 'active'.
+
+        This used to answer 'expired', which is not one of the model's choices.
+        The rule now is the owner's: פעיל means money is in the system, and
+        paid_until_date has not passed.
         """
         child = create_test_child(
             family=self.family,
@@ -142,7 +138,7 @@ class ChildStatusCalculationTests(TestCase):
         )
         
         status = child.calculate_status()
-        self.assertEqual(status, 'expired')
+        self.assertEqual(status, 'active')
     
     def test_update_status_saves_correctly(self):
         """
@@ -250,16 +246,13 @@ class ChildStatusPriorityTests(TestCase):
         self.next_month = self.today + timedelta(days=30)
         self.last_month = self.today - timedelta(days=30)
     
-    def test_expired_has_highest_priority(self):
+    def test_money_in_beats_an_ended_subscription(self):
         """
-        Test: 'expired' status has highest priority, even if paid
-        
-        Scenario:
-        - subscription_end_date is in the past
-        - paid_until_date is in the future
-        
-        Expected: status = 'expired' (not 'active')
-        Priority 1 beats Priority 3
+        Test: money still in the system wins over a subscription that ended.
+
+        The old rule answered 'expired' here, which was not a real status. The
+        owner's rule is that פעיל means money came in — and paid_until_date is
+        still ahead, so it has.
         """
         child = create_test_child(
             family=self.family,
@@ -269,5 +262,5 @@ class ChildStatusPriorityTests(TestCase):
         )
         
         status = child.calculate_status()
-        self.assertEqual(status, 'expired')
+        self.assertEqual(status, 'active')
 

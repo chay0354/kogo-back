@@ -1,19 +1,8 @@
 """One real child should appear once in CRM lists and widget signup."""
 from django.db.models import Case, Count, F, IntegerField, OuterRef, Q, Subquery, Value, When
 
+from apps.customers.child_status import CHILD_STATUS_RANK  # noqa: F401  (re-exported)
 from apps.customers.models import Child
-
-# Lower rank wins when the same child was created twice (widget retry, etc.).
-CHILD_STATUS_RANK = {
-    'active': 0,
-    'payment_problem': 1,
-    'trial_signed': 2,
-    'trial_completed': 3,
-    'not_paid': 4,
-    'pending': 5,
-    'inactive': 6,
-    'ghost': 7,
-}
 
 
 def child_status_rank_annotation():

@@ -17,6 +17,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date, timedelta
 from django.conf import settings
+from apps.customers.child_status import CHILD_STATUS_RANK, STATUS_GHOST
 from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer, CronHeartbeat
 from apps.customers.phone_search import PhoneAwareSearchFilter
 # Store models moved to apps.store
@@ -121,6 +122,32 @@ class ParentViewSet(viewsets.ModelViewSet):
     filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'phone', 'email']
     ordering_fields = ['last_name', 'created_at']
+
+
+def _find_child_for_walk_in(*, first_name, last_name, phone):
+    """
+    The child a walk-in turns out to be, or None.
+
+    Deliberately strict, and the same rule apps/enrollments/ghost_students.py
+    already applies when it reads a roster: full name and phone must both
+    match. A first name alone collides constantly in a class of children.
+    """
+    from apps.enrollments.person_match import child_person_key, person_key
+
+    wanted = person_key(first_name=first_name, last_name=last_name, phone=phone)
+    if wanted is None:
+        return None
+    candidates = (
+        Child.objects
+        .exclude(status=STATUS_GHOST)
+        .select_related('family')
+        .filter(first_name__iexact=(first_name or '').strip())
+    )
+    matches = [child for child in candidates if child_person_key(child) == wanted]
+    if not matches:
+        return None
+    matches.sort(key=lambda child: CHILD_STATUS_RANK.get(child.status, 99))
+    return matches[0]
 
 
 class ChildViewSet(viewsets.ModelViewSet):
@@ -742,6 +769,31 @@ class ChildViewSet(viewsets.ModelViewSet):
                 }
             )
         
+        # A walk-in the system already knows is that child, not a new ghost
+        # beside them. Without this a child could sit in the list twice — once
+        # as נרשם לניסיון and once as רפאים — which is exactly what the ghost
+        # was meant to avoid. Same rule the attendance screen uses: full name
+        # plus phone, never a first name on its own.
+        existing = _find_child_for_walk_in(
+            first_name=first_name, last_name=family_name, phone=phone_number,
+        )
+        if existing is not None:
+            enrollment, _ = LessonEnrollment.objects.get_or_create(
+                lesson=lesson,
+                child=existing,
+                defaults={'status': 'active', 'start_date': date.today()},
+            )
+            return Response({
+                'child': ChildSerializer(existing).data,
+                'enrollment': {
+                    'id': str(enrollment.id),
+                    'lesson_id': str(lesson.id),
+                    'status': enrollment.status,
+                },
+                'matched_existing': True,
+                'message': f'{existing.full_name} כבר קיים במערכת — השיעור שויך אליו',
+            }, status=status.HTTP_200_OK)
+
         # Create ghost child with minimal data
         ghost_child = Child.objects.create(
             family=ghost_family,
