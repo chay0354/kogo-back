@@ -527,18 +527,77 @@ class ManyChatService:
         REGISTRATION_KIND_CARD_LINK: 'קישור להזנת כרטיס',
     }
 
+    def kind_automations(self, *, resolve_ns: bool = True, skip: set[str] | None = None) -> list[dict]:
+        """
+        The templates Kogo itself knows, each with its Hebrew name.
+
+        Listed whether or not ManyChat has an automation by that name: the
+        office is entitled to see the whole set, and a missing one is a fact to
+        report (`in_manychat: False`), not a row to drop.
+        """
+        skip = skip or set()
+        rows = []
+        for kind, entry in self._REGISTRATION_KINDS.items():
+            if kind in skip:
+                continue
+            ns = self.resolve_flow_ns(entry['flow_setting']) if resolve_ns else ''
+            label = self.AUTOMATION_LABELS.get(kind, kind)
+            rows.append({
+                'automation_type': 'kind',
+                'automation_id': kind,
+                'flow_ns': ns,
+                'label': label,
+                'manychat_name': None,
+                'kogo_label': label,
+                'needs_enrollment_context': True,
+                'in_manychat': bool(ns),
+            })
+        return rows
+
     def list_available_automations(self) -> list[dict]:
         """
-        Every automation returned by ManyChat getFlows (source of truth).
-        Kogo kinds are matched by flow_ns for richer field handling when sending.
+        Every automation the office can send — strictly.
+
+        A ManyChat failure raises here rather than reading as an empty picker.
+        The screen-facing `automations_payload` carries the same failure in the
+        open instead, so it can show the templates and name the reason.
+        """
+        self.get_flows()  # a ManyChat outage is an error, not an empty list
+        return self.automations_payload()['automations']
+
+    def automations_payload(self) -> dict:
+        """
+        Every automation the office can send, and whether ManyChat answered.
+
+        Two sources, and the caller has to be able to tell them apart: what
+        ManyChat returns from getFlows, and the kinds Kogo itself knows. A kind
+        whose automation is missing from ManyChat is still listed — it is a
+        template the office is entitled to see, and hiding it turned "ManyChat
+        answered with nothing" into "half the templates quietly vanished", with
+        no way to tell which had happened.
+
+        `manychat_ok` says whether getFlows answered at all; `manychat_count`
+        how many automations it returned. Both are for the screen to say out
+        loud, because a short list is only alarming if you know it is short.
         """
         items: list[dict] = []
         seen_ns: set[str] = set()
+        seen_kinds: set[str] = set()
 
-        # This list drives the office's manual broadcast picker.  Do not turn a
-        # ManyChat outage into an apparently valid empty list: the caller needs
-        # to tell the office that its live automations could not be loaded.
-        flows = self.get_flows()
+        # A ManyChat outage must never read as "these are your automations".
+        # `list_available_automations` keeps raising for exactly that reason;
+        # here the failure is carried out in the open instead, as
+        # `manychat_ok: False` plus the reason, so the picker can show every
+        # template Kogo knows and say why the live list is missing.
+        manychat_ok = True
+        manychat_error = ''
+        try:
+            flows = self.get_flows()
+        except ManyChatError as exc:
+            logger.warning('ManyChat getFlows failed while listing automations: %s', exc)
+            flows = []
+            manychat_ok = False
+            manychat_error = str(exc)
 
         kind_by_ns = self._kind_by_flow_ns_from_flows(flows)
 
@@ -553,8 +612,10 @@ class ManyChatService:
                 'flow_ns': ns,
                 'label': name,
                 'manychat_name': name,
+                'in_manychat': True,
             }
             if kind:
+                seen_kinds.add(kind)
                 item['automation_type'] = 'kind'
                 item['automation_id'] = kind
                 item['kogo_label'] = self.AUTOMATION_LABELS.get(kind, kind)
@@ -565,24 +626,24 @@ class ManyChatService:
                 item['needs_enrollment_context'] = False
             items.append(item)
 
-        # Flows configured in Django but missing from getFlows (rare).
-        for kind, entry in self._REGISTRATION_KINDS.items():
-            ns = self.resolve_flow_ns(entry['flow_setting'])
-            if not ns or ns in seen_ns:
+        # Every Kogo kind that getFlows did not already account for — whether
+        # because ManyChat has no automation by that name, or because it never
+        # answered. `flow_ns` is empty for those, and sending one is refused by
+        # the server with ManyChat's own reason rather than silently dropped.
+        for row in self.kind_automations(resolve_ns=manychat_ok, skip=seen_kinds):
+            if row['flow_ns'] and row['flow_ns'] in seen_ns:
                 continue
-            seen_ns.add(ns)
-            items.append({
-                'automation_type': 'kind',
-                'automation_id': kind,
-                'flow_ns': ns,
-                'label': self.AUTOMATION_LABELS.get(kind, kind),
-                'manychat_name': None,
-                'kogo_label': self.AUTOMATION_LABELS.get(kind, kind),
-                'needs_enrollment_context': True,
-            })
+            if row['flow_ns']:
+                seen_ns.add(row['flow_ns'])
+            items.append(row)
 
         items.sort(key=lambda row: (row.get('label') or '').casefold())
-        return items
+        return {
+            'automations': items,
+            'manychat_ok': manychat_ok,
+            'manychat_count': len(flows),
+            'manychat_error': manychat_error,
+        }
 
     def send_automation_to_contact(
         self,

@@ -231,3 +231,66 @@ class NotifyRegistrationFieldOrderTests(SimpleTestCase):
         text = svc.send_whatsapp_text.call_args[0][1]
         self.assertIn('יהודה הלוי', text)
         self.assertIn('18:15-19:00', text)
+
+
+class AutomationListTests(SimpleTestCase):
+    """
+    The list the office picks from on the customers page.
+
+    The owner's report (15.9): "כל הטמפלטים של הווצאפ זה מציע רק חלק לשליחת
+    הודעה". A template Kogo knows is a template the office may pick; whether
+    ManyChat has an automation by that name is a fact to report, not a reason
+    to drop the row.
+    """
+
+    def _svc(self):
+        svc = ManyChatService(api_key='x')
+        svc.resolve_flow_ns = MagicMock(return_value='')
+        return svc
+
+    def test_every_kogo_template_is_listed_even_when_manychat_answers_with_nothing(self):
+        svc = self._svc()
+        svc.get_flows = MagicMock(return_value=[])
+        payload = svc.automations_payload()
+        listed = {row['automation_id'] for row in payload['automations']}
+        self.assertEqual(listed, set(ManyChatService._REGISTRATION_KINDS))
+        self.assertTrue(payload['manychat_ok'])
+        self.assertEqual(payload['manychat_count'], 0)
+        self.assertTrue(all(row['in_manychat'] is False for row in payload['automations']))
+
+    def test_a_list_that_never_came_back_says_so(self):
+        svc = self._svc()
+        svc.get_flows = MagicMock(side_effect=ManyChatError('boom'))
+        payload = svc.automations_payload()
+        self.assertFalse(payload['manychat_ok'])
+        self.assertEqual(payload['manychat_count'], 0)
+        # Still the whole set, so the screen is never half a list with no reason.
+        self.assertEqual(
+            {row['automation_id'] for row in payload['automations']},
+            set(ManyChatService._REGISTRATION_KINDS),
+        )
+
+    def test_an_automation_manychat_has_is_listed_once_and_marked(self):
+        svc = ManyChatService(api_key='x')
+        svc.resolve_flow_ns = MagicMock(return_value='')
+        svc.get_flows = MagicMock(return_value=[{'ns': 'ns_card', 'name': 'card-update'}])
+        payload = svc.automations_payload()
+        rows = [r for r in payload['automations'] if r['automation_id'] == 'card_update']
+        self.assertEqual(len(rows), 1, 'a kind ManyChat has must not be listed twice')
+        self.assertEqual(rows[0]['flow_ns'], 'ns_card')
+        self.assertTrue(rows[0]['in_manychat'])
+        self.assertEqual(payload['manychat_count'], 1)
+
+    def test_a_flow_that_is_not_a_kogo_template_is_listed_too(self):
+        svc = self._svc()
+        svc.get_flows = MagicMock(return_value=[{'ns': 'ns_x', 'name': 'ברכת יום הולדת'}])
+        rows = svc.automations_payload()['automations']
+        theirs = [r for r in rows if r['automation_id'] == 'ns_x']
+        self.assertEqual(len(theirs), 1)
+        self.assertEqual(theirs[0]['automation_type'], 'flow')
+        self.assertEqual(theirs[0]['label'], 'ברכת יום הולדת')
+
+    def test_the_old_entry_point_still_returns_a_plain_list(self):
+        svc = self._svc()
+        svc.get_flows = MagicMock(return_value=[])
+        self.assertIsInstance(svc.list_available_automations(), list)
