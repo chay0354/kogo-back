@@ -12,6 +12,7 @@ from .card_link_views import (
 )
 from .card_replacement_views import (
     ChildFamilyCardQuoteView,
+    ChildrenWithoutStandingOrderView,
     FamilyCardQuoteView,
     FamilyCardReplaceView,
     PublicCardReplaceApplyView,
@@ -30,7 +31,7 @@ from .widget_views import (
     WidgetLessonOccurrencesView,
     WidgetTermsView,
 )
-from .views import cron_recurring_billing, cron_recurring_billing_status
+from .views import cron_card_update_reminders, cron_recurring_billing, cron_recurring_billing_status
 
 router = DefaultRouter()
 router.register(r'families', views.FamilyViewSet, basename='family')
@@ -66,9 +67,11 @@ urlpatterns = [
     path('families/<uuid:family_id>/card/', FamilyCardQuoteView.as_view(), name='family-card-quote'),
     path('families/<uuid:family_id>/card/replace/', FamilyCardReplaceView.as_view(), name='family-card-replace'),
     path('children/<uuid:child_id>/family-card/', ChildFamilyCardQuoteView.as_view(), name='child-family-card-quote'),
+    path('children-without-standing-order/', ChildrenWithoutStandingOrderView.as_view(), name='children-without-sto'),
     path('replace-card/<str:token>/', PublicCardReplacePreviewView.as_view(), name='replace-card-preview'),
     path('replace-card/<str:token>/apply/', PublicCardReplaceApplyView.as_view(), name='replace-card-apply'),
     path('cron/recurring-billing/', cron_recurring_billing, name='cron-recurring-billing'),
+    path('cron/card-update-reminders/', cron_card_update_reminders, name='cron-card-update-reminders'),
     path('cron/recurring-billing/status/', cron_recurring_billing_status, name='cron-recurring-billing-status'),
 ]
 

@@ -355,6 +355,11 @@ ALLOCATION_THRESHOLD_ILS = config('ALLOCATION_THRESHOLD_ILS', default='5000')
 # Hebrew message, before anything reaches Tranzila. Empty = accept every brand.
 BLOCKED_CARD_BRANDS = config('BLOCKED_CARD_BRANDS', default='diners')
 
+# Chasing a standing order that failed and was never fixed. Every N days, at
+# most M times; after that the row is left for somebody to phone.
+CARD_UPDATE_REMINDER_DAYS = config('CARD_UPDATE_REMINDER_DAYS', default=14, cast=int)
+CARD_UPDATE_REMINDER_MAX = config('CARD_UPDATE_REMINDER_MAX', default=3, cast=int)
+
 # Registrations made before this date pay only דמי רישום on signup; the monthly
 # subscription itself starts on this date at the full monthly price (no proration for
 # the signup month). Set empty to charge the first month on signup as usual.

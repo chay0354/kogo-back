@@ -19,6 +19,7 @@ from apps.core.card_validation import CardValidationError
 from apps.core.permissions import IsManagerOrPartner
 from apps.customers.card_replacement import (
     CardReplacementError,
+    children_without_standing_order,
     family_public_url,
     public_preview,
     quote,
@@ -43,6 +44,24 @@ class FamilyCardQuoteView(APIView):
         payload = quote(family)
         payload['link'] = family_public_url(family)
         return Response(payload)
+
+
+class ChildrenWithoutStandingOrderView(APIView):
+    """
+    Who is enrolled, paying, and has no standing order behind them.
+
+    GET /api/v1/customers/children-without-standing-order/?branch_id=
+
+    Reads only. The office decides what to do with each row — usually replacing
+    the card, which is what creates the standing order that was never made.
+    """
+    permission_classes = [IsAuthenticated, IsManagerOrPartner]
+
+    def get(self, request):
+        rows = children_without_standing_order(
+            branch_id=request.query_params.get('branch_id') or None,
+        )
+        return Response({'count': len(rows), 'results': rows})
 
 
 class FamilyCardReplaceView(APIView):

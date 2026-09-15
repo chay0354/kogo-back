@@ -25,6 +25,7 @@ from typing import Any, Iterable
 
 from django.core.signing import BadSignature, SignatureExpired, dumps, loads
 from django.db import IntegrityError, transaction
+from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
@@ -346,6 +347,70 @@ def send_card_update_whatsapp(recurring: RecurringPayment) -> dict:
         extra_fields=extra_fields,
         **ctx,
     )
+
+
+def send_card_update_reminders(*, today=None, limit: int = 80) -> dict:
+    """
+    Chase the standing orders that failed and were never fixed.
+
+    A declined standing order is never retried by the cron — the row leaves
+    'active' and nothing brings it back — so the only thing that revives it is
+    the parent replacing the card. One message on the day it failed is easy to
+    miss, and the money stops quietly either way.
+
+    Every CARD_UPDATE_REMINDER_DAYS days, at most CARD_UPDATE_REMINDER_MAX times.
+    After that the chasing stops and the row is left for somebody to phone:
+    a fourth identical message is not persuasion, it is noise.
+    """
+    from django.conf import settings
+
+    days = int(getattr(settings, 'CARD_UPDATE_REMINDER_DAYS', 14))
+    max_sent = int(getattr(settings, 'CARD_UPDATE_REMINDER_MAX', 3))
+    now = timezone.now()
+    cutoff = now - timedelta(days=days)
+
+    rows = list(
+        _recurring_qs()
+        .filter(status='failed', card_update_reminders_sent__lt=max_sent)
+        .filter(Q(card_update_last_reminder_at__isnull=True) | Q(card_update_last_reminder_at__lte=cutoff))
+        .order_by('card_update_last_reminder_at', 'next_billing_date')[: max(1, min(int(limit or 80), 200))]
+    )
+
+    sent = failed = 0
+    results: list[dict] = []
+    for recurring in rows:
+        outcome = send_card_update_whatsapp(recurring)
+        ok = bool(outcome.get('sent'))
+        if ok:
+            # Counted only when it actually went out, so a ManyChat outage does
+            # not burn a parent's three attempts on messages nobody received.
+            RecurringPayment.objects.filter(pk=recurring.pk).update(
+                card_update_reminders_sent=F('card_update_reminders_sent') + 1,
+                card_update_last_reminder_at=now,
+            )
+            sent += 1
+        else:
+            failed += 1
+        results.append({
+            'id': str(recurring.id),
+            'child_name': recurring.child.full_name if recurring.child_id else '',
+            'reminder_number': (recurring.card_update_reminders_sent or 0) + (1 if ok else 0),
+            'sent': ok,
+            'reason': outcome.get('reason'),
+        })
+
+    exhausted = (
+        RecurringPayment.objects
+        .filter(status='failed', card_update_reminders_sent__gte=max_sent)
+        .count()
+    )
+    return {
+        'checked': len(rows),
+        'sent': sent,
+        'failed': failed,
+        'needs_a_phone_call': exhausted,
+        'results': results,
+    }
 
 
 def send_card_update_for_failed(

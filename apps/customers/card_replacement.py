@@ -493,6 +493,68 @@ def _record(*, family, card, actor, source, recurring_ids, charged_total, result
     )
 
 
+def children_without_standing_order(*, branch_id=None, limit: int = 500) -> list[dict]:
+    """
+    Children enrolled in a paid lesson who have no standing order at all.
+
+    Not a failure — an absence, which is why nothing ever reported it. A card
+    the terminal cannot tokenise (Diners is the one the office hit) clears the
+    registration fee and returns no token, and `_ensure_recurring_payment_for_
+    widget_charge` then declines to create the standing order. Nothing fails, no
+    message goes out, and the monthly run cannot see a row that does not exist.
+
+    Read-only. It answers "who is this happening to", and the fixing is a
+    decision somebody makes per child.
+    """
+    from apps.enrollments.enrollment_counts import paying_enrollments
+    from apps.enrollments.models import LessonEnrollment
+
+    enrolments = (
+        paying_enrollments(LessonEnrollment.objects.all())
+        .select_related(
+            'child', 'child__family',
+            'lesson', 'lesson__course', 'lesson__course__branch',
+        )
+    )
+    if branch_id:
+        enrolments = enrolments.filter(lesson__course__branch_id=branch_id)
+
+    covered = set(
+        RecurringPayment.objects
+        .filter(status__in=REPLACEABLE_STATUSES)
+        .exclude(tranzila_token='')
+        .values_list('child_id', flat=True)
+    )
+
+    today = _today()
+    rows: list[dict] = []
+    seen: set = set()
+    for enrolment in enrolments.order_by('child__first_name')[: max(1, min(int(limit or 500), 2000))]:
+        child = enrolment.child
+        if child is None or child.id in covered or child.id in seen:
+            continue
+        seen.add(child.id)
+
+        family = getattr(child, 'family', None)
+        parent = family.parents.filter(is_primary=True).first() if family else None
+        course = enrolment.lesson.course if enrolment.lesson_id else None
+        paid_until = child.paid_until_date
+        rows.append({
+            'child_id': str(child.id),
+            'child_name': child.full_name,
+            'child_status': child.status,
+            'family_id': str(family.id) if family else '',
+            'family_name': family.name if family else '',
+            'parent_phone': (parent.phone if parent else '') or (family.phone if family else ''),
+            'course_name': course.name if course else '',
+            'branch_name': course.branch.name if course and course.branch_id else '',
+            'paid_until': paid_until.isoformat() if paid_until else None,
+            # How long the month has been going unbilled — the size of the hole.
+            'days_unbilled': (today - paid_until).days if paid_until and paid_until < today else 0,
+        })
+    return rows
+
+
 def build_family_token(family) -> str:
     """Signed, family-scoped, 14 days. Colons break Next.js path segments."""
     return dumps({'f': str(family.id)}, salt=SIGN_SALT).replace(':', '~')
