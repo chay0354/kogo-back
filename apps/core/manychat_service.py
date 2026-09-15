@@ -535,11 +535,10 @@ class ManyChatService:
         items: list[dict] = []
         seen_ns: set[str] = set()
 
-        try:
-            flows = self.get_flows()
-        except ManyChatError:
-            logger.warning('ManyChat getFlows failed while listing automations')
-            flows = []
+        # This list drives the office's manual broadcast picker.  Do not turn a
+        # ManyChat outage into an apparently valid empty list: the caller needs
+        # to tell the office that its live automations could not be loaded.
+        flows = self.get_flows()
 
         kind_by_ns = self._kind_by_flow_ns_from_flows(flows)
 

@@ -65,6 +65,15 @@ class CardLinkFlowTests(SimpleTestCase):
         self.assertEqual(svc.resolve_flow_for(entry), 'content_link')
 
 
+class AvailableAutomationsTests(SimpleTestCase):
+    def test_a_manychat_failure_is_not_masqueraded_as_an_empty_picker(self):
+        svc = ManyChatService(api_key='x')
+        svc.get_flows = MagicMock(side_effect=ManyChatError('ManyChat unavailable'))
+
+        with self.assertRaisesRegex(ManyChatError, 'ManyChat unavailable'):
+            svc.list_available_automations()
+
+
 class SetCustomFieldsFallbackTests(SimpleTestCase):
     def test_retries_fields_one_by_one_when_batch_fails(self):
         svc = ManyChatService(api_key='x')
