@@ -21,10 +21,11 @@ Usage:
 """
 from dataclasses import dataclass
 from typing import List, Optional
-from datetime import date
-from decimal import Decimal
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import Count, Q
+from django.utils import timezone
 from apps.customers.financial_models import Discount
 from apps.customers.models import Child
 
@@ -88,7 +89,7 @@ class DiscountService:
         # Check Additional Lesson Discount (takes precedence as it's most specific)
         if lesson_id:
             additional_lesson = self.check_additional_lesson_discount(child_id, lesson_id)
-            if additional_lesson:
+            if additional_lesson and self._fixed_price_lowers(additional_lesson, base_price):
                 # Fixed final price for additional lessons
                 discount_amount = max(Decimal('0.00'), base_price - additional_lesson.value)
                 return DiscountCalculation(
@@ -106,10 +107,9 @@ class DiscountService:
         
         # Check Early Sign-Up Discount
         early_signup = self.check_early_signup_discount(payment_date)
-        if early_signup:
-            # Check if it's a fixed_final_price discount
-            if early_signup.discount_type == 'fixed_final_price':
-                # Fixed final price takes precedence - return immediately
+        if early_signup and early_signup.discount_type == 'fixed_final_price':
+            # Fixed final price takes precedence - return immediately
+            if self._fixed_price_lowers(early_signup, base_price):
                 discount_amount = max(Decimal('0.00'), base_price - early_signup.value)
                 return DiscountCalculation(
                     applicable_discounts=[ApplicableDiscount(
@@ -123,21 +123,23 @@ class DiscountService:
                     final_price=early_signup.value,
                     base_price=base_price
                 )
-            else:
-                applicable_discounts.append(ApplicableDiscount(
-                    discount_id=str(early_signup.id),
-                    name=early_signup.name,
-                    discount_type='early_signup',
-                    value=early_signup.value,
-                    reason=f"תשלום בתאריך {payment_date.strftime('%d/%m/%Y')} נמצא בטווח רישום מוקדם"
-                ))
+        elif early_signup:
+            applicable_discounts.append(ApplicableDiscount(
+                discount_id=str(early_signup.id),
+                name=early_signup.name,
+                discount_type='early_signup',
+                value=self._amount_off(early_signup, base_price),
+                reason=self._with_percent(
+                    early_signup,
+                    f"תשלום בתאריך {payment_date.strftime('%d/%m/%Y')} נמצא בטווח רישום מוקדם",
+                ),
+            ))
         
         # Check Second Child Discount
         second_child = self.check_second_child_discount(family_id, child_id)
-        if second_child:
-            # Check if it's a fixed_final_price discount
-            if second_child.discount_type == 'fixed_final_price':
-                # Fixed final price takes precedence - return immediately
+        if second_child and second_child.discount_type == 'fixed_final_price':
+            # Fixed final price takes precedence - return immediately
+            if self._fixed_price_lowers(second_child, base_price):
                 discount_amount = max(Decimal('0.00'), base_price - second_child.value)
                 return DiscountCalculation(
                     applicable_discounts=[ApplicableDiscount(
@@ -151,14 +153,14 @@ class DiscountService:
                     final_price=second_child.value,
                     base_price=base_price
                 )
-            else:
-                applicable_discounts.append(ApplicableDiscount(
-                    discount_id=str(second_child.id),
-                    name=second_child.name,
-                    discount_type='second_child',
-                    value=second_child.value,
-                    reason="הנחה אוטומטית לילד שני ומעלה במשפחה"
-                ))
+        elif second_child:
+            applicable_discounts.append(ApplicableDiscount(
+                discount_id=str(second_child.id),
+                name=second_child.name,
+                discount_type='second_child',
+                value=self._amount_off(second_child, base_price),
+                reason=self._with_percent(second_child, "הנחה אוטומטית לילד שני ומעלה במשפחה"),
+            ))
         
         # Calculate total discount (additive for fixed/percentage types)
         total_discount = sum(
@@ -200,7 +202,7 @@ class DiscountService:
     def check_second_child_discount(
         self,
         family_id: str,
-        child_id: str
+        child_id: Optional[str] = None
     ) -> Optional[Discount]:
         """
         Check if second child discount applies.
@@ -218,34 +220,34 @@ class DiscountService:
 
         Args:
             family_id: UUID of the family
-            child_id: UUID of the child being charged
+            child_id: UUID of the child being charged. None when the child does
+                not exist yet (the widget's lookup asks before creating them), in
+                which case every child of the family is a potential sibling.
 
         Returns:
             Discount object if applicable, None otherwise
         """
         from apps.enrollments.models import LessonEnrollment
         from apps.customers.models import Payment
-        from django.db.models import Q
-        from django.utils import timezone
-        from datetime import timedelta
 
-        sibling_on_team = LessonEnrollment.objects.filter(
+        siblings_on_team = LessonEnrollment.objects.filter(
             child__family_id=family_id,
             status='active',
             trial_lesson_date__isnull=True,
-        ).exclude(child_id=child_id).exists()
+        )
+        recent = timezone.now() - timedelta(hours=2)
+        siblings_paying = Payment.objects.filter(
+            family_id=family_id,
+            payment_type='recurring_subscription',
+        ).filter(
+            Q(status='completed')
+            | Q(status__in=('pending', 'processing'), created_at__gte=recent)
+        )
+        if child_id:
+            siblings_on_team = siblings_on_team.exclude(child_id=child_id)
+            siblings_paying = siblings_paying.exclude(child_id=child_id)
 
-        if not sibling_on_team:
-            recent = timezone.now() - timedelta(hours=2)
-            sibling_on_team = Payment.objects.filter(
-                family_id=family_id,
-                payment_type='recurring_subscription',
-            ).exclude(child_id=child_id).filter(
-                Q(status='completed')
-                | Q(status__in=('pending', 'processing'), created_at__gte=recent)
-            ).exists()
-
-        if not sibling_on_team:
+        if not (siblings_on_team.exists() or siblings_paying.exists()):
             return None
 
         return Discount.objects.filter(
@@ -265,56 +267,101 @@ class DiscountService:
         
         Logic:
         - Child must have status='active'
-        - Child must be enrolled in at least 2 lessons
-        - This lesson must NOT be the first lesson (by enrollment creation date)
-        - Only applies to 2nd lesson onwards
-        
+        - Re-billing a lesson the child already sits on (card link, replaced
+          card): this lesson must NOT be the first lesson (by enrollment
+          creation date) — the first lesson stays at full price.
+        - Buying the lesson (widget / CRM signup): its enrollment is only
+          created once the payment completes, so the lesson is additional when
+          the child already pays for another lesson, or a payment for another
+          lesson is in flight from the same checkout — the same way the lesson
+          price tiers count it. Without this the discount the CRM configures
+          never reached a signup, only a later card link, and the same lesson
+          was billed at two prices.
+
         Args:
             child_id: UUID of the child
             lesson_id: UUID of the lesson being paid for
-            
+
         Returns:
             Discount object if applicable, None otherwise
         """
         try:
             from apps.enrollments.models import LessonEnrollment
-            
+
             child = Child.objects.get(id=child_id)
-            
+
             # Check if child is active
             if child.status != 'active':
                 return None
-            
+
             # Get all active lesson enrollments for this child
             enrollments = LessonEnrollment.objects.filter(
                 child=child,
                 status='active'
             ).order_by('created_at')
-            
-            # Need at least 2 lessons
-            if enrollments.count() < 2:
-                return None
-            
-            # Find the position of this lesson (0-indexed)
-            lesson_position = None
-            for idx, enrollment in enumerate(enrollments):
-                if str(enrollment.lesson_id) == str(lesson_id):
-                    lesson_position = idx
-                    break
-            
-            # If this is NOT the first lesson (position > 0), apply discount
-            if lesson_position is not None and lesson_position > 0:
+
+            own = enrollments.filter(lesson_id=lesson_id).first()
+            if own is not None:
+                is_additional = enrollments.filter(created_at__lt=own.created_at).exists()
+            else:
+                is_additional = self._child_pays_for_another_lesson(child, lesson_id)
+
+            if is_additional:
                 return Discount.objects.filter(
                     is_active=True,
                     is_built_in=True,
                     value__gt=0,
                     name__contains=self.ADDITIONAL_LESSON_IDENTIFIER
                 ).first()
-            
+
             return None
-            
+
         except Child.DoesNotExist:
             return None
+
+    @staticmethod
+    def _child_pays_for_another_lesson(child: Child, lesson_id: str) -> bool:
+        """Another lesson the child is signed to (not a trial) or is paying for right now."""
+        from apps.enrollments.models import LessonEnrollment
+        from apps.customers.models import Payment
+
+        if LessonEnrollment.objects.filter(
+            child=child,
+            status__in=('active', 'payments_problem'),
+            trial_lesson_date__isnull=True,
+        ).exclude(lesson_id=lesson_id).exists():
+            return True
+        recent = timezone.now() - timedelta(hours=2)
+        return Payment.objects.filter(
+            child=child,
+            payment_type='recurring_subscription',
+            status__in=('pending', 'processing'),
+            created_at__gte=recent,
+        ).exclude(lesson_id=lesson_id).exclude(lesson_id__isnull=True).exists()
+
+    @staticmethod
+    def _fixed_price_lowers(discount: Discount, base_price: Decimal) -> bool:
+        """A "מחיר סופי קבוע" is a discount only while it is below the lesson's own price.
+
+        One global figure serves every course; on a course cheaper than it, applying
+        it would charge the parent more than the lesson costs — so it does not apply.
+        """
+        return discount.value < base_price
+
+    @staticmethod
+    def _amount_off(discount: Discount, base_price: Decimal) -> Decimal:
+        """Shekels a fixed or percentage discount takes off base_price (rounded to אגורות)."""
+        if discount.discount_type == 'percentage':
+            return (base_price * discount.value / Decimal('100')).quantize(
+                Decimal('0.01'), rounding=ROUND_HALF_UP
+            )
+        return discount.value
+
+    @staticmethod
+    def _with_percent(discount: Discount, reason: str) -> str:
+        if discount.discount_type == 'percentage':
+            return f"{reason} ({discount.value.normalize():f}%)"
+        return reason
     
     def get_discount_summary(self, discount_calculation: DiscountCalculation) -> dict:
         """

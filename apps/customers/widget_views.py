@@ -568,15 +568,22 @@ class WidgetLookupView(APIView):
                 'already_registered': bool(requested and requested.intersection(enrolled_ids)),
             })
 
-        # Family exists but this name is new → sibling
+        # Family exists but this name is new → sibling. The question promises the
+        # sibling discount, so it is asked only when that discount will be billed:
+        # one is configured, and a sibling already sits on a team (a family whose
+        # children only tried a lesson, or left, earns nothing — the parent used
+        # to answer "yes" and see no discount).
+        from apps.customers.discount_service import DiscountService
+
+        sibling_discount = DiscountService().check_second_child_discount(str(family.id))
         return Response({
             'family_status': 'existing',
             'child_status': 'new',
-            'discount_type': 'sibling',
+            'discount_type': 'sibling' if sibling_discount else None,
             'discount_question': (
                 'זיהינו שמשפחתכם כבר רשומה אצלנו. '
                 'האם מדובר באח/אחות של ילד אחר שמתאמן אצלנו?'
-            ),
+            ) if sibling_discount else None,
             'enrolled_lesson_ids': [],
             'already_registered': False,
         })
