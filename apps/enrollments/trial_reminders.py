@@ -141,26 +141,42 @@ def iter_upcoming_lesson_occurrences(
     *,
     count: int = 8,
     now: Optional[datetime] = None,
+    cancelled: Optional[set] = None,
+    blocked: Optional[frozenset] = None,
 ) -> list[date]:
-    """Next N calendar dates when this lesson occurs (excluding cancellations)."""
+    """
+    Next N calendar dates when this lesson occurs (excluding cancellations).
+
+    ``cancelled`` and ``blocked`` let a caller that is walking a whole catalogue
+    fetch both once and hand them in, instead of this running two queries per
+    lesson. Left out, they are looked up here as before — same answer either way,
+    which is the point: the widget's availability and the date picker must not be
+    able to drift apart.
+    """
     from apps.scheduling.models import LessonCancellation
 
     now = now or timezone.localtime()
     count = max(1, min(int(count or 8), 16))
     min_date = trial_lesson_min_date(now=now)
+    if blocked is None:
+        blocked = blocked_trial_lesson_dates()
 
     if not lesson.is_recurring:
         if lesson.lesson_date and lesson.lesson_date >= min_date:
-            if lesson.lesson_date in blocked_trial_lesson_dates():
+            if lesson.lesson_date in blocked:
+                return []
+            if cancelled is not None:
+                if lesson.lesson_date not in cancelled:
+                    return [lesson.lesson_date]
                 return []
             if not LessonCancellation.objects.filter(lesson=lesson, occurrence_date=lesson.lesson_date).exists():
                 return [lesson.lesson_date]
         return []
 
-    cancelled = set(
-        LessonCancellation.objects.filter(lesson=lesson).values_list('occurrence_date', flat=True)
-    )
-    blocked = blocked_trial_lesson_dates()
+    if cancelled is None:
+        cancelled = set(
+            LessonCancellation.objects.filter(lesson=lesson).values_list('occurrence_date', flat=True)
+        )
 
     results: list[date] = []
     cursor_now = now

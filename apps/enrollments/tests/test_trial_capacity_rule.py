@@ -115,25 +115,56 @@ class TrialCapacityRuleTest(TestCase):
         self.assertEqual(trial_seats_left(lesson=self.lesson, occurrence_date=_wednesday()), 2)
         self.assertEqual(trial_seats_left(lesson=self.lesson, occurrence_date=_wednesday(1)), 0)
 
-    def test_a_full_date_is_not_offered_by_the_widget_picker(self):
+    def test_a_full_date_is_shown_as_full_rather_than_dropped(self):
+        """
+        It used to be removed from the list, and that was the wrong kindness. A
+        shorter list cannot be told apart from "this class has no dates", so a
+        parent whose nearest Wednesday was taken was left thinking the class was
+        unavailable instead of picking the week after. It is listed, and marked.
+        """
         self._fill_payers(18)
         self._book_trials(2, on=_wednesday())
         res = self.client.get('/api/v1/customers/widget/lesson-occurrences/', {'lesson_id': str(self.lesson.id)})
         self.assertEqual(res.status_code, 200, res.content)
-        offered = {row['date'] for row in res.json()}
-        self.assertNotIn(_wednesday().isoformat(), offered)
-        self.assertIn(_wednesday(1).isoformat(), offered)
+        rows = {row['date']: row for row in res.json()}
+        self.assertIn(_wednesday().isoformat(), rows)
+        self.assertTrue(rows[_wednesday().isoformat()]['is_full'])
+        self.assertEqual(rows[_wednesday().isoformat()]['seats_left'], 0)
+        self.assertIn(_wednesday(1).isoformat(), rows)
+        self.assertFalse(rows[_wednesday(1).isoformat()]['is_full'])
 
-    def test_the_catalogue_says_when_a_trial_can_no_longer_be_booked(self):
-        self._fill_payers(18)
-        self._book_trials(2)
+    def _catalogue_row(self):
         res = self.client.get('/api/v1/customers/widget/courses/', {'branch_id': str(self.branch.id)})
         self.assertEqual(res.status_code, 200, res.content)
         rows = [c for c in res.json() if c['id'] == str(self.course.id)]
         self.assertTrue(rows, res.json())
-        lesson_row = next(l for l in rows[0]['lessons'] if l['id'] == str(self.lesson.id))
+        return next(l for l in rows[0]['lessons'] if l['id'] == str(self.lesson.id))
+
+    def test_one_full_date_does_not_close_the_class_to_trials(self):
+        """
+        This used to assert the opposite, because the catalogue summed every
+        trial booked ahead into one figure. Eighteen payers and two trials on the
+        nearest Wednesday filled that date — and closed the class on every date,
+        including the Wednesday after, which had two seats free the whole time.
+        """
+        self._fill_payers(18)
+        self._book_trials(2, on=_wednesday())
+        lesson_row = self._catalogue_row()
+        self.assertFalse(lesson_row['trial_is_full'])
+        self.assertEqual(lesson_row['trial_spots_left'], 2)
+        self.assertFalse(lesson_row['is_full'])
+        self.assertEqual(lesson_row['available_spots'], 2)
+
+    def test_the_catalogue_says_when_a_trial_can_no_longer_be_booked(self):
+        """Every offered date full — then, and only then, the class is closed."""
+        self._fill_payers(18)
+        res = self.client.get('/api/v1/customers/widget/lesson-occurrences/', {'lesson_id': str(self.lesson.id)})
+        for row in res.json():
+            self._book_trials(2, on=date.fromisoformat(row['date']))
+        lesson_row = self._catalogue_row()
         self.assertTrue(lesson_row['trial_is_full'])
         self.assertEqual(lesson_row['trial_spots_left'], 0)
+        # A paying place is a different question and is still open.
         self.assertFalse(lesson_row['is_full'])
         self.assertEqual(lesson_row['available_spots'], 2)
 
