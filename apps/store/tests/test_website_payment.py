@@ -1,6 +1,7 @@
 """B2C website checkout → CRM iframe initiate / webhook failure handling."""
 import json
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -364,16 +365,22 @@ class WebsitePickupPaymentTest(TestCase):
         self.assertEqual(cart[0]['size_stock_id'], str(self.pickup_row.id))
         self.assertFalse(cart[0]['line_delivery'])
 
-        PaymentService().complete_store_purchase_from_webhook(
-            invoice_id=str(invoice.id),
-            tranzila_response={
-                'is_successful': True,
-                'response_code': '000',
-                'error_message': '',
-                'transaction_id': 'txn-1',
-                'confirmation_code': 'ok',
-            },
-        )
+        # A hand-built success response: the completion asks Tranzila's ledger
+        # before it sells, so the answer is supplied here.
+        with patch(
+            'apps.payment_links.public_views.verify_transaction_with_tranzila',
+            return_value=('verified', None),
+        ):
+            PaymentService().complete_store_purchase_from_webhook(
+                invoice_id=str(invoice.id),
+                tranzila_response={
+                    'is_successful': True,
+                    'response_code': '000',
+                    'error_message': '',
+                    'transaction_id': 'txn-1',
+                    'confirmation_code': 'ok',
+                },
+            )
         self.delivery_row.refresh_from_db()
         self.pickup_row.refresh_from_db()
         self.assertEqual(self.delivery_row.stock_quantity, 5)
