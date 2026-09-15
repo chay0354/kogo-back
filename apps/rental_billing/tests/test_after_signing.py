@@ -276,20 +276,19 @@ class SignedPageNextStepTests(SigningTestCase):
         self.assertNotIn('card_url', page)
 
     @override_settings(RENTAL_BILLING_ENABLED=True)
-    def test_after_thirty_days_the_signed_link_still_closes(self):
+    def test_a_year_later_the_signed_link_still_leads_to_the_standing_order(self):
         self.sign()
-        # 31 days pass. Straight through the database: signed_at is frozen against
-        # any write but the signing itself, which is the point of the guard.
+        # A year passes. Straight through the database: signed_at is frozen
+        # against any write but the signing itself.
         with connection.cursor() as cursor:
             cursor.execute(
                 'UPDATE rental_contracts SET signed_at = %s WHERE id = %s',
-                [timezone.now() - signing.SIGNED_LINK_LIFETIME - timedelta(minutes=1), self.contract.pk],
+                [timezone.now() - timedelta(days=400), self.contract.pk],
             )
         page = self.page()
-        # The closed state as it was: no contract, and nowhere to be sent on to.
-        self.assertEqual(set(page), {'state', 'message', 'version'})
-        self.assertEqual(page['state'], 'expired')
-        self.assertEqual(page['message'], signing.SIGNED_CLOSED)
+        self.assertEqual(page['state'], 'signed')
+        self.assertEqual(page['next'], 'card')
+        self.assertTrue(page['card_url'])
 
     @override_settings(RENTAL_BILLING_ENABLED=True)
     def test_it_never_reaches_another_tenancys_order(self):

@@ -847,15 +847,16 @@ class OfficeViewAndCachingTests(SigningTestCase):
 class SignedLinkClosesTests(SigningTestCase):
     """A signed contract's link shows it for 30 days, then only says it was signed."""
 
-    def test_the_signed_link_closes_after_thirty_days(self):
+    def test_the_signed_link_stays_open_however_long_it_takes(self):
+        # Nothing about a link is closed by the clock: the tenant carries on to
+        # the standing order through this same link, and reads their signed copy
+        # through it later. Withdrawing the link is what closes it.
         self.send_link()
         self.assertEqual(self.sign().status_code, status.HTTP_200_OK)
         signed = self.fresh()
         self.assertEqual(signing.link_state(signed).state, signing.STATE_SIGNED)
 
-        later = signed.signed_at + signing.SIGNED_LINK_LIFETIME + timedelta(minutes=1)
-        closed = signing.link_state(signed, now=later)
-        self.assertEqual(closed.state, signing.STATE_EXPIRED)
-        self.assertEqual(closed.status_code, 410)
-        payload = signing.public_payload(signed, closed)
-        self.assertEqual(set(payload), {'state', 'message', 'version'})
+        later = signed.signed_at + timedelta(days=400)
+        still_open = signing.link_state(signed, now=later)
+        self.assertEqual(still_open.state, signing.STATE_SIGNED)
+        self.assertEqual(still_open.status_code, 409)
