@@ -16,7 +16,16 @@ class LessonListSerializer(serializers.ModelSerializer):
     city_id = serializers.UUIDField(source='course.branch.city.id', read_only=True, allow_null=True)
     city_name = serializers.CharField(source='course.branch.city.name', read_only=True, allow_null=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
-    room_capacity = serializers.IntegerField(source='course.capacity', read_only=True)
+    # Named for the room but really "how many fit in this lesson" — the smaller
+    # of the course cap and the room's. It used to send the course figure alone,
+    # so a class in a nineteen-seat studio was drawn with twenty places and never
+    # looked full. Same rule the widget and the trial gate use.
+    room_capacity = serializers.SerializerMethodField()
+
+    def get_room_capacity(self, obj):
+        from apps.enrollments.enrollment_counts import resolve_lesson_capacity
+
+        return resolve_lesson_capacity(obj)
     enrollment_count = serializers.SerializerMethodField()
     day_of_week_display = serializers.CharField(source='get_day_of_week_display', read_only=True)
     
@@ -54,7 +63,16 @@ class LessonDetailSerializer(serializers.ModelSerializer):
     city_id = serializers.UUIDField(source='course.branch.city.id', read_only=True, allow_null=True)
     city_name = serializers.CharField(source='course.branch.city.name', read_only=True, allow_null=True)
     room_name = serializers.CharField(source='room.name', read_only=True, allow_null=True)
-    room_capacity = serializers.IntegerField(source='course.capacity', read_only=True)
+    # Named for the room but really "how many fit in this lesson" — the smaller
+    # of the course cap and the room's. It used to send the course figure alone,
+    # so a class in a nineteen-seat studio was drawn with twenty places and never
+    # looked full. Same rule the widget and the trial gate use.
+    room_capacity = serializers.SerializerMethodField()
+
+    def get_room_capacity(self, obj):
+        from apps.enrollments.enrollment_counts import resolve_lesson_capacity
+
+        return resolve_lesson_capacity(obj)
     enrollments = serializers.SerializerMethodField()
     attendance = serializers.SerializerMethodField()
     cancellation_reason = serializers.SerializerMethodField()

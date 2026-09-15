@@ -110,11 +110,13 @@ class BranchViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             # Store app might not be installed or migrations not run
             products_count = 0
         
-        # Count active students (children with active lesson enrollments in this branch)
-        from apps.enrollments.models import LessonEnrollment
-        active_students = LessonEnrollment.objects.filter(
+        # Children who actually pay to attend something in this branch.
+        # An enrollment booked for a test lesson is 'active' as well, so counting
+        # on status alone reported every trial signup as a student of the branch
+        # — 167 where 132 pay, in one branch, on the day this was found.
+        from apps.enrollments.enrollment_counts import paying_enrollments
+        active_students = paying_enrollments().filter(
             lesson__course__branch=branch,
-            status='active'
         ).values('child').distinct().count()
         
         # Calculate monthly revenue from actual collected payments

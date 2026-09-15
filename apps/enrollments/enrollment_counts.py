@@ -12,6 +12,27 @@ from apps.enrollments.models import LessonEnrollment
 TRIAL_CHILD_STATUSES = ('trial_signed', 'trial_completed')
 
 
+def resolve_lesson_capacity(lesson) -> Optional[int]:
+    """
+    How many children this lesson can actually hold.
+
+    The smaller of what the course allows and what the room fits, because both
+    are real limits and the tighter one wins. A course capped at twenty in a
+    room that holds nineteen takes nineteen.
+
+    It lives here because three callers had each worked it out for themselves —
+    the widget, the trial-seat counter and the schedule — and the schedule's
+    version read the course figure alone, so twelve lessons in a nineteen-seat
+    studio were shown with twenty places.
+    """
+    caps = []
+    course = getattr(lesson, 'course', None)
+    for value in (getattr(course, 'capacity', None), getattr(getattr(lesson, 'room', None), 'capacity', None)):
+        if value:
+            caps.append(int(value))
+    return min(caps) if caps else None
+
+
 def paying_enrollments(qs: QuerySet | None = None) -> QuerySet:
     """
     Active enrollments that count as paying subscribers (revenue / salary tiers).
@@ -153,10 +174,7 @@ def trial_seats_left(*, lesson, occurrence_date: Optional[date] = None, capacity
     the lesson has no capacity set. Never negative.
     """
     if capacity is None:
-        course = getattr(lesson, 'course', None)
-        room = getattr(lesson, 'room', None)
-        caps = [int(c) for c in (getattr(course, 'capacity', None), getattr(room, 'capacity', None)) if c]
-        capacity = min(caps) if caps else None
+        capacity = resolve_lesson_capacity(lesson)
     if not capacity:
         return None
     taken = count_capacity_enrollments(

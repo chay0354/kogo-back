@@ -209,13 +209,21 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
         return count_paying_enrollments(lesson=obj)
     
     def get_total_students_count(self, obj):
-        """Get count of all enrollments regardless of status (for student count display)"""
+        """
+        The same paying headcount as `enrolled_count`.
+
+        It used to count every active row, trial signups included, under a name
+        that reads like a roster total. Nothing displayed it, which is the only
+        reason it never showed a wrong number on screen — but "students of this
+        lesson" has to mean one thing in this payload, or the next caller picks
+        the field whose name sounds right and shows a class of fourteen as
+        twenty. The roster including trials is a per-date question and is
+        answered properly by the schedule's own counters, which take the date.
+        """
         counts = self.context.get('total_enrollment_counts')
         if counts is not None:
             return counts.get(obj.id, 0)
-        if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
-            return sum(1 for e in obj.enrollments.all() if e.status == 'active')
-        return obj.enrollments.filter(status='active').count()
+        return self.get_enrolled_count(obj)
     
     def get_day_name(self, obj):
         """Convert day number to Hebrew name"""
