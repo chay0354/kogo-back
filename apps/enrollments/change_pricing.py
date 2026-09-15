@@ -53,7 +53,6 @@ from apps.enrollments.change_course import (
     replace_unit,
     sibling_unit_enrollments,
 )
-from apps.enrollments.enrollment_counts import paying_enrollments
 from apps.enrollments.models import LessonEnrollment, ScheduledUnitChange
 
 logger = logging.getLogger(__name__)
@@ -90,8 +89,13 @@ def unit_label(target_lessons: list[Lesson], target_bundle: LessonBundle | None)
 def _other_regular_lesson_ids(child, old_rows: list[LessonEnrollment]) -> set:
     """Paying lessons the child keeps regardless of this change."""
     unit_ids = {row.id for row in old_rows}
+    # Not `paying_enrollments`: it keeps only `active` rows, which dropped a
+    # lesson waiting on a card and priced the target as a first lesson. Same
+    # rule as `get_child_lesson_index_for_billing` at signup: a trial booking
+    # is not a signed lesson, a payment problem still is.
     return set(
-        paying_enrollments(LessonEnrollment.objects.filter(child=child, status__in=('active', 'payments_problem')))
+        LessonEnrollment.objects
+        .filter(child=child, status__in=('active', 'payments_problem'), trial_lesson_date__isnull=True)
         .exclude(id__in=unit_ids)
         .values_list('lesson_id', flat=True)
     )
@@ -99,17 +103,35 @@ def _other_regular_lesson_ids(child, old_rows: list[LessonEnrollment]) -> set:
 
 def target_base_price(child, old_rows: list[LessonEnrollment], target_lessons: list[Lesson], target_bundle: LessonBundle | None) -> Decimal:
     """The monthly list price of the target unit, priced as the child's Nth lesson."""
+    return target_pricing(child, old_rows, target_lessons, target_bundle)[0]
+
+
+def target_pricing(
+    child, old_rows: list[LessonEnrollment], target_lessons: list[Lesson], target_bundle: LessonBundle | None,
+) -> tuple[Decimal, str | None]:
+    """
+    The monthly list price of the target unit, and the lesson id to hand the
+    discount service — mirroring `resolve_billing_price` at signup.
+
+    The id is None when a per-lesson tier, a bundle or a track price already
+    lowered the figure (the "additional lesson" discount must not lower it
+    twice), and when the target would be the child's only lesson: the row being
+    moved still sits on the roster while we quote, and must not make its own
+    replacement look like a second lesson.
+    """
     if target_bundle is not None:
         course = target_bundle.course
         price = course.price if course.must_attend_all_lessons else target_bundle.combined_price
-        return money(price or 0)
+        return money(price or 0), None
     lesson = target_lessons[0]
     if len(target_lessons) > 1 and lesson.course.must_attend_all_lessons:
-        return money(lesson.course.price or 0)
+        return money(lesson.course.price or 0), None
     index = len(_other_regular_lesson_ids(child, old_rows)) + 1
     tier = get_lesson_price_for_course_index(lesson, index)
     regular = lesson.course.price or 0
-    return money(tier if tier and tier > 0 else regular)
+    used_tier = index >= 2 and tier is not None and money(tier) != money(regular)
+    lesson_id = None if (used_tier or index < 2) else str(lesson.id)
+    return money(tier if tier and tier > 0 else regular), lesson_id
 
 
 def _unit_prorate(target_lessons: list[Lesson], today: date) -> tuple[Decimal, int, int]:
@@ -188,17 +210,18 @@ def quote_unit_change(
         return quote
 
     current = money(recurring.amount)
-    new_base = target_base_price(child, old_rows, target_lessons, target_bundle)
-    # Family-level discounts (second child, early signup) are recomputed for
-    # the new price. The "additional lesson" discount is not asked for: it
-    # needs the child to already sit on the lesson, which is never true before
-    # a move — the same is true at signup, so the two paths agree.
+    new_base, discount_lesson_id = target_pricing(child, old_rows, target_lessons, target_bundle)
+    # Every discount is recomputed for the new price the way signup computes
+    # it: family-level ones (second child, early signup) always, and the
+    # "additional lesson" one when the target really is an additional lesson
+    # for this child and no per-lesson tier already lowered the figure. A child
+    # with two lessons who moves the second one keeps the second-lesson price.
     calc = PaymentService().discount_service.evaluate_discounts_for_payment(
         family_id=str(child.family_id),
         child_id=str(child.id),
         payment_date=today,
         base_price=new_base,
-        lesson_id=None,
+        lesson_id=discount_lesson_id,
     )
     new_amount = money(calc.final_price)
     factor, remaining, total = _unit_prorate(target_lessons, today)

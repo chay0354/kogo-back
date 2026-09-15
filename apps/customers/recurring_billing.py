@@ -6,11 +6,11 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.core.payment_service import JERUSALEM_TZ, subscription_tranzila_items
-from apps.core.tranzila_service import TranzilaService
+from apps.core.tranzila_service import TranzilaService, is_tranzila_uncertain_gateway_error
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 from apps.customers.recurring_amount import amount_for_charge, apply_due_pending_recurring_amounts
 
@@ -91,6 +91,24 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             summary['skipped'] += 1
             continue
 
+        # A claim from an earlier run that never resolved: Tranzila was called
+        # and no answer was written down (a timeout, the function killed after
+        # the charge). The card may already carry that month. Nothing charges
+        # behind it — the office settles it against the terminal first.
+        unresolved = (
+            TranzilaTransaction.objects
+            .filter(idempotency_key__startswith=f'recurring_{recurring.id}_', is_successful=False)
+            .order_by('request_timestamp')
+            .first()
+        )
+        if unresolved is not None:
+            summary['skipped'] += 1
+            summary['errors'].append(
+                f'{recurring.id}: חיוב קודם ללא תשובה מהסליקה ({unresolved.idempotency_key}) — '
+                'לבדוק בטרנזילה לפני שממשיכים'
+            )
+            continue
+
         initial = recurring.initial_payment
         lesson = initial.lesson if initial else None
         if not lesson:
@@ -122,6 +140,30 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
         lesson_part = (amount - store_part).quantize(Decimal('0.01'))
         if dry_run:
             summary['charged'] += 1
+            continue
+
+        # The month is claimed before Tranzila is touched, the way the card-update
+        # link does it. The key is unique per standing order and day: a run that
+        # dies after the gateway answered leaves this row behind, and the next
+        # run stops at it instead of charging the card a second time. A decline
+        # takes no money and drops the claim again. Two overlapping runs cannot
+        # both hold it — the second loses the insert and moves on.
+        try:
+            with transaction.atomic():
+                claim = TranzilaTransaction.objects.create(
+                    transaction_id='',
+                    confirmation_code='',
+                    transaction_type='recurring_charge',
+                    response_code='',
+                    response_message='',
+                    request_data={'recurring_id': str(recurring.id), 'billing_day': today.isoformat()},
+                    response_data={},
+                    idempotency_key=idempotency_key,
+                    is_successful=False,
+                )
+        except IntegrityError:
+            summary['skipped'] += 1
+            summary['errors'].append(f'{recurring.id}: ריצה מקבילה כבר תופסת את החיוב של היום')
             continue
 
         payment = Payment.objects.create(
@@ -170,7 +212,24 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             duplicate_guard_key=f'recurring-{recurring.id}-{today:%Y-%m}',
         )
 
+        if is_tranzila_uncertain_gateway_error(result):
+            # No answer came back — the card may already have been charged. This
+            # is not a decline: the standing order stays active, the child is not
+            # flagged, no "update your card" message goes out, and the claim above
+            # keeps every later run away until the office has checked the terminal.
+            payment.status = 'processing'
+            payment.failure_reason = result.get('error', 'no answer from the gateway')
+            payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
+            logger.error(
+                'Recurring charge uncertain for %s (payment %s) — leaving it claimed: %s',
+                recurring.id, payment.id, payment.failure_reason,
+            )
+            summary['failed'] += 1
+            summary['errors'].append(f'{recurring.id}: לא התקבלה תשובה מהסליקה — {payment.failure_reason}')
+            continue
+
         if not result.get('success'):
+            TranzilaTransaction.objects.filter(pk=claim.pk, is_successful=False).delete()
             payment.status = 'failed'
             payment.failure_reason = result.get('error', 'charge failed')
             payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
@@ -188,24 +247,29 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             summary['errors'].append(f'{recurring.id}: {payment.failure_reason}')
             continue
 
+        # The record of the charge is the smallest write there is: the payment,
+        # the claim turned into its transaction, and the dates that make the
+        # month paid. Everything else comes after it, so that a failure there
+        # cannot roll a charge that happened out of the database.
         try:
             with transaction.atomic():
                 payment.status = 'completed'
                 payment.payment_date = timezone.now()
                 payment.save(update_fields=['status', 'payment_date', 'updated_at'])
 
-                tranzila_txn = TranzilaTransaction.objects.create(
-                    transaction_id=result.get('transaction_id', ''),
-                    confirmation_code=result.get('confirmation_code', ''),
-                    transaction_type='recurring_charge',
-                    response_code=result.get('response_code', '000'),
-                    response_message='',
-                    request_data={},
-                    response_data=result.get('raw_response', {}),
-                    idempotency_key=idempotency_key,
-                    is_successful=True,
-                    response_timestamp=timezone.now(),
-                )
+                # The claim taken before the charge becomes its record; a second
+                # row would collide with its own unique key.
+                tranzila_txn = claim
+                tranzila_txn.transaction_id = result.get('transaction_id', '')
+                tranzila_txn.confirmation_code = result.get('confirmation_code', '')
+                tranzila_txn.response_code = result.get('response_code', '000')
+                tranzila_txn.response_data = result.get('raw_response', {})
+                tranzila_txn.is_successful = True
+                tranzila_txn.response_timestamp = timezone.now()
+                tranzila_txn.save(update_fields=[
+                    'transaction_id', 'confirmation_code', 'response_code', 'response_data',
+                    'is_successful', 'response_timestamp',
+                ])
                 payment.tranzila_transaction = tranzila_txn
                 payment.save(update_fields=['tranzila_transaction'])
 
@@ -213,10 +277,6 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 recurring.last_charge_date = today
                 recurring.next_billing_date = _next_month_first(charge_month)
                 recurring.save(update_fields=['last_charge_date', 'next_billing_date', 'updated_at'])
-
-                child.status = 'active'
-                child.paid_until_date = _paid_until(charge_month)
-                child.save(update_fields=['status', 'paid_until_date', 'updated_at'])
 
                 # Spend the override here and nowhere else. A run that charges and
                 # then fails to commit rolls this back with the rest, which leaves
@@ -226,12 +286,21 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                     override.applied_at = timezone.now()
                     override.save(update_fields=['applied_at', 'updated_at'])
         except Exception as exc:
-            logger.exception('Recurring charge post-processing failed for %s', recurring.id)
+            # The claim stays unresolved on purpose: the next run must not charge
+            # this card again until someone has looked at the terminal.
+            logger.exception('Recurring charge post-processing failed for %s (claim kept)', recurring.id)
             summary['failed'] += 1
             summary['errors'].append(f'{recurring.id}: {exc}')
             continue
 
         summary['charged'] += 1
+        try:
+            child.status = 'active'
+            child.paid_until_date = _paid_until(charge_month)
+            child.save(update_fields=['status', 'paid_until_date', 'updated_at'])
+        except Exception as exc:
+            logger.exception('Child status not updated after recurring charge %s (the charge is recorded)', recurring.id)
+            summary['errors'].append(f'{recurring.id}: child status not updated — {exc}')
         # The receipt is issued once the charge is on record, never inside the
         # block above. There, a receipt that failed (a wait on the series lock, a
         # dropped connection, the function's time limit) rolled the charge back

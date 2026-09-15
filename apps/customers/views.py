@@ -1410,6 +1410,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 include_monthly_amount=bool(
                     serializer.validated_data.get('include_monthly_amount', True)
                 ),
+                # The subscription dialog only shows a price on open; a real
+                # initiation (the widget's iframe flow) leaves the flag off.
+                quote_only=bool(request.data.get('quote_only', False)),
             )
             # Don't re-validate response with a serializer (Decimals/floats can trip it and cause 500).
             return Response(result, status=status.HTTP_201_CREATED)

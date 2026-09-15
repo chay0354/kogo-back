@@ -187,31 +187,38 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
     
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
-    def test_uses_lesson_price_override(self, mock_discount, mock_tranzila):
-        """Test uses lesson price override when set"""
+    def test_legacy_lesson_price_field_does_not_override_the_course_price(self, mock_discount, mock_tranzila):
+        """Monthly pricing is course-only (f8df6c4): a value left in the old
+        Lesson.price field must not change what a first lesson costs."""
         lesson = TestDataFactory.create_lesson(
-            price=Decimal('400.00')  # Override course price
+            price=Decimal('400.00')  # legacy field, no longer a billing input
         )
-        
-        mock_discount.return_value = DiscountCalculation(
-            applicable_discounts=[],
-            total_discount_amount=Decimal('0.00'),
-            final_price=Decimal('400.00'),
-            base_price=Decimal('400.00')
-        )
+        lesson.course.price = Decimal('350.00')
+        lesson.course.save()
+
+        def passthrough_discount(**kwargs):
+            return DiscountCalculation(
+                applicable_discounts=[],
+                total_discount_amount=Decimal('0.00'),
+                final_price=kwargs['base_price'],
+                base_price=kwargs['base_price'],
+            )
+
+        mock_discount.side_effect = passthrough_discount
         mock_tranzila.return_value = "https://tranzila.test/payment"
-        
+
         result = self.service.initiate_subscription_payment(
             child_id=str(self.child.id),
             lesson_id=str(lesson.id)
         )
-        
-        self.assertEqual(result['base_amount'], 400.00)
-        
-        # Verify discount service called with correct price
+
+        self.assertEqual(result['base_amount'], 350.00)
+        self.assertEqual(result['monthly_amount'], 350.00)
+
+        # The discount service is priced from the course, not the legacy field
         mock_discount.assert_called_once()
         call_args = mock_discount.call_args[1]
-        self.assertEqual(call_args['base_price'], Decimal('400.00'))
+        self.assertEqual(call_args['base_price'], Decimal('350.00'))
 
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')

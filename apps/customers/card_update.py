@@ -32,7 +32,7 @@ from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
 from apps.core.manychat_service import ManyChatService
 from apps.core.password_reset_email import crm_frontend_url
 from apps.core.payment_service import JERUSALEM_TZ, PaymentService, subscription_tranzila_items
-from apps.core.tranzila_service import TranzilaService, extract_card_token
+from apps.core.tranzila_service import TranzilaService, extract_card_token, is_tranzila_uncertain_gateway_error
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 
 logger = logging.getLogger(__name__)
@@ -741,6 +741,21 @@ def apply_new_card(
             description=f'עדכון כרטיס - {child.full_name}',
             duplicate_guard_key=guard_key,
         )
+
+    if is_tranzila_uncertain_gateway_error(result):
+        # The gateway swallowed its own timeout and answered `uncertain`: the
+        # card may already have been charged. This is the "answer that never
+        # came back" the claim exists for — it stays, the row stays open, and
+        # the parent is sent to the office instead of being allowed to pay twice.
+        if payment is not None:
+            payment.status = 'processing'
+            payment.failure_reason = result.get('error', 'no answer from the gateway')
+            payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
+        logger.error(
+            'Card-update charge uncertain for recurring %s (payment %s) — claim kept: %s',
+            recurring.id, getattr(payment, 'id', None), result.get('error'),
+        )
+        raise CardUpdateError('לא התקבלה תשובה מהסליקה. ייתכן שהכרטיס חויב — פנו למשרד לפני ניסיון נוסף.')
 
     if not result.get('success'):
         if payment is not None:
