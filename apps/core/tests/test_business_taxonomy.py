@@ -167,3 +167,160 @@ class IncomeAttributionTests(APITestCase):
         from apps.core.revenue_service import aggregate_income_by_business
         from datetime import date
         self.assertEqual(aggregate_income_by_business(date(2026, 1, 1), date(2026, 1, 31)), [])
+
+
+SEPTEMBER = (date(2026, 9, 1), date(2026, 9, 30))
+
+
+class TenantIncomeAttributionTests(APITestCase):
+    """
+    Phase 6: a studio tenant's rent is that tenant's business's income, not a
+    nameless line under their branch.
+
+    The amount is still the calendar's — price per session × the sessions in
+    the period — because that is where a rental's price lives and what its
+    contract quotes. What changed is which row it lands on.
+    """
+
+    def setUp(self):
+        from apps.rentals.tests.factories import make_branch, make_customer, make_rental, make_tenancy
+
+        self.make_rental = make_rental
+        self.make_tenancy = make_tenancy
+        self.make_customer = make_customer
+        self.branch = make_branch('פלורנטין')
+        self.merchants = Business.objects.get(name='סוחרים')
+        self.category = BusinessCategory.objects.create(business=self.merchants, name='סטודיו לריקוד')
+
+    def tenant(self, name='אור', *, tagged=True):
+        return self.make_customer(
+            'סטודיו', name, branch=self.branch,
+            business=self.merchants if tagged else None,
+            business_category=self.category if tagged else None,
+        )
+
+    def rent(self, tenancy=None, *, price='400', when=date(2026, 9, 10), renter_name='שוכר'):
+        return self.make_rental(
+            self.branch, price=price, event_type='one_time', event_date=when,
+            renter_name=renter_name, tenancy=tenancy,
+            contract=(date(2026, 9, 1), date(2027, 8, 31)),
+        )
+
+    def income(self):
+        from apps.core.revenue_service import aggregate_income_by_business
+
+        return {row['business_name']: row for row in aggregate_income_by_business(*SEPTEMBER)}
+
+    def test_a_tagged_tenants_rent_lands_under_their_business_and_category(self):
+        tenancy = self.make_tenancy(self.branch, tenant=self.tenant())
+        self.rent(tenancy)
+
+        by_name = self.income()
+
+        self.assertNotIn('סניפים', by_name)
+        self.assertEqual(by_name['סוחרים']['revenue'], 400.0)
+        self.assertEqual(
+            [(c['category_name'], c['revenue']) for c in by_name['סוחרים']['categories']],
+            [('סטודיו לריקוד', 400.0)],
+        )
+
+    def test_a_tenants_rent_and_their_invoice_are_one_line(self):
+        # The point of the change: a merchant who rents a studio and is also
+        # invoiced for something else reads as one business, not two sources.
+        tenant = self.tenant()
+        tenancy = self.make_tenancy(self.branch, tenant=tenant)
+        self.rent(tenancy)
+        FormalDocument.objects.create(
+            document_number='2026-0100', document_type='tax_invoice', client_type='business',
+            business_customer=tenant, business=self.merchants, business_category=self.category,
+            branch=self.branch, document_date=date(2026, 9, 20), subtotal=Decimal('100'),
+            vat_percent=Decimal('18'), vat_amount=Decimal('18'), total_amount=Decimal('118'),
+        )
+
+        row = self.income()['סוחרים']
+
+        self.assertEqual(row['revenue'], 518.0)
+        self.assertEqual(len(row['categories']), 1)
+        self.assertEqual(row['categories'][0]['revenue'], 518.0)
+
+    def test_a_rental_with_no_tenancy_is_still_the_branchs(self):
+        self.rent(None)
+        by_name = self.income()
+        self.assertEqual(by_name['סניפים']['revenue'], 400.0)
+        self.assertEqual(by_name['סניפים']['categories'][0]['category_name'], 'פלורנטין')
+        self.assertNotIn('סוחרים', by_name)
+
+    def test_a_tenant_who_was_never_tagged_is_still_the_branchs(self):
+        tenancy = self.make_tenancy(self.branch, tenant=self.tenant(tagged=False))
+        self.rent(tenancy)
+        by_name = self.income()
+        self.assertEqual(by_name['סניפים']['revenue'], 400.0)
+        self.assertNotIn('סוחרים', by_name)
+
+    def test_the_branch_panel_still_sees_every_rental_tagged_or_not(self):
+        # total / by_branch_id feed the dashboard's branch table, which knows
+        # nothing about documents. Phase 6 must not move a figure there.
+        from apps.scheduling.studio_rental_finance import aggregate_studio_rental_revenue
+
+        tenancy = self.make_tenancy(self.branch, tenant=self.tenant())
+        self.rent(tenancy)
+        self.rent(None, price='250', when=date(2026, 9, 11))
+
+        rental = aggregate_studio_rental_revenue(*SEPTEMBER)
+
+        self.assertEqual(rental['total'], Decimal('650'))
+        self.assertEqual(rental['by_branch_id'], {str(self.branch.id): Decimal('650')})
+        self.assertEqual(rental['by_month'], {'2026-09': Decimal('650')})
+        # Only the untagged half is left for the branch bucket.
+        self.assertEqual(rental['untagged_by_branch_id'], {str(self.branch.id): Decimal('250')})
+
+    def _receipt_for(self, tenancy, period, *, document_date, total=Decimal('472.00')):
+        """A charged month with its RT receipt, the way apps/rental_billing leaves one."""
+        from apps.rental_billing.models import TenantCharge, TenantStandingOrder
+
+        order = TenantStandingOrder.objects.create(
+            tenancy=tenancy, tenant=tenancy.tenant, branch=self.branch, business=self.merchants,
+            amount_before_vat=Decimal('400'), billing_day=10, start_date=date(2026, 9, 1),
+        )
+        doc = FormalDocument.objects.create(
+            document_number='RT-2026-0001', document_type='combined', client_type='business',
+            business_customer=tenancy.tenant, business=self.merchants, business_category=self.category,
+            branch=self.branch, document_date=document_date, subtotal=Decimal('400'),
+            vat_percent=Decimal('18'), vat_amount=Decimal('72'), total_amount=total,
+        )
+        TenantCharge.objects.create(
+            standing_order=order, tenancy=tenancy, period=period, amount_before_vat=40000,
+            vat_amount=7200, total=47200, business=self.merchants, business_category=self.category,
+            status=TenantCharge.STATUS_CHARGED, trigger=TenantCharge.TRIGGER_CRON, receipt=doc,
+        )
+        return doc
+
+    def test_a_month_with_its_rt_receipt_is_counted_once_by_the_receipt(self):
+        tenancy = self.make_tenancy(self.branch, tenant=self.tenant())
+        self.rent(tenancy)
+        self._receipt_for(tenancy, date(2026, 9, 1), document_date=date(2026, 9, 10))
+
+        row = self.income()['סוחרים']
+
+        # The receipt's 472, not 472 + the calendar's 400.
+        self.assertEqual(row['revenue'], 472.0)
+
+    def test_a_charged_month_whose_receipt_failed_is_not_lost(self):
+        from apps.rental_billing.models import TenantCharge
+
+        tenancy = self.make_tenancy(self.branch, tenant=self.tenant())
+        self.rent(tenancy)
+        self._receipt_for(tenancy, date(2026, 9, 1), document_date=date(2026, 9, 10))
+        TenantCharge.objects.update(receipt=None, receipt_error='הקבלה לא הופקה')
+        FormalDocument.objects.all().delete()
+
+        self.assertEqual(self.income()['סוחרים']['revenue'], 400.0)
+
+    def test_a_receipt_issued_outside_the_period_does_not_hide_the_month(self):
+        # The guard asks the one question the reports ask of a document: is its
+        # own date inside this period? A receipt issued in October is October's.
+        tenancy = self.make_tenancy(self.branch, tenant=self.tenant())
+        self.rent(tenancy)
+        self._receipt_for(tenancy, date(2026, 9, 1), document_date=date(2026, 10, 3))
+
+        self.assertEqual(self.income()['סוחרים']['revenue'], 400.0)

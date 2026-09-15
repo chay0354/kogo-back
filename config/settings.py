@@ -392,6 +392,15 @@ MANYCHAT_REGISTER_LESSON_FLOW_NS = config('MANYCHAT_REGISTER_LESSON_FLOW_NS', de
 # Both are silent until the automation exists in ManyChat — there is no free-text
 # fallback for a message the office has not written.
 MANYCHAT_REGISTER_MORNING_FLOW_NS = config('MANYCHAT_REGISTER_MORNING_FLOW_NS', default='')
+# The studio tenants (apps/rentals, apps/rental_billing). Create automations named
+# exactly "rental-contract" (the tenant's link to read and sign their contract) and
+# "rental-card-update" (the link to enter a card after a monthly charge was
+# declined), or set the flow ns here. Neither falls back to a courses automation:
+# those templates name a child and a course, and a merchant must not be sent one.
+# Without an automation the link goes as free text, which WhatsApp delivers only
+# inside the 24-hour window.
+MANYCHAT_RENTAL_CONTRACT_FLOW_NS = config('MANYCHAT_RENTAL_CONTRACT_FLOW_NS', default='')
+MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS = config('MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS', default='')
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))
 # Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
 TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))
