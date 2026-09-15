@@ -290,12 +290,21 @@ class WhatsAppViewSet(viewsets.ViewSet):
         """ManyChat automations available for manual broadcast."""
         svc = ManyChatService()
         if not svc.is_configured:
-            return Response({'automations': [], 'configured': False})
+            # No API key: nothing can be sent, but the office should still see
+            # which templates exist rather than a blank list it cannot explain.
+            return Response({
+                'configured': False,
+                'automations': svc.kind_automations(resolve_ns=False),
+                'manychat_ok': False,
+                'manychat_count': 0,
+            })
         try:
-            items = svc.list_available_automations()
+            payload = svc.automations_payload()
         except ManyChatError as exc:
             return Response({'error': str(exc), 'automations': []}, status=status.HTTP_502_BAD_GATEWAY)
-        return Response({'configured': True, 'automations': items})
+        # manychat_ok / manychat_count so the screen can say why the list is
+        # short, instead of leaving the office to guess.
+        return Response({'configured': True, **payload})
 
     @action(detail=False, methods=['post'], url_path='bulk-flow')
     def bulk_flow(self, request):
