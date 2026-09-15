@@ -195,16 +195,24 @@ def _resolve_lesson_capacity(lesson, course):
     return min(caps) if caps else resolve_lesson_capacity(lesson)
 
 
-def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None):
+def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, occurrence_context=None):
     """
     Two capacities, because two different things are being asked.
 
     `available_spots` is what a paying registration may take. `trial_spots_left`
     is what a trial may take, and it is smaller: trials already booked sit in
-    the same room. When it reaches zero the widget must stop offering a trial.
+    the same room.
+
+    The trial half is answered **per date**. A trial fills the room on one day,
+    so "can this class still take a trial" means "is there a day it can take one
+    on" — not "is the sum of every trial ahead smaller than the room". Under the
+    old reading a Wednesday class with fourteen paying children and six trials
+    booked for one date reported itself closed to trials on every date, and the
+    parent never reached the date picker to see that the following week was
+    empty. `trial_spots_left` is now the best date's remaining seats.
     """
     enrolled = enrolled_counts.get(lesson.id, 0)
-    trials = (trial_counts or {}).get(lesson.id, 0)
+    trials_by_date = (trial_counts or {}).get(lesson.id, {})
     capacity = _resolve_lesson_capacity(lesson, course)
     if capacity is None:
         return {
@@ -216,19 +224,35 @@ def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None):
             'trial_is_full': False,
         }
     available = max(0, capacity - enrolled)
-    trial_left = max(0, capacity - enrolled - trials)
+    cancelled, blocked = (occurrence_context or (None, None))
+    seats = trial_seats_by_date(
+        lesson, capacity, enrolled, trials_by_date,
+        cancelled=(cancelled or {}).get(lesson.id, set()) if cancelled is not None else None,
+        blocked=blocked,
+    )
+    best = max((left for _d, left in seats), default=0)
     return {
         'enrolled_count': enrolled,
         'capacity': capacity,
         'available_spots': available,
         'is_full': available <= 0,
-        'trial_spots_left': trial_left,
-        'trial_is_full': trial_left <= 0,
+        'trial_spots_left': best,
+        # No offered date has room. A lesson with no upcoming date at all (all
+        # cancelled or blocked) also has nowhere to put a trial.
+        'trial_is_full': best <= 0,
     }
 
 
 def _batch_upcoming_trial_counts(lesson_ids):
-    """lesson_id -> trials still ahead, the ones that will sit in the room."""
+    """
+    lesson_id -> {date: trials booked for that date}.
+
+    Per date, and that is the whole point. A trial occupies the room on one day;
+    six of them booked for the same Wednesday say nothing about the Wednesday
+    after. Summed into a single per-lesson figure they closed the lesson to
+    trials outright — which is how a class with fourteen paying children and six
+    trials on one date stopped offering a trial on any date at all.
+    """
     if not lesson_ids:
         return {}
     from django.db.models import Count
@@ -242,10 +266,54 @@ def _batch_upcoming_trial_counts(lesson_ids):
             trial_lesson_date__isnull=False,
             trial_lesson_date__gte=date.today(),
         )
-        .values('lesson_id')
+        .values('lesson_id', 'trial_lesson_date')
         .annotate(c=Count('id'))
     )
-    return {row['lesson_id']: row['c'] for row in rows}
+    counts: dict = {}
+    for row in rows:
+        counts.setdefault(row['lesson_id'], {})[row['trial_lesson_date']] = row['c']
+    return counts
+
+
+def _batch_occurrence_context(lesson_ids):
+    """Cancellations per lesson and the blocked dates, both fetched once."""
+    from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
+    from apps.scheduling.models import LessonCancellation
+
+    cancelled: dict = {}
+    if lesson_ids:
+        for lesson_id, occ in LessonCancellation.objects.filter(
+            lesson_id__in=lesson_ids,
+        ).values_list('lesson_id', 'occurrence_date'):
+            cancelled.setdefault(lesson_id, set()).add(occ)
+    return cancelled, blocked_trial_lesson_dates()
+
+
+def trial_seats_by_date(lesson, capacity, enrolled, trials_by_date, *, cancelled=None, blocked=None, count=None):
+    """
+    [(date, seats_left)] for the dates a trial could be booked on this lesson.
+
+    Seats left is the room minus the paying students minus the trials already
+    booked *for that date*. Never negative, and None capacity means no limit was
+    set, so every date is open.
+    """
+    from apps.enrollments.trial_reminders import (
+        TRIAL_LESSON_OCCURRENCE_LIMIT,
+        iter_upcoming_lesson_occurrences,
+    )
+
+    dates = iter_upcoming_lesson_occurrences(
+        lesson,
+        count=count or TRIAL_LESSON_OCCURRENCE_LIMIT,
+        cancelled=cancelled,
+        blocked=blocked,
+    )
+    if capacity is None:
+        return [(d, None) for d in dates]
+    return [
+        (d, max(0, capacity - enrolled - (trials_by_date or {}).get(d, 0)))
+        for d in dates
+    ]
 
 
 def _widget_instructor_photo_url(instructor):
@@ -258,7 +326,7 @@ def _widget_instructor_photo_url(instructor):
     return (instructor.photo_url or None) if instructor else None
 
 
-def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None, trials_default=None, trial_counts=None):
+def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None, trials_default=None, trial_counts=None, occurrence_context=None):
     from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
     if trials_default is None:
         trials_default = trials_open_by_default()
@@ -266,7 +334,7 @@ def _serialize_widget_bundle(bundle, *, enrolled_counts, course, photo_map=None,
     lesson_payloads = []
     bundle_full = False
     for bl in bundle_lessons:
-        cap = _lesson_widget_capacity(bl, course, enrolled_counts, trial_counts)
+        cap = _lesson_widget_capacity(bl, course, enrolled_counts, trial_counts, occurrence_context)
         if cap['is_full']:
             bundle_full = True
         lesson_payloads.append({
@@ -1595,6 +1663,9 @@ class WidgetCoursesView(APIView):
                 all_lesson_ids.extend(bl.id for bl in bundle.lessons.all())
         enrolled_counts = _batch_paying_enrollment_counts(all_lesson_ids)
         trial_counts = _batch_upcoming_trial_counts(all_lesson_ids)
+        # Cancellations and blocked dates once for the whole catalogue, rather
+        # than two queries per lesson inside the per-date availability walk.
+        occurrence_context = _batch_occurrence_context(all_lesson_ids)
         photo_map = pair_photo_map()
         from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
         trials_default = trials_open_by_default()
@@ -1604,7 +1675,7 @@ class WidgetCoursesView(APIView):
             lessons = []
             if not course.must_attend_all_lessons:
                 for lesson in course.lessons.all():
-                    cap = _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts)
+                    cap = _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts, occurrence_context)
                     lessons.append({
                         'id': str(lesson.id),
                         'trial_registration_open': trial_registration_open_for(lesson, default=trials_default),
@@ -1633,6 +1704,7 @@ class WidgetCoursesView(APIView):
                 _serialize_widget_bundle(
                     bundle, enrolled_counts=enrolled_counts, course=course, photo_map=photo_map,
                     trials_default=trials_default, trial_counts=trial_counts,
+                    occurrence_context=occurrence_context,
                 )
                 for bundle in _widget_bundles_for_course(course)
             ]
@@ -1761,6 +1833,18 @@ class WidgetLessonOccurrencesView(APIView):
 
     DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
 
+    def _row(self, lesson, occurrence, seats_left):
+        return {
+            'lesson_id': str(lesson.id),
+            'date': occurrence.isoformat(),
+            'label': occurrence.strftime('%d/%m/%Y'),
+            'day_name': self.DAY_NAMES[(occurrence.weekday() + 1) % 7],
+            'start_time': str(lesson.start_time)[:5],
+            'end_time': str(lesson.end_time)[:5],
+            'seats_left': seats_left,
+            'is_full': seats_left is not None and seats_left <= 0,
+        }
+
     def get(self, request):
         from apps.enrollments.enrollment_counts import trial_seats_left
         from apps.enrollments.trial_reminders import (
@@ -1785,21 +1869,13 @@ class WidgetLessonOccurrencesView(APIView):
                 return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
             lesson_map = {str(lesson.id): lesson for lesson in lessons}
             ordered_lessons = [lesson_map[lid] for lid in lesson_ids if lid in lesson_map]
-            occurrences = [
-                (lesson, occurrence)
-                for lesson, occurrence in iter_merged_upcoming_lesson_occurrences(ordered_lessons, count=count)
-                if (left := trial_seats_left(lesson=lesson, occurrence_date=occurrence)) is None or left > 0
-            ]
+            # Every date is returned, full ones marked rather than dropped. A
+            # silently shorter list reads as "there are no more dates"; a date
+            # shown as מלא tells the parent the truth — that day is taken, the
+            # one after it is not.
             return Response([
-                {
-                    'lesson_id': str(lesson.id),
-                    'date': occurrence.isoformat(),
-                    'label': occurrence.strftime('%d/%m/%Y'),
-                    'day_name': self.DAY_NAMES[(occurrence.weekday() + 1) % 7],
-                    'start_time': str(lesson.start_time)[:5],
-                    'end_time': str(lesson.end_time)[:5],
-                }
-                for lesson, occurrence in occurrences
+                self._row(lesson, occurrence, trial_seats_left(lesson=lesson, occurrence_date=occurrence))
+                for lesson, occurrence in iter_merged_upcoming_lesson_occurrences(ordered_lessons, count=count)
             ])
 
         if not lesson_id:
@@ -1810,22 +1886,13 @@ class WidgetLessonOccurrencesView(APIView):
         except Lesson.DoesNotExist:
             return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        # A date whose room is already full for a trial is not offered: the parent
-        # should not pick a day and only then be told it cannot be booked.
-        dates = [
-            d for d in iter_upcoming_lesson_occurrences(lesson, count=count)
-            if (left := trial_seats_left(lesson=lesson, occurrence_date=d)) is None or left > 0
-        ]
+        # A full date is shown as full, not hidden. Dropping it left the parent
+        # with a shorter list and no way to tell "that Wednesday is taken" from
+        # "this class has no dates" — and with every date full, from a class that
+        # does not run at all.
         return Response([
-            {
-                'lesson_id': str(lesson.id),
-                'date': d.isoformat(),
-                'label': d.strftime('%d/%m/%Y'),
-                'day_name': self.DAY_NAMES[(d.weekday() + 1) % 7],
-                'start_time': str(lesson.start_time)[:5],
-                'end_time': str(lesson.end_time)[:5],
-            }
-            for d in dates
+            self._row(lesson, d, trial_seats_left(lesson=lesson, occurrence_date=d))
+            for d in iter_upcoming_lesson_occurrences(lesson, count=count)
         ])
 
 
