@@ -32,7 +32,7 @@ from apps.customers.financial_models import Invoice, InvoiceChild, Discount
 from apps.customers.discount_service import DiscountService
 from apps.customers.trial_credit import credit_for_lesson, describe as describe_trial_credit
 from apps.core.card_validation import validate_card_details
-from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc
+from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc, is_tranzila_uncertain_gateway_error
 from apps.courses.models import Lesson, LessonBundle, LessonPriceOption
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import count_capacity_enrollments, paying_enrollments
@@ -94,9 +94,14 @@ def child_already_has_registration_fee(child, current_lesson=None) -> bool:
     if payments.filter(registration_fee__gt=0, status='completed').exists():
         return True
 
+    # Only a row from the same checkout counts as "in flight" (the same two
+    # hours `get_child_lesson_index_for_billing` uses). An abandoned pending
+    # row from a previous visit — a closed dialog, a cart never paid — used to
+    # hide the fee from every later signup of this child on another lesson.
     in_flight = payments.filter(
         registration_fee__gt=0,
         status__in=('pending', 'processing'),
+        created_at__gte=timezone.now() - timedelta(hours=2),
     )
     if current_lesson is not None:
         in_flight = in_flight.exclude(lesson=current_lesson)
@@ -201,7 +206,7 @@ def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
     lessons = members or ([lesson] if lesson is not None else [])
     if lesson is not None and lesson not in lessons:
         lessons = [lesson] + lessons
-    today = date.today()
+    today = timezone.now().astimezone(JERUSALEM_TZ).date()
     for member in lessons:
         enrollment, created = LessonEnrollment.objects.get_or_create(
             child=child,
@@ -560,12 +565,15 @@ def get_child_lesson_index_for_billing(child: Child, lesson: Lesson) -> int:
     The selected lesson is excluded so re-opening payment for the same lesson
     does not incorrectly move the child into the next price tier.
     """
+    # Not `paying_enrollments`: that helper keeps only `active` rows, which
+    # silently dropped the payments-problem half of BILLING_ENROLLMENT_STATUSES
+    # and priced a child's second lesson as a first one while the first was
+    # waiting on a card. A trial booking is still not a signed lesson.
     signed_lesson_ids = set(
-        paying_enrollments(
-            LessonEnrollment.objects.filter(
-                child=child,
-                status__in=BILLING_ENROLLMENT_STATUSES,
-            )
+        LessonEnrollment.objects.filter(
+            child=child,
+            status__in=BILLING_ENROLLMENT_STATUSES,
+            trial_lesson_date__isnull=True,
         ).exclude(lesson=lesson).values_list('lesson_id', flat=True)
     )
     recent_pending = timezone.now() - timedelta(hours=2)
@@ -774,6 +782,7 @@ class PaymentService:
         price_option_id: Optional[str] = None,
         include_registration_fee: bool = True,
         include_monthly_amount: bool = True,
+        quote_only: bool = False,
     ) -> Dict:
         """
         Initiate a recurring subscription payment for a child's lesson enrollment.
@@ -785,6 +794,12 @@ class PaymentService:
         4. Create Payment record (pending)
         5. Generate Tranzila payment URL
         6. Return payment details for frontend
+
+        With `quote_only` steps 4 and 5 are skipped: the same figures come back
+        with `payment_id` and `tranzila_url` set to None, and nothing is written.
+        The office's subscription dialog prices a lesson this way; the row it
+        used to leave behind on every open carried a registration fee that hid
+        the fee from the child's next signup and posed as a sibling signing up.
 
         Args:
             child_id: UUID of child
@@ -807,7 +822,10 @@ class PaymentService:
             Dict with payment_id, tranzila_url, amount, discounts_applied
         """
         if payment_date is None:
-            payment_date = date.today()
+            # The server clock is UTC; the discount ranges and the proration are
+            # Israeli calendar days. `date.today()` here made an early-signup
+            # range end three hours early and start three hours late.
+            payment_date = timezone.now().astimezone(JERUSALEM_TZ).date()
 
         try:
             child = Child.objects.select_related('family').get(id=child_id)
@@ -890,25 +908,27 @@ class PaymentService:
                 (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
             )
 
+        def first_charge_figures():
+            charge_fee = resolve_include_registration_fee(child, lesson, include_registration_fee)
+            fee = registration_fee_amount(lesson.course) if charge_fee else Decimal('0.00')
+            # A paid trial already settled for this branch comes off this
+            # first charge, once. It never touches the monthly amount.
+            credit = credit_for_lesson(child, lesson, first_charge=prorated_lesson + fee, today=today_local)
+            return fee, credit, prorated_lesson + fee - credit['amount']
+
         # Create Payment record (pending) with retry (SQLite can throw "database is locked" under concurrency).
+        # A quote computes the same figures under no lock and writes nothing.
         payment = None
         registration_fee = Decimal('0.00')
         prorated_final = prorated_lesson
-        max_attempts = 5
+        if quote_only:
+            registration_fee, trial_credit, prorated_final = first_charge_figures()
+        max_attempts = 0 if quote_only else 5
         for attempt in range(1, max_attempts + 1):
             try:
                 with transaction.atomic():
                     Child.objects.select_for_update().get(id=child.id)
-                    charge_fee = resolve_include_registration_fee(child, lesson, include_registration_fee)
-                    registration_fee = (
-                        registration_fee_amount(lesson.course) if charge_fee else Decimal('0.00')
-                    )
-                    # A paid trial already settled for this branch comes off this
-                    # first charge, once. It never touches the monthly amount.
-                    trial_credit = credit_for_lesson(
-                        child, lesson, first_charge=prorated_lesson + registration_fee, today=today_local,
-                    )
-                    prorated_final = prorated_lesson + registration_fee - trial_credit['amount']
+                    registration_fee, trial_credit, prorated_final = first_charge_figures()
                     payment = Payment.objects.create(
                         child=child,
                         family=child.family,
@@ -961,37 +981,39 @@ class PaymentService:
                     continue
                 raise
 
-        if payment is None:
+        if payment is None and not quote_only:
             raise RuntimeError("Failed to create payment record")
-        
-        # Generate Tranzila payment URL
-        tranzila_url= self.iframe_tranzila_service.create_recurring_payment_request(
-            amount=prorated_final,
-            currency='ILS',
-            description=payment.description,
-            customer_name=child.family.name,
-            customer_email=child.family.email,
-            customer_phone=child.family.phone,
-            success_url=success_url,
-            error_url=error_url,
-            callback_url=callback_url,
-            transaction_id=str(payment.id),
-            # The initial charge carries דמי רישום (plus the pro-rated month unless
-            # monthly billing starts later); the standing order itself must run at the
-            # plain monthly price from the next billing date.
-            recur_sum=full_monthly_amount,
-            recur_start_date=next_billing_date.isoformat(),
-        )
-        
-        log_payment_operation(
-            "SUBSCRIPTION_INITIATED",
-            child=child.full_name,
-            payment_id=payment.id,
-            amount=discount_calculation.final_price
-        )
-        
+
+        tranzila_url = None
+        if not quote_only:
+            # Generate Tranzila payment URL
+            tranzila_url = self.iframe_tranzila_service.create_recurring_payment_request(
+                amount=prorated_final,
+                currency='ILS',
+                description=payment.description,
+                customer_name=child.family.name,
+                customer_email=child.family.email,
+                customer_phone=child.family.phone,
+                success_url=success_url,
+                error_url=error_url,
+                callback_url=callback_url,
+                transaction_id=str(payment.id),
+                # The initial charge carries דמי רישום (plus the pro-rated month unless
+                # monthly billing starts later); the standing order itself must run at the
+                # plain monthly price from the next billing date.
+                recur_sum=full_monthly_amount,
+                recur_start_date=next_billing_date.isoformat(),
+            )
+
+            log_payment_operation(
+                "SUBSCRIPTION_INITIATED",
+                child=child.full_name,
+                payment_id=payment.id,
+                amount=discount_calculation.final_price
+            )
+
         return {
-            'payment_id': str(payment.id),
+            'payment_id': str(payment.id) if payment is not None else None,
             'tranzila_url': tranzila_url,
             'course_index': course_index,
             'bundle_id': str(bundle.id) if bundle else None,
@@ -1275,7 +1297,10 @@ class PaymentService:
             is created at the full widget price.
         """
         if payment_date is None:
-            payment_date = date.today()
+            # The server clock is UTC; the discount ranges and the proration are
+            # Israeli calendar days. `date.today()` here made an early-signup
+            # range end three hours early and start three hours late.
+            payment_date = timezone.now().astimezone(JERUSALEM_TZ).date()
 
         try:
             child = Child.objects.select_related('family').get(id=child_id)
@@ -1315,6 +1340,15 @@ class PaymentService:
             lessons_covered_by_selection(lesson=lesson, bundle=bundle),
         ):
             raise ValueError(ALREADY_REGISTERED_LESSON_ERROR)
+        # A charge for this lesson that never got its answer (a timeout after
+        # Tranzila may already have taken the money) is still open. The office
+        # settles it against the terminal before a second card request goes out.
+        if Payment.objects.filter(
+            child=child, lesson=lesson, payment_type='recurring_subscription', status='processing',
+        ).exists():
+            raise ValueError(
+                'חיוב קודם לילד על השיעור הזה עדיין בבדיקה מול הסליקה — יש לברר בטרנזילה ולסגור אותו לפני חיוב נוסף'
+            )
         if not include_monthly_amount:
             base_price = Decimal('0.00')
         elif not base_price:
@@ -1566,6 +1600,23 @@ class PaymentService:
                     {'name': d.name, 'type': d.discount_type, 'value': float(d.value), 'reason': d.reason}
                     for d in discount_calculation.applicable_discounts
                 ],
+            }
+        elif is_tranzila_uncertain_gateway_error(result):
+            # No answer came back: the card may already have been charged. Not a
+            # decline — the row stays `processing` (the guard above keeps a second
+            # charge for this lesson out) and the child is not flagged.
+            payment.status = 'processing'
+            payment.failure_reason = result.get('error', 'no answer from the gateway')
+            payment.save()
+            logger.error(
+                'Subscription charge uncertain for payment %s — leaving processing: %s',
+                payment.id, payment.failure_reason,
+            )
+            return {
+                'success': False,
+                'uncertain': True,
+                'payment_id': str(payment.id),
+                'error': 'לא התקבלה תשובה מהסליקה — ייתכן שהכרטיס חויב. אל תחייבו שוב לפני בדיקה בטרנזילה.',
             }
         else:
             payment.status = 'failed'
@@ -2394,7 +2445,18 @@ class PaymentService:
         
         # Use full amount if not specified
         refund_amount = amount if amount else payment.final_amount
-        
+        # A partial refund is bounded by the charge it refunds. Anything else
+        # (a typo of ₪2600 for ₪260, a negative figure) is stopped here, before
+        # the gateway — a token credit has nothing tying it to the original sum.
+        if refund_amount <= 0 or refund_amount > payment.final_amount:
+            logger.warning(
+                "Refund of %s refused for payment %s (charged %s)", refund_amount, payment_id, payment.final_amount,
+            )
+            return {
+                'success': False,
+                'error': f'סכום הזיכוי חייב להיות בין ₪0.01 ל־₪{payment.final_amount:.2f} (סכום החיוב)',
+            }
+
         log_payment_operation(
             "REFUND_PAYMENT",
             payment_id=payment_id,
