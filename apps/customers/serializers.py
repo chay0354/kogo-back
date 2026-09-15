@@ -605,29 +605,51 @@ class EarlySignupDiscountSerializer(serializers.ModelSerializer):
         
         return data
     
+    # The CRM list, the PATCH serializer choice and DiscountService all recognise an
+    # early-signup range by these words in its name. A name without them — the
+    # office's own title, or a name cleared on edit — made the range vanish from the
+    # list and from every price while the row still existed.
+    IDENTIFIER = 'רישום מוקדם'
+
+    @classmethod
+    def _generated_name(cls, start_date, end_date):
+        return f"הנחת {cls.IDENTIFIER} {start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
+
+    @classmethod
+    def _recognisable_name(cls, name, start_date, end_date):
+        name = (name or '').strip()
+        if not name:
+            return cls._generated_name(start_date, end_date)
+        if cls.IDENTIFIER not in name:
+            return f"{name} ({cls.IDENTIFIER})"
+        return name
+
     def create(self, validated_data):
         """Create early signup discount with proper defaults"""
         validated_data['discount_type'] = 'fixed'
         validated_data['applies_to'] = 'family'
         validated_data['promotion_type'] = 'temporary'
         validated_data['is_built_in'] = True
-        
-        # Auto-generate name if not provided
-        if not validated_data.get('name'):
-            start = validated_data['start_date'].strftime('%d/%m/%Y')
-            end = validated_data['end_date'].strftime('%d/%m/%Y')
-            validated_data['name'] = f"הנחת רישום מוקדם {start} - {end}"
-        
+
+        validated_data['name'] = self._recognisable_name(
+            validated_data.get('name'), validated_data['start_date'], validated_data['end_date'],
+        )
+
         return super().create(validated_data)
-    
+
     def update(self, instance, validated_data):
         """Update early signup discount"""
-        # Update name if dates changed and name wasn't explicitly set
-        if ('start_date' in validated_data or 'end_date' in validated_data) and 'name' not in validated_data:
-            start = validated_data.get('start_date', instance.start_date)
-            end = validated_data.get('end_date', instance.end_date)
-            validated_data['name'] = f"הנחת רישום מוקדם {start.strftime('%d/%m/%Y')} - {end.strftime('%d/%m/%Y')}"
-        
+        start = validated_data.get('start_date', instance.start_date)
+        end = validated_data.get('end_date', instance.end_date)
+        name = validated_data.get('name', instance.name)
+        # The dialog sends back the name it was shown, so a name the CRM generated
+        # for the old dates follows the new dates instead of going stale.
+        if instance.start_date and instance.end_date and (
+            (name or '').strip() == self._generated_name(instance.start_date, instance.end_date)
+        ):
+            name = ''
+        validated_data['name'] = self._recognisable_name(name, start, end)
+
         return super().update(instance, validated_data)
 
 
