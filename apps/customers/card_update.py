@@ -142,6 +142,10 @@ def build_card_update_token(
     return dumps(payload, salt=SIGN_SALT).replace(':', '~')
 
 
+def card_update_public_url_for_token(token: str) -> str:
+    return f'{crm_frontend_url()}/update-card/{token}'
+
+
 def card_update_public_url(
     recurring: RecurringPayment,
     *,
@@ -149,8 +153,174 @@ def card_update_public_url(
     amount: Decimal | None = None,
     months: Iterable[date] | None = None,
 ) -> str:
+    """
+    A URL and nothing else — it leaves no trace.
+
+    Anything the office actually hands to a parent should go through
+    `issue_card_update_link` instead, or it will not appear on the links screen
+    and nobody will be able to say what happened with it.
+    """
     token = build_card_update_token(recurring, mode=mode, amount=amount, months=months)
-    return f'{crm_frontend_url()}/update-card/{token}'
+    return card_update_public_url_for_token(token)
+
+
+# ---------------------------------------------------------------------------
+# The trace a link leaves — a log beside the token, never a gate in front of it
+# ---------------------------------------------------------------------------
+
+def canonical_card_update_token(token: str) -> str:
+    """
+    One spelling of a token, whichever spelling reached us.
+
+    The URL carries `~` where the signature has `:` (colons break Next.js and
+    WhatsApp path segments), and callers hand us either form. Everything stored
+    and every lookup goes through here, so both find the same row.
+    """
+    return (token or '').strip().replace(':', '~')
+
+
+def record_card_update_link(
+    recurring: RecurringPayment,
+    token: str,
+    *,
+    mode: str = '',
+    amount: Decimal | None = None,
+    months: Iterable[date] | None = None,
+    created_by=None,
+    channel: str = '',
+):
+    """
+    Write the log line for a link that was just made. Returns the row, or None.
+
+    Swallows everything. A link whose row could not be written is a link the
+    office cannot see afterwards; a link that was never handed to the parent
+    because the log table was unhappy is a parent who cannot pay.
+    """
+    from apps.payment_links.models import CardUpdateLink
+
+    try:
+        return CardUpdateLink.objects.create(
+            recurring_payment=recurring,
+            child_id=recurring.child_id,
+            mode=mode or '',
+            amount=Decimal(str(amount)).quantize(Decimal('0.01')) if amount is not None else None,
+            months=[month_key(row) for row in (months or [])],
+            channel=channel or '',
+            token=canonical_card_update_token(token),
+            created_by=created_by if getattr(created_by, 'is_authenticated', False) else None,
+        )
+    except Exception:
+        logger.exception('Card-update link not recorded for standing order %s (the link works)', recurring.id)
+        return None
+
+
+def issue_card_update_link(
+    recurring: RecurringPayment,
+    *,
+    mode: str = '',
+    amount: Decimal | None = None,
+    months: Iterable[date] | None = None,
+    created_by=None,
+    channel: str = '',
+) -> tuple[str, Any]:
+    """The URL to hand out, and the log row that remembers it was handed out."""
+    token = build_card_update_token(recurring, mode=mode, amount=amount, months=months)
+    record = record_card_update_link(
+        recurring, token, mode=mode, amount=amount, months=months,
+        created_by=created_by, channel=channel,
+    )
+    return card_update_public_url_for_token(token), record
+
+
+def note_card_update_sent(record, result: dict) -> None:
+    """What ManyChat answered for this link. Never raises."""
+    if record is None:
+        return
+    from apps.payment_links.models import CardUpdateLink
+
+    try:
+        CardUpdateLink.objects.filter(id=record.id).update(
+            sent_at=timezone.now() if result.get('sent') else None,
+            sent_result={
+                key: (value if isinstance(value, (str, int, bool)) or value is None else str(value))
+                for key, value in (result or {}).items()
+            },
+            updated_at=timezone.now(),
+        )
+    except Exception:
+        logger.exception('Card-update send result not recorded for link %s', record.id)
+
+
+def note_card_update_opened(token: str) -> None:
+    """
+    The parent reached the page. Never raises, and never refuses anything.
+
+    A token with no row here — every link signed before this table existed —
+    updates nothing at all and carries on.
+    """
+    from apps.payment_links.models import CardUpdateLink
+
+    try:
+        now = timezone.now()
+        rows = CardUpdateLink.objects.filter(token=canonical_card_update_token(token))
+        rows.filter(first_opened_at__isnull=True).update(first_opened_at=now, updated_at=now)
+        rows.filter(status=CardUpdateLink.STATUS_CREATED).update(
+            status=CardUpdateLink.STATUS_OPENED, updated_at=now,
+        )
+    except Exception:
+        logger.exception('Card-update link open not recorded')
+
+
+def note_card_update_finished(token: str, result: dict) -> None:
+    """
+    How the link ended, written *after* `apply_new_card` has returned.
+
+    This is the same order the receipt follows (`recurring_billing`, and the
+    charge in this module): the money is on record first, the bookkeeping after,
+    where nothing it does can roll a charge back or turn a paid card into an
+    error the parent tries again.
+    """
+    from apps.payment_links.models import CardUpdateLink
+
+    try:
+        now = timezone.now()
+        charged = bool((result or {}).get('charged'))
+        rows = CardUpdateLink.objects.filter(token=canonical_card_update_token(token))
+        rows.filter(first_opened_at__isnull=True).update(first_opened_at=now, updated_at=now)
+        if charged:
+            rows.update(
+                status=CardUpdateLink.STATUS_CHARGED,
+                completed_at=now,
+                charged_amount=Decimal(str((result or {}).get('amount') or '0')).quantize(Decimal('0.01')),
+                last_error='',
+                updated_at=now,
+            )
+        else:
+            # A card saved after a charge is a second submit of a link that
+            # already took money — the money is what this link did.
+            rows.exclude(status=CardUpdateLink.STATUS_CHARGED).update(
+                status=CardUpdateLink.STATUS_CARD_SAVED,
+                completed_at=now,
+                last_error='',
+                updated_at=now,
+            )
+    except Exception:
+        logger.exception('Card-update link outcome not recorded')
+
+
+def note_card_update_declined(token: str, error: str) -> None:
+    """A card the gateway refused. Never overwrites a link that already succeeded."""
+    from apps.payment_links.models import CardUpdateLink
+
+    try:
+        now = timezone.now()
+        rows = CardUpdateLink.objects.filter(token=canonical_card_update_token(token))
+        rows.filter(first_opened_at__isnull=True).update(first_opened_at=now, updated_at=now)
+        rows.exclude(
+            status__in=(CardUpdateLink.STATUS_CHARGED, CardUpdateLink.STATUS_CARD_SAVED),
+        ).update(status=CardUpdateLink.STATUS_DECLINED, last_error=(error or '')[:500], updated_at=now)
+    except Exception:
+        logger.exception('Card-update link decline not recorded')
 
 
 def format_sto_amount(amount) -> str:
@@ -325,7 +495,7 @@ def preview_payload(
     }
 
 
-def send_card_update_whatsapp(recurring: RecurringPayment) -> dict:
+def send_card_update_whatsapp(recurring: RecurringPayment, *, created_by=None) -> dict:
     lesson = _lesson_for(recurring)
     if not lesson or not recurring.child_id:
         return {'sent': False, 'reason': 'missing_lesson_or_child'}
@@ -335,19 +505,26 @@ def send_card_update_whatsapp(recurring: RecurringPayment) -> dict:
         return {'sent': False, 'reason': 'no_parent_phone'}
 
     token = build_card_update_token(recurring)
+    # Recorded before ManyChat is called, so a send that times out still leaves
+    # the office a link it can see and copy.
+    record = record_card_update_link(
+        recurring, token, created_by=created_by, channel='whatsapp',
+    )
     lookup_names = ctx.pop('lookup_names', None)
     extra_fields = {
-        'kogo_card_update_url': f'{crm_frontend_url()}/update-card/{token}',
+        'kogo_card_update_url': card_update_public_url_for_token(token),
         'kogo_card_update_token': token,
         'kogo_amount': format_sto_amount(recurring.amount),
         'kogo_support_phone': '050-9424755',
     }
-    return ManyChatService().notify_registration(
+    result = ManyChatService().notify_registration(
         kind=ManyChatService.REGISTRATION_KIND_CARD_UPDATE,
         lookup_names=lookup_names,
         extra_fields=extra_fields,
         **ctx,
     )
+    note_card_update_sent(record, result)
+    return result
 
 
 def send_card_update_reminders(*, today=None, limit: int = 80) -> dict:
@@ -418,6 +595,7 @@ def send_card_update_for_failed(
     *,
     ids: Iterable[str] | None = None,
     limit: int = 80,
+    created_by=None,
 ) -> dict:
     qs = (
         _recurring_qs()
@@ -433,7 +611,7 @@ def send_card_update_for_failed(
     failed = 0
     results: list[dict] = []
     for recurring in rows:
-        result = send_card_update_whatsapp(recurring)
+        result = send_card_update_whatsapp(recurring, created_by=created_by)
         row = {
             'id': str(recurring.id),
             'child_name': recurring.child.full_name if recurring.child_id else '',

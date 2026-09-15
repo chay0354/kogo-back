@@ -1879,7 +1879,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             MAX_RENEW_AMOUNT,
             MODE_RENEW,
             CardUpdateError,
-            card_update_public_url,
+            issue_card_update_link,
             month_key,
             month_label,
             months_label,
@@ -1930,7 +1930,13 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                     return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            url = card_update_public_url(recurring, mode=mode, amount=amount, months=months)
+            # `copy`: this endpoint makes the URL, it does not send it. We never
+            # learn when the office pasted it, so the row carries no sent time —
+            # better a blank than a timestamp that means nothing.
+            url, _record = issue_card_update_link(
+                recurring, mode=mode, amount=amount, months=months,
+                created_by=request.user, channel='copy',
+            )
         except CardUpdateError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1956,7 +1962,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                 {'error': 'לא ניתן לשלוח קישור להוראת קבע מבוטלת'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        result = send_card_update_whatsapp(recurring)
+        result = send_card_update_whatsapp(recurring, created_by=request.user)
         if not result.get('sent'):
             return Response(result, status=status.HTTP_502_BAD_GATEWAY)
         return Response(result)
@@ -1969,7 +1975,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         ids = request.data.get('ids') if isinstance(request.data, dict) else None
         if ids is not None and not isinstance(ids, list):
             return Response({'error': 'ids חייב להיות מערך'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(send_card_update_for_failed(ids=ids))
+        return Response(send_card_update_for_failed(ids=ids, created_by=request.user))
 
 
 def _cron_allowed_secrets():
