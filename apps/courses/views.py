@@ -154,9 +154,14 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
         course_type = self.get_object()
         course_ids = [c.id for c in course_type.courses.all()]
 
+        # Paying children, not active rows. A trial signup is an active
+        # enrollment too, so counting on status alone put every child booked for
+        # a test lesson into the course's headcount — and this number is shown
+        # next to the capacity, where six trials on one Wednesday turned a class
+        # of fourteen into "20/20, full".
         course_enrollment_counts = dict(
-            LessonEnrollment.objects.filter(
-                status='active', lesson__course_id__in=course_ids,
+            paying_enrollments(
+                LessonEnrollment.objects.filter(lesson__course_id__in=course_ids)
             )
             .values_list('lesson__course_id')
             .annotate(c=Count('child_id', distinct=True))

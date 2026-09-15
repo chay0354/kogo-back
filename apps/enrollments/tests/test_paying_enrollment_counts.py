@@ -66,11 +66,23 @@ class PayingEnrollmentCountTest(TestCase):
         self.assertEqual(count_paying_enrollments(lesson=self.lesson), 1)
 
     def test_course_details_enrolled_count_excludes_trial(self):
-        res = self.client.get(f'/api/v1/courses/types/{self.ct.id}/details/')
-        self.assertEqual(res.status_code, 200)
-        lessons = res.data['courses'][0]['lessons']
-        self.assertEqual(lessons[0]['enrolled_count'], 1)
-        self.assertEqual(lessons[0]['total_students_count'], 2)
+        """
+        Lessons moved off the course-type payload to their own endpoint, so this
+        asks the one that serves them now.
+
+        Both count fields answer the same question on purpose. This test used to
+        expect total_students_count to be 2 — the roster, trial included — and
+        that second meaning is what let a class of paying students be shown
+        against its capacity as full. The roster is a per-date question and is
+        still answered, with the date, by the schedule endpoint; see
+        test_schedule_occurrence_returns_roster_and_trial_counts below.
+        """
+        res = self.client.get(f'/api/v1/courses/courses/{self.course.id}/lessons_detail/')
+        self.assertEqual(res.status_code, 200, res.data)
+        lessons = res.data['lessons'] if isinstance(res.data, dict) else res.data
+        row = next(l for l in lessons if str(l['id']) == str(self.lesson.id))
+        self.assertEqual(row['enrolled_count'], 1)
+        self.assertEqual(row['total_students_count'], 1)
 
     def test_trial_child_counts_after_converting_to_active(self):
         self.trial_child.status = 'active'
@@ -125,8 +137,16 @@ class PayingEnrollmentCountTest(TestCase):
         self.assertEqual(row['active_student_count'], 1)
         self.assertEqual(row['trial_student_count'], 1)
 
-    def test_course_enrollment_count_same_across_lessons_includes_trial(self):
-        lesson_two = Lesson.objects.create(
+    def test_course_enrollment_count_excludes_trials(self):
+        """
+        The course headcount shown beside the capacity on the courses page.
+
+        It used to include trial signups — this test asserted it, and was named
+        for it. That is what produced the report this change came from: a
+        Wednesday class of fourteen paying children with six trials booked for
+        one day read as "20/20", full, with six places actually free.
+        """
+        Lesson.objects.create(
             course=self.course,
             room=self.room,
             day_of_week=2,
@@ -136,7 +156,4 @@ class PayingEnrollmentCountTest(TestCase):
         res = self.client.get(f'/api/v1/courses/types/{self.ct.id}/details/')
         self.assertEqual(res.status_code, 200)
         course = res.data['courses'][0]
-        self.assertEqual(course['course_enrollment_count'], 2)
-        counts_by_lesson = {l['id']: l['total_students_count'] for l in course['lessons']}
-        self.assertEqual(counts_by_lesson[str(self.lesson.id)], 2)
-        self.assertEqual(counts_by_lesson[str(lesson_two.id)], 0)
+        self.assertEqual(course['course_enrollment_count'], 1)
