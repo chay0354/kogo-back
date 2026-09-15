@@ -11,6 +11,7 @@ urlpatterns = [
     # empty prefix, so its detail route would otherwise swallow this path.
     path('my-branches/', views.MyBranchesView.as_view(), name='instructor-my-branches'),
     path('my-dashboard/', views.MyDashboardView.as_view(), name='instructor-my-dashboard'),
+    path('my-trials/', views.MyTrialsView.as_view(), name='instructor-my-trials'),
     path('login-diagnostics/', views.LoginDiagnosticsView.as_view(), name='instructor-login-diagnostics'),
     path('<uuid:instructor_id>/photo/', views.InstructorPhotoView.as_view(), name='instructor-photo'),
     path('<uuid:instructor_id>/pair-photos/', views.InstructorPairPhotoView.as_view(), name='instructor-pair-photos'),

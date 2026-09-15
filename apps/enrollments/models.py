@@ -73,6 +73,21 @@ class LessonEnrollment(models.Model):
     )
 
     trial_lesson_date = models.DateField(null=True, blank=True, verbose_name="תאריך שיעור ניסיון")
+    # The same date, kept for good.
+    #
+    # `trial_lesson_date` is cleared the moment a trial child subscribes to the
+    # lesson they trialled at, and it has to be: the register shows a
+    # trial-dated row on that one date only, so leaving it would drop the child
+    # off next week's list. The cost was that the conversions — the trials that
+    # worked, which is the number anyone actually wants — became the one group
+    # nobody could find afterwards. This column is written once, when the trial
+    # is booked, and never cleared, so the history survives the conversion
+    # without the roster ever seeing it.
+    trial_held_on = models.DateField(
+        null=True, blank=True, editable=False,
+        verbose_name="תאריך הניסיון (היסטורי)",
+        help_text="נשמר גם אחרי שהילד נרשם, כדי שאפשר יהיה לראות מי היה בניסיון ומתי.",
+    )
     # What became of the trial, read off the register when the date has passed.
     # It lives on the enrollment and not on Child.status: `trial_completed`
     # only ever meant "the date went by", and the child's status feeds capacity,
@@ -120,6 +135,16 @@ class LessonEnrollment(models.Model):
             models.Index(fields=['lesson', 'status']),
             models.Index(fields=['status']),
         ]
+
+    def save(self, *args, **kwargs):
+        # Written here rather than at each of the dozen places that book,
+        # reschedule or convert a trial: any one of them could be missed, and a
+        # trial whose date was never recorded is invisible for good.
+        if self.trial_lesson_date and not self.trial_held_on:
+            self.trial_held_on = self.trial_lesson_date
+            if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+                kwargs['update_fields'] = list(kwargs['update_fields']) + ['trial_held_on']
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.child.full_name} - {self.lesson}"
