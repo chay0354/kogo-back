@@ -22,15 +22,33 @@ def _email_configured() -> bool:
     return bool((getattr(settings, 'EMAIL_HOST', '') or '').strip())
 
 
+# The CRM's production host. Only ever used when CRM_FRONTEND_URL is not set
+# on a deployment that is not DEBUG — the state that once sent every parent a
+# http://localhost:3000 link (see apps/core/frontend_url.py). A wrong-but-real
+# host is a bug the office sees the moment it opens a link; localhost is one
+# the parent sees and the office never hears about.
+PRODUCTION_FRONTEND_URL = 'https://kogo-front.vercel.app'
+DEV_FRONTEND_URL = 'http://localhost:3000'
+
+
 def crm_frontend_url() -> str:
     explicit = (getattr(settings, 'CRM_FRONTEND_URL', '') or '').strip()
     if explicit:
         return explicit.rstrip('/')
     for origin in getattr(settings, 'CORS_ALLOWED_ORIGINS', []) or []:
         origin = (origin or '').strip()
-        if origin.startswith('http'):
+        if origin.startswith('http') and not is_dev_host(origin):
             return origin.rstrip('/')
-    return 'http://localhost:3000'
+    if getattr(settings, 'DEBUG', False):
+        return DEV_FRONTEND_URL
+    return PRODUCTION_FRONTEND_URL
+
+
+def is_dev_host(url: str) -> bool:
+    """localhost / 127.0.0.1 / 0.0.0.0 — a link only the developer's own machine can open."""
+    from urllib.parse import urlsplit
+    host = (urlsplit((url or '').strip()).hostname or '').lower()
+    return host in ('localhost', '127.0.0.1', '0.0.0.0', '::1')
 
 
 def build_password_reset_link(user: User) -> str:
