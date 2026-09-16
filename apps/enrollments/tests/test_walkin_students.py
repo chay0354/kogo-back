@@ -478,12 +478,46 @@ class WalkInDisappearsOnceRegisteredTests(WalkInTestBase):
         self.register(first='רותם', last='אחר', phone='0521234567')
         self.assertEqual([g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'])
 
-    def test_registering_on_another_lesson_leaves_this_ghost_standing(self):
-        """The boundary: resolution is per lesson, not per child."""
+    def test_registering_on_another_lesson_clears_this_ghost_too(self):
+        """
+        A ghost stands in for a child the system does not hold. Once the office
+        registers that child — any lesson — the stand-in is a second row for one
+        person, so it goes wherever it sits.
+        """
         other = self._lesson('חוג אחר', self.instructor)
         self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
         self.register(first='יאיר', last='ציון', phone='0544320500', lesson=other)
-        self.assertEqual(
-            [g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'],
-            'רפאים נפתר מול הרשמות של אותו שיעור בלבד',
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_a_trial_on_another_lesson_clears_it_as_well(self):
+        other = self._lesson('חוג שלישי', self.instructor)
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.register(first='יאיר', last='ציון', phone='0544320500', trial=True, lesson=other)
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_a_child_registered_with_no_lesson_at_all_still_clears_it(self):
+        """The office may open the card before choosing a course."""
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        family = Family.objects.create(name='ציון', phone='0544320500')
+        Child.objects.create(
+            family=family, first_name='יאיר', last_name='ציון',
+            birth_date=date(2015, 5, 5), gender='male', status='active',
         )
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_a_namesake_elsewhere_does_not_clear_it(self):
+        """
+        The asymmetry: a phone identifies a family, a name does not. Two children
+        can share a full name across branches, and clearing on that would delete
+        a real walk-in from a register somebody is standing in front of.
+        """
+        other = self._lesson('חוג רביעי', self.instructor)
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.register(first='יאיר', last='ציון', phone='0559999999', lesson=other)
+        self.assertEqual([g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'])
+
+    def test_another_ghost_elsewhere_is_not_a_registration(self):
+        other = self._lesson('חוג חמישי', self.instructor)
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500', lesson=other)
+        self.assertEqual([g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'])

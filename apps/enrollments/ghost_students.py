@@ -255,12 +255,46 @@ def delete_ghost_enrollment(*, enrollment) -> dict:
     return removed
 
 
+def _phones_of_registered_children(phones: set) -> set:
+    """
+    Which of these phone numbers already belong to a registered child, anywhere.
+
+    A ghost is a stand-in for a child the system does not hold. The moment the
+    office registers that child — for any lesson, as a trial or as a subscriber
+    — the stand-in is a second row for one person, and the register stops
+    describing the room. So the phone is matched across the whole system and not
+    only against this lesson's roster.
+
+    The name is not, and that asymmetry is deliberate: a phone identifies a
+    family, while two different children can share a full name across branches,
+    and a global name match would quietly delete one of them from a register.
+    """
+    from apps.customers.models import Child
+
+    if not phones:
+        return set()
+
+    candidates = (
+        Child.objects
+        .exclude(status=GHOST_STATUS)
+        .values_list('phone_number', 'family__phone')
+    )
+    found = set()
+    for own, family_phone in candidates.iterator(chunk_size=2000):
+        for raw in (own, family_phone):
+            digits = _normalise_phone(raw)
+            if digits and digits in phones:
+                found.add(digits)
+    return found
+
+
 def visible_ghost_enrollments(lesson, occurrence_date: date, real_enrollments: Iterable):
     """
     Ghosts that should still appear on this lesson's roster for this date.
 
     Drops anything past its window, and anything a real child has since
-    replaced — same phone anywhere, or same full name on this lesson.
+    replaced — the same phone anywhere in the system, or the same full name on
+    this lesson.
     """
     from apps.enrollments.models import LessonEnrollment
 
@@ -287,15 +321,34 @@ def visible_ghost_enrollments(lesson, occurrence_date: date, real_enrollments: I
             if digits:
                 real_phones.add(digits)
 
+    # Ghosts still inside their window; the rest are gone whatever else is true.
+    in_window = [
+        g for g in ghosts
+        if not (g.ghost_visible_until and occurrence_date > g.ghost_visible_until)
+    ]
+
+    # One query for the lot rather than one per ghost: a lesson rarely holds
+    # more than a couple, but the roster is read on every register open.
+    ghost_phones = set()
+    for ghost in in_window:
+        digits = _normalise_phone(
+            getattr(ghost.child, 'phone_number', '')
+            or getattr(getattr(ghost.child, 'family', None), 'phone', '')
+        )
+        if digits:
+            ghost_phones.add(digits)
+    registered_phones = real_phones | _phones_of_registered_children(ghost_phones - real_phones)
+
     visible = []
-    for ghost in ghosts:
-        if ghost.ghost_visible_until and occurrence_date > ghost.ghost_visible_until:
-            continue
+    for ghost in in_window:
         child = ghost.child
         if _normalise_name(f'{child.first_name} {child.last_name}') in real_names:
             continue
-        digits = _normalise_phone(getattr(child, 'phone_number', '') or getattr(child.family, 'phone', ''))
-        if digits and digits in real_phones:
+        digits = _normalise_phone(
+            getattr(child, 'phone_number', '')
+            or getattr(getattr(child, 'family', None), 'phone', '')
+        )
+        if digits and digits in registered_phones:
             continue
         visible.append(ghost)
     return visible
