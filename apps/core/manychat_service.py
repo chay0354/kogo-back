@@ -42,6 +42,51 @@ def _manychat_error_text(exc: ManyChatError) -> str:
     return ' '.join(p for p in parts if p).lower()
 
 
+def manychat_error_detail(exc: ManyChatError) -> str:
+    """
+    A failure an office worker can act on, instead of "Validation error".
+
+    ManyChat puts the useful half in ``details`` — the field it rejected, the
+    flow it could not find — and only the useless half in ``message``. The
+    broadcast screen used to show the message alone, which is how two failed
+    rows could say nothing more than "Validation error" and leave nobody, the
+    office or us, able to tell a bad phone number from a deleted automation.
+
+    Not to be confused with ``_manychat_error_text``, which lower-cases
+    everything for substring matching and is no good to read.
+    """
+    parts: list[str] = []
+    message = str(exc).strip()
+    if message:
+        parts.append(message)
+
+    payload = exc.payload
+    if isinstance(payload, dict):
+        details = payload.get('details')
+        if isinstance(details, dict):
+            # {"messages": {"last_name": ["required"]}} and friends.
+            for key, value in details.items():
+                if isinstance(value, dict):
+                    for field, problem in value.items():
+                        parts.append(f'{field}: {_flatten(problem)}')
+                else:
+                    parts.append(f'{key}: {_flatten(value)}')
+        elif details:
+            parts.append(str(details))
+
+    seen: set[str] = set()
+    unique = [p for p in parts if p and not (p in seen or seen.add(p))]
+    return ' · '.join(unique) or 'ManyChat API error'
+
+
+def _flatten(value) -> str:
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(v) for v in value)
+    if isinstance(value, dict):
+        return ', '.join(f'{k}={v}' for k, v in value.items())
+    return str(value)
+
+
 class ManyChatService:
     def __init__(self, api_key: str | None = None):
         self.api_key = (api_key or getattr(settings, 'MANYCHAT_KEY', '') or '').strip()
@@ -535,11 +580,10 @@ class ManyChatService:
         items: list[dict] = []
         seen_ns: set[str] = set()
 
-        try:
-            flows = self.get_flows()
-        except ManyChatError:
-            logger.warning('ManyChat getFlows failed while listing automations')
-            flows = []
+        # This list drives the office's manual broadcast picker.  Do not turn a
+        # ManyChat outage into an apparently valid empty list: the caller needs
+        # to tell the office that its live automations could not be loaded.
+        flows = self.get_flows()
 
         kind_by_ns = self._kind_by_flow_ns_from_flows(flows)
 
@@ -617,7 +661,18 @@ class ManyChatService:
             flow_ns = (automation_id or '').strip()
             if not flow_ns:
                 return {'sent': False, 'reason': 'missing_flow_ns'}
-            resolved = self.lookup_or_create(phone, name)
+            # The two calls are reported apart. They fail for opposite reasons —
+            # a number ManyChat will not accept, versus an automation that is
+            # gone or unpublished — and a broadcast that says only "Validation
+            # error" for both sends the office looking in the wrong place.
+            try:
+                resolved = self.lookup_or_create(phone, name)
+            except ManyChatError as exc:
+                raise ManyChatError(
+                    f'איש הקשר: {manychat_error_detail(exc)}',
+                    status_code=exc.status_code,
+                    payload=exc.payload,
+                ) from exc
             sid = resolved.get('subscriber_id')
             if not sid:
                 return {'sent': False, 'reason': 'no_subscriber_id'}
@@ -628,7 +683,14 @@ class ManyChatService:
                         time.sleep(FIELD_SETTLE_SECONDS)
                 except ManyChatError as exc:
                     logger.warning('ManyChat setCustomFields (broadcast) failed for %s: %s', sid, exc)
-            self.send_flow(sid, flow_ns)
+            try:
+                self.send_flow(sid, flow_ns)
+            except ManyChatError as exc:
+                raise ManyChatError(
+                    f'האוטומציה ({flow_ns}): {manychat_error_detail(exc)}',
+                    status_code=exc.status_code,
+                    payload=exc.payload,
+                ) from exc
             return {
                 'sent': True,
                 'method': 'flow',
@@ -675,7 +737,8 @@ class ManyChatService:
         try:
             resolved = self.lookup_or_create(phone, parent_name, lookup_names=lookup_names)
         except ManyChatError as exc:
-            return {'sent': False, 'reason': 'lookup_failed', 'error': str(exc)}
+            # The detail, not just ManyChat's headline — see manychat_error_detail.
+            return {'sent': False, 'reason': 'lookup_failed', 'error': f'איש הקשר: {manychat_error_detail(exc)}'}
 
         sid = resolved.get('subscriber_id')
         if not sid:
@@ -729,7 +792,7 @@ class ManyChatService:
                 return {
                     'sent': False,
                     'reason': 'send_flow_failed',
-                    'error': str(exc),
+                    'error': f'האוטומציה ({flow_ns}): {manychat_error_detail(exc)}',
                     'subscriber_id': sid,
                 }
         if flow_ns and not fields_ok:
@@ -760,7 +823,7 @@ class ManyChatService:
             return {
                 'sent': False,
                 'reason': 'send_text_failed',
-                'error': str(exc),
+                'error': f'שליחת הטקסט: {manychat_error_detail(exc)}',
                 'subscriber_id': sid,
             }
 

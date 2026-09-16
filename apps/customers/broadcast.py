@@ -12,7 +12,7 @@ import logging
 from typing import Iterable
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
-from apps.core.manychat_service import ManyChatError, ManyChatService
+from apps.core.manychat_service import ManyChatError, ManyChatService, manychat_error_detail
 from apps.core.scoping import ACTIVE_ENROLLMENT_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,10 @@ def broadcast_to_children(
                     branch_name=ctx.get('branch_name') or None,
                 )
         except ManyChatError as exc:
-            outcome = {'sent': False, 'error': str(exc)}
+            # str(exc) is ManyChat's headline and is often just "Validation
+            # error". What the office needs is the field it rejected, which
+            # lives in the payload.
+            outcome = {'sent': False, 'error': manychat_error_detail(exc)}
 
         if outcome.get('sent'):
             # Only a message that went out covers the sibling on the same phone;
