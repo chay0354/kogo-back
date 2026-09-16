@@ -283,7 +283,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         dates = iter_upcoming_lesson_occurrences(lesson, count=8)
         current = enrollment.trial_lesson_date if str(enrollment.lesson_id) == str(lesson.id) else None
         from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
-        if current and current not in dates and current not in blocked_trial_lesson_dates():
+        if current and current not in dates and current not in blocked_trial_lesson_dates(lesson):
             dates = [current] + dates
         day_name = day_names[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
         start_time = lesson.start_time.strftime('%H:%M') if lesson.start_time else ''
@@ -533,6 +533,73 @@ class TrialBlockedDateViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             'unmoved': sum(1 for row in rows if not row.get('moved')),
         }
         return response
+
+    @action(detail=False, methods=['get'], url_path='lessons-on-date')
+    def lessons_on_date(self, request):
+        """
+        The lessons that actually run on one date, for the picker that narrows a
+        block to some of them.
+
+        Only the lessons whose weekday matches, minus the ones already cancelled
+        on that occurrence — a block naming a lesson that does not meet that day
+        would be a row nobody can explain later. Every row carries its branch,
+        course and age band so the screen can filter without asking again.
+        """
+        from django.utils.dateparse import parse_date
+
+        from apps.courses.age_stages import age_key_for, stage_label
+        from apps.courses.models import Lesson
+        from apps.core.ledger_dimensions import parse_age_key
+        from apps.scheduling.models import LessonCancellation
+
+        day = parse_date(request.query_params.get('date') or '')
+        if not day:
+            return Response({'error': 'נדרש תאריך'}, status=status.HTTP_400_BAD_REQUEST)
+
+        lessons = (
+            Lesson.objects
+            .filter(course__is_active=True, is_recurring=True, day_of_week=(day.weekday() + 1) % 7)
+            .exclude(status='cancelled')
+            .select_related('course', 'course__branch', 'instructor')
+        )
+        branch_id = request.query_params.get('branch_id')
+        if branch_id and branch_id != 'all':
+            lessons = lessons.filter(course__branch_id=branch_id)
+        course_id = request.query_params.get('course_id')
+        if course_id and course_id != 'all':
+            lessons = lessons.filter(course_id=course_id)
+        age_key = (request.query_params.get('age_key') or '').strip()
+        if age_key and age_key != 'all':
+            low, high = parse_age_key(age_key)
+            lessons = lessons.filter(course__min_age=low, course__max_age=high)
+
+        cancelled = set(
+            LessonCancellation.objects
+            .filter(lesson__in=lessons, occurrence_date=day)
+            .values_list('lesson_id', flat=True)
+        )
+
+        days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+        rows = []
+        for lesson in lessons.order_by('start_time', 'course__name'):
+            if lesson.id in cancelled:
+                continue
+            course = lesson.course
+            branch = course.branch if course.branch_id else None
+            rows.append({
+                'id': str(lesson.id),
+                'course_id': str(course.id),
+                'course_name': course.name,
+                'branch_id': str(branch.id) if branch else None,
+                'branch_name': branch.name if branch else '',
+                'instructor_name': lesson.instructor.full_name if lesson.instructor_id else '',
+                'day_name': days[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '',
+                'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
+                'end_time': lesson.end_time.strftime('%H:%M') if lesson.end_time else '',
+                'age_key': age_key_for(course.min_age, course.max_age),
+                'age_label': stage_label(course.min_age, course.max_age),
+            })
+        return Response({'date': day.isoformat(), 'lessons': rows})
 
     @action(detail=False, methods=['get'], url_path='configured')
     def configured(self, request):

@@ -1,6 +1,7 @@
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.courses.models import Lesson
 from apps.enrollments.enrollment_counts import count_capacity_enrollments
 from apps.enrollments.trial_reminders import compute_trial_lesson_date, iter_upcoming_lesson_occurrences
 from apps.enrollments.models import Enrollment, LessonEnrollment, ChildAbsence, TrialBlockedDate
@@ -75,7 +76,7 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
             from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
             allowed = set(iter_upcoming_lesson_occurrences(lesson, count=8))
             current = self.instance.trial_lesson_date if self.instance else None
-            if current and current not in blocked_trial_lesson_dates():
+            if current and current not in blocked_trial_lesson_dates(lesson):
                 allowed.add(current)
             if trial_date not in allowed:
                 raise serializers.ValidationError({
@@ -167,7 +168,31 @@ class TrialBlockedDateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('לא ניתן לחסום תאריך שעבר')
         return value
 
+    # Which lessons the day is closed for. Empty means the whole day — which is
+    # what every row written before this existed meant, so an old client that
+    # sends nothing keeps blocking the whole day exactly as it did.
+    lesson_ids = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=Lesson.objects.all(), source='lessons',
+        required=False, allow_empty=True,
+    )
+    lessons_detail = serializers.SerializerMethodField()
+
+    def get_lessons_detail(self, obj):
+        """Enough to render the row without a second request per lesson."""
+        days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+        rows = []
+        for lesson in obj.lessons.all():
+            course = lesson.course if lesson.course_id else None
+            rows.append({
+                'id': str(lesson.id),
+                'course_name': course.name if course else '',
+                'branch_name': course.branch.name if course and course.branch_id else '',
+                'day_name': days[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '',
+                'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
+            })
+        return rows
+
     class Meta:
         model = TrialBlockedDate
-        fields = ['id', 'date', 'reason', 'created_by_name', 'created_at']
-        read_only_fields = ['id', 'created_by_name', 'created_at']
+        fields = ['id', 'date', 'reason', 'created_by_name', 'created_at', 'lesson_ids', 'lessons_detail']
+        read_only_fields = ['id', 'created_by_name', 'created_at', 'lessons_detail']

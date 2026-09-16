@@ -229,11 +229,11 @@ def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, 
             'trial_is_full': False,
         }
     available = max(0, capacity - enrolled)
-    cancelled, blocked = (occurrence_context or (None, None))
+    cancelled, blocked_by_lesson = (occurrence_context or (None, None))
     seats = trial_seats_by_date(
         lesson, capacity, enrolled, trials_by_date,
         cancelled=(cancelled or {}).get(lesson.id, set()) if cancelled is not None else None,
-        blocked=blocked,
+        blocked=(blocked_by_lesson or {}).get(lesson.id) if blocked_by_lesson is not None else None,
     )
     best = max((left for _d, left in seats), default=0)
     return {
@@ -281,8 +281,14 @@ def _batch_upcoming_trial_counts(lesson_ids):
 
 
 def _batch_occurrence_context(lesson_ids):
-    """Cancellations per lesson and the blocked dates, both fetched once."""
-    from apps.enrollments.trial_reminders import blocked_trial_lesson_dates
+    """
+    Cancellations and blocked dates for a whole catalogue, both per lesson.
+
+    Blocked dates are per lesson because a marked date may name lessons rather
+    than close the day. One shared set would either hide a date from lessons it
+    was never closed for, or offer one that is closed for this one.
+    """
+    from apps.enrollments.trial_reminders import blocked_trial_dates_by_lesson
     from apps.scheduling.models import LessonCancellation
 
     cancelled: dict = {}
@@ -291,7 +297,7 @@ def _batch_occurrence_context(lesson_ids):
             lesson_id__in=lesson_ids,
         ).values_list('lesson_id', 'occurrence_date'):
             cancelled.setdefault(lesson_id, set()).add(occ)
-    return cancelled, blocked_trial_lesson_dates()
+    return cancelled, blocked_trial_dates_by_lesson(lesson_ids)
 
 
 def trial_seats_by_date(lesson, capacity, enrolled, trials_by_date, *, cancelled=None, blocked=None, count=None):
