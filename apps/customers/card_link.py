@@ -49,7 +49,11 @@ from apps.payment_links.models import CardLink, money, new_card_link_token
 logger = logging.getLogger(__name__)
 
 SIGN_SALT = 'kogo-card-link'
-CARD_LINK_TOKEN_MAX_AGE = 14 * 24 * 3600
+# A card link does not expire. The office hands one out and it stays good until
+# it is used or cancelled — a parent who pays three weeks later should not be
+# told to ask for a new link. What still closes a link: `completed` (it is done),
+# `cancelled`, and regenerating it, which mints a new token and a new
+# `token_version` so the old one stops resolving.
 PROCESSING_STALE_AFTER = timedelta(seconds=90)
 MAX_ATTEMPTS = 6
 
@@ -92,9 +96,7 @@ def card_link_public_url(link: CardLink, base: str | None = None) -> str:
 def _resolve_legacy_signed_token(raw: str) -> CardLink | None:
     """Links sent before the short token existed carry a signed payload."""
     try:
-        payload = loads(raw.replace('~', ':'), salt=SIGN_SALT, max_age=CARD_LINK_TOKEN_MAX_AGE)
-    except SignatureExpired as exc:
-        raise CardLinkError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.') from exc
+        payload = loads(raw.replace('~', ':'), salt=SIGN_SALT)
     except BadSignature:
         return None
     link_id = str((payload or {}).get('id') or '').strip()
@@ -121,9 +123,6 @@ def resolve_card_link_token(token: str) -> tuple[CardLink, bool]:
     if link.status == CardLink.STATUS_CANCELLED:
         raise CardLinkError('הקישור כבר לא בתוקף. בקשו מהמשרד קישור חדש.')
 
-    age = timezone.now() - link.created_at
-    if age.total_seconds() > CARD_LINK_TOKEN_MAX_AGE:
-        raise CardLinkError('פג תוקף הקישור. בקשו מהמשרד קישור חדש.')
     return link, False
 
 

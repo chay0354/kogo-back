@@ -17,6 +17,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date, timedelta
 from django.conf import settings
+from apps.customers.child_status import CHILD_STATUS_RANK, STATUS_GHOST
 from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer, CronHeartbeat
 from apps.customers.phone_search import PhoneAwareSearchFilter
 # Store models moved to apps.store
@@ -121,6 +122,32 @@ class ParentViewSet(viewsets.ModelViewSet):
     filter_backends = [PhoneAwareSearchFilter, filters.OrderingFilter]
     search_fields = ['first_name', 'last_name', 'phone', 'email']
     ordering_fields = ['last_name', 'created_at']
+
+
+def _find_child_for_walk_in(*, first_name, last_name, phone):
+    """
+    The child a walk-in turns out to be, or None.
+
+    Deliberately strict, and the same rule apps/enrollments/ghost_students.py
+    already applies when it reads a roster: full name and phone must both
+    match. A first name alone collides constantly in a class of children.
+    """
+    from apps.enrollments.person_match import child_person_key, person_key
+
+    wanted = person_key(first_name=first_name, last_name=last_name, phone=phone)
+    if wanted is None:
+        return None
+    candidates = (
+        Child.objects
+        .exclude(status=STATUS_GHOST)
+        .select_related('family')
+        .filter(first_name__iexact=(first_name or '').strip())
+    )
+    matches = [child for child in candidates if child_person_key(child) == wanted]
+    if not matches:
+        return None
+    matches.sort(key=lambda child: CHILD_STATUS_RANK.get(child.status, 99))
+    return matches[0]
 
 
 class ChildViewSet(viewsets.ModelViewSet):
@@ -742,6 +769,31 @@ class ChildViewSet(viewsets.ModelViewSet):
                 }
             )
         
+        # A walk-in the system already knows is that child, not a new ghost
+        # beside them. Without this a child could sit in the list twice — once
+        # as נרשם לניסיון and once as רפאים — which is exactly what the ghost
+        # was meant to avoid. Same rule the attendance screen uses: full name
+        # plus phone, never a first name on its own.
+        existing = _find_child_for_walk_in(
+            first_name=first_name, last_name=family_name, phone=phone_number,
+        )
+        if existing is not None:
+            enrollment, _ = LessonEnrollment.objects.get_or_create(
+                lesson=lesson,
+                child=existing,
+                defaults={'status': 'active', 'start_date': date.today()},
+            )
+            return Response({
+                'child': ChildSerializer(existing).data,
+                'enrollment': {
+                    'id': str(enrollment.id),
+                    'lesson_id': str(lesson.id),
+                    'status': enrollment.status,
+                },
+                'matched_existing': True,
+                'message': f'{existing.full_name} כבר קיים במערכת — השיעור שויך אליו',
+            }, status=status.HTTP_200_OK)
+
         # Create ghost child with minimal data
         ghost_child = Child.objects.create(
             family=ghost_family,
@@ -1410,6 +1462,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 include_monthly_amount=bool(
                     serializer.validated_data.get('include_monthly_amount', True)
                 ),
+                # The subscription dialog only shows a price on open; a real
+                # initiation (the widget's iframe flow) leaves the flag off.
+                quote_only=bool(request.data.get('quote_only', False)),
             )
             # Don't re-validate response with a serializer (Decimals/floats can trip it and cause 500).
             return Response(result, status=status.HTTP_201_CREATED)
@@ -1876,7 +1931,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
             MAX_RENEW_AMOUNT,
             MODE_RENEW,
             CardUpdateError,
-            card_update_public_url,
+            issue_card_update_link,
             month_key,
             month_label,
             months_label,
@@ -1927,7 +1982,13 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                     return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            url = card_update_public_url(recurring, mode=mode, amount=amount, months=months)
+            # `copy`: this endpoint makes the URL, it does not send it. We never
+            # learn when the office pasted it, so the row carries no sent time —
+            # better a blank than a timestamp that means nothing.
+            url, _record = issue_card_update_link(
+                recurring, mode=mode, amount=amount, months=months,
+                created_by=request.user, channel='copy',
+            )
         except CardUpdateError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1953,7 +2014,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
                 {'error': 'לא ניתן לשלוח קישור להוראת קבע מבוטלת'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        result = send_card_update_whatsapp(recurring)
+        result = send_card_update_whatsapp(recurring, created_by=request.user)
         if not result.get('sent'):
             return Response(result, status=status.HTTP_502_BAD_GATEWAY)
         return Response(result)
@@ -1966,7 +2027,7 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
         ids = request.data.get('ids') if isinstance(request.data, dict) else None
         if ids is not None and not isinstance(ids, list):
             return Response({'error': 'ids חייב להיות מערך'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(send_card_update_for_failed(ids=ids))
+        return Response(send_card_update_for_failed(ids=ids, created_by=request.user))
 
 
 def _cron_allowed_secrets():

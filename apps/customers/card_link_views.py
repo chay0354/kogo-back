@@ -3,11 +3,20 @@ Card links for existing customers.
 
 CRM (managers): create, list per child, send on WhatsApp, cancel, regenerate.
 Public (the parent, no auth, throttled): preview by token, submit a card.
+
+The list has two forms, and they are not the same answer to the same question.
+With `child_id` it is the per-child list the send dialog reads, and its shape is
+frozen. Without it, it is the office's own screen — every card link and every
+standing-order card-update link, newest first, across all children, because the
+owner's question is "I sent a link, what happened with it?" and he does not know
+which child to open to find out.
 """
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -33,9 +42,15 @@ from apps.customers.card_link import (
     unit_label,
     unit_lessons,
 )
+from apps.customers.card_update import (
+    MODE_CARD_ONLY,
+    MODE_RENEW,
+    card_update_public_url_for_token,
+    month_label,
+)
 from apps.customers.models import Child
 from apps.core.payment_service import child_has_standing_order_for_lessons, lessons_covered_by_selection
-from apps.payment_links.models import CardLink, money
+from apps.payment_links.models import CardLink, CardUpdateLink, money
 
 
 def _serialize(link: CardLink, request=None) -> dict:
@@ -70,13 +85,235 @@ def _serialize(link: CardLink, request=None) -> dict:
     }
 
 
+KIND_CARD_UPDATE = 'card_update'
+KIND_LABELS = {
+    CardLink.KIND_STANDING_ORDER: 'הוראת קבע',
+    CardLink.KIND_ONE_TIME: 'חיוב חד-פעמי',
+    KIND_CARD_UPDATE: 'עדכון אשראי',
+}
+MODE_LABELS = {MODE_RENEW: 'חידוש הוראת קבע', MODE_CARD_ONLY: 'שינוי פרטי אשראי'}
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+
+def _int_param(raw, default: int, low: int, high: int) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def _person(child) -> tuple[str, str]:
+    """(child name, family name) — blank rather than missing."""
+    if child is None:
+        return '', ''
+    family = child.family if child.family_id else None
+    return child.full_name, (family.name if family else '')
+
+
+def _family_branch(child):
+    if child is None or not child.family_id:
+        return None
+    family = child.family
+    return family.branch if family.branch_id else None
+
+
+def _who(user) -> str:
+    if user is None:
+        return ''
+    return (user.get_full_name() or '').strip() or user.get_username()
+
+
+def _months_label_from_keys(keys) -> str:
+    rows = []
+    for key in keys or []:
+        try:
+            year, month = str(key).split('-')
+            rows.append(month_label(date(int(year), int(month), 1)))
+        except (ValueError, TypeError, IndexError):
+            continue
+    return ', '.join(rows)
+
+
+def _overview_card_link(link: CardLink, request=None) -> dict:
+    """One card link, said in the words the office reads the screen in."""
+    child_name, family_name = _person(link.child)
+    branch = link.branch if link.branch_id else _family_branch(link.child)
+    if link.kind == CardLink.KIND_STANDING_ORDER:
+        description = unit_label(lesson=link.lesson, bundle=link.bundle) if link.lesson_id else ''
+    else:
+        description = link.description
+    return {
+        'id': str(link.id),
+        'source': 'card_link',
+        'kind': link.kind,
+        'kind_label': KIND_LABELS.get(link.kind, link.kind),
+        'mode': '',
+        'mode_label': '',
+        'status': link.status,
+        'status_label': link.get_status_display(),
+        'child_id': str(link.child_id) if link.child_id else None,
+        'child_name': child_name,
+        'family_name': family_name,
+        # branch_id/business_id are what the CRM's shared filter bar narrows on;
+        # the names beside them are what the row shows.
+        'branch_id': str(branch.id) if branch else None,
+        'branch_name': branch.name if branch else '',
+        'business_id': str(link.business_id) if link.business_id else None,
+        'business_name': link.business.name if link.business_id else '',
+        # A standing-order link has no fixed sum: the first charge is priced when
+        # the parent pays, exactly as the widget prices it. Blank is the truth.
+        'amount': str(money(link.amount)) if link.amount is not None else None,
+        'description': description,
+        'created_at': link.created_at.isoformat(),
+        'created_by_name': _who(link.created_by),
+        'sent_at': link.sent_at.isoformat() if link.sent_at else None,
+        # A one-time charge is never sent on WhatsApp — the approved template
+        # speaks of a standing order — so the office copies it, and 'copy' is
+        # what happened to it even though we never learn when.
+        'sent_via': (
+            'whatsapp' if link.sent_at
+            else ('copy' if link.kind == CardLink.KIND_ONE_TIME else '')
+        ),
+        # A card link records no page view; the column stays blank for it rather
+        # than pretending a link nobody opened was never opened.
+        'first_opened_at': None,
+        'completed_at': link.completed_at.isoformat() if link.completed_at else None,
+        'last_error': link.last_error,
+        'public_url': (
+            card_link_public_url(link, public_frontend_url(request))
+            if link.status in (CardLink.STATUS_PENDING, CardLink.STATUS_PROCESSING) else ''
+        ),
+    }
+
+
+def _sto_branch(recurring):
+    """The branch a standing order bills for — its lesson's, as everywhere else."""
+    initial = recurring.initial_payment if recurring is not None and recurring.initial_payment_id else None
+    lesson = initial.lesson if initial is not None and initial.lesson_id else None
+    if lesson is not None and lesson.course_id and lesson.course.branch_id:
+        return lesson.course.branch
+    if initial is not None and initial.branch_id:
+        return initial.branch
+    return None
+
+
+def _overview_card_update(link: CardUpdateLink) -> dict:
+    child_name, family_name = _person(link.child)
+    branch = _sto_branch(link.recurring_payment) or _family_branch(link.child)
+    months = _months_label_from_keys(link.months)
+    mode_label = MODE_LABELS.get(link.mode, '')
+    description = f'{mode_label} · {months}' if mode_label and months else (mode_label or months)
+    # What the link actually took, when it took anything — a month collected by
+    # the monthly run in between is dropped, so the sum asked for and the sum
+    # charged are not always the same number.
+    amount = link.charged_amount if link.charged_amount is not None else link.amount
+    return {
+        'id': str(link.id),
+        'source': 'card_update',
+        'kind': KIND_CARD_UPDATE,
+        'kind_label': KIND_LABELS[KIND_CARD_UPDATE],
+        'mode': link.mode,
+        'mode_label': mode_label,
+        'status': link.status,
+        'status_label': link.get_status_display(),
+        'child_id': str(link.child_id) if link.child_id else None,
+        'child_name': child_name,
+        'family_name': family_name,
+        'branch_id': str(branch.id) if branch else None,
+        'branch_name': branch.name if branch else '',
+        # A standing order is always branch income; it carries no business tag.
+        'business_id': None,
+        'business_name': '',
+        'amount': str(money(amount)) if amount is not None else None,
+        'description': description,
+        'created_at': link.created_at.isoformat(),
+        'created_by_name': _who(link.created_by),
+        'sent_at': link.sent_at.isoformat() if link.sent_at else None,
+        'sent_via': link.channel,
+        'first_opened_at': link.first_opened_at.isoformat() if link.first_opened_at else None,
+        'completed_at': link.completed_at.isoformat() if link.completed_at else None,
+        'last_error': link.last_error,
+        'public_url': (
+            card_update_public_url_for_token(link.token)
+            if link.token and link.status not in (
+                CardUpdateLink.STATUS_CHARGED, CardUpdateLink.STATUS_CARD_SAVED,
+            ) else ''
+        ),
+    }
+
+
+def _overview(request) -> dict:
+    """
+    Every link the office sent, newest first, whatever table it lives in.
+
+    The two tables are paged together in Python rather than in SQL: a UNION over
+    two different shapes buys nothing at these volumes, and the merge keeps each
+    row serialized by the code that knows what it means.
+    """
+    limit = _int_param(request.query_params.get('limit'), DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE)
+    offset = _int_param(request.query_params.get('offset'), 0, 0, 100_000)
+    kind = (request.query_params.get('kind') or '').strip()
+    wanted_status = (request.query_params.get('status') or '').strip()
+    query = (request.query_params.get('q') or '').strip()
+
+    links = CardLink.objects.select_related(
+        'child', 'child__family', 'child__family__branch', 'branch', 'business',
+        'lesson', 'lesson__course', 'bundle', 'created_by',
+    ).prefetch_related('bundle__lessons')
+    updates = CardUpdateLink.objects.select_related(
+        'child', 'child__family', 'child__family__branch', 'created_by',
+        'recurring_payment', 'recurring_payment__initial_payment',
+        'recurring_payment__initial_payment__lesson',
+        'recurring_payment__initial_payment__lesson__course',
+        'recurring_payment__initial_payment__lesson__course__branch',
+        'recurring_payment__initial_payment__branch',
+    )
+
+    if kind in (CardLink.KIND_STANDING_ORDER, CardLink.KIND_ONE_TIME):
+        links, updates = links.filter(kind=kind), updates.none()
+    elif kind == KIND_CARD_UPDATE:
+        links = links.none()
+    if wanted_status:
+        # The two tables do not share a status vocabulary, and they should not:
+        # 'נדחה' on a card-update link and 'ממתין' on a card link are different
+        # facts. A status only one table knows simply empties the other.
+        links = links.filter(status=wanted_status)
+        updates = updates.filter(status=wanted_status)
+    if query:
+        matches = (
+            Q(child__first_name__icontains=query)
+            | Q(child__last_name__icontains=query)
+            | Q(child__family__name__icontains=query)
+            | Q(child__family__phone__icontains=query)
+        )
+        links = links.filter(matches)
+        updates = updates.filter(matches)
+
+    window = limit + offset
+    rows = [(row.created_at, _overview_card_link(row, request)) for row in links.order_by('-created_at')[:window]]
+    rows += [(row.created_at, _overview_card_update(row)) for row in updates.order_by('-created_at')[:window]]
+    rows.sort(key=lambda pair: pair[0], reverse=True)
+    page = [payload for _, payload in rows[offset:offset + limit]]
+    count = links.count() + updates.count()
+    return {
+        'results': page,
+        'count': count,
+        'limit': limit,
+        'offset': offset,
+        'has_more': offset + len(page) < count,
+    }
+
+
 class CardLinkListCreateView(APIView):
     permission_classes = [IsAuthenticated, IsManager]
 
     def get(self, request):
         child_id = request.query_params.get('child_id')
         if not child_id:
-            return Response({'error': 'נדרש child_id'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(_overview(request))
         links = (
             CardLink.objects.filter(child_id=child_id)
             .select_related('lesson', 'lesson__course', 'bundle')
@@ -201,10 +438,9 @@ class CardLinkActionView(APIView):
             link.status = CardLink.STATUS_PENDING
             link.rotate_token()
             link.last_error = ''
-            # The 14 days run from when a URL was issued, so a new URL starts them
-            # again — as it did when the signed token carried its own timestamp.
-            link.created_at = timezone.now()
-            link.save(update_fields=['status', 'token', 'token_version', 'last_error', 'created_at', 'updated_at'])
+            # `created_at` is left alone now that nothing expires: it is when the
+            # office first made this link, which is what the screen reports.
+            link.save(update_fields=['status', 'token', 'token_version', 'last_error', 'updated_at'])
             return Response(_serialize(link, request))
         return Response({'error': 'פעולה לא מוכרת'}, status=status.HTTP_400_BAD_REQUEST)
 

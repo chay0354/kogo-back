@@ -17,6 +17,7 @@ from apps.documents.tests.test_period_report import make_user
 from apps.documents.undocumented_income import (
     SOURCE_LESSONS,
     SOURCE_ORPHAN_CHARGES,
+    SOURCE_RENTALS,
     SOURCE_STORE,
     collect_undocumented,
 )
@@ -450,3 +451,155 @@ class StoreAttributionTests(TestCase):
 
         self.assertEqual([g.title for g in groups], ['סניפים · סניף צפון', 'מותג קוגומלו · מרצנדייס משלוחים'])
         self.assertEqual(groups[1].key, BusinessCategory.objects.get(name='מרצנדייס משלוחים').id)
+
+
+class StudioRentalIncomeTests(TestCase):
+    """
+    Phase 6: a month of studio rent with no receipt behind it is income the
+    period report has to state, under the tenant's own business.
+
+    The rent itself has always been on the calendar; what the report never had
+    was a line for it. Charging the tenants (apps/rental_billing) issues an RT
+    receipt per month, and that receipt is a document — so the moment one
+    exists for a month, this section drops it and the documents half counts it.
+    """
+
+    def setUp(self):
+        from apps.core.models import Business, BusinessCategory
+        from apps.rentals.tests.factories import make_branch, make_customer, make_rental, make_tenancy
+
+        self.make_rental = make_rental
+        self.make_tenancy = make_tenancy
+        self.make_customer = make_customer
+        self.north = make_branch('סניף צפון')
+        self.south = make_branch('סניף דרום')
+        self.merchants = Business.objects.get(name='סוחרים')
+        self.dance = BusinessCategory.objects.create(business=self.merchants, name='סטודיו לריקוד')
+        self.manager = make_user('manager-rentals-undoc@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = type(self.manager).objects.get(pk=self.manager.pk)
+
+    def tenant(self, last='אור', *, branch=None, tagged=True):
+        return self.make_customer(
+            'סטודיו', last, branch=branch or self.north,
+            business=self.merchants if tagged else None,
+            business_category=self.dance if tagged else None,
+        )
+
+    def tenancy(self, *, branch=None, tagged=True, last='אור'):
+        branch = branch or self.north
+        return self.make_tenancy(branch, tenant=self.tenant(last, branch=branch, tagged=tagged))
+
+    def rent(self, tenancy, *, branch=None, price='400', day=10, renter_name='שוכר'):
+        return self.make_rental(
+            branch or self.north, price=price, event_type='one_time', event_date=date(2026, 8, day),
+            renter_name=renter_name, tenancy=tenancy, contract=(date(2026, 8, 1), date(2027, 7, 31)),
+        )
+
+    def test_a_month_of_rent_is_one_row_per_tenant_with_its_sessions(self):
+        tenancy = self.tenancy()
+        self.rent(tenancy, day=5)
+        self.rent(tenancy, day=12)
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        section = next(s for s in result.sections if s.source == SOURCE_RENTALS)
+        self.assertEqual(len(section.rows), 1)
+        row = section.rows[0]
+        self.assertEqual(row.customer, 'סטודיו אור')
+        self.assertEqual(row.amount, Decimal('800'))
+        self.assertEqual(row.reference, '08/2026')
+        self.assertEqual(row.row_date, date(2026, 8, 5))
+        self.assertIn('2 מפגשים', row.detail)
+
+    def test_it_files_under_the_tenants_business_and_category(self):
+        self.rent(self.tenancy())
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('business_unit')
+        self.assertEqual([g.title for g in groups], ['סוחרים'])
+        self.assertEqual(groups[0].total, Decimal('400'))
+
+        by_cat = collect_undocumented(self.manager, *AUG).grouped('business_category')
+        self.assertEqual([g.title for g in by_cat], ['סוחרים · סטודיו לריקוד'])
+
+    def test_an_untagged_rental_stays_its_branchs_where_it_always_was(self):
+        self.rent(self.tenancy(tagged=False))
+        self.rent(None, price='250', day=6)
+
+        groups = collect_undocumented(self.manager, *AUG).grouped('business_unit')
+
+        self.assertEqual([g.title for g in groups], ['סניפים'])
+        self.assertEqual(groups[0].total, Decimal('650'))
+
+    def test_a_rental_no_agreement_holds_is_named_by_the_event(self):
+        self.rent(None, renter_name='להקת מחול')
+        row = collect_undocumented(self.manager, *AUG).sections[0].rows[0]
+        self.assertEqual(row.customer, 'להקת מחול')
+
+    def test_by_branch_it_reads_as_the_branch_whose_studio_was_rented(self):
+        self.rent(self.tenancy())
+        groups = collect_undocumented(self.manager, *AUG).grouped('branch')
+        self.assertEqual([g.title for g in groups], ['סניף צפון'])
+
+    def test_a_partner_sees_only_their_own_branches_rentals(self):
+        self.rent(self.tenancy(), day=5)
+        self.rent(self.tenancy(branch=self.south, last='דרום'), branch=self.south, price='999', day=6)
+        partner = make_user('partner-rentals-undoc@test', role=UserProfile.ROLE_PARTNER)
+        partner.profile.assigned_branches.set([self.north])
+        partner = type(partner).objects.get(pk=partner.pk)
+
+        result = collect_undocumented(partner, *AUG)
+
+        self.assertEqual(result.total, Decimal('400'))
+
+    def test_an_inactive_or_free_rental_is_not_income(self):
+        self.make_rental(
+            self.north, price='0', event_type='one_time', event_date=date(2026, 8, 5), tenancy=self.tenancy(),
+        )
+        self.make_rental(
+            self.north, price='300', event_type='one_time', event_date=date(2026, 8, 6),
+            is_active=False, tenancy=self.tenancy(last='שני'),
+        )
+        self.assertTrue(collect_undocumented(self.manager, *AUG).is_empty)
+
+    def test_a_month_whose_receipt_is_in_the_period_is_left_to_the_document(self):
+        from apps.rental_billing.models import TenantCharge, TenantStandingOrder
+
+        tenancy = self.tenancy()
+        self.rent(tenancy)
+        receipt = FormalDocument.objects.create(
+            document_number='RT-2026-0001', document_type='combined', client_type='business',
+            business_customer=tenancy.tenant, business=self.merchants, business_category=self.dance,
+            branch=self.north, document_date=date(2026, 8, 10), subtotal=Decimal('400'),
+            vat_percent=Decimal('18'), vat_amount=Decimal('72'), total_amount=Decimal('472'),
+        )
+        order = TenantStandingOrder.objects.create(
+            tenancy=tenancy, tenant=tenancy.tenant, branch=self.north, business=self.merchants,
+            amount_before_vat=Decimal('400'), billing_day=10, start_date=date(2026, 8, 1),
+        )
+        TenantCharge.objects.create(
+            standing_order=order, tenancy=tenancy, period=date(2026, 8, 1), amount_before_vat=40000,
+            vat_amount=7200, total=47200, business=self.merchants, status=TenantCharge.STATUS_CHARGED,
+            trigger=TenantCharge.TRIGGER_CRON, receipt=receipt,
+        )
+
+        self.assertTrue(collect_undocumented(self.manager, *AUG).is_empty)
+
+    def test_it_never_merges_into_a_childs_receipt_of_the_same_sum(self):
+        # merge_against_documents matches on child and sum; a rental has no
+        # child, so a family receipt for ₪400 must not swallow a tenant's rent.
+        fam = Family.objects.create(name='משפחה צפון', branch=self.north)
+        kid = Child.objects.create(
+            family=fam, first_name='נועה', last_name='כהן',
+            birth_date=date(2015, 5, 5), gender='female', status='active',
+        )
+        FormalDocument.objects.create(
+            document_number='2026-0100', document_type='receipt', client_type='existing', child=kid,
+            branch=self.north, document_date=date(2026, 8, 10),
+            subtotal=Decimal('400'), total_amount=Decimal('400'),
+        )
+        self.rent(self.tenancy())
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.total, Decimal('400'))
+        self.assertEqual(result.merged_count, 0)

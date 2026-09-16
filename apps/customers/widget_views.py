@@ -1515,8 +1515,10 @@ class WidgetChargeView(APIView):
                         child.subscription_start_date = deferred_start
                         child.paid_until_date = None
                     else:
-                        child.subscription_start_date = date.today()
-                        _, _, _, next_bill = _compute_prorate(date.today(), lesson.day_of_week)
+                        # Israeli calendar day, like the proration that priced this
+                        # charge — the server clock is UTC.
+                        child.subscription_start_date = today_il
+                        _, _, _, next_bill = _compute_prorate(today_il, lesson.day_of_week)
                         child.paid_until_date = next_bill - timedelta(days=1)
                     child.save()
 

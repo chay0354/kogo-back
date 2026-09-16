@@ -65,7 +65,6 @@ logger = logging.getLogger(__name__)
 # and what stays on it is their ID, phone and e-mail. A message forwarded on
 # should not open those for ever, so the signed link — and only the signed one
 # — closes. The office keeps the signed copy and re-sends it by hand.
-SIGNED_LINK_LIFETIME = timedelta(days=30)
 # A token is short_token(): 10 letters and digits. Anything else is not looked up at all.
 _TOKEN_PATTERN = re.compile(r'[A-Za-z0-9]{6,32}')
 
@@ -224,8 +223,9 @@ def link_state(contract, *, now=None) -> LinkState:
     cancelled — the contract is out of play: a newer version replaced it
                 ("updated") or the office voided it ("withdrawn") — 409 to a
                 signing attempt — or its link was withdrawn (410).
-    expired   — only the 30-day close of a link that was already signed (410).
-                An unsigned link is never closed by time.
+    expired   — never reached by time any more: no link is closed by the clock,
+                signed or not. The state is kept because withdrawing a link
+                still answers 410, and older clients read this name.
     open      — the page shows it and the tenant may try to sign.
 
     Whether the tenancy changed since the contract was issued (is_stale) is
@@ -233,8 +233,8 @@ def link_state(contract, *, now=None) -> LinkState:
     the signing refuses a stale contract (sign_contract, 409).
     """
     if contract.status == RentalContract.STATUS_SIGNED:
-        if contract.signed_at and (now or timezone.now()) - contract.signed_at > SIGNED_LINK_LIFETIME:
-            return LinkState(STATE_EXPIRED, SIGNED_CLOSED, 410)
+        # A signed link stays open: it is how the tenant carries on to the
+        # standing order, and how they read their own signed copy later.
         return LinkState(STATE_SIGNED, ALREADY_SIGNED, 409)
     # "Not the current one": a newer version exists. It voided this one when it
     # was issued, so this is the void case too, told apart only by its message.

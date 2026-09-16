@@ -4,6 +4,7 @@ Serializers for Customer models
 from decimal import Decimal
 from rest_framework import serializers
 from datetime import date
+from apps.customers.child_status import STATUS_GHOST
 from apps.customers.models import (
     Family, Parent, Child, Payment, RecurringPayment, RecurringChargeOverride,
     TranzilaTransaction, PaymentDiscountSnapshot, BusinessCustomer
@@ -213,7 +214,26 @@ class EnrollmentDetailSerializer(serializers.Serializer):
     trial_lesson_date = serializers.DateField(allow_null=True, required=False)
 
 
-class ChildSerializer(serializers.ModelSerializer):
+class GhostIsInstructorOnlyMixin:
+    """
+    רפאים is set by the walk-in flow, not by hand.
+
+    The instructor's attendance screen and create_ghost put a child there, and
+    the same flows take them out of it by merging them into the real child.
+    Letting a child endpoint write it would leave a ghost nobody walked in as,
+    which nothing then clears — and the child would sit in the list twice, once
+    as רפאים and once as whatever they really are.
+    """
+
+    def validate_status(self, value):
+        if value == STATUS_GHOST and getattr(self.instance, 'status', None) != STATUS_GHOST:
+            raise serializers.ValidationError(
+                'סטטוס רפאים נקבע רק דרך הוספת תלמיד מזדמן על ידי המדריך.'
+            )
+        return value
+
+
+class ChildSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSerializer):
     """ילד - סידור בסיסי"""
     family_name = serializers.CharField(source='family.name', read_only=True)
     age = serializers.IntegerField(read_only=True)
@@ -501,7 +521,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         return obj.created_at >= threshold_date
 
 
-class ChildCreateSerializer(serializers.ModelSerializer):
+class ChildCreateSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSerializer):
     """יצירת ילד חדש"""
     class Meta:
         model = Child
@@ -512,7 +532,7 @@ class ChildCreateSerializer(serializers.ModelSerializer):
         ]
 
 
-class ChildUpdateSerializer(serializers.ModelSerializer):
+class ChildUpdateSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSerializer):
     """עדכון ילד"""
     class Meta:
         model = Child

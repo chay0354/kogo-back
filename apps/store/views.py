@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from apps.core.permissions import IsManagerOrPartner
 from django.views.decorators.csrf import csrf_exempt
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 
 from apps.store.inventory_ops import InventoryError, adjust_product_stock, transfer_product_stock
@@ -496,18 +497,21 @@ class StoreSaleViewSet(viewsets.ReadOnlyModelViewSet):
         if date_from:
             start_date = date_from
         else:
-            start_date = date.today() - timedelta(days=days)
+            start_date = timezone.localdate() - timedelta(days=days)
         end_date = date_to
         branch_param = request.query_params.get('branch', '')
         city_param = request.query_params.get('city', '')
 
-        # Base sales queryset — completed only
+        # Base sales queryset — completed only. `sale_date` is a datetime: compared
+        # with a bare date, `__lte` meant midnight at the start of the last day, so
+        # every sale made during that day fell outside the window. Both ends are
+        # whole days in Asia/Jerusalem.
         completed_sales = StoreSale.objects.filter(
-            sale_date__gte=start_date,
+            sale_date__date__gte=start_date,
             invoice__payment_status='completed',
         ).select_related('product', 'child', 'branch', 'invoice')
         if end_date:
-            completed_sales = completed_sales.filter(sale_date__lte=end_date)
+            completed_sales = completed_sales.filter(sale_date__date__lte=end_date)
 
         # Base products queryset
         products_qs = StoreProduct.objects.filter(is_active=True)
@@ -725,6 +729,7 @@ def charge_card(request):
     from apps.store.pricing import line_charge_amount, sale_unit_and_total, tranzila_items_for_cart_line
     from apps.store.stock_utils import decrement_product_stock as _decrement_product_stock
     from apps.store.stock_utils import store_line_item_branch_id as _store_line_item_branch_id
+    from apps.store.stock_utils import available_stock_for_item as _available_stock_for_item
     from apps.customers.models import Child, RecurringPayment
     from django.db import transaction as db_transaction
     
@@ -749,6 +754,15 @@ def charge_card(request):
 
         for item in product_items:
             product = StoreProduct.objects.get(id=item['product_id'])
+            # Refused before the card is charged, and against the row this line
+            # draws on: this path charged first and decremented blindly, so a
+            # size that had run out — or a product already at zero — was still
+            # sold, and the flat stock went below zero.
+            if _available_stock_for_item(product, item) < int(item['quantity']):
+                return Response(
+                    {'error': f'אין מספיק מלאי עבור {product.name}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             unit_price = Decimal(str(item['price_override'])) if item.get('price_override') else product.sale_price
             if item.get('price_override'):
                 total_amount += unit_price * item['quantity']

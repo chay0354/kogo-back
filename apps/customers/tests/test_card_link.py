@@ -110,11 +110,26 @@ class TokenTest(_Base):
         with self.assertRaises(CardLinkError):
             resolve_card_link_token(build_card_link_token(link))
 
-    def test_expired_token(self):
+    def test_a_link_does_not_expire_with_age(self):
+        # The office hands a link out and it stays good until it is used or
+        # cancelled: a parent paying three weeks later must not be turned away.
         link = self._sto_link()
-        with patch('apps.customers.card_link.CARD_LINK_TOKEN_MAX_AGE', -1):
-            with self.assertRaises(CardLinkError):
-                resolve_card_link_token(build_card_link_token(link))
+        CardLink.objects.filter(id=link.id).update(created_at=timezone.now() - timedelta(days=400))
+        link.refresh_from_db()
+        resolved, done = resolve_card_link_token(build_card_link_token(link))
+        self.assertEqual(resolved.id, link.id)
+        self.assertFalse(done)
+
+    def test_regenerating_closes_the_old_token(self):
+        # Age no longer closes a link, so this is the lever that does.
+        link = self._sto_link()
+        old_token = build_card_link_token(link)
+        link.rotate_token()  # what the regenerate action does
+        link.save(update_fields=['token', 'token_version', 'updated_at'])
+        with self.assertRaises(CardLinkError):
+            resolve_card_link_token(old_token)
+        resolved, _ = resolve_card_link_token(build_card_link_token(link))
+        self.assertEqual(resolved.id, link.id)
 
 
 class QuoteTest(_Base):

@@ -592,6 +592,7 @@ UNDOC_WIDTHS = [4.6 * cm, 4.2 * cm, 2.0 * cm, 2.6 * cm, 3.2 * cm, 2.4 * cm]
 SHORT_SOURCE_LABELS = {
     'lessons': 'חוג',
     'store': 'חנות',
+    'rentals': 'שכירות',
     'orphan_charges': 'חיוב ללא חשבונית',
     'payment_links': 'קישור',
 }

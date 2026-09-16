@@ -11,6 +11,7 @@
     POST               contracts/{id}/void/         {"reason": "..."}, a draft, sent or viewed contract
     POST               contracts/{id}/signing-link/         a new signing link for the current open contract
     POST               contracts/{id}/signing-link/cancel/  withdraw it; the contract is a draft again
+    POST               contracts/{id}/send-whatsapp/        send the live link to the tenant on WhatsApp
     GET                contracts/{id}/signed-pdf/   the signed copy, checked against its fingerprint first
 
 Managers and partners only. A partner reads and writes only the tenancies of
@@ -330,6 +331,36 @@ class RentalContractViewSet(viewsets.GenericViewSet):
         except ContractError as exc:
             return _contract_error(exc)
         return Response(self.get_serializer(withdrawn).data)
+
+    @action(detail=True, methods=['post'], url_path='send-whatsapp')
+    def send_whatsapp(self, request, pk=None):
+        """
+        Send the tenant the link they already have, on WhatsApp (rental-contract).
+
+        No link is made here: the office asks for one first. That keeps a
+        re-send a re-send — the same URL — instead of quietly killing the one
+        the tenant may already have open.
+
+        A send that did not go out never answers 200, so the office falls back
+        to copying the link instead of believing a message went. What is
+        missing here — a link, a phone — is a 400 the office can fix; anything
+        ManyChat said is a 502, the way the courses' card-update send answers.
+        """
+        from apps.rentals.contract_whatsapp import NO_LINK, NO_PHONE, send_contract_link_whatsapp
+
+        contract = self.get_object()
+        result = send_contract_link_whatsapp(contract, request)
+        body = {'whatsapp': result, 'contract': self.get_serializer(contract).data}
+        if result.get('sent'):
+            return Response(body)
+        reason = result.get('reason')
+        if reason in (NO_LINK, NO_PHONE):
+            body['error'] = (
+                'אין קישור פעיל לחתימה. צרו קישור ואז שלחו.' if reason == NO_LINK
+                else 'לשוכר לא הוזן טלפון. הוסיפו טלפון בעריכת השוכר ואז שלחו.'
+            )
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
+        return Response(body, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=True, methods=['post'])
     def void(self, request, pk=None):

@@ -22,6 +22,16 @@ FIELD_SETTLE_SECONDS = 1.5
 # are often mapped to those copies, which stay empty if we only write the original.
 _TIMESTAMPED_FIELD = re.compile(r'^(.+?) \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)$')
 
+# Printed at the end of a free-text fallback, and written to kogo_support_phone.
+SUPPORT_PHONE = '050-9424755'
+
+
+class _Blanks(dict):
+    """A placeholder the caller did not fill reads as nothing, never as a crash."""
+
+    def __missing__(self, key):
+        return ''
+
 
 class ManyChatError(Exception):
     def __init__(self, message: str, status_code: int | None = None, payload: Any = None):
@@ -419,6 +429,11 @@ class ManyChatService:
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
         'MANYCHAT_REGISTER_LESSON_FLOW_NS': ('register-missing', 'register missing'),
         'MANYCHAT_REGISTER_MORNING_FLOW_NS': ('register-morning', 'register morning'),
+        # The studio tenants (apps/rentals, apps/rental_billing). Two automations
+        # of their own: the tenant is a merchant, not a parent, and the courses'
+        # templates name a child and a course.
+        'MANYCHAT_RENTAL_CONTRACT_FLOW_NS': ('rental-contract', 'rental contract'),
+        'MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS': ('rental-card-update', 'rental card update'),
     }
 
     def resolve_flow_for(self, config_entry: dict) -> str:
@@ -472,6 +487,8 @@ class ManyChatService:
     REGISTRATION_KIND_CARD_UPDATE = 'card_update'
     REGISTRATION_KIND_DIDNT_ARRIVE = 'didnt_arrive'
     REGISTRATION_KIND_CARD_LINK = 'card_link'
+    REGISTRATION_KIND_RENTAL_CONTRACT = 'rental_contract'
+    REGISTRATION_KIND_RENTAL_CARD_UPDATE = 'rental_card_update'
 
     _REGISTRATION_KINDS = {
         REGISTRATION_KIND_SUBSCRIPTION: {
@@ -548,6 +565,31 @@ class ManyChatService:
                 'אם לא מסתדר, אפשר לפנות לצוות קוגומלו ב-050-9424755.'
             ),
         },
+        # A studio tenant's contract is ready to sign: the link to /s/<token>.
+        # No fallback_flow_setting on purpose — every other automation here
+        # speaks to a parent about a child, and a merchant must never be sent
+        # one of those. With no automation of its own the send drops to the
+        # text below, which WhatsApp delivers only inside the 24-hour window.
+        REGISTRATION_KIND_RENTAL_CONTRACT: {
+            'flow_setting': 'MANYCHAT_RENTAL_CONTRACT_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'חוזה השכירות{branch_suffix} מוכן לחתימה.\n'
+                'לקריאה ולחתימה: {sign_url}\n'
+                'לשאלות אפשר לפנות לצוות קוגומלו ב-{support_phone}.'
+            ),
+        },
+        # A tenant's monthly charge was declined: the link to enter another card.
+        # Deliberately not falling back to card-update either, for the same reason.
+        REGISTRATION_KIND_RENTAL_CARD_UPDATE: {
+            'flow_setting': 'MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS',
+            'fallback_template': (
+                'שלום {parent_name}!\n'
+                'החיוב החודשי עבור שכירות הסטודיו{branch_suffix} על סך ₪{amount} לא עבר.\n'
+                'להזנת כרטיס אשראי: {card_update_url}\n'
+                'לשאלות אפשר לפנות לצוות קוגומלו ב-{support_phone}.'
+            ),
+        },
         # 3 consecutive times not marked present (didnt_arrive automation).
         REGISTRATION_KIND_DIDNT_ARRIVE: {
             'flow_setting': 'MANYCHAT_DIDNT_ARRIVE_FLOW_NS',
@@ -570,20 +612,81 @@ class ManyChatService:
         REGISTRATION_KIND_CARD_UPDATE: 'עדכון כרטיס (הוראת קבע נכשלה)',
         REGISTRATION_KIND_DIDNT_ARRIVE: 'לא הגיע (3 פעמים)',
         REGISTRATION_KIND_CARD_LINK: 'קישור להזנת כרטיס',
+        REGISTRATION_KIND_RENTAL_CONTRACT: 'שוכר — חוזה לחתימה',
+        REGISTRATION_KIND_RENTAL_CARD_UPDATE: 'שוכר — עדכון כרטיס',
     }
+
+    def kind_automations(self, *, resolve_ns: bool = True, skip: set[str] | None = None) -> list[dict]:
+        """
+        The templates Kogo itself knows, each with its Hebrew name.
+
+        Listed whether or not ManyChat has an automation by that name: the
+        office is entitled to see the whole set, and a missing one is a fact to
+        report (`in_manychat: False`), not a row to drop.
+        """
+        skip = skip or set()
+        rows = []
+        for kind, entry in self._REGISTRATION_KINDS.items():
+            if kind in skip:
+                continue
+            ns = self.resolve_flow_ns(entry['flow_setting']) if resolve_ns else ''
+            label = self.AUTOMATION_LABELS.get(kind, kind)
+            rows.append({
+                'automation_type': 'kind',
+                'automation_id': kind,
+                'flow_ns': ns,
+                'label': label,
+                'manychat_name': None,
+                'kogo_label': label,
+                'needs_enrollment_context': True,
+                'in_manychat': bool(ns),
+            })
+        return rows
 
     def list_available_automations(self) -> list[dict]:
         """
-        Every automation returned by ManyChat getFlows (source of truth).
-        Kogo kinds are matched by flow_ns for richer field handling when sending.
+        Every automation the office can send — strictly.
+
+        A ManyChat failure raises here rather than reading as an empty picker.
+        The screen-facing `automations_payload` carries the same failure in the
+        open instead, so it can show the templates and name the reason.
+        """
+        self.get_flows()  # a ManyChat outage is an error, not an empty list
+        return self.automations_payload()['automations']
+
+    def automations_payload(self) -> dict:
+        """
+        Every automation the office can send, and whether ManyChat answered.
+
+        Two sources, and the caller has to be able to tell them apart: what
+        ManyChat returns from getFlows, and the kinds Kogo itself knows. A kind
+        whose automation is missing from ManyChat is still listed — it is a
+        template the office is entitled to see, and hiding it turned "ManyChat
+        answered with nothing" into "half the templates quietly vanished", with
+        no way to tell which had happened.
+
+        `manychat_ok` says whether getFlows answered at all; `manychat_count`
+        how many automations it returned. Both are for the screen to say out
+        loud, because a short list is only alarming if you know it is short.
         """
         items: list[dict] = []
         seen_ns: set[str] = set()
+        seen_kinds: set[str] = set()
 
-        # This list drives the office's manual broadcast picker.  Do not turn a
-        # ManyChat outage into an apparently valid empty list: the caller needs
-        # to tell the office that its live automations could not be loaded.
-        flows = self.get_flows()
+        # A ManyChat outage must never read as "these are your automations".
+        # `list_available_automations` keeps raising for exactly that reason;
+        # here the failure is carried out in the open instead, as
+        # `manychat_ok: False` plus the reason, so the picker can show every
+        # template Kogo knows and say why the live list is missing.
+        manychat_ok = True
+        manychat_error = ''
+        try:
+            flows = self.get_flows()
+        except ManyChatError as exc:
+            logger.warning('ManyChat getFlows failed while listing automations: %s', exc)
+            flows = []
+            manychat_ok = False
+            manychat_error = str(exc)
 
         kind_by_ns = self._kind_by_flow_ns_from_flows(flows)
 
@@ -598,8 +701,10 @@ class ManyChatService:
                 'flow_ns': ns,
                 'label': name,
                 'manychat_name': name,
+                'in_manychat': True,
             }
             if kind:
+                seen_kinds.add(kind)
                 item['automation_type'] = 'kind'
                 item['automation_id'] = kind
                 item['kogo_label'] = self.AUTOMATION_LABELS.get(kind, kind)
@@ -610,24 +715,24 @@ class ManyChatService:
                 item['needs_enrollment_context'] = False
             items.append(item)
 
-        # Flows configured in Django but missing from getFlows (rare).
-        for kind, entry in self._REGISTRATION_KINDS.items():
-            ns = self.resolve_flow_ns(entry['flow_setting'])
-            if not ns or ns in seen_ns:
+        # Every Kogo kind that getFlows did not already account for — whether
+        # because ManyChat has no automation by that name, or because it never
+        # answered. `flow_ns` is empty for those, and sending one is refused by
+        # the server with ManyChat's own reason rather than silently dropped.
+        for row in self.kind_automations(resolve_ns=manychat_ok, skip=seen_kinds):
+            if row['flow_ns'] and row['flow_ns'] in seen_ns:
                 continue
-            seen_ns.add(ns)
-            items.append({
-                'automation_type': 'kind',
-                'automation_id': kind,
-                'flow_ns': ns,
-                'label': self.AUTOMATION_LABELS.get(kind, kind),
-                'manychat_name': None,
-                'kogo_label': self.AUTOMATION_LABELS.get(kind, kind),
-                'needs_enrollment_context': True,
-            })
+            if row['flow_ns']:
+                seen_ns.add(row['flow_ns'])
+            items.append(row)
 
         items.sort(key=lambda row: (row.get('label') or '').casefold())
-        return items
+        return {
+            'automations': items,
+            'manychat_ok': manychat_ok,
+            'manychat_count': len(flows),
+            'manychat_error': manychat_error,
+        }
 
     def send_automation_to_contact(
         self,
@@ -805,7 +910,12 @@ class ManyChatService:
 
         # Fallback (only delivers if user is within 24h customer-service window).
         extras = extra_fields or {}
-        text = config_entry['fallback_template'].format(
+        # format_map over a defaulting mapping, not format(**names): a template
+        # naming a placeholder this call does not fill reads as nothing rather
+        # than raising KeyError in the middle of a send. ({course_suffix} in the
+        # card-link template did exactly that, unnoticed because that kind falls
+        # back to the card-update automation before it ever reaches the text.)
+        text = config_entry['fallback_template'].format_map(_Blanks(
             parent_name=parent_name,
             child_name=child_name,
             course_name=course_name,
@@ -814,7 +924,11 @@ class ManyChatService:
             time_range=time_range,
             card_update_url=extras.get('kogo_card_update_url', ''),
             amount=extras.get('kogo_amount', ''),
-        )
+            sign_url=extras.get('kogo_rental_sign_url', ''),
+            support_phone=extras.get('kogo_support_phone', SUPPORT_PHONE),
+            # ' בסניף X', or nothing at all when there is no branch to name.
+            branch_suffix=f' בסניף {branch_name}' if branch_name and branch_name != '—' else '',
+        ))
         try:
             self.send_whatsapp_text(sid, text)
             return {'sent': True, 'method': 'text', 'kind': kind, 'subscriber_id': sid, 'phone': phone, 'whatsapp_phone': whatsapp_phone, 'parent_name': parent_name, 'child_name': child_name}

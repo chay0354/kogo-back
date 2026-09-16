@@ -7,6 +7,8 @@ from __future__ import annotations
 from datetime import date
 
 from django.db import transaction
+
+from apps.customers.child_status import STATUS_GHOST, resolve_child_status
 from django.db.models import Q
 
 from apps.courses.models import Lesson, LessonBundle
@@ -346,9 +348,15 @@ def drop_course_unit(*, enrollment: LessonEnrollment, cancellation_reason: str =
         still_active = LessonEnrollment.objects.filter(
             child=child, status__in=['active', 'payments_problem'],
         ).exclude(id__in=removed_ids).exists()
-        if not still_active and child.status not in ('inactive', 'ghost'):
-            child.status = 'inactive'
-            child.save(update_fields=['status', 'updated_at'])
+        # Losing the last active enrolment is not a status of its own — there
+        # is no "לא פעיל" any more. What the child is now comes from what is
+        # recorded about them: money in, a trial ahead, a trial behind, or
+        # nothing yet.
+        if not still_active and child.status != STATUS_GHOST:
+            resolved = resolve_child_status(child)
+            if resolved != child.status:
+                child.status = resolved
+                child.save(update_fields=['status', 'updated_at'])
 
     return {
         'removed_ids': removed_ids,
