@@ -144,6 +144,19 @@ def resolve_child_status(child) -> str:
     if _has_money_in(child):
         return STATUS_ACTIVE
 
+    # Money ran out. What that means depends on whether they left first.
+    #
+    #   cancelled, then the paid period ended   -> inactive
+    #   never cancelled, the money just stopped -> payment_problem
+    #
+    # A child who cancels keeps active until the date they paid up to, and
+    # turns inactive the moment it passes. One still on a lesson with nothing
+    # paid is not a quiet ex-customer: somebody has to chase the payment.
+    if child.paid_until_date and child.paid_until_date < date.today():
+        if child.lesson_enrollments.filter(status__in=LIVE_ENROLLMENT_STATUSES).exists():
+            return STATUS_PAYMENT_PROBLEM
+        return STATUS_INACTIVE
+
     # The card failed and no money has come in since, so the problem stands.
     if child.status == STATUS_PAYMENT_PROBLEM:
         return STATUS_PAYMENT_PROBLEM
