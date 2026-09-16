@@ -7,11 +7,17 @@ do by itself. Run it when you mean to, read the dry run first.
 
     python manage.py backfill_child_statuses            # report only
     python manage.py backfill_child_statuses --apply    # write
+    python manage.py backfill_child_statuses --all      # also re-check the rest
 
 `not_paid` becomes `payment_problem` — it was never set by any code, and the
 dashboard already counted the two together. Everything else that is not one of
-the six (`inactive`, and the `expired` / `trial` that calculate_status used to
-write) is worked out again from what is recorded about the child.
+the statuses (the `expired` / `trial` that calculate_status used to write) is
+worked out again from what is recorded about the child.
+
+By default only children on a retired status are touched. `--all` also
+re-checks the ones whose status is a real name but no longer matches the
+record — a child left on בתהליך רישום whose lessons were all cancelled, say.
+That is the wider sweep, so read its dry run carefully before applying it.
 """
 from collections import Counter
 
@@ -20,7 +26,6 @@ from django.db import transaction
 
 from apps.customers.child_status import (
     CHILD_STATUSES,
-    LEGACY_STATUS_MAP,
     canonical_status,
     resolve_child_status,
 )
@@ -40,29 +45,59 @@ class Command(BaseCommand):
             '--history', action='store_true',
             help='Also record each change in ChildStatusHistory.',
         )
+        parser.add_argument(
+            '--all', action='store_true', dest='check_all',
+            help='Also re-check children whose status is valid but stale.',
+        )
 
     def handle(self, *args, **options):
         apply_changes = options['apply']
         write_history = options['history']
+        check_all = options['check_all']
 
-        stale = Child.objects.exclude(status__in=CHILD_STATUSES)
-        total = stale.count()
-        if not total:
-            self.stdout.write(self.style.SUCCESS('Every child already holds one of the six statuses.'))
-            return
+        candidates = (
+            Child.objects.all() if check_all
+            else Child.objects.exclude(status__in=CHILD_STATUSES)
+        )
 
         moves = Counter()
+        reasons = {}
         planned = []
-        for child in stale.select_related('family'):
+        for child in candidates.select_related('family'):
             mapped = canonical_status(child.status)
-            target = mapped or resolve_child_status(child)
+            if check_all:
+                # Every name is re-checked against the record, real or retired.
+                target, why = resolve_child_status(child), 'resolved from the record'
+            elif mapped is not None:
+                target, why = mapped, 'mapped'
+            else:
+                target, why = resolve_child_status(child), 'resolved from the record'
+            if target == child.status:
+                continue
             planned.append((child, child.status, target))
             moves[(child.status, target)] += 1
+            reasons[(child.status, target)] = why
 
-        self.stdout.write(f'{total} child(ren) on a retired status:')
+        total = len(planned)
+        if not total:
+            self.stdout.write(self.style.SUCCESS('Every child already holds the status the record supports.'))
+            return
+
+        scope = 'whose status no longer matches the record' if check_all else 'on a retired status'
+        self.stdout.write(f'{total} child(ren) {scope}:')
         for (was, becomes), count in sorted(moves.items(), key=lambda kv: -kv[1]):
-            known = 'mapped' if LEGACY_STATUS_MAP.get(was) else 'resolved from the record'
-            self.stdout.write(f'  {was:<16} → {becomes:<16} {count:>5}   ({known})')
+            self.stdout.write(
+                f'  {was:<16} → {becomes:<16} {count:>5}   ({reasons[(was, becomes)]})'
+            )
+
+        after = Counter(Child.objects.values_list('status', flat=True))
+        for _child, was, becomes in planned:
+            after[was] -= 1
+            after[becomes] += 1
+        self.stdout.write('\nHow the list would read afterwards:')
+        for status, count in sorted(after.items(), key=lambda kv: -kv[1]):
+            if count:
+                self.stdout.write(f'  {status:<16} {count:>5}')
 
         if not apply_changes:
             self.stdout.write(self.style.WARNING('\nDry run. Nothing written. Re-run with --apply.'))
