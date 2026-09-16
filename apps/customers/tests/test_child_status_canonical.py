@@ -165,6 +165,28 @@ class ResolveStatusTest(TestCase):
         )
         self.assertEqual(resolve_child_status(child), 'active')
 
+    def test_a_child_recorded_as_cancelled_stays_inactive(self):
+        """
+        The commonest shape of לא פעיל: cancelled, and the cancellation took
+        the enrolment rows with it. Nothing is left to prove they ever had
+        anything — which is the point, not a reason to call them something else.
+        """
+        child = self.make_child(status='inactive')
+        self.assertEqual(child.lesson_enrollments.count(), 0)
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_cancelled_child_who_books_a_trial_is_back(self):
+        child = self.make_child(status='inactive')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active',
+            start_date=TODAY, trial_lesson_date=TODAY + timedelta(days=4),
+        )
+        self.assertEqual(resolve_child_status(child), 'trial_signed')
+
+    def test_a_cancelled_child_who_pays_is_active(self):
+        child = self.make_child(status='inactive', paid_until_date=TODAY + timedelta(days=30))
+        self.assertEqual(resolve_child_status(child), 'active')
+
     def test_a_ghost_stays_a_ghost(self):
         child = self.make_child(status='ghost')
         self.assertEqual(resolve_child_status(child), 'ghost')

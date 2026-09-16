@@ -150,14 +150,24 @@ def resolve_child_status(child) -> str:
 
     trial_ahead, trial_held = _trial_dates(child)
     if trial_ahead:
+        # A trial booked ahead means they are back, whatever they were before.
         return STATUS_TRIAL_SIGNED
+
+    # Someone recorded this child as cancelled, and nothing since says
+    # otherwise. That is a fact about them, not a guess to be re-derived —
+    # and cancelling often takes the enrolment rows with it, leaving a child
+    # who "was not in anything", which is exactly what לא פעיל describes.
+    # Without this the record was overruled by its own absence of evidence.
+    if child.status == STATUS_INACTIVE:
+        return STATUS_INACTIVE
+
     if trial_held:
         return STATUS_TRIAL_COMPLETED
 
-    # Nothing paid, no trial. What separates the last two is whether this child
-    # had something and lost it. Still on a lesson, just unpaid, is בתהליך
-    # רישום — the registration never finished. Every lesson they had now
-    # cancelled is לא פעיל: they are not paying and not in anything.
+    # Nothing paid, no trial, nothing recorded as cancelled. What separates the
+    # last two is whether this child had something and lost it: still on a
+    # lesson, just unpaid, is בתהליך רישום — the registration never finished.
+    # Every lesson they had now cancelled is לא פעיל.
     enrollments = child.lesson_enrollments
     if enrollments.filter(status__in=LIVE_ENROLLMENT_STATUSES).exists():
         return STATUS_PENDING
