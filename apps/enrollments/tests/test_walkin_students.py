@@ -406,3 +406,84 @@ class WalkInLinkedColleagueTests(APITestCase):
         res = self.remove(self.bob_lesson, added.data['id'], self.bob)
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(LessonEnrollment.objects.filter(id=added.data['id']).exists())
+
+
+class WalkInDisappearsOnceRegisteredTests(WalkInTestBase):
+    """
+    The promise the instructor screen now makes in words: a ghost goes away by
+    itself once the office registers the child.
+
+    It is resolved when the roster is read, not by a nightly job, so the ghost
+    can never outlive the real record — but only against the enrolments of the
+    lesson it sits on. That boundary is asserted here too, because it is the one
+    that surprises people.
+    """
+
+    def roster(self, lesson=None):
+        lesson = lesson or self.lesson
+        res = self.client.get(f'/api/v1/scheduling/lessons/{lesson.id}/?date={OCC}')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        return res.data['enrollments']
+
+    def ghosts_on(self, lesson=None):
+        return [r for r in self.roster(lesson) if r['child_status'] == 'ghost']
+
+    def names_on(self, lesson=None):
+        return [r['child_name'] for r in self.roster(lesson)]
+
+    def register(self, *, first, last, phone, trial=False, lesson=None):
+        """Register a real child on the lesson — as a trial or as a subscriber."""
+        lesson = lesson or self.lesson
+        family = Family.objects.create(name=last, phone=phone)
+        child = Child.objects.create(
+            family=family, first_name=first, last_name=last,
+            birth_date=date(2015, 5, 5), gender='male',
+            status='trial_signed' if trial else 'active',
+        )
+        LessonEnrollment.objects.create(
+            lesson=lesson, child=child, status='active', start_date=OCC,
+            **({'trial_lesson_date': OCC} if trial else {}),
+        )
+        return child
+
+    def test_a_ghost_shows_until_somebody_registers_the_child(self):
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.assertEqual([g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'])
+
+    def test_registering_for_a_trial_takes_the_ghost_off_the_register(self):
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.register(first='יאיר', last='ציון', phone='0544320500', trial=True)
+        self.assertEqual(self.ghosts_on(), [], 'הרפאים ירד')
+        self.assertEqual(self.names_on().count('יאיר ציון'), 1, 'מופיע פעם אחת, כתלמיד ניסיון')
+
+    def test_registering_as_a_subscriber_takes_the_ghost_off_the_register(self):
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.register(first='יאיר', last='ציון', phone='0544320500')
+        self.assertEqual(self.ghosts_on(), [])
+        self.assertEqual(self.names_on().count('יאיר ציון'), 1)
+
+    def test_the_same_phone_is_enough_even_under_another_spelling(self):
+        """Parents spell a name two ways; the phone is the harder fact."""
+        self.add_walkin(first='יאיר', last='ציון', phone='054-432-0500')
+        self.register(first='יאיר', last='ציוני', phone='0544320500')
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_the_same_full_name_is_enough_when_no_phone_was_typed(self):
+        self.add_walkin(first='יאיר', last='ציון', phone='')
+        self.register(first='יאיר', last='ציון', phone='0559999999')
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_a_different_child_does_not_take_the_ghost_away(self):
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.register(first='רותם', last='אחר', phone='0521234567')
+        self.assertEqual([g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'])
+
+    def test_registering_on_another_lesson_leaves_this_ghost_standing(self):
+        """The boundary: resolution is per lesson, not per child."""
+        other = self._lesson('חוג אחר', self.instructor)
+        self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
+        self.register(first='יאיר', last='ציון', phone='0544320500', lesson=other)
+        self.assertEqual(
+            [g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'],
+            'רפאים נפתר מול הרשמות של אותו שיעור בלבד',
+        )
