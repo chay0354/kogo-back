@@ -267,6 +267,18 @@ class TrialBlockedDate(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     date = models.DateField(unique=True, verbose_name="תאריך")
     reason = models.CharField(max_length=120, blank=True, verbose_name="סיבה", help_text="למשל: ראש השנה, חופשת סוכות.")
+    # Empty means the whole day, for every lesson — which is what every row
+    # created before this field meant, so nothing had to be migrated. Naming
+    # lessons narrows the block to those alone: the studio closes one room for
+    # an event while the rest of the timetable runs.
+    #
+    # The scope has to be read wherever the block is enforced. A half-applied
+    # narrowing is worse than none: the widget would offer a date the submit
+    # then refuses, or hide one that was never blocked.
+    lessons = models.ManyToManyField(
+        'courses.Lesson', blank=True, related_name='trial_blocked_dates',
+        verbose_name="שיעורים", help_text="ריק = כל החוגים באותו יום.",
+    )
     created_by = models.ForeignKey(
         'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='trial_blocked_dates', verbose_name="נוצר על ידי",

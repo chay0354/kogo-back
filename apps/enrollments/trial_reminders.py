@@ -59,16 +59,53 @@ def configured_blocked_trial_lesson_dates() -> frozenset[date]:
     return frozenset(dates)
 
 
-def blocked_trial_lesson_dates() -> frozenset[date]:
+def blocked_trial_lesson_dates(lesson=None) -> frozenset[date]:
     """Calendar dates that must not appear as trial-lesson options.
 
-    The union of the configured list and the dates the office marks in the CRM
-    (TrialBlockedDate). Every enforcement point reads this one function — the
-    picker, the submit check, and the CRM date edit — so they cannot disagree.
+    The configured list, plus the dates the office marks in the CRM
+    (``TrialBlockedDate``). Every enforcement point reads this one function —
+    the picker, the submit check, and the CRM date edit — so they cannot
+    disagree about a date.
+
+    A marked date blocks the whole day unless it names lessons, in which case it
+    blocks only those. Called without a lesson this answers for the whole
+    timetable and so returns **only the whole-day blocks**: a caller that does
+    not say which lesson it is asking about must not be handed a date that was
+    closed for one room. Pass the lesson to get its own answer.
     """
     dates = set(configured_blocked_trial_lesson_dates())
-    dates.update(TrialBlockedDate.objects.values_list('date', flat=True))
+    rows = TrialBlockedDate.objects.prefetch_related('lessons')
+    lesson_id = getattr(lesson, 'pk', None) or getattr(lesson, 'id', None)
+    for row in rows:
+        scoped = [l.pk for l in row.lessons.all()]
+        if not scoped:
+            dates.add(row.date)
+        elif lesson_id is not None and lesson_id in scoped:
+            dates.add(row.date)
     return frozenset(dates)
+
+
+def blocked_trial_dates_by_lesson(lesson_ids) -> dict:
+    """
+    ``{lesson_id: frozenset(dates)}`` for a whole catalogue, in two queries.
+
+    Same rule as ``blocked_trial_lesson_dates``; this exists so walking every
+    lesson in a branch does not run a query each. A lesson with nothing of its
+    own still gets the whole-day blocks.
+    """
+    everyone = set(configured_blocked_trial_lesson_dates())
+    scoped: dict = {}
+    for row in TrialBlockedDate.objects.prefetch_related('lessons'):
+        lessons = [l.pk for l in row.lessons.all()]
+        if not lessons:
+            everyone.add(row.date)
+        else:
+            for lid in lessons:
+                scoped.setdefault(lid, set()).add(row.date)
+    return {
+        lid: frozenset(everyone | scoped.get(lid, set()))
+        for lid in lesson_ids
+    }
 
 
 def trial_lesson_min_date(*, now: Optional[datetime] = None) -> date:
@@ -124,7 +161,7 @@ def next_allowed_trial_date(lesson: Lesson, *, now: Optional[datetime] = None) -
     from apps.scheduling.models import LessonCancellation
 
     now = now or timezone.localtime()
-    blocked = blocked_trial_lesson_dates()
+    blocked = blocked_trial_lesson_dates(lesson)
     cancelled = set(
         LessonCancellation.objects.filter(lesson=lesson).values_list('occurrence_date', flat=True)
     ) if lesson.pk else set()
@@ -159,7 +196,7 @@ def iter_upcoming_lesson_occurrences(
     count = max(1, min(int(count or 8), 16))
     min_date = trial_lesson_min_date(now=now)
     if blocked is None:
-        blocked = blocked_trial_lesson_dates()
+        blocked = blocked_trial_lesson_dates(lesson)
 
     if not lesson.is_recurring:
         if lesson.lesson_date and lesson.lesson_date >= min_date:
@@ -231,7 +268,7 @@ def iter_merged_upcoming_lesson_occurrences(
 
 
 def validate_trial_lesson_date(lesson: Lesson, trial_date: date, *, now: Optional[datetime] = None) -> None:
-    if trial_date in blocked_trial_lesson_dates():
+    if trial_date in blocked_trial_lesson_dates(lesson):
         raise ValueError('תאריך שיעור הניסיון אינו זמין')
     allowed = iter_upcoming_lesson_occurrences(
         lesson, count=TRIAL_LESSON_OCCURRENCE_LIMIT, now=now,
@@ -271,9 +308,15 @@ def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]
     Move active trial enrollments off blocked dates to the next date of the same חוג.
     Also updates matching payment.trial_lesson_date and start_date when it matched.
     """
-    blocked = blocked_trial_lesson_dates()
-    if not blocked:
+    # Every date blocked for anyone, to find the candidates in one query. Which
+    # of them actually applies is then asked per enrolment, against its own
+    # lesson: a date closed for one room must not move the children booked into
+    # the others that day.
+    any_blocked = set(configured_blocked_trial_lesson_dates())
+    any_blocked.update(TrialBlockedDate.objects.values_list('date', flat=True))
+    if not any_blocked:
         return []
+    blocked_for = {}
 
     qs = (
         LessonEnrollment.objects
@@ -287,7 +330,7 @@ def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]
         .prefetch_related('child__family__parents')
         .filter(
             status='active',
-            trial_lesson_date__in=sorted(blocked),
+            trial_lesson_date__in=sorted(any_blocked),
         )
         .order_by('trial_lesson_date', 'child__last_name', 'child__first_name')
     )
@@ -298,6 +341,12 @@ def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]
         child = enrollment.child
         old_date = enrollment.trial_lesson_date
         if not lesson or not child or not old_date:
+            continue
+
+        # The row is only moved if its own lesson is blocked that day.
+        if lesson.pk not in blocked_for:
+            blocked_for[lesson.pk] = blocked_trial_lesson_dates(lesson)
+        if old_date not in blocked_for[lesson.pk]:
             continue
 
         new_date = next_trial_date_after(lesson, old_date)
