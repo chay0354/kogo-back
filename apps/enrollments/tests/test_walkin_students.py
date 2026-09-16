@@ -521,3 +521,78 @@ class WalkInDisappearsOnceRegisteredTests(WalkInTestBase):
         self.add_walkin(first='יאיר', last='ציון', phone='0544320500')
         self.add_walkin(first='יאיר', last='ציון', phone='0544320500', lesson=other)
         self.assertEqual([g['child_name'] for g in self.ghosts_on()], ['יאיר ציון'])
+
+
+
+class GhostWithoutAPhoneTests(WalkInTestBase):
+    """
+    A walk-in typed in with no phone has only a name to go on.
+
+    It clears across lessons only when that name is unmistakable in the branch —
+    held by exactly one registered child there. Otherwise it stays and runs out
+    with its window: a ghost left up a little longer is a small cost, a real
+    child removed from a register is not.
+    """
+
+    def ghosts_on(self, lesson=None):
+        lesson = lesson or self.lesson
+        res = self.client.get(f'/api/v1/scheduling/lessons/{lesson.id}/?date={OCC}')
+        return [r for r in res.data['enrollments'] if r['child_status'] == 'ghost']
+
+    def register(self, *, first, last, phone='', lesson=None, branch=None, trial=False):
+        lesson = lesson or self._lesson(f'חוג {first}', self.instructor)
+        family = Family.objects.create(name=last, phone=phone, branch=branch or self.branch)
+        child = Child.objects.create(
+            family=family, first_name=first, last_name=last,
+            birth_date=date(2015, 5, 5), gender='male',
+            status='trial_signed' if trial else 'active',
+        )
+        LessonEnrollment.objects.create(
+            lesson=lesson, child=child, status='active', start_date=OCC,
+            **({'trial_lesson_date': OCC} if trial else {}),
+        )
+        return child
+
+    def test_one_namesake_registered_in_the_branch_clears_it(self):
+        self.add_walkin(first='נועם', last='בלי', phone='')
+        self.register(first='נועם', last='בלי', phone='0521111111')
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_a_trial_in_the_branch_clears_it_too(self):
+        self.add_walkin(first='נועם', last='בלי', phone='')
+        self.register(first='נועם', last='בלי', phone='0521111111', trial=True)
+        self.assertEqual(self.ghosts_on(), [])
+
+    def test_two_namesakes_in_the_branch_leave_it_standing(self):
+        """Ambiguous: which of them is the walk-in? Not ours to guess."""
+        self.add_walkin(first='נועם', last='בלי', phone='')
+        self.register(first='נועם', last='בלי', phone='0521111111')
+        self.register(first='נועם', last='בלי', phone='0522222222')
+        self.assertEqual(len(self.ghosts_on()), 1)
+
+    def test_a_namesake_in_another_branch_leaves_it_standing(self):
+        other_branch = Branch.objects.create(name='סניף אחר', city=self.city)
+        other_course = Course.objects.create(
+            name='חוג בסניף אחר', branch=other_branch, course_type=self.ctype,
+            price=Decimal('200.00'), capacity=12,
+        )
+        other_lesson = Lesson.objects.create(
+            course=other_course, instructor=self.instructor,
+            day_of_week=1, start_time='18:00', end_time='19:00', is_recurring=True,
+        )
+        self.add_walkin(first='נועם', last='בלי', phone='')
+        self.register(first='נועם', last='בלי', phone='0521111111',
+                      lesson=other_lesson, branch=other_branch)
+        self.assertEqual(len(self.ghosts_on()), 1)
+
+    def test_a_ghost_with_a_phone_is_not_cleared_by_a_namesake_with_another(self):
+        """A phone identifies; a namesake on a different number is somebody else."""
+        self.add_walkin(first='נועם', last='בלי', phone='0540000000')
+        self.register(first='נועם', last='בלי', phone='0521111111')
+        self.assertEqual(len(self.ghosts_on()), 1)
+
+    def test_a_ghost_does_not_count_as_the_registered_namesake(self):
+        other = self._lesson('חוג שני', self.instructor)
+        self.add_walkin(first='נועם', last='בלי', phone='')
+        self.add_walkin(first='נועם', last='בלי', phone='', lesson=other)
+        self.assertEqual(len(self.ghosts_on()), 1)
