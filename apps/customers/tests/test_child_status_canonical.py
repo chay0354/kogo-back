@@ -30,23 +30,24 @@ TODAY = date.today()
 
 
 class StatusListTest(TestCase):
-    def test_exactly_six_statuses_exist(self):
+    def test_exactly_seven_statuses_exist(self):
         self.assertEqual(
             CHILD_STATUSES,
-            ['active', 'trial_signed', 'trial_completed', 'pending', 'payment_problem', 'ghost'],
+            ['active', 'trial_signed', 'trial_completed', 'pending',
+             'payment_problem', 'inactive', 'ghost'],
         )
 
-    def test_the_model_offers_the_same_six(self):
+    def test_the_model_offers_the_same_seven(self):
         self.assertEqual([value for value, _ in Child.STATUS_CHOICES], CHILD_STATUSES)
 
     def test_the_retired_ones_are_gone(self):
-        for retired in ('not_paid', 'inactive', 'expired', 'trial', 'non_active', 'paused'):
+        for retired in ('not_paid', 'expired', 'trial', 'non_active', 'paused'):
             self.assertNotIn(retired, CHILD_STATUS_LABELS)
 
     def test_a_retired_status_still_reads_as_something(self):
         self.assertEqual(canonical_status('not_paid'), 'payment_problem')
-        self.assertIsNone(canonical_status('inactive'))   # resolved from the record
-        self.assertIsNone(canonical_status('expired'))
+        self.assertEqual(canonical_status('non_active'), 'inactive')
+        self.assertIsNone(canonical_status('expired'))    # resolved from the record
         self.assertIsNone(canonical_status('nonsense'))
 
 
@@ -117,8 +118,35 @@ class ResolveStatusTest(TestCase):
         child.paid_until_date = TODAY + timedelta(days=30)
         self.assertEqual(resolve_child_status(child), 'active')
 
-    def test_nothing_recorded_is_pending(self):
+    def test_nothing_recorded_at_all_is_pending(self):
+        """Details filled in and nothing else: still בתהליך רישום."""
         self.assertEqual(resolve_child_status(self.make_child()), 'pending')
+
+    def test_an_enrollment_that_was_cancelled_leaves_the_child_inactive(self):
+        """Had something, it was cancelled, nothing paid — that is לא פעיל."""
+        child = self.make_child()
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive',
+            start_date=TODAY - timedelta(days=30),
+        )
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_child_still_enrolled_but_unpaid_is_not_inactive(self):
+        """Mid-registration is בתהליך רישום; nothing has been cancelled."""
+        child = self.make_child()
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active', start_date=TODAY,
+        )
+        self.assertEqual(resolve_child_status(child), 'pending')
+
+    def test_a_held_trial_still_wins_over_inactive(self):
+        """They really were at a trial — that is the truer thing to say."""
+        child = self.make_child()
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive',
+            start_date=TODAY - timedelta(days=20), trial_lesson_date=TODAY - timedelta(days=14),
+        )
+        self.assertEqual(resolve_child_status(child), 'trial_completed')
 
     def test_a_payment_that_has_lapsed_is_not_money_in(self):
         """Paid once, two years ago, paid_until long past — not פעיל today."""
