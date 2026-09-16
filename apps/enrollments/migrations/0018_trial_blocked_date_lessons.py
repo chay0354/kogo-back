@@ -7,7 +7,10 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('courses', '0021_lesson_trial_registration_open'),
-        ('enrollments', '0017_recover_lost_trial_dates'),
+        # 0016, not 0017: the recovery migration is written but has not been
+        # shipped, and a migration may not depend on one that is not in the
+        # repository. When 0017 does ship it renumbers after this one.
+        ('enrollments', '0016_trial_held_on'),
     ]
 
     operations = [
