@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 from django.conf import settings
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,98 @@ def _manychat_error_text(exc: ManyChatError) -> str:
         if details is not None:
             parts.append(str(details))
     return ' '.join(p for p in parts if p).lower()
+
+
+class ManyChatContactUnfindable(ManyChatError):
+    """
+    The number is a ManyChat contact, and nothing the API offers can reach it.
+
+    ManyChat refuses to create the contact ("This WhatsApp ID already exists")
+    while none of its lookups — the SMS phone, a custom field, a name — finds
+    it, because the API has no search by WhatsApp number. Only a link made by
+    hand gets past this; see ``ManyChatService.link_contact``.
+    """
+
+
+# The old wording told the office to check the number was on WhatsApp. It is:
+# that is exactly why ManyChat already has it.
+CONTACT_UNFINDABLE_MESSAGE = (
+    'איש קשר עם המספר הזה כבר קיים ב-ManyChat, אבל ManyChat לא מאפשר לאתר אותו לפי מספר וואטסאפ. '
+    'צריך לקשר אותו ידנית פעם אחת (״קישור לאיש קשר״ בתוצאות התפוצה), ומאז ההודעות יגיעו אליו.'
+)
+
+
+class ContactLinkError(ValueError):
+    """A manual link the office asked for that cannot be made, in words it can act on."""
+
+
+def remembered_subscriber_id(phone: str) -> int | None:
+    """The ManyChat contact last known for this phone, if any."""
+    key = ManyChatService.normalize_phone_e164(phone)
+    if not key:
+        return None
+    try:
+        from apps.core.models import ManyChatContact
+
+        return ManyChatContact.objects.filter(phone=key).values_list('subscriber_id', flat=True).first()
+    except Exception:  # noqa: BLE001 — the memory saves lookups; it must never stop a send
+        logger.debug('ManyChat contact memory unavailable for %s', key, exc_info=True)
+        return None
+
+
+def remember_contact(phone: str, subscriber_id, source: str, user=None) -> None:
+    """Keep the contact for next time. Writes only when something changed."""
+    key = ManyChatService.normalize_phone_e164(phone)
+    try:
+        sid = int(subscriber_id)
+    except (TypeError, ValueError):
+        return
+    if not key:
+        return
+    try:
+        from apps.core.models import ManyChatContact
+
+        with transaction.atomic():
+            row = ManyChatContact.objects.select_for_update().filter(phone=key).first()
+            if row is None:
+                ManyChatContact.objects.create(phone=key, subscriber_id=sid, source=source, linked_by=user)
+            elif row.subscriber_id != sid or (source == ManyChatContact.SOURCE_MANUAL and row.source != source):
+                row.subscriber_id = sid
+                row.source = source
+                row.linked_by = user
+                row.save(update_fields=['subscriber_id', 'source', 'linked_by', 'updated_at'])
+    except Exception:  # noqa: BLE001
+        logger.warning('Could not remember ManyChat contact %s for %s', subscriber_id, key, exc_info=True)
+
+
+def forget_contact(phone: str, subscriber_id) -> None:
+    key = ManyChatService.normalize_phone_e164(phone)
+    if not key:
+        return
+    try:
+        from apps.core.models import ManyChatContact
+
+        with transaction.atomic():
+            ManyChatContact.objects.filter(phone=key, subscriber_id=subscriber_id).delete()
+    except Exception:  # noqa: BLE001
+        logger.warning('Could not forget ManyChat contact %s for %s', subscriber_id, key, exc_info=True)
+
+
+def parse_contact_ref(ref: str) -> int | None:
+    """
+    A contact id out of whatever the office pasted: the id itself, or the
+    address of the contact's page in ManyChat (…/subscribers/123 or …/chat/123).
+    """
+    text = (ref or '').strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    match = re.search(r'/(?:subscribers?|chat|contacts?)/(\d{3,})', text)
+    if match:
+        return int(match.group(1))
+    groups = re.findall(r'\d{5,}', text)
+    return int(groups[-1]) if groups else None
 
 
 def manychat_error_detail(exc: ManyChatError) -> str:
@@ -773,7 +866,9 @@ class ManyChatService:
             try:
                 resolved = self.lookup_or_create(phone, name)
             except ManyChatError as exc:
-                raise ManyChatError(
+                # Same kind of error, so a contact that needs linking by hand is
+                # still recognisable as one on the broadcast row.
+                raise type(exc)(
                     f'איש הקשר: {manychat_error_detail(exc)}',
                     status_code=exc.status_code,
                     payload=exc.payload,
@@ -843,7 +938,8 @@ class ManyChatService:
             resolved = self.lookup_or_create(phone, parent_name, lookup_names=lookup_names)
         except ManyChatError as exc:
             # The detail, not just ManyChat's headline — see manychat_error_detail.
-            return {'sent': False, 'reason': 'lookup_failed', 'error': f'איש הקשר: {manychat_error_detail(exc)}'}
+            reason = 'contact_unfindable' if isinstance(exc, ManyChatContactUnfindable) else 'lookup_failed'
+            return {'sent': False, 'reason': reason, 'error': f'איש הקשר: {manychat_error_detail(exc)}'}
 
         sid = resolved.get('subscriber_id')
         if not sid:
@@ -1129,13 +1225,90 @@ class ManyChatService:
                 wa_matched.append(info)
         return wa_matched
 
+    @staticmethod
+    def _phone_matches(info: dict, phone: str) -> bool | None:
+        """Whether a contact belongs to the phone; None when ManyChat did not say."""
+        recorded = ManyChatService.normalize_phone_e164(str(info.get('whatsapp_phone') or info.get('phone') or ''))
+        if not recorded:
+            return None
+        return recorded == ManyChatService.normalize_phone_e164(phone)
+
+    def _remembered_subscriber(self, phone: str) -> dict | None:
+        """
+        The remembered contact, checked against the phone before it is trusted.
+
+        One read instead of a dozen searches. A contact that no longer exists, or
+        now belongs to another number, is forgotten and the searches run as before.
+        """
+        sid = remembered_subscriber_id(phone)
+        if not sid:
+            return None
+        try:
+            info = self.get_subscriber(sid)
+        except ManyChatError as exc:
+            if exc.status_code in (400, 404):
+                forget_contact(phone, sid)
+            return None
+        if not isinstance(info, dict) or self._phone_matches(info, phone) is False:
+            forget_contact(phone, sid)
+            return None
+        info = dict(info)
+        info.setdefault('id', sid)
+        return info
+
+    def link_contact(self, phone: str, contact_ref: str, user=None) -> dict:
+        """
+        Link a phone to a ManyChat contact by hand — the only way past a contact
+        ManyChat has but will not find (see ``ManyChatContactUnfindable``).
+
+        The contact is read back first, and refused when it belongs to another
+        number, so a mistyped id cannot send one family's messages to another.
+        """
+        target = self.normalize_phone_e164(phone)
+        if not target:
+            raise ContactLinkError('מספר הטלפון אינו תקין.')
+        if self.normalize_phone_e164(contact_ref or '') == target:
+            raise ContactLinkError(
+                'זה מספר הטלפון. צריך את הקישור לאיש הקשר ב-ManyChat — פתחו אותו שם והעתיקו את הכתובת מהדפדפן.'
+            )
+        sid = parse_contact_ref(contact_ref)
+        if not sid:
+            raise ContactLinkError('לא נמצא מזהה איש קשר. הדביקו את הכתובת של איש הקשר מ-ManyChat, או את המספר שבסופה.')
+        try:
+            info = self.get_subscriber(sid)
+        except ManyChatError as exc:
+            if exc.status_code in (400, 404):
+                raise ContactLinkError(f'ב-ManyChat אין איש קשר עם המזהה {sid}.') from exc
+            raise
+        if not isinstance(info, dict):
+            raise ContactLinkError(f'ב-ManyChat אין איש קשר עם המזהה {sid}.')
+        matches = self._phone_matches(info, phone)
+        if matches is False:
+            recorded = str(info.get('whatsapp_phone') or info.get('phone') or '')
+            raise ContactLinkError(
+                f'איש הקשר {sid} ב-ManyChat שייך למספר {recorded}, לא ל-{phone}. בדקו שפתחתם את איש הקשר הנכון.'
+            )
+        from apps.core.models import ManyChatContact
+
+        remember_contact(phone, sid, ManyChatContact.SOURCE_MANUAL, user=user)
+        info = dict(info)
+        info.setdefault('id', sid)
+        return {'subscriber_id': sid, 'subscriber': info, 'phone_verified': matches is True}
+
     def lookup_or_create(self, phone: str, name: str = '', lookup_names: list[str] | None = None) -> dict:
         """Find by phone or create a WhatsApp subscriber for any valid number."""
+        from apps.core.models import ManyChatContact
+
+        remembered = self._remembered_subscriber(phone)
+        if remembered:
+            return {'subscriber': remembered, 'created': False, 'subscriber_id': remembered.get('id')}
+
         sub = self._resolve_subscriber(phone, name, lookup_names)
         if sub:
             sid = sub.get('id')
             if sid:
                 self._ensure_phone_indexed(sid, phone)
+                remember_contact(phone, sid, ManyChatContact.SOURCE_FOUND)
             return {'subscriber': sub, 'created': False, 'subscriber_id': sid}
 
         parts = (name or 'Kogo').strip().split(maxsplit=1)
@@ -1146,26 +1319,34 @@ class ManyChatService:
             sid = created.get('id')
             if sid:
                 self._ensure_phone_indexed(sid, phone)
+                remember_contact(phone, sid, ManyChatContact.SOURCE_CREATED)
             return {'subscriber': created, 'created': True, 'subscriber_id': sid}
         except ManyChatError as exc:
-            if 'already exists' in _manychat_error_text(exc) or 'whatsapp id' in _manychat_error_text(exc):
+            text = _manychat_error_text(exc)
+            # Checked first: "is not a valid whatsapp id" also contains
+            # "whatsapp id", and used to fall into the branch below — so a
+            # number that is not on WhatsApp was reported as one ManyChat could
+            # not find, and this message was never reached.
+            if 'not a valid whatsapp id' in text:
+                raise ManyChatError(
+                    'מספר הטלפון אינו רשום ב-WhatsApp — לא ניתן לשלוח הודעה.',
+                    status_code=exc.status_code,
+                    payload=exc.payload,
+                ) from exc
+            if 'already exists' in text or 'whatsapp id' in text:
                 sub = self._resolve_subscriber(phone, name, lookup_names)
                 if not sub:
                     wa_match = self._find_by_whatsapp_phone(phone)
                     sub = self._pick_best_subscriber(wa_match, phone)
                 if sub and sub.get('id'):
                     self._ensure_phone_indexed(sub.get('id'), phone)
+                    remember_contact(phone, sub.get('id'), ManyChatContact.SOURCE_FOUND)
                     return {'subscriber': sub, 'created': False, 'subscriber_id': sub.get('id')}
-                raise ManyChatError(
-                    'לא ניתן למצוא את איש הקשר ב-ManyChat לפי מספר הטלפון. '
-                    'ודא שהמספר רשום ב-WhatsApp.',
+                # No payload: ManyChat's own line ("This WhatsApp ID already
+                # exists") is what this message explains, and repeating it after
+                # the explanation only made the row longer.
+                raise ManyChatContactUnfindable(
+                    CONTACT_UNFINDABLE_MESSAGE,
                     status_code=exc.status_code,
-                    payload=exc.payload,
-                ) from exc
-            if 'not a valid whatsapp id' in _manychat_error_text(exc):
-                raise ManyChatError(
-                    'מספר הטלפון אינו רשום ב-WhatsApp — לא ניתן לשלוח הודעה.',
-                    status_code=exc.status_code,
-                    payload=exc.payload,
                 ) from exc
             raise

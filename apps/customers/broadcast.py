@@ -12,7 +12,12 @@ import logging
 from typing import Iterable
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
-from apps.core.manychat_service import ManyChatError, ManyChatService, manychat_error_detail
+from apps.core.manychat_service import (
+    ManyChatContactUnfindable,
+    ManyChatError,
+    ManyChatService,
+    manychat_error_detail,
+)
 from apps.core.scoping import ACTIVE_ENROLLMENT_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -153,6 +158,8 @@ def broadcast_to_children(
             # error". What the office needs is the field it rejected, which
             # lives in the payload.
             outcome = {'sent': False, 'error': manychat_error_detail(exc)}
+            if isinstance(exc, ManyChatContactUnfindable):
+                outcome['reason'] = 'contact_unfindable'
 
         if outcome.get('sent'):
             # Only a message that went out covers the sibling on the same phone;
@@ -165,6 +172,9 @@ def broadcast_to_children(
         else:
             row['status'] = 'failed'
             row['error'] = outcome.get('error') or outcome.get('reason') or 'unknown'
+            if outcome.get('reason') == 'contact_unfindable':
+                # The screen offers to link this contact by hand.
+                row['reason'] = 'contact_unfindable'
             counts['failed'] += 1
             logger.warning('Broadcast to child %s failed: %s', child.id, row['error'])
         results.append(row)

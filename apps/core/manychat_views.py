@@ -5,7 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.core.manychat_service import ManyChatError, ManyChatService
+from apps.core.manychat_service import ContactLinkError, ManyChatError, ManyChatService, manychat_error_detail
 from apps.core.permissions import IsManager
 from apps.customers.models import Family, Parent
 from apps.customers.models import Child
@@ -162,6 +162,36 @@ class WhatsAppViewSet(viewsets.ViewSet):
             })
         except ManyChatError as exc:
             return Response({'error': str(exc), 'detail': exc.payload}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(detail=False, methods=['post'], url_path='link-contact')
+    def link_contact(self, request):
+        """
+        Link a phone to a ManyChat contact by hand.
+
+        For the contact ManyChat has under this WhatsApp number but will not
+        find through its API. The office pastes the contact's address from
+        ManyChat; from then on every send to the phone reaches that contact.
+        """
+        phone = str(request.data.get('phone') or '').strip()
+        contact = str(request.data.get('contact') or '').strip()
+        if not phone or not contact:
+            return Response(
+                {'error': 'נדרשים מספר טלפון והקישור לאיש הקשר ב-ManyChat'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        svc = ManyChatService()
+        try:
+            result = svc.link_contact(phone, contact, user=request.user)
+        except ContactLinkError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ManyChatError as exc:
+            return Response({'error': f'ManyChat: {manychat_error_detail(exc)}'}, status=status.HTTP_502_BAD_GATEWAY)
+        sub = result.get('subscriber') or {}
+        return Response({
+            'subscriber_id': result['subscriber_id'],
+            'display_name': _subscriber_display_name(sub),
+            'phone_verified': result['phone_verified'],
+        })
 
     @action(detail=False, methods=['get'], url_path='subscriber')
     def subscriber_detail(self, request):
