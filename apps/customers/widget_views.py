@@ -17,6 +17,11 @@ from datetime import date, timedelta
 from django.utils import timezone
 from apps.core.computerized_docs import CONSENT_SOURCE_WIDGET, record_consent
 from apps.core.tranzila_service import is_tranzila_uncertain_gateway_error
+from apps.customers.child_status import (
+    STATUS_INACTIVE,
+    STATUS_PAYMENT_PROBLEM,
+    STATUS_PENDING,
+)
 from apps.customers.models import Family, Parent, Child, Payment
 from apps.customers.child_identity import find_existing_child_on_family
 from apps.customers.widget_course_types import sort_widget_course_types
@@ -1585,10 +1590,39 @@ class WidgetChargeView(APIView):
         payment.failure_code = str(result.get('response_code', ''))[:50]
         payment.save(update_fields=['status', 'failure_reason', 'failure_code', 'updated_at'])
         # An earlier lesson in the same bundle may already be paid and active;
-        # flagging the child as a payment problem then would be wrong.
+        # flagging the child then would be wrong.
         if allow_child_status_downgrade and child:
-            Child.objects.filter(pk=child.pk).update(status='payment_problem')
-            return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
+            Child.objects.filter(pk=child.pk).update(
+                status=_status_after_failed_charge(child, is_trial_payment),
+            )
+        # Always answer. This return used to sit inside the `if` above, so a
+        # bundle whose first lesson was paid and whose second was declined fell
+        # off the end of the function with None — and the loop's
+        # result.get('success') then raised, turning "your card was declined,
+        # try again" into a server error after a charge had already gone through.
+        return {'success': False, 'payment_id': str(payment.id), 'error': result.get('error', 'התשלום נכשל')}
+
+
+def _status_after_failed_charge(child, is_trial_payment):
+    """
+    What a declined widget charge leaves the child as. It depends on the path.
+
+    A trial that did not go through was never booked. The parent reached the
+    card and it stopped there, which is בתהליך רישום — not a billing problem,
+    because there is nothing to bill: no enrolment was created. The widget
+    tells them to try again.
+
+    A registration whose card was declined is a customer with a billing
+    problem, בעיה באשראי.
+
+    A failed trial never pulls down a child who already holds something
+    better — a paying child adding a trial for another course, say.
+    """
+    if not is_trial_payment:
+        return STATUS_PAYMENT_PROBLEM
+    if child.status in (STATUS_PENDING, STATUS_INACTIVE):
+        return STATUS_PENDING
+    return child.status
 
 
 class WidgetPaymentStatusView(APIView):
