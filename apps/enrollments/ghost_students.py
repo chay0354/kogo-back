@@ -288,6 +288,46 @@ def _phones_of_registered_children(phones: set) -> set:
     return found
 
 
+def _names_registered_once_in_branch(names: set, branch_id) -> set:
+    """
+    Which of these full names belong to exactly one registered child in the branch.
+
+    For a ghost typed in without a phone, the name is all there is. Matched
+    across the whole system it would be unsafe — two children share a full name
+    across branches, and one of them would vanish from a register somebody is
+    standing in front of. So it is narrowed twice: to the branch the ghost was
+    added in, and to a name that one registered child holds there, not two.
+
+    A walk-in is almost always a local child, which is what makes the branch the
+    right fence. When the name is ambiguous the ghost stays, and runs out with
+    its window as before: leaving a ghost up a little longer is a small cost,
+    removing a real child from the register is not.
+    """
+    from django.db.models import Q
+
+    from apps.customers.models import Child
+
+    if not names or branch_id is None:
+        return set()
+
+    in_branch = (
+        Child.objects
+        .exclude(status=GHOST_STATUS)
+        .filter(
+            Q(family__branch_id=branch_id)
+            | Q(lesson_enrollments__lesson__course__branch_id=branch_id)
+        )
+        .values_list('id', 'first_name', 'last_name')
+        .distinct()
+    )
+    holders: dict[str, set] = {}
+    for child_id, first, last in in_branch.iterator(chunk_size=2000):
+        name = _normalise_name(f'{first} {last}')
+        if name in names:
+            holders.setdefault(name, set()).add(child_id)
+    return {name for name, ids in holders.items() if len(ids) == 1}
+
+
 def visible_ghost_enrollments(lesson, occurrence_date: date, real_enrollments: Iterable):
     """
     Ghosts that should still appear on this lesson's roster for this date.
@@ -339,16 +379,37 @@ def visible_ghost_enrollments(lesson, occurrence_date: date, real_enrollments: I
             ghost_phones.add(digits)
     registered_phones = real_phones | _phones_of_registered_children(ghost_phones - real_phones)
 
+    # A ghost with no phone has only a name to go on. It still clears on its own
+    # lesson by that name, as it always did; beyond the lesson it needs the name
+    # to be unmistakable in the branch.
+    phoneless_names = set()
+    for ghost in in_window:
+        if not _normalise_phone(
+            getattr(ghost.child, 'phone_number', '')
+            or getattr(getattr(ghost.child, 'family', None), 'phone', '')
+        ):
+            phoneless_names.add(_normalise_name(f'{ghost.child.first_name} {ghost.child.last_name}'))
+    branch_id = getattr(getattr(lesson, 'course', None), 'branch_id', None)
+    registered_names = real_names | _names_registered_once_in_branch(
+        phoneless_names - real_names, branch_id,
+    )
+
     visible = []
     for ghost in in_window:
         child = ghost.child
-        if _normalise_name(f'{child.first_name} {child.last_name}') in real_names:
-            continue
+        name = _normalise_name(f'{child.first_name} {child.last_name}')
         digits = _normalise_phone(
             getattr(child, 'phone_number', '')
             or getattr(getattr(child, 'family', None), 'phone', '')
         )
+        if name in real_names:
+            continue
         if digits and digits in registered_phones:
+            continue
+        # The branch-wide name match is only for a ghost that has no phone. One
+        # that does is identified by it, and a namesake with another number is
+        # somebody else.
+        if not digits and name in registered_names:
             continue
         visible.append(ghost)
     return visible
