@@ -149,13 +149,17 @@ class ResolveStatusTest(TestCase):
         self.assertEqual(resolve_child_status(child), 'trial_completed')
 
     def test_a_payment_that_has_lapsed_is_not_money_in(self):
-        """Paid once, two years ago, paid_until long past — not פעיל today."""
+        """
+        Paid once, two years ago, paid_until long past. Not פעיל — and not
+        בתהליך רישום either: they were a customer and the money ran out, with
+        nothing left open, which is לא פעיל.
+        """
         child = self.make_child(paid_until_date=TODAY - timedelta(days=700))
         Payment.objects.create(
             child=child, family=self.family, payment_type='recurring_subscription',
             status='completed', base_amount=Decimal('260'), final_amount=Decimal('260'),
         )
-        self.assertEqual(resolve_child_status(child), 'pending')
+        self.assertEqual(resolve_child_status(child), 'inactive')
 
     def test_a_fresh_payment_with_no_paid_until_yet_is_money_in(self):
         child = self.make_child()
@@ -186,6 +190,45 @@ class ResolveStatusTest(TestCase):
     def test_a_cancelled_child_who_pays_is_active(self):
         child = self.make_child(status='inactive', paid_until_date=TODAY + timedelta(days=30))
         self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_cancelled_child_stays_active_until_the_paid_period_ends(self):
+        """The owner's rule: cancel, and פעיל runs to the date you paid up to."""
+        child = self.make_child(status='active', paid_until_date=TODAY + timedelta(days=12))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive',
+            start_date=TODAY - timedelta(days=60),
+        )
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_and_turns_inactive_the_moment_it_passes(self):
+        child = self.make_child(status='active', paid_until_date=TODAY - timedelta(days=1))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive',
+            start_date=TODAY - timedelta(days=60),
+        )
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_long_past_trial_does_not_resurrect_a_lapsed_customer(self):
+        """
+        Someone who paid for two years, left, and had a trial before any of it
+        was coming out as ביצע ניסיון — a description of them from years ago.
+        """
+        child = self.make_child(status='active', paid_until_date=TODAY - timedelta(days=5))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive',
+            start_date=TODAY - timedelta(days=700),
+            trial_lesson_date=TODAY - timedelta(days=700),
+        )
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_money_stopping_without_a_cancellation_is_a_card_problem(self):
+        """Still in the class, nothing paid — somebody has to chase it."""
+        child = self.make_child(status='active', paid_until_date=TODAY - timedelta(days=3))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active',
+            start_date=TODAY - timedelta(days=200),
+        )
+        self.assertEqual(resolve_child_status(child), 'payment_problem')
 
     def test_a_ghost_stays_a_ghost(self):
         child = self.make_child(status='ghost')
