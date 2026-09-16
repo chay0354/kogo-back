@@ -106,7 +106,8 @@ def _has_money_in(child) -> bool:
     Is this child's money in the system?
 
     Paid up to a date that has not passed, or — for a registration that has
-    just gone through and has no such date recorded yet — a completed payment.
+    just gone through and has no such date recorded yet — a completed payment
+    for that registration. A paid trial is not one.
 
     Two readings are deliberately excluded. An enrolment is not money: that was
     the old frontend's rule, and it showed children as פעיל who had never paid
@@ -117,7 +118,12 @@ def _has_money_in(child) -> bool:
     today = date.today()
     if child.paid_until_date:
         return child.paid_until_date >= today
-    return child.payments.filter(status='completed').exists()
+    # Only a registration counts. A paid trial is money too, but it buys a
+    # trial — the parent booked one lesson to see — and a child on it is
+    # נרשם לניסיון, not פעיל. Payment.trial_lesson_date is what marks one: it is
+    # set on the trial's payment and nowhere else. In production that was 50 of
+    # the 55 children this rule was about to promote.
+    return child.payments.filter(status='completed', trial_lesson_date__isnull=True).exists()
 
 
 def _trial_dates(child):
