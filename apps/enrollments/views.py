@@ -680,7 +680,23 @@ def cron_trial_reminders(request):
 
     dry_run = str(request.query_params.get('dry_run', '')).lower() in ('1', 'true', 'yes')
     summary = send_due_trial_reminders(dry_run=dry_run)
-    return Response({'ok': True, 'dry_run': dry_run, 'summary': summary})
+
+    # Once a day, on the first runs of the morning, fold duplicate children and
+    # walk-ins whose real child now exists. It rides here rather than on its own
+    # schedule so vercel.json stays untouched; ?merge=1 runs it on demand.
+    merges = None
+    force = str(request.query_params.get('merge', '')).lower() in ('1', 'true', 'yes')
+    if force or timezone.now().hour == 4:
+        from apps.customers.child_merge import resolve_duplicates
+
+        try:
+            result = resolve_duplicates(dry_run=dry_run)
+            merges = {k: result[k] for k in ('planned', 'merged', 'refused', 'skipped', 'ghosts_planned')}
+        except Exception:
+            logger.exception('duplicate-children sweep failed')
+            merges = {'error': True}
+
+    return Response({'ok': True, 'dry_run': dry_run, 'summary': summary, 'merges': merges})
 
 
 

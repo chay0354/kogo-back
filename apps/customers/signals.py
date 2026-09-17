@@ -46,3 +46,36 @@ def create_status_history(sender, instance, created, **kwargs):
                 previous_status=previous_status,
                 new_status=instance.status
             )
+
+
+@receiver(post_save, sender=Child)
+def fold_duplicates_of_a_registered_child(sender, instance, **kwargs):
+    """
+    A registered child just saved may be one the system already holds — as a
+    walk-in the instructor added, or as an earlier registration. Fold those in
+    now, so a ghost goes the moment the real child exists rather than lingering
+    in the customers list.
+
+    After commit, and never raising: this rides on registration and payment
+    flows, and a duplicate that survives until the nightly sweep is a far
+    smaller cost than a registration that fails because tidying up did.
+    """
+    from django.db import transaction
+
+    from apps.customers.child_merge import merging, resolve_around
+
+    if instance.status == 'ghost' or merging.get():
+        return
+
+    child_id = instance.pk
+
+    def run():
+        try:
+            child = Child.objects.select_related('family').filter(pk=child_id).first()
+            if child is not None:
+                resolve_around(child)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('folding duplicates of child %s failed', child_id)
+
+    transaction.on_commit(run)
