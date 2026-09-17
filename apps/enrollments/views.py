@@ -560,7 +560,7 @@ class TrialBlockedDateViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             Lesson.objects
             .filter(course__is_active=True, is_recurring=True, day_of_week=(day.weekday() + 1) % 7)
             .exclude(status='cancelled')
-            .select_related('course', 'course__branch', 'instructor')
+            .select_related('course', 'course__branch', 'course__course_type', 'instructor')
         )
         branch_id = request.query_params.get('branch_id')
         if branch_id and branch_id != 'all':
@@ -568,6 +568,11 @@ class TrialBlockedDateViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         course_id = request.query_params.get('course_id')
         if course_id and course_id != 'all':
             lessons = lessons.filter(course_id=course_id)
+        # The kind of class — קפוארה, ריקוד — which is how the office thinks
+        # about a day, rather than one course row per weekday and age.
+        course_type_id = request.query_params.get('course_type_id')
+        if course_type_id and course_type_id != 'all':
+            lessons = lessons.filter(course__course_type_id=course_type_id)
         age_key = (request.query_params.get('age_key') or '').strip()
         if age_key and age_key != 'all':
             low, high = parse_age_key(age_key)
@@ -590,6 +595,8 @@ class TrialBlockedDateViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
                 'id': str(lesson.id),
                 'course_id': str(course.id),
                 'course_name': course.name,
+                'course_type_id': str(course.course_type_id) if course.course_type_id else None,
+                'course_type_name': course.course_type.name if course.course_type_id else '',
                 'branch_id': str(branch.id) if branch else None,
                 'branch_name': branch.name if branch else '',
                 'instructor_name': lesson.instructor.full_name if lesson.instructor_id else '',
