@@ -133,6 +133,10 @@ class WhatsAppViewSet(viewsets.ViewSet):
             subscribers: list[dict] = []
             if phone:
                 subscribers.extend(svc.find_by_phone(phone))
+            if phone and not subscribers:
+                # The contacts imported from the previous system are only
+                # findable through the phone User Fields.
+                subscribers.extend(svc.find_by_custom_phone_field(phone))
             if name and not subscribers:
                 subscribers.extend(svc.find_by_name(name))
             return Response({
