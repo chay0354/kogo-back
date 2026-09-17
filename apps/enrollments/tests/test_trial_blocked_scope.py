@@ -200,3 +200,26 @@ class TheLessonPickerApi(ScopedBlockTestBase):
 
     def test_it_needs_a_date(self):
         self.assertEqual(self.client.get(self.URL).status_code, 400)
+
+
+class TheLessonPickerFiltersByKindOfClass(ScopedBlockTestBase):
+    URL = '/api/v1/enrollments/trial-blocked-dates/lessons-on-date/'
+
+    def test_each_row_names_its_kind_of_class(self):
+        day = self.first_date(self.closed)
+        res = self.client.get(self.URL, {'date': day.isoformat()})
+        self.assertTrue(all(row['course_type_name'] == 'קפוארה' for row in res.data['lessons']))
+
+    def test_it_filters_by_kind_of_class(self):
+        day = self.first_date(self.closed)
+        dance = CourseType.objects.create(name='ריקוד')
+        course = Course.objects.create(
+            name='ריקוד א-ב', branch=self.branch, course_type=dance, price=Decimal('235.00'),
+            capacity=20, instructor=self.instructor, min_age=3, max_age=4, is_active=True,
+        )
+        danced = Lesson.objects.create(
+            course=course, instructor=self.instructor, day_of_week=3, room=self.room,
+            start_time=time(18, 0), end_time=time(18, 45), is_recurring=True,
+        )
+        res = self.client.get(self.URL, {'date': day.isoformat(), 'course_type_id': str(dance.id)})
+        self.assertEqual([r['id'] for r in res.data['lessons']], [str(danced.id)])
