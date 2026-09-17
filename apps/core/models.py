@@ -443,3 +443,52 @@ class BusinessCategory(models.Model):
 
     def __str__(self):
         return f"{self.business.name} · {self.name}"
+
+
+class ManyChatContact(models.Model):
+    """
+    The ManyChat contact behind a phone number, remembered once it is known.
+
+    ManyChat's API cannot search by WhatsApp number. A parent who first wrote to
+    the business on WhatsApp exists there under that number, but none of the
+    lookups the API does offer — the SMS phone field, a mirrored custom field, a
+    name — finds them, and creating the contact again is refused with "This
+    WhatsApp ID already exists". Every send to that parent failed, with nothing
+    anyone could do about it.
+
+    So a contact is remembered here the first time it is found or created, and
+    one ManyChat cannot find can be linked by hand, once, from the ManyChat
+    contact's own page. A remembered contact is still checked against the phone
+    before it is used, so a link that went stale is dropped rather than followed.
+    """
+
+    SOURCE_FOUND = 'found'
+    SOURCE_CREATED = 'created'
+    SOURCE_MANUAL = 'manual'
+    SOURCE_CHOICES = [
+        (SOURCE_FOUND, 'נמצא אוטומטית'),
+        (SOURCE_CREATED, 'נוצר על ידי המערכת'),
+        (SOURCE_MANUAL, 'קושר ידנית'),
+    ]
+
+    phone = models.CharField(max_length=20, unique=True, verbose_name="טלפון (בינלאומי)")
+    subscriber_id = models.BigIntegerField(verbose_name="מזהה איש קשר ב-ManyChat")
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES, verbose_name="מקור")
+    linked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='manychat_contacts_linked',
+        verbose_name="קושר על ידי",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
+
+    class Meta:
+        db_table = 'manychat_contacts'
+        verbose_name = "איש קשר ב-ManyChat"
+        verbose_name_plural = "אנשי קשר ב-ManyChat"
+
+    def __str__(self):
+        return f'{self.phone} → {self.subscriber_id}'
