@@ -23,6 +23,17 @@ FIELD_SETTLE_SECONDS = 1.5
 # are often mapped to those copies, which stay empty if we only write the original.
 _TIMESTAMPED_FIELD = re.compile(r'^(.+?) \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)$')
 
+# User Fields that hold a contact's WhatsApp number, searched by name.
+#
+# ManyChat's API cannot look a contact up by WhatsApp number, and 4,196 contacts
+# imported from the previous system on 29.7.2026 carry nothing else — no SMS
+# phone, no custom field — so no lookup reached them. A ManyChat rule copies each
+# contact's WhatsApp number into kogo_whatsapp_phone (set up 17.9.2026); the
+# WhatsApp bot already writes it into Client_Phone for everyone it talks to.
+# Searched by name, so they work whether or not MANYCHAT_PHONE_FIELD_ID is set.
+# Only ever read here: Client_Phone belongs to the bot.
+PHONE_LOOKUP_FIELD_NAMES = ('kogo_whatsapp_phone', 'Client_Phone')
+
 # Printed at the end of a free-text fallback, and written to kogo_support_phone.
 SUPPORT_PHONE = '050-9424755'
 
@@ -312,32 +323,68 @@ class ManyChatService:
             return [rows]
         return rows if isinstance(rows, list) else []
 
+    def phone_lookup_field_ids(self) -> list[str]:
+        """
+        The User Fields a phone is searched in, in order: the configured one
+        first (as before), then those named in PHONE_LOOKUP_FIELD_NAMES that
+        exist on this page. Only text fields — the API searches nothing else.
+        """
+        ids: list[str] = []
+        if self.phone_field_id:
+            ids.append(str(self.phone_field_id))
+        try:
+            defs = self.list_custom_fields()
+        except ManyChatError as exc:
+            logger.warning('ManyChat getCustomFields failed; searching the configured phone field only: %s', exc)
+            defs = []
+        by_name = {
+            (row.get('name') or '').strip(): row
+            for row in defs
+            if row.get('id') is not None and (row.get('type') or 'text') == 'text'
+        }
+        for name in PHONE_LOOKUP_FIELD_NAMES:
+            row = by_name.get(name)
+            if row is not None:
+                ids.append(str(row['id']))
+        return list(dict.fromkeys(ids))
+
     def find_by_custom_phone_field(self, phone: str) -> list[dict]:
-        """Lookup via mirrored custom field (ManyChat cannot search by WhatsApp ID directly)."""
-        if not self.phone_field_id:
-            return []
+        """
+        Lookup via the User Fields that mirror the phone (ManyChat cannot search
+        by WhatsApp ID directly).
+
+        Stops at the first field that holds a contact of this very number, so a
+        contact found once costs a call or two. A row whose own number differs —
+        the bot's field can hold a number the parent typed — is never a match;
+        it is only handed on for ``_pick_best_subscriber`` to check and refuse.
+        """
         variants = self.phone_lookup_variants(phone)
+        if not variants:
+            return []
         found: list[dict] = []
         seen: set[str | int] = set()
-        for value in variants:
-            try:
-                result = self._request(
-                    'GET',
-                    '/fb/subscriber/findByCustomField',
-                    params={'field_id': self.phone_field_id, 'field_value': value},
-                )
-            except ManyChatError:
-                continue
-            rows = result.get('data') or []
-            if isinstance(rows, dict):
-                rows = [rows]
-            for row in rows:
-                sid = row.get('id')
-                if sid is not None and sid not in seen:
-                    seen.add(sid)
-                    found.append(row)
-        matched = self._matches_for_phone(found, phone)
-        return matched or found
+        for field_id in self.phone_lookup_field_ids():
+            for value in variants:
+                try:
+                    result = self._request(
+                        'GET',
+                        '/fb/subscriber/findByCustomField',
+                        params={'field_id': field_id, 'field_value': value},
+                    )
+                except ManyChatError:
+                    continue
+                rows = result.get('data') or []
+                if isinstance(rows, dict):
+                    rows = [rows]
+                for row in rows:
+                    sid = row.get('id')
+                    if sid is not None and sid not in seen:
+                        seen.add(sid)
+                        found.append(row)
+                matched = self._matches_for_phone(found, phone)
+                if matched:
+                    return matched
+        return found
 
     def get_subscriber(self, subscriber_id: int | str) -> dict:
         result = self._request('GET', '/fb/subscriber/getInfo', params={'subscriber_id': subscriber_id})
