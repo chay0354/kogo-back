@@ -266,14 +266,23 @@ def create_preview(upload, user) -> LegacyImport:
     if not rows:
         raise ImportFileError('לא נמצאו בקובץ מסמכים לייבוא')
     summary = build_summary(rows, skipped)
-    legacy_import = LegacyImport.objects.create(
-        file_name=(getattr(upload, 'name', '') or 'export.xls')[:255],
-        sha256=hashlib.sha256(content).hexdigest(),
-        row_count=len(rows),
-        rows=rows,
-        summary=summary,
-        uploaded_by=user if getattr(user, 'is_authenticated', False) else None,
-    )
+    fields = {
+        'file_name': (getattr(upload, 'name', '') or 'export.xls')[:255],
+        'row_count': len(rows),
+        'rows': rows,
+        'summary': summary,
+        'uploaded_by': user if getattr(user, 'is_authenticated', False) else None,
+    }
+    sha256 = hashlib.sha256(content).hexdigest()
+    # The same file uploaded again for another look is the same preview, with
+    # its summary read afresh: the rows are megabytes, and one copy is enough.
+    legacy_import = LegacyImport.objects.filter(sha256=sha256, status=LegacyImport.STATUS_PREVIEW).first()
+    if legacy_import is None:
+        legacy_import = LegacyImport.objects.create(sha256=sha256, **fields)
+    else:
+        for name, value in fields.items():
+            setattr(legacy_import, name, value)
+        legacy_import.save(update_fields=list(fields))
     logger.info(
         'Legacy import %s previewed: %s documents, %s skipped, %s customers',
         legacy_import.pk, len(rows), len(skipped), summary['customers']['total'],

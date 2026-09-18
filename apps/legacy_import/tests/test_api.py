@@ -99,6 +99,12 @@ class PreviewTests(ImportFixture, APITestCase):
             self.assertNotIn('01/01/1980', blob)
         self.assertFalse(any('password' in key for r in legacy_import.rows for key in r))
 
+    def test_the_same_file_previewed_twice_is_one_import(self):
+        first = self.client.post(f'{BASE}preview/', {'file': upload()}).data
+        second = self.client.post(f'{BASE}preview/', {'file': upload()}).data
+        self.assertEqual(first['id'], second['id'])
+        self.assertEqual(LegacyImport.objects.count(), 1)
+
     def test_a_file_over_the_limit_is_refused_before_it_is_read(self):
         big = SimpleUploadedFile('big.xls', b'\0' * (service.MAX_UPLOAD_BYTES + 1))
         res = self.client.post(f'{BASE}preview/', {'file': big})
