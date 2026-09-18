@@ -412,3 +412,73 @@ class AutomationListTests(SimpleTestCase):
         svc = self._svc()
         svc.get_flows = MagicMock(return_value=[])
         self.assertIsInstance(svc.list_available_automations(), list)
+
+
+class DeadLinkGuardTests(SimpleTestCase):
+    """
+    The failure message once went out as http://localhost:3000/update-card/…
+    on a deployment without CRM_FRONTEND_URL. The parent tapped it and got
+    "refused to connect"; the office never heard. Two guards now: the link
+    base never falls back to localhost outside DEBUG, and the send seam
+    refuses a link only a developer's machine could open.
+    """
+
+    def _svc(self):
+        svc = ManyChatService(api_key='x')
+        svc.lookup_or_create = MagicMock(return_value={'subscriber_id': 11})
+        svc.set_custom_fields = MagicMock(return_value={'status': 'success'})
+        svc.send_flow = MagicMock(return_value={'status': 'success'})
+        svc.send_whatsapp_text = MagicMock(return_value={'status': 'success'})
+        svc.resolve_flow_for = MagicMock(return_value='ns_card_update')
+        return svc
+
+    def _send(self, svc, url):
+        return svc.notify_registration(
+            phone='0501234567', parent_name='דנה', child_name='נועה', course_name='—',
+            day_name='—', start_time='', end_time='', branch_name='—',
+            kind=ManyChatService.REGISTRATION_KIND_CARD_UPDATE,
+            extra_fields={'kogo_card_update_url': url, 'kogo_card_update_token': 't'},
+        )
+
+    @override_settings(DEBUG=False)
+    def test_a_localhost_link_is_refused_before_anything_is_sent(self):
+        svc = self._svc()
+        result = self._send(svc, 'http://localhost:3000/update-card/abc')
+        self.assertEqual(result, {'sent': False, 'reason': 'link_host_not_configured', 'fields': ['kogo_card_update_url']})
+        svc.lookup_or_create.assert_not_called()
+        svc.send_flow.assert_not_called()
+        svc.send_whatsapp_text.assert_not_called()
+
+    @override_settings(DEBUG=False)
+    def test_a_real_link_goes_out_as_before(self):
+        svc = self._svc()
+        result = self._send(svc, 'https://kogo-front.vercel.app/update-card/abc')
+        self.assertTrue(result['sent'])
+        svc.send_flow.assert_called_once()
+
+    @override_settings(DEBUG=True)
+    def test_a_developer_may_still_send_localhost_links_locally(self):
+        svc = self._svc()
+        self.assertTrue(self._send(svc, 'http://localhost:3000/update-card/abc')['sent'])
+
+
+class FrontendUrlFallbackTests(SimpleTestCase):
+    @override_settings(CRM_FRONTEND_URL='', CORS_ALLOWED_ORIGINS=['http://localhost:3000', 'http://localhost:3001'], DEBUG=False)
+    def test_outside_debug_the_fallback_is_the_production_host_not_localhost(self):
+        from apps.core.password_reset_email import PRODUCTION_FRONTEND_URL, crm_frontend_url
+        self.assertEqual(crm_frontend_url(), PRODUCTION_FRONTEND_URL)
+
+    @override_settings(CRM_FRONTEND_URL='', CORS_ALLOWED_ORIGINS=['http://localhost:3000'], DEBUG=True)
+    def test_in_debug_localhost_is_still_the_developer_default(self):
+        from apps.core.password_reset_email import crm_frontend_url
+        self.assertEqual(crm_frontend_url(), 'http://localhost:3000')
+
+    @override_settings(CRM_FRONTEND_URL='https://crm.example.com/', DEBUG=False)
+    def test_an_explicit_url_always_wins(self):
+        from apps.core.password_reset_email import crm_frontend_url
+        self.assertEqual(crm_frontend_url(), 'https://crm.example.com')
+
+    @override_settings(CRM_FRONTEND_URL='', CORS_ALLOWED_ORIGINS=['http://localhost:3000', 'https://kogo-front.vercel.app'], DEBUG=False)
+    def test_a_real_cors_origin_beats_the_built_in_host(self):
+        from apps.core.password_reset_email import crm_frontend_url
+        self.assertEqual(crm_frontend_url(), 'https://kogo-front.vercel.app')
