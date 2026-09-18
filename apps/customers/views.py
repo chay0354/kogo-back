@@ -83,6 +83,14 @@ class FamilyViewSet(viewsets.ModelViewSet):
             ).distinct()
         return queryset
 
+    def destroy(self, request, *args, **kwargs):
+        """A family holding an issued receipt or a completed charge is never deleted (document_retention)."""
+        from apps.customers.document_retention import REFUSAL, family_holds_documents
+
+        if family_holds_documents(self.get_object()):
+            return Response({'error': REFUSAL}, status=status.HTTP_400_BAD_REQUEST)
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=['post'], url_path='computerized-consent')
     def computerized_consent(self, request, pk=None):
         """
@@ -680,18 +688,28 @@ class ChildViewSet(viewsets.ModelViewSet):
         
         After deleting the child, checks if the family has any remaining children.
         If not, deletes the family (which cascades to parents).
+
+        A child who holds an issued document or a completed charge is refused,
+        and so is the family's delete when the family holds one: CASCADE would
+        take the receipts with them (apps/customers/document_retention.py).
         """
+        from apps.customers.document_retention import (
+            REFUSAL, child_holds_documents, family_holds_documents,
+        )
+
         child = self.get_object()
         family = child.family
-        
+        if child_holds_documents(child):
+            return Response({'error': REFUSAL}, status=status.HTTP_400_BAD_REQUEST)
+
         # Delete the child first
         response = super().destroy(request, *args, **kwargs)
-        
+
         # Check if the family has any remaining children
-        if family.children.count() == 0:
+        if family.children.count() == 0 and not family_holds_documents(family):
             # No more children, delete the family (cascades to parents)
             family.delete()
-        
+
         return response
     
     @action(detail=False, methods=['post'])
@@ -1270,6 +1288,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
     ).prefetch_related('discount_snapshots')
     serializer_class = PaymentSerializer
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    # A charge is the record its receipt was issued from, and the lesson
+    # receipt's lines are read from it at every print: editing or deleting one
+    # rewrote an issued document (הוראה 23(ב) — only a further document corrects
+    # one). Nothing in the CRM ever sent PUT, PATCH or DELETE here; a refund is
+    # the `refund` action, which issues a credit note.
+    http_method_names = ['get', 'post', 'head', 'options']
 
     @action(detail=True, methods=['post'], url_path='resolve-change-difference', permission_classes=[IsAuthenticated, IsManager])
     def resolve_change_difference(self, request, pk=None):
@@ -1632,7 +1656,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         The document existed only as a mail attachment, so anyone who lost the mail
         had no way back to it. This is the same PDF, on demand.
         """
-        from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
+        from apps.customers.subscription_invoice_pdf import reproduce_subscription_invoice_pdf
 
         payment = self.get_object()
         invoice = payment.invoices.order_by('invoice_date').first()
@@ -1643,7 +1667,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            pdf_bytes = generate_subscription_invoice_pdf(invoice)
+            # "מקור" once, "העתק" after (נספח ה'(א)(4)).
+            pdf_bytes = reproduce_subscription_invoice_pdf(invoice, user=request.user)
         except Exception:
             logger.exception('Subscription invoice PDF failed for %s', invoice.invoice_number)
             return Response(
@@ -2190,7 +2215,13 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
         return scope_branches(BusinessCustomer.objects.all(), self.request.user, 'branch')
 
     def destroy(self, request, *args, **kwargs):
+        from apps.customers.document_retention import BUSINESS_REFUSAL, business_customer_holds_documents
+
         customer = self.get_object()
+        # FormalDocument.business_customer is SET_NULL: the documents would stay,
+        # printed with no customer (document_retention).
+        if business_customer_holds_documents(customer):
+            return Response({'error': BUSINESS_REFUSAL}, status=status.HTTP_400_BAD_REQUEST)
         try:
             customer.delete()
         except ProtectedError:

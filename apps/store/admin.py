@@ -5,6 +5,21 @@ from django.contrib import admin
 from apps.store.models import StoreProduct, StoreInvoice, StoreSale
 
 
+class _ViewOnlyMixin:
+    """
+    A store sale is a numbered tax document (ST/SD runs): the admin shows it and
+    never adds, edits or deletes one. A refund is a credit note (the API's refund).
+    """
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(StoreProduct)
 class StoreProductAdmin(admin.ModelAdmin):
     list_display = [
@@ -40,7 +55,7 @@ class StoreProductAdmin(admin.ModelAdmin):
     is_low_stock.short_description = 'מלאי נמוך'
 
 
-class StoreSaleInline(admin.TabularInline):
+class StoreSaleInline(_ViewOnlyMixin, admin.TabularInline):
     model = StoreSale
     extra = 0
     readonly_fields = ['id', 'sale_date', 'created_at']
@@ -51,7 +66,7 @@ class StoreSaleInline(admin.TabularInline):
 
 
 @admin.register(StoreInvoice)
-class StoreInvoiceAdmin(admin.ModelAdmin):
+class StoreInvoiceAdmin(_ViewOnlyMixin, admin.ModelAdmin):
     list_display = [
         'invoice_number', 'get_customer_name', 'total_amount',
         'payment_method', 'payment_status', 'charged_with_token',
@@ -95,7 +110,7 @@ class StoreInvoiceAdmin(admin.ModelAdmin):
 
 
 @admin.register(StoreSale)
-class StoreSaleAdmin(admin.ModelAdmin):
+class StoreSaleAdmin(_ViewOnlyMixin, admin.ModelAdmin):
     list_display = [
         'invoice', 'product', 'quantity', 'total_price',
         'payment_method', 'sale_date'

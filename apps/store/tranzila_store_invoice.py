@@ -22,11 +22,25 @@ STORE_PAYMENT_METHOD = {
 
 
 def _billing_terminal() -> str:
-    """Billing terminal for tax documents; falls back to payment terminal."""
+    """Billing terminal for reading Tranzila documents already issued; falls back to payment terminal."""
     explicit = (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
     if explicit:
         return explicit
     return (getattr(settings, 'TRANZILA_TERMINAL', '') or '').strip()
+
+
+def _issuing_terminal() -> str:
+    """
+    The terminal a new Tranzila document may be issued on — only one set for it on purpose.
+
+    Every sale already has kogo's own document (ST run), mailed to the buyer. A
+    Tranzila document on top of it is a second tax invoice for the same sale,
+    numbered by another system — and each one owes VAT until cancelled (סעיף 49
+    לחוק מע"מ). Falling back to the payment terminal issued that second document
+    whenever the payment terminal had Tranzila's documents module. The same rule
+    as the manual documents (service._attempt_tranzila) and the rental receipts.
+    """
+    return (getattr(settings, 'TRANZILA_BILLING_TERMINAL', '') or '').strip()
 
 
 def _customer_details(invoice: StoreInvoice) -> tuple[str, str, str]:
@@ -74,7 +88,7 @@ def issue_store_tranzila_document(invoice: StoreInvoice) -> FormalDocument | Non
     if invoice.formal_document_id and invoice.formal_document.tranzila_issued:
         return invoice.formal_document
 
-    terminal = _billing_terminal()
+    terminal = _issuing_terminal()
     if not terminal or terminal == 'mock-terminal':
         logger.info(
             'No Tranzila billing terminal configured — skipping Tranzila doc for %s',

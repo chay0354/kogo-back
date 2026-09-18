@@ -127,7 +127,7 @@ class InvoicePdfView(APIView):
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def get(self, request, invoice_id):
-        from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
+        from apps.customers.subscription_invoice_pdf import reproduce_subscription_invoice_pdf
 
         invoice = Invoice.objects.select_related('family').filter(id=invoice_id).first()
         if invoice is None:
@@ -138,6 +138,8 @@ class InvoicePdfView(APIView):
             if str(branch_id) not in allowed:
                 return Response({'error': 'החשבונית לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
 
-        response = HttpResponse(generate_subscription_invoice_pdf(invoice), content_type='application/pdf')
+        response = HttpResponse(
+            reproduce_subscription_invoice_pdf(invoice, user=request.user), content_type='application/pdf',
+        )
         response['Content-Disposition'] = f'attachment; filename="{invoice.invoice_number}.pdf"'
         return response

@@ -31,26 +31,29 @@ def _doc(subtotal='6000', discount='0', doc_type='tax_invoice', allocation=''):
 
 class ThresholdTests(TestCase):
     def test_above_the_threshold_needs_one(self):
-        self.assertTrue(allocation_required(Decimal('5000')))
+        # סעיף 38(א1) לחוק מע"מ: "עולה על" — the threshold itself needs none.
+        self.assertFalse(allocation_required(Decimal('5000')))
         self.assertTrue(allocation_required(Decimal('5000.01')))
 
     def test_below_does_not(self):
         self.assertFalse(allocation_required(Decimal('4999.99')))
         self.assertFalse(allocation_required(Decimal('0')))
 
-    @override_settings(ALLOCATION_THRESHOLD_ILS='15000')
     def test_the_threshold_is_a_setting_not_a_constant(self):
         """It steps down year by year and is printed on real invoices."""
         import importlib
 
         from apps.documents import invoice_document
 
-        importlib.reload(invoice_document)
         try:
-            self.assertFalse(invoice_document.allocation_required(Decimal('6000')))
-            self.assertTrue(invoice_document.allocation_required(Decimal('15000')))
-            self.assertIn('15,000', invoice_document.allocation_note(Decimal('100')).text)
+            with override_settings(ALLOCATION_THRESHOLD_ILS='15000'):
+                importlib.reload(invoice_document)
+                self.assertFalse(invoice_document.allocation_required(Decimal('6000')))
+                self.assertTrue(invoice_document.allocation_required(Decimal('15000.01')))
+                self.assertIn('15,000', invoice_document.allocation_note(Decimal('100')).text)
         finally:
+            # Reloaded once the override is gone: reloading inside it left the
+            # ₪15,000 threshold in place for every test that ran after this one.
             importlib.reload(invoice_document)
 
 

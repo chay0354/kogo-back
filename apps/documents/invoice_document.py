@@ -74,7 +74,31 @@ def date_stamp(day) -> str:
 
 
 def allocation_required(net_before_vat) -> bool:
-    return Decimal(str(net_before_vat or 0)) >= ALLOCATION_THRESHOLD
+    """
+    Whether the amount is above the threshold. סעיף 38(א1) לחוק מע"מ speaks of a
+    tax invoice "שסכומה, בלא המס, עולה על" the threshold — so an invoice of
+    exactly ₪5,000 before VAT needs none.
+    """
+    return Decimal(str(net_before_vat or 0)) > ALLOCATION_THRESHOLD
+
+
+# The documents an allocation number is asked for (הוראת ביצוע מע"מ 01/2025;
+# the Tax Authority's FAQ: a credit note needs none).
+ALLOCATION_DOCUMENT_TYPES = ('tax_invoice', 'combined')
+
+
+def document_needs_allocation(document_type: str, net_before_vat, *, to_business: bool) -> bool:
+    """
+    A tax invoice (or invoice-receipt) above the threshold, to a business customer.
+
+    The number is what lets an עוסק מורשה deduct the input VAT; a private family
+    deducts nothing, and a credit note is issued without one.
+    """
+    return (
+        document_type in ALLOCATION_DOCUMENT_TYPES
+        and to_business
+        and allocation_required(net_before_vat)
+    )
 
 
 def _threshold_label() -> str:
@@ -82,25 +106,32 @@ def _threshold_label() -> str:
     return f'{value:,}'
 
 
-def allocation_note(net_before_vat: Decimal, allocation_number: str = '') -> Note:
+def allocation_note(net_before_vat: Decimal, allocation_number: str = '', *,
+                    to_business: bool = True, credit: bool = False) -> Note | None:
     """
     The allocation-number line on the document.
 
     Three states, and the reader is told which one they are looking at: the
     number itself once it has been entered, that one is needed and is still
-    missing, or that this transaction needs none.
+    missing, or that this transaction needs none. A credit note says nothing
+    unless a number was entered for it; a private customer above the threshold
+    is told none is needed, since only an עוסק מורשה deducts input VAT.
     """
     number = (allocation_number or '').strip()
     if number:
         return Note('מספר הקצאה:', number)
+    if credit:
+        return None
     if allocation_required(net_before_vat):
+        if not to_business:
+            return Note('מספר הקצאה:', 'לא נדרש לעסקה זו - הלקוח אינו עוסק מורשה.')
         return Note(
             'מספר הקצאה:',
             f'נדרש לעסקה זו (סכום לפני מע"מ מעל {_threshold_label()} ₪) — טרם הוזן.',
         )
     return Note(
         'מספר הקצאה:',
-        f'לא נדרש לעסקה זו - סכום העסקה לפני מע"מ נמוך מ-{_threshold_label()} ₪.',
+        f'לא נדרש לעסקה זו - סכום העסקה לפני מע"מ אינו עולה על {_threshold_label()} ₪.',
     )
 
 

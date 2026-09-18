@@ -104,8 +104,23 @@ def _paid(method: str, amount: Decimal, on, *, installments: int = 1, **check) -
     )
 
 
+def _produced(moment, fallback):
+    """
+    (date, time) the system produced a document — 1205/1206, in Israel time.
+
+    הבהרה 12 keeps two dates apart: 1205 is set by the system and cannot be
+    changed by the user, 1230 is the date printed on the document. A document
+    typed with an earlier date than the day it was produced reports both.
+    """
+    if moment is None:
+        return fallback, None
+    local = timezone.localtime(moment) if timezone.is_aware(moment) else moment
+    return local.date(), local.time().replace(second=0, microsecond=0)
+
+
 def _document(row, type_code: int, lines, payments, *, customer_vat: str = '',
-              linked: tuple = (None, '')) -> UniformDocument:
+              linked: tuple = (None, ''), produced_at=None) -> UniformDocument:
+    issue_date, issue_time = _produced(produced_at, row.document_date)
     if type_code == RECEIPT_CODE:
         # הבהרה 4: a receipt's amount received goes in 1219, 1221 and 1223.
         before = after = row.total_amount
@@ -116,7 +131,9 @@ def _document(row, type_code: int, lines, payments, *, customer_vat: str = '',
     return UniformDocument(
         type_code=type_code,
         number=row.document_number,
-        issue_date=row.document_date,
+        issue_date=issue_date,
+        issue_time=issue_time,
+        document_date=row.document_date,
         customer_name=row.customer,
         customer_vat_number=customer_vat,
         amount_before_discount=before,
@@ -201,6 +218,7 @@ def _manual(row, doc, formal_types: dict) -> UniformDocument:
         # and a private family has none.
         customer_vat=_digits(customer.company_number or customer.id_number) if customer else '',
         linked=linked,
+        produced_at=doc.created_at,
     )
 
 
@@ -214,7 +232,7 @@ def _lesson(row, invoice) -> UniformDocument:
         vat_rate=VAT_PERCENT_DISPLAY,
     )
     payment = _paid(invoice.payment_method, row.total_amount, row.document_date)
-    return _document(row, DOCUMENT_TYPE_CODES['combined'], [line], [payment])
+    return _document(row, DOCUMENT_TYPE_CODES['combined'], [line], [payment], produced_at=invoice.created_at)
 
 
 def _store(row, invoice) -> UniformDocument:
@@ -247,7 +265,7 @@ def _store(row, invoice) -> UniformDocument:
     payments = []
     if type_code in PAYMENT_DOCUMENT_TYPES:
         payments.append(_paid(invoice.payment_method, row.total_amount, row.document_date))
-    return _document(row, type_code, lines, payments)
+    return _document(row, type_code, lines, payments, produced_at=invoice.created_at)
 
 
 def _documents(rows) -> list[UniformDocument]:
