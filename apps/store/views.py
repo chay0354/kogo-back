@@ -431,7 +431,9 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
 
         invoice = self.get_object()
         try:
-            pdf_bytes = generate_store_invoice_pdf(invoice)
+            # The original went to the buyer by mail; the office's print is a
+            # copy (נספח ה'(א)(4)). A sale never mailed prints as the original.
+            pdf_bytes = generate_store_invoice_pdf(invoice, copy=bool(invoice.invoice_email_sent_at))
         except Exception:
             logger.exception('Store invoice PDF failed for %s', invoice.invoice_number)
             return Response({'error': 'שגיאה ביצירת הקובץ'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

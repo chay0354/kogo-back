@@ -160,13 +160,12 @@ def normalize_tranzila_document(row: dict, customer_name: str = '') -> dict:
 
 
 def _allocation_required(doc) -> bool:
-    """True when this tax document is above the Tax Authority threshold."""
-    from apps.documents.document_pdf import TAX_DOCUMENT_TYPES
-    from apps.documents.invoice_document import allocation_required
+    """True for a tax invoice above the threshold to a business customer (never a credit note)."""
+    from apps.documents.invoice_document import document_needs_allocation
 
-    if doc.document_type not in TAX_DOCUMENT_TYPES:
-        return False
-    return allocation_required(doc.subtotal - doc.discount_amount)
+    return document_needs_allocation(
+        doc.document_type, doc.subtotal - doc.discount_amount, to_business=doc.client_type == 'business',
+    )
 
 
 def normalize_tranzila_transaction(row: dict) -> dict:

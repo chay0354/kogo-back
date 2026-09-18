@@ -28,7 +28,7 @@ from apps.documents.invoice_document import (
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, money as _money_shared, render_invoice_pdf,
 )
-from apps.documents.issuer import ISSUER_NAME, ORIGINAL_MARK
+from apps.documents.issuer import COPY_MARK, ISSUER_NAME, ORIGINAL_MARK
 from apps.store.models import StoreInvoice
 
 _FONTS_DIR = os.path.join(
@@ -135,26 +135,35 @@ def _items(invoice: StoreInvoice) -> list[LineItem]:
     return items
 
 
+# A sale that was paid when its document was issued. A refund afterwards does
+# not change that document — it is a credit note of its own (הוראה 23(ב)), and a
+# reprint is "הזהה במהותו למקור" (הוראה 18(ב)(2)). So a refunded sale prints as
+# it was issued: paid, nothing credited on its face.
+ISSUED_PAID = ('completed', 'refunded', 'refund_failed')
+
+
 def _payment_fields(invoice: StoreInvoice) -> list[Field]:
-    paid = invoice.amount_paid if invoice.amount_paid else (
-        invoice.total_amount if invoice.payment_status == 'completed' else Decimal('0.00')
-    )
+    if invoice.payment_method != 'monthly_billing' and invoice.payment_status in ISSUED_PAID:
+        status = 'completed'
+        paid = Decimal(str(invoice.total_amount))
+    else:
+        status = invoice.payment_status
+        paid = invoice.amount_paid if invoice.amount_paid else (
+            invoice.total_amount if invoice.payment_status == 'completed' else Decimal('0.00')
+        )
     open_balance = max(Decimal('0'), Decimal(str(invoice.total_amount)) - Decimal(str(paid)))
     method = PAYMENT_METHOD_LABELS.get(invoice.payment_method, invoice.payment_method or '')
     confirmation = (invoice.tranzila_confirmation_code or invoice.tranzila_transaction_id or '').strip()
-    fields = [
-        Field('סטטוס', PAYMENT_STATUS_LABELS.get(invoice.payment_status, invoice.payment_status or '')),
+    return [
+        Field('סטטוס', PAYMENT_STATUS_LABELS.get(status, status or '')),
         Field('אמצעי תשלום', method),
         Field('אישור תשלום', confirmation),
         Field('שולם', _money_shared(paid)),
+        Field('יתרה לתשלום', _money_shared(open_balance)),
     ]
-    if invoice.refunded_amount:
-        fields.append(Field('זוכה', _money_shared(invoice.refunded_amount)))
-    fields.append(Field('יתרה לתשלום', _money_shared(open_balance)))
-    return fields
 
 
-def build_store_invoice_layout(invoice: StoreInvoice) -> InvoiceLayout:
+def build_store_invoice_layout(invoice: StoreInvoice, *, copy: bool = False) -> InvoiceLayout:
     """The design's data for one store sale. Separated out so tests can read it."""
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.total_amount)
     # A sale billed to the monthly standing order is not yet a receipt.
@@ -162,7 +171,7 @@ def build_store_invoice_layout(invoice: StoreInvoice) -> InvoiceLayout:
     return InvoiceLayout(
         # The number prints exactly as it was issued, whatever its shape.
         title=f'{title_word} - {invoice.invoice_number}',
-        copy_mark=ORIGINAL_MARK,
+        copy_mark=COPY_MARK if copy else ORIGINAL_MARK,
         document_fields=[
             Field('מספר מסמך', invoice.invoice_number),
             Field('תאריך ושעה', issue_stamp(invoice.issue_date)),
@@ -177,18 +186,26 @@ def build_store_invoice_layout(invoice: StoreInvoice) -> InvoiceLayout:
         ],
         grand_label='סה"כ לתשלום',
         grand_value=_money_shared(gross),
-        notes=[allocation_note(before_vat), computerized_note()],
+        # A sale on monthly billing is a חשבונית עסקה, not a tax invoice: no
+        # allocation line. A store buyer is a private customer.
+        notes=[
+            note for note in (
+                None if invoice.payment_method == 'monthly_billing'
+                else allocation_note(before_vat, to_business=False),
+                computerized_note(),
+            ) if note is not None
+        ],
         footer=footer_line(),
         pdf_title=invoice.invoice_number,
         pdf_author=ISSUER_NAME,
     )
 
 
-def generate_store_invoice_pdf(invoice: StoreInvoice) -> bytes:
+def generate_store_invoice_pdf(invoice: StoreInvoice, *, copy: bool = False) -> bytes:
     invoice = (
         StoreInvoice.objects
         .select_related('child')
         .prefetch_related('line_items__product')
         .get(pk=invoice.pk)
     )
-    return render_invoice_pdf(build_store_invoice_layout(invoice))
+    return render_invoice_pdf(build_store_invoice_layout(invoice, copy=copy))

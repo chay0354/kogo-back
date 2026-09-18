@@ -14,6 +14,9 @@ ISSUER_LINE = f'{ISSUER_NAME} · {VAT_REGISTRATION_LINE}'
 
 # תקנה 9א(א)(2): "מקור" goes on the original copy only.
 ORIGINAL_MARK = 'מקור'
+# נספח ה'(א)(4) and הוראה 18(ב)(2): every further print of an issued document is
+# marked "העתק" — the software must not produce "מקור" twice.
+COPY_MARK = 'העתק'
 
 # סעיף 18ב(א): a document sent by computer carries these words "בצורה בולטת לעין".
 COMPUTERIZED_MARK = 'מסמך ממוחשב'

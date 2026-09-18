@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from django.db import transaction
+
 from apps.core.vat import (
     DOCUMENT_TITLE, VAT_PERCENT_DISPLAY, split_vat_inclusive, split_vat_inclusive_lines,
 )
-from apps.customers.financial_models import Invoice
+from apps.customers.financial_models import Invoice, InvoiceActivityLog
 from apps.documents.invoice_document import (
     allocation_note, business_fields, computerized_note, date_stamp, footer_line, issue_stamp,
     late_note,
@@ -20,7 +22,7 @@ from apps.documents.invoice_document import (
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, money, render_invoice_pdf,
 )
-from apps.documents.issuer import ISSUER_NAME, ORIGINAL_MARK
+from apps.documents.issuer import COPY_MARK, ISSUER_NAME, ORIGINAL_MARK
 
 STATUS_LABELS = {
     'paid': 'שולם',
@@ -111,7 +113,7 @@ def _late_dates(invoice: Invoice) -> tuple[str, str]:
     return (details.get('document_issued_at') or '')[:10], (details.get('money_received_at') or '')[:10]
 
 
-def build_subscription_invoice_layout(invoice: Invoice) -> InvoiceLayout:
+def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False) -> InvoiceLayout:
     """The design's data for one lesson receipt. Separated out so tests can read it."""
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
     payer = (invoice.payer_name or invoice.family.name or '').strip()
@@ -119,7 +121,8 @@ def build_subscription_invoice_layout(invoice: Invoice) -> InvoiceLayout:
     phone = (invoice.payer_phone or invoice.family.phone or '').strip()
     paid = invoice.status == 'paid'
 
-    notes = [allocation_note(before_vat), computerized_note()]
+    # A family is not an עוסק מורשה: the allocation line says so above the threshold.
+    notes = [allocation_note(before_vat, to_business=False), computerized_note()]
     issued_late, money_received = _late_dates(invoice)
     if issued_late or money_received:
         notes.insert(0, late_note(issued_late, money_received))
@@ -128,7 +131,7 @@ def build_subscription_invoice_layout(invoice: Invoice) -> InvoiceLayout:
         # Whatever the record holds — INV-20260815-A1B2C3D4 as readily as
         # IR-2026-000123. The number is never reshaped for the page.
         title=f'{DOCUMENT_TITLE} - {invoice.invoice_number}',
-        copy_mark=ORIGINAL_MARK,
+        copy_mark=COPY_MARK if copy else ORIGINAL_MARK,
         document_fields=[
             Field('מספר מסמך', invoice.invoice_number),
             Field('תאריך ושעה', issue_stamp(invoice.invoice_date)),
@@ -162,11 +165,37 @@ def build_subscription_invoice_layout(invoice: Invoice) -> InvoiceLayout:
     )
 
 
-def generate_subscription_invoice_pdf(invoice: Invoice) -> bytes:
+def generate_subscription_invoice_pdf(invoice: Invoice, *, copy: bool = False) -> bytes:
     invoice = (
         Invoice.objects
         .select_related('family', 'parent', 'branch', 'payment')
         .prefetch_related('children__child', 'children__course', 'children__lesson', 'activity_logs')
         .get(pk=invoice.pk)
     )
-    return render_invoice_pdf(build_subscription_invoice_layout(invoice))
+    return render_invoice_pdf(build_subscription_invoice_layout(invoice, copy=copy))
+
+
+# The receipt's "מקור" left the system once — by mail (email_sent_at) or, when
+# there was no mail to send, as the office's first download. Logged here so
+# every later print says "העתק" (נספח ה'(א)(4): "מקור" on one copy only).
+ORIGINAL_PRODUCED = 'original_produced'
+
+
+def original_downloaded(invoice: Invoice) -> bool:
+    return InvoiceActivityLog.objects.filter(invoice_id=invoice.pk, action=ORIGINAL_PRODUCED).exists()
+
+
+def reproduce_subscription_invoice_pdf(invoice: Invoice, *, user=None) -> bytes:
+    """
+    The PDF the office downloads: the original the first time the original has
+    not yet left the system, a copy marked "העתק" every time after.
+    """
+    with transaction.atomic():
+        locked = Invoice.objects.select_for_update().get(pk=invoice.pk)
+        copy = bool(locked.email_sent_at) or original_downloaded(locked)
+        if not copy:
+            InvoiceActivityLog.objects.create(
+                invoice=locked, action=ORIGINAL_PRODUCED,
+                details={'via': 'download', 'by': getattr(user, 'email', '') or str(getattr(user, 'pk', '') or '')},
+            )
+    return generate_subscription_invoice_pdf(invoice, copy=copy)

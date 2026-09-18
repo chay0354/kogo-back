@@ -21,12 +21,12 @@ class DocumentPaymentSerializer(serializers.ModelSerializer):
 
 
 def _allocation_required(obj) -> bool:
-    from apps.documents.invoice_document import allocation_required
-    from apps.documents.document_pdf import TAX_DOCUMENT_TYPES
+    """A tax invoice above the threshold to a business customer — never a credit note or a family."""
+    from apps.documents.invoice_document import document_needs_allocation
 
-    if obj.document_type not in TAX_DOCUMENT_TYPES:
-        return False
-    return allocation_required(obj.subtotal - obj.discount_amount)
+    return document_needs_allocation(
+        obj.document_type, obj.subtotal - obj.discount_amount, to_business=obj.client_type == 'business',
+    )
 
 
 class FormalDocumentSerializer(serializers.ModelSerializer):
@@ -141,7 +141,18 @@ class ReceiptDetailsInputSerializer(serializers.Serializer):
 
 class CreditInvoiceInputSerializer(serializers.Serializer):
     document_date = serializers.DateField()
-    linked_invoice_id = serializers.CharField(required=False, allow_blank=True, default='')
+    # A credit note names the document it credits (its number and date): the
+    # dialog always asked for it, and now the API does too. The number may be
+    # one kogo never issued (the previous software's), so it is not looked up
+    # here; its date is found when kogo has the document, or given with it.
+    linked_invoice_id = serializers.CharField(
+        max_length=30,
+        error_messages={
+            'required': 'חשבונית זיכוי חייבת לציין את מספר המסמך המקורי',
+            'blank': 'חשבונית זיכוי חייבת לציין את מספר המסמך המקורי',
+        },
+    )
+    linked_document_date = serializers.DateField(required=False, allow_null=True)
     credit_reason = serializers.CharField()
     credit_amount_before_vat = serializers.DecimalField(max_digits=12, decimal_places=2)
     vat_exempt = serializers.BooleanField(default=False)

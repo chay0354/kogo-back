@@ -64,6 +64,15 @@ def _net_and_gross(amount: Decimal, doc: FormalDocument) -> tuple[Decimal, Decim
     return value, (value * (Decimal('1') + rate)).quantize(Decimal('0.01'))
 
 
+def _payer_name(family) -> str:
+    """The family's primary parent by full name, else the family's name, else ''."""
+    if family is None:
+        return ''
+    parent = family.parents.filter(is_primary=True).first() or family.parents.first()
+    full = f'{parent.first_name} {parent.last_name}'.strip() if parent else ''
+    return full or (family.name or '')
+
+
 def _customer_fields(doc: FormalDocument) -> list[Field]:
     """
     The customer, from whichever record the document points at.
@@ -86,6 +95,9 @@ def _customer_fields(doc: FormalDocument) -> list[Field]:
         family = getattr(doc.child, 'family', None)
         return [
             Field('שם הלקוח', doc.child.full_name or ''),
+            # The child is who the lessons are for; the parent is who paid —
+            # הוראה 5(א)(4) asks a receipt for "שם המשלם".
+            Field('שם המשלם', _payer_name(family)),
             Field('טלפון', str(getattr(family, 'phone', '') or '')),
             Field('אימייל', str(getattr(family, 'email', '') or '')),
         ]
@@ -159,6 +171,18 @@ def _totals(doc: FormalDocument) -> list[Field]:
     return rows
 
 
+def check_details(payment) -> str:
+    """'מס' 000123 · בנק 12 · סניף 600 · חשבון 456789 · לפירעון 01/10/2026' — what is known of it."""
+    parts = [
+        f"מס' {payment.reference}" if payment.reference else '',
+        f'בנק {payment.check_bank}' if payment.check_bank else '',
+        f'סניף {payment.check_branch}' if payment.check_branch else '',
+        f'חשבון {payment.check_account}' if payment.check_account else '',
+        f'לפירעון {date_stamp(payment.check_date)}' if payment.check_date else '',
+    ]
+    return ' · '.join(part for part in parts if part)
+
+
 def _payment_fields(doc: FormalDocument) -> list[Field]:
     payments = list(doc.payments.all())
     if doc.document_type == 'draft':
@@ -188,13 +212,20 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
             if hasattr(payment, 'get_payment_method_display') else payment.payment_method,
         )
         installments = payment.card_installments or 0
-        fields += [
-            Field(f'אמצעי תשלום{suffix}', label or ''),
-            Field(f'4 ספרות אחרונות{suffix}', payment.card_last_four or ''),
-            Field(f'מספר תשלומים{suffix}', str(installments) if installments > 1 else ''),
-            Field(f'אסמכתא / אישור{suffix}', payment.reference or ''),
-            Field(f'סכום ששולם{suffix}', money(payment.amount)),
-        ]
+        fields.append(Field(f'אמצעי תשלום{suffix}', label or ''))
+        if payment.payment_method == 'check':
+            # הוראה 5(ב): a receipt for a check names the check — its number, the
+            # bank and branch, and the day it is due (and the account). They were
+            # stored with the receipt all along and never printed. One row per
+            # check, as the reference was, so a plan of twelve checks stays short.
+            fields.append(Field(f"פרטי הצ'ק{suffix}", check_details(payment)))
+        else:
+            fields += [
+                Field(f'4 ספרות אחרונות{suffix}', payment.card_last_four or ''),
+                Field(f'מספר תשלומים{suffix}', str(installments) if installments > 1 else ''),
+                Field(f'אסמכתא / אישור{suffix}', payment.reference or ''),
+            ]
+        fields.append(Field(f'סכום ששולם{suffix}', money(payment.amount)))
     paid = sum((p.amount for p in payments), Decimal('0'))
     fields.append(Field('יתרה לתשלום', money(max(doc.total_amount - paid, Decimal('0')))))
     return fields
@@ -213,7 +244,13 @@ def _notes(doc: FormalDocument) -> list[Note]:
     if doc.document_type == 'draft':
         notes.append(Note('טיוטה:', 'מסמך זה אינו חשבונית ואינו מסמך מס. הוא יקבל מספר רק לאחר אישור.'))
     elif doc.document_type in TAX_DOCUMENT_TYPES:
-        notes.append(allocation_note(doc.subtotal - doc.discount_amount, doc.allocation_number))
+        note = allocation_note(
+            doc.subtotal - doc.discount_amount, doc.allocation_number,
+            to_business=doc.client_type == 'business',
+            credit=doc.document_type == 'credit_invoice',
+        )
+        if note is not None:
+            notes.append(note)
     elif doc.document_type == 'transaction_invoice':
         notes.append(Note('חשבון עסקה:', 'אינו חשבונית מס. חשבונית מס תופק עם התשלום.'))
     if doc.document_type != 'draft':

@@ -1,6 +1,6 @@
 import logging
 import uuid
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from django.utils import timezone
 from django.db import transaction
 
@@ -12,6 +12,10 @@ from apps.documents.models import (
 logger = logging.getLogger(__name__)
 
 VAT_RATE = Decimal('0.18')
+# To the agora, half up — the rounding apps.core.vat applies to every other
+# document. Decimal's default (half-even) put ₪18.045 of VAT at ₪18.04 here
+# and at ₪18.05 on a lesson receipt.
+AGORA = Decimal('0.01')
 
 
 DRAFT_TYPE = 'draft'
@@ -58,15 +62,15 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
     base = subtotal - effective_discount
     if prices_include_vat and not vat_exempt:
         # The prices are gross: the total is what was paid, VAT is taken out of it.
-        net = (base / (1 + VAT_RATE)).quantize(Decimal('0.01'))
+        net = (base / (1 + VAT_RATE)).quantize(AGORA, rounding=ROUND_HALF_UP)
         vat = base - net
         total = base
         subtotal = subtotal - vat
     else:
-        vat = Decimal('0') if vat_exempt else (base * VAT_RATE).quantize(Decimal('0.01'))
+        vat = Decimal('0') if vat_exempt else (base * VAT_RATE).quantize(AGORA, rounding=ROUND_HALF_UP)
         total = base + vat
     if round_total:
-        total = total.quantize(Decimal('1'))
+        total = total.quantize(Decimal('1'), rounding=ROUND_HALF_UP)
     return {
         'subtotal': subtotal,
         'discount_amount': effective_discount,
@@ -320,7 +324,7 @@ def create_credit_invoice(data: dict) -> FormalDocument:
     credit = data['credit_invoice_details']
     amount_before_vat = Decimal(str(credit['credit_amount_before_vat']))
     vat_exempt = credit.get('vat_exempt', False)
-    vat_amount = Decimal('0') if vat_exempt else (amount_before_vat * VAT_RATE).quantize(Decimal('0.01'))
+    vat_amount = Decimal('0') if vat_exempt else (amount_before_vat * VAT_RATE).quantize(AGORA, rounding=ROUND_HALF_UP)
     total = amount_before_vat + vat_amount
 
     # Try to resolve linked document
@@ -331,6 +335,9 @@ def create_credit_invoice(data: dict) -> FormalDocument:
             linked_doc = FormalDocument.objects.get(document_number=linked_number)
         except FormalDocument.DoesNotExist:
             pass
+    # The original's date is printed beside its number: from the document when
+    # kogo issued it, else as typed (a number from the previous software).
+    linked_date = credit.get('linked_document_date') or original_document_date(linked_number)
 
     doc = FormalDocument.objects.create(
         document_number=_generate_document_number('credit_invoice'),
@@ -350,6 +357,7 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         total_amount=total,
         linked_document=linked_doc,
         linked_document_number=linked_number,
+        linked_document_date=linked_date,
         credit_reason=credit.get('credit_reason', ''),
         customer_notes=credit.get('customer_notes', ''),
         internal_notes=credit.get('internal_notes', ''),
@@ -365,6 +373,32 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         logger.exception('Credit note email failed for %s (non-fatal)', doc.document_number)
 
     return doc
+
+
+def original_document_date(number: str):
+    """
+    The date of the document `number`, from whichever of kogo's runs issued it.
+
+    A credit note prints the original's number and date. The original may be a
+    document issued by hand, a lesson receipt (IR) or a store sale (ST/SD); a
+    number kogo never issued — the previous software's — gives None.
+    """
+    number = (number or '').strip()
+    if not number:
+        return None
+    from apps.customers.financial_models import Invoice
+    from apps.store.models import StoreInvoice
+
+    formal = FormalDocument.objects.filter(document_number=number).values_list('document_date', flat=True).first()
+    if formal:
+        return formal
+    for moment in (
+        Invoice.objects.filter(invoice_number=number).values_list('invoice_date', flat=True).first(),
+        StoreInvoice.objects.filter(invoice_number=number).values_list('issue_date', flat=True).first(),
+    ):
+        if moment:
+            return timezone.localtime(moment).date() if timezone.is_aware(moment) else moment.date()
+    return None
 
 
 def _credit_note_recipient(doc: FormalDocument) -> tuple[str, str]:

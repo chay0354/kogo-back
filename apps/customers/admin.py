@@ -37,6 +37,14 @@ class FamilyAdmin(admin.ModelAdmin):
     search_fields = ['name', 'phone', 'email', 'parent_id_number', 'address']
     inlines = [ParentInline, ChildInline]
     readonly_fields = ['created_at', 'updated_at']
+
+    def has_delete_permission(self, request, obj=None):
+        # A family that holds an issued receipt or a completed charge stays (document_retention).
+        from apps.customers.document_retention import family_holds_documents
+
+        if obj is not None and family_holds_documents(obj):
+            return False
+        return super().has_delete_permission(request, obj)
     
     fieldsets = (
         ('פרטי משפחה', {
@@ -79,6 +87,14 @@ class ChildAdmin(admin.ModelAdmin):
     search_fields = ['first_name', 'last_name', 'id_number', 'family__name']
     readonly_fields = ['age', 'full_name', 'created_at', 'updated_at']
     inlines = [EnrollmentInline, ChildStatusHistoryInline]
+
+    def has_delete_permission(self, request, obj=None):
+        # A child named on an issued document or a completed charge stays (document_retention).
+        from apps.customers.document_retention import child_holds_documents
+
+        if obj is not None and child_holds_documents(obj):
+            return False
+        return super().has_delete_permission(request, obj)
     
     fieldsets = (
         ('פרטים אישיים', {
@@ -122,13 +138,31 @@ class ChildAdmin(admin.ModelAdmin):
 
 
 # Financial Models
-class InvoiceChildInline(admin.TabularInline):
+#
+# An issued receipt is a tax document: it is never edited or deleted, here or
+# anywhere (נספח ה' להוראות ניהול פנקסי חשבונות; a correction is a credit note).
+# The admin shows it and nothing more. Being read-only here also stops the admin
+# from deleting a family or a child and taking its receipts with it through
+# CASCADE: Django refuses a delete that would remove objects the user may not
+# delete.
+class _ViewOnlyMixin:
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class InvoiceChildInline(_ViewOnlyMixin, admin.TabularInline):
     model = InvoiceChild
-    extra = 1
+    extra = 0
 
 
 @admin.register(Invoice)
-class InvoiceAdmin(admin.ModelAdmin):
+class InvoiceAdmin(_ViewOnlyMixin, admin.ModelAdmin):
     list_display = ['invoice_number', 'family', 'amount', 'status', 'payment_method', 'invoice_date']
     list_filter = ['status', 'payment_method', 'branch']
     search_fields = ['invoice_number', 'family__name', 'payer_name']

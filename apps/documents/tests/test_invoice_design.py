@@ -279,7 +279,11 @@ class StoreSaleDesignTests(MandatoryMarkingsMixin, TestCase):
         save_sample('10-store-sale-refunded', pdf)
 
         self.assert_statutory_markings(pdf, 'ST-2026-000046', 'חשבונית מס / קבלה')
-        self.assertIn('זוכה', pdf_text(pdf))
+        # A reprint is "הזהה במהותו למקור" (הוראה 18(ב)(2)): the sale was paid when
+        # it was issued, and the refund is a credit note of its own — not a line
+        # added to this document's face afterwards.
+        self.assertNotIn('זוכה', pdf_text(pdf))
+        self.assertIn('שולם', pdf_text(pdf))
 
     def test_a_sale_on_the_standing_order_is_a_transaction_invoice(self):
         invoice = self.make_invoice(

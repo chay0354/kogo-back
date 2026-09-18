@@ -88,7 +88,10 @@ def send_subscription_invoice_email(invoice: Invoice) -> bool:
     check_consent(invoice.family if invoice.family_id else None, invoice.invoice_number)
 
     subject, text, html = build_subscription_invoice_email(invoice)
-    pdf_bytes = generate_subscription_invoice_pdf(invoice)
+    # The original, unless the office already downloaded it (then this is a copy).
+    from apps.customers.subscription_invoice_pdf import original_downloaded
+
+    pdf_bytes = generate_subscription_invoice_pdf(invoice, copy=original_downloaded(invoice))
     filename = f'{invoice.invoice_number}.pdf'
 
     if resend_configured():
