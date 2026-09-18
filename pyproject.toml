@@ -20,6 +20,7 @@ dependencies = [
   "requests==2.31.0",
   "reportlab==5.0.0",
   "python-bidi==0.6.11",
+  "xlrd==2.0.1",
 ]
 
 [tool.uv]

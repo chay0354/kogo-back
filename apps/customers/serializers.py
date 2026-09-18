@@ -1078,4 +1078,9 @@ class BusinessCustomerSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'full_name', 'branch_name', 'created_at', 'updated_at']
+        # An organisation has one name and no family name ("עיריית רמת גן" is
+        # split like the wizard splits it, but a one-word studio is not). The
+        # wizard saves the card again with every document, so a card imported
+        # with the name in first_name alone must save as it is.
+        extra_kwargs = {'last_name': {'allow_blank': True}}
 

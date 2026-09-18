@@ -18,3 +18,6 @@ requests==2.31.0
 reportlab==5.0.0
 python-bidi==0.6.11
 
+# Reading the previous invoicing software's .xls export (BIFF, not xlsx).
+# Pure Python, no OS-level deps.
+xlrd==2.0.1

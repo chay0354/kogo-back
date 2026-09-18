@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     'apps.signatures',
     'apps.rentals',
     'apps.rental_billing',
+    'apps.legacy_import',
 ]
 
 MIDDLEWARE = [
