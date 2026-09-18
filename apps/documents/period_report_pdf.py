@@ -920,6 +920,9 @@ def _integrity_block(report: PeriodReport, styles: dict) -> list:
                 broken.append(len(rows) + 1)
                 shown = ', '.join(run.missing[:4]) + (' …' if len(run.missing) > 4 else '')
                 state = f'חסרים {len(run.missing)}: {shown}'
+            if run.continues:
+                # The run starts where the previous software's run stopped.
+                state = f'{state} · {run.continues}'
             rows.append([
                 _rtl_cell(run.name if run.series else f'{run.year} · ישנה', styles['td_num'], widths[0]),
                 _rtl_cell(run.label, styles['td'], widths[1]),

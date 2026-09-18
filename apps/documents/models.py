@@ -65,7 +65,11 @@ class DocumentSeries(models.Model):
     """
     series = models.CharField(max_length=10, verbose_name="סדרה")
     year = models.PositiveIntegerField(verbose_name="שנת מס")
+    # The last number handed out; start - 1 while the run has handed out none.
     counter = models.PositiveIntegerField(default=0)
+    # The run's first number. 1, unless the run continues the previous
+    # software's run of the same type (DocumentSeriesOpening says from where).
+    start = models.PositiveIntegerField(default=1, verbose_name="מספר פתיחה")
 
     class Meta:
         db_table = 'document_series'
@@ -74,6 +78,11 @@ class DocumentSeries(models.Model):
     def __str__(self) -> str:
         return f'{self.series}-{self.year}: {self.counter}'
 
+    @property
+    def issued(self) -> int:
+        """How many numbers the run handed out: start .. counter."""
+        return max(0, self.counter - self.start + 1)
+
     @classmethod
     def next_number(cls, series: str, year: int) -> int:
         """The next number, under a row lock; a caller that rolls back gives it back."""
@@ -81,9 +90,95 @@ class DocumentSeries(models.Model):
             row, _ = cls.objects.select_for_update().get_or_create(
                 series=series, year=year, defaults={'counter': 0},
             )
-            row.counter += 1
+            # A run that starts above 1 hands out its start first.
+            row.counter = max(row.counter, row.start - 1) + 1
             row.save(update_fields=['counter'])
             return row.counter
+
+    @classmethod
+    def open_at(cls, series: str, year: int, start: int) -> 'DocumentSeries':
+        """
+        Make `start` the next number of a run that has handed out nothing yet.
+
+        Under the same row lock next_number takes, so no number can be handed
+        out between the check and the change. A run that handed out even one
+        number is refused: an issued number is never renumbered (סעיף 23(ב)),
+        and a run cannot start below a number it already gave. The caller runs
+        this inside its own transaction, with the audit record beside it.
+        """
+        if start < 1:
+            raise ValueError('A run starts at 1 or above')
+        row, _ = cls.objects.select_for_update().get_or_create(
+            series=series, year=year, defaults={'counter': 0},
+        )
+        if row.counter != 0:
+            raise SeriesAlreadyIssued(row)
+        row.start = start
+        row.counter = start - 1
+        row.save(update_fields=['start', 'counter'])
+        return row
+
+
+class SeriesAlreadyIssued(Exception):
+    """The run handed out numbers (or was opened) already, so its start is fixed."""
+
+    def __init__(self, row: DocumentSeries):
+        super().__init__(f'{row.series}-{row.year} is at {row.counter}')
+        self.row = row
+
+
+class DocumentSeriesOpening(models.Model):
+    """
+    The record of a run that continues the previous software's run of its type.
+
+    The business moved to kogo from another invoicing program, which numbered
+    each document type in a run of its own that never reset. So the books stay
+    one consecutive run, a kogo run may start where the old one stopped: the
+    old program's last number, plus one. This keeps who set it, when, from what
+    and why. It is written once, beside the run's change, and never edited or
+    deleted — a mistake is not fixed by rewriting history.
+
+    One old run is continued by one kogo run a tax year: two kogo runs that
+    both start at 121883 would be two runs of one type sharing numbers.
+    """
+    series = models.CharField(max_length=10, verbose_name="סדרה")
+    year = models.PositiveIntegerField(verbose_name="שנת מס")
+    start = models.PositiveIntegerField(verbose_name="המספר הראשון בסדרה")
+    previous_last_number = models.PositiveIntegerField(verbose_name="המספר האחרון בתוכנה הקודמת")
+    previous_type_label = models.CharField(max_length=50, verbose_name="סוג המסמך בתוכנה הקודמת")
+    note = models.TextField(blank=True, verbose_name="מקור / סיבה")
+    created_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='series_openings', verbose_name="מי פתח",
+    )
+    # The name as it was, so the record still says who once the account is gone.
+    created_by_name = models.CharField(max_length=150, blank=True, verbose_name="שם הפותח")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="מתי")
+
+    class Meta:
+        db_table = 'document_series_openings'
+        ordering = ['year', 'series']
+        constraints = [
+            models.UniqueConstraint(fields=['series', 'year'], name='series_opening_once_per_run'),
+            models.UniqueConstraint(
+                fields=['year', 'previous_type_label'], name='series_opening_one_run_per_old_run',
+            ),
+            models.CheckConstraint(
+                check=models.Q(start=models.F('previous_last_number') + 1),
+                name='series_opening_continues_the_old_run',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.series}-{self.year} from {self.start} ({self.previous_type_label} {self.previous_last_number})'
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValueError('A series opening is never edited')
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('A series opening is never deleted')
 
 
 class FormalDocument(models.Model):

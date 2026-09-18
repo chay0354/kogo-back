@@ -523,6 +523,59 @@ class MissingReceiptsViewSet(viewsets.ViewSet):
         return Response(issue_missing_receipts(payment_ids, user=request.user))
 
 
+class DocumentSeriesViewSet(viewsets.ViewSet):
+    """
+    The number runs of this tax year and the next, and continuing the previous
+    software's runs in them (apps/documents/series_opening.py).
+
+    GET  /api/v1/documents/series/
+    POST /api/v1/documents/series/open/
+         {series, year, start, previous_last_number, previous_type_label, note}
+
+    Managers only: an opening fixes where a run's numbers start, for good.
+    """
+
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def list(self, request):
+        from apps.documents.series_opening import series_overview
+
+        return Response(series_overview())
+
+    @action(detail=False, methods=['post'], url_path='open')
+    def open_run(self, request):
+        from apps.documents.series_opening import OpeningRefused, open_series, series_overview
+
+        data = request.data
+        try:
+            opening = open_series(
+                series=data.get('series'),
+                year=data.get('year'),
+                start=data.get('start'),
+                previous_last_number=data.get('previous_last_number'),
+                previous_type_label=data.get('previous_type_label'),
+                note=data.get('note') or '',
+                user=request.user,
+            )
+        except OpeningRefused as exc:
+            return Response(
+                {'error': exc.message},
+                status=status.HTTP_409_CONFLICT if exc.conflict else status.HTTP_400_BAD_REQUEST,
+            )
+        logger.info(
+            'Series %s-%s opened at %s (previous %s %s) by %s',
+            opening.series, opening.year, opening.start,
+            opening.previous_type_label, opening.previous_last_number,
+            getattr(request.user, 'email', request.user),
+        )
+        overview = series_overview()
+        run = next(
+            row for row in overview['runs']
+            if row['series'] == opening.series and row['year'] == opening.year
+        )
+        return Response({'run': run, 'overview': overview}, status=status.HTTP_201_CREATED)
+
+
 class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Cash paid up front: list the plans and register a new one.
