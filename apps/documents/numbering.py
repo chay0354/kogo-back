@@ -70,11 +70,15 @@ LEGACY_LABEL = 'מסמכים ידניים · סדרה משותפת (סגורה)'
 # Postgres regexes for a number from the lesson run and from the store runs. The
 # older 'INV-…' numbers were cut from a payment's UUID and match neither: they
 # were never fiscal numbers (see apps/documents/register.py).
-LESSON_RUN_REGEX = r'^IR-[0-9]{4}-[0-9]{6}$'
-STORE_RUN_REGEX = r'^(ST|SD)-[0-9]{4}-[0-9]{6}$'
+#
+# Six digits at least, not exactly: a run that continues the previous
+# software's run (DocumentSeriesOpening) may start past 999999, and its numbers
+# are printed in full — 'IRM-2026-1000000' — never cut to fit.
+LESSON_RUN_REGEX = r'^IR-[0-9]{4}-[0-9]{6,}$'
+STORE_RUN_REGEX = r'^(ST|SD)-[0-9]{4}-[0-9]{6,}$'
 # A tenant's receipt: a FormalDocument, issued with a standing order's charge
 # (apps/rental_billing), that the register files under a channel of its own.
-RENTAL_RUN_REGEX = r'^RT-[0-9]{4}-[0-9]{6}$'
+RENTAL_RUN_REGEX = r'^RT-[0-9]{4}-[0-9]{6,}$'
 _RENTAL_RUN = re.compile(RENTAL_RUN_REGEX)
 
 
@@ -91,10 +95,15 @@ def _tax_year(when: date | datetime | None) -> int:
     return when.year
 
 
+def format_document_number(series: str, year: int, number: int) -> str:
+    """'IR-2026-000123': zero-filled to six digits, and longer when the number is."""
+    return f'{series}-{year}-{number:06d}'
+
+
 def next_document_number(series: str, when: date | datetime | None = None) -> str:
     """'IR-2026-000123'. Call inside the transaction that saves the document."""
     year = _tax_year(when)
-    return f'{series}-{year}-{DocumentSeries.next_number(series, year):06d}'
+    return format_document_number(series, year, DocumentSeries.next_number(series, year))
 
 
 def formal_document_number(document_type: str) -> str:
@@ -117,6 +126,10 @@ class SeriesRun:
     first: str  # '' when it handed out none
     last: str
     missing: tuple = ()  # numbers handed out that no document carries
+    start: int = 1  # the run's first number; above 1 when it continues the previous software's run
+    # When it continues the previous software's run: that run's type and last number.
+    previous_type_label: str = ''
+    previous_last_number: int | None = None
 
     @property
     def name(self) -> str:
@@ -125,6 +138,17 @@ class SeriesRun:
     @property
     def complete(self) -> bool:
         return not self.missing
+
+    @property
+    def continues(self) -> str:
+        """'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413)', or '' for a run that starts at 1."""
+        if self.previous_last_number is None:
+            return ''
+        return continuation_note(self.previous_last_number)
+
+
+def continuation_note(previous_last_number: int) -> str:
+    return f'ממשיך את הסדרה של התוכנה הקודמת (אחרון {previous_last_number})'
 
 
 def _series_sources() -> dict:
@@ -148,10 +172,17 @@ def _series_sources() -> dict:
     }
 
 
-def _check_run(series, year, label, handed_out, queryset, field, prefix, width) -> SeriesRun:
+def _check_run(series, year, label, handed_out, queryset, field, prefix, width, start=1, opening=None) -> SeriesRun:
+    """
+    A run that handed out `start` .. `handed_out`, checked for numbers no document carries.
+
+    `handed_out` is the counter: the last number given. Below `start` the run
+    never gave anything, so nothing there is looked for or reported missing.
+    """
     numbers = queryset.filter(**{f'{field}__startswith': prefix}).values_list(field, flat=True)
     present = {int(number[len(prefix):]) for number in numbers if number[len(prefix):].isdigit()}
-    missing = sorted(set(range(1, handed_out + 1)) - present)
+    missing = sorted(set(range(start, handed_out + 1)) - present)
+    issued = max(0, handed_out - start + 1)
 
     def formatted(n: int) -> str:
         return f'{prefix}{n:0{width}d}'
@@ -160,10 +191,13 @@ def _check_run(series, year, label, handed_out, queryset, field, prefix, width) 
         series=series,
         year=year,
         label=label,
-        issued=handed_out,
-        first=formatted(1) if handed_out else '',
-        last=formatted(handed_out) if handed_out else '',
+        issued=issued,
+        first=formatted(start) if issued else '',
+        last=formatted(handed_out) if issued else '',
         missing=tuple(formatted(n) for n in missing),
+        start=start,
+        previous_type_label=opening.previous_type_label if opening else '',
+        previous_last_number=opening.previous_last_number if opening else None,
     )
 
 
@@ -172,19 +206,24 @@ def continuity(year: int | None = None) -> list[SeriesRun]:
     Every run the business numbers documents in, each checked for gaps.
 
     נספח ה׳(א)(5) asks the software itself for "בדיקת רצף המספרים העוקבים": a
-    run's counter says how many numbers it handed out, and each one of them must
-    be on a document that exists. Oldest year first; within a year, in the order
-    of SERIES_LABELS, the closed shared run last.
+    run hands out start .. counter, and each one of those numbers must be on a
+    document that exists. A run that continues the previous software's run
+    starts above 1, and the numbers below its start were that software's to
+    give, so they are not looked for here. Oldest year first; within a year, in
+    the order of SERIES_LABELS, the closed shared run last.
     """
-    from apps.documents.models import DocumentCounter, FormalDocument
+    from apps.documents.models import DocumentCounter, DocumentSeriesOpening, FormalDocument
 
     sources = _series_sources()
     rank = {series: index for index, series in enumerate(SERIES_LABELS)}
     rows = DocumentSeries.objects.all()
     legacy = DocumentCounter.objects.all()
+    openings = DocumentSeriesOpening.objects.all()
     if year is not None:
         rows = rows.filter(year=year)
         legacy = legacy.filter(year=year)
+        openings = openings.filter(year=year)
+    opened = {(opening.series, opening.year): opening for opening in openings}
 
     runs = []
     for row in rows:
@@ -195,6 +234,7 @@ def continuity(year: int | None = None) -> list[SeriesRun]:
         runs.append(_check_run(
             row.series, row.year, SERIES_LABELS.get(row.series, row.series), row.counter,
             queryset, field, f'{row.series}-{row.year}-', 6,
+            start=row.start, opening=opened.get((row.series, row.year)),
         ))
     # The closed shared run numbered '2026-0042': at least four digits.
     for row in legacy:

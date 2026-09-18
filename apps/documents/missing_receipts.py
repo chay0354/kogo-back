@@ -30,7 +30,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.documents.numbering import SERIES_SUBSCRIPTION
+from apps.documents.numbering import SERIES_SUBSCRIPTION, format_document_number
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,11 @@ def _run_dict(run) -> dict:
         'last': run.last,
         'missing': list(run.missing),
         'complete': run.complete,
+        'start': run.start,
+        # Set when the run continues the previous software's run of its type.
+        'previous_type_label': run.previous_type_label,
+        'previous_last_number': run.previous_last_number,
+        'continues': run.continues,
     }
 
 
@@ -263,7 +268,9 @@ def next_receipt_number() -> str:
 
     year = timezone.localdate().year
     row = DocumentSeries.objects.filter(series=SERIES_SUBSCRIPTION, year=year).first()
-    return f'{SERIES_SUBSCRIPTION}-{year}-{(row.counter if row else 0) + 1:06d}'
+    # A run opened at a start above 1 hands out that start first (DocumentSeries.next_number).
+    following = max(row.counter, row.start - 1) + 1 if row else 1
+    return format_document_number(SERIES_SUBSCRIPTION, year, following)
 
 
 def missing_receipts_report(year: int) -> dict:
