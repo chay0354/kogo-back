@@ -37,6 +37,17 @@ MAX_ROWS = 25
 # A charge is only late once the billing cron has had the day to run.
 OVERDUE_GRACE_DAYS = 1
 
+# The whole brief has to answer inside one request on the hosting platform.
+# Checks run cheapest first, so if the budget runs out it is the calls to
+# Tranzila and ManyChat that are dropped — and the brief says so rather than
+# letting the screen hang on a request nobody will answer.
+TIME_BUDGET_SECONDS = 40
+
+# Working out a child's true status means reading their enrollments and their
+# payments. The newest records are where a wrong status actually shows up, so
+# beyond this many children the check says how far it got instead of running on.
+MAX_CHILDREN_SCANNED = 3000
+
 
 @dataclass
 class BriefItem:
@@ -47,6 +58,7 @@ class BriefItem:
     summary: str = ''
     action: str = ''
     rows: list = field(default_factory=list)
+    duration_ms: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -246,11 +258,13 @@ def check_status_mismatch(today: date) -> BriefItem:
     from apps.customers.child_status import canonical_status, resolve_child_status, status_label
     from apps.customers.models import Child
 
+    base = Child.objects.exclude(status='ghost')
+    total_children = base.count()
     children = (
-        Child.objects
-        .exclude(status='ghost')
+        base
         .select_related('family')
         .prefetch_related('lesson_enrollments', 'payments')
+        .order_by('-updated_at')[:MAX_CHILDREN_SCANNED]
     )
     mismatched = []
     for child in children.iterator(chunk_size=500):
@@ -264,10 +278,12 @@ def check_status_mismatch(today: date) -> BriefItem:
         count=len(mismatched),
         action='לפתוח את כרטיס הילד ולתקן את הסטטוס, או לבדוק למה הרישום לא עודכן.',
     )
+    scanned = min(total_children, MAX_CHILDREN_SCANNED)
+    partial = '' if scanned >= total_children else f' (נבדקו {scanned} מתוך {total_children} האחרונים)'
     if not mismatched:
-        item.summary = 'הסטטוס של כל הילדים תואם את הרישומים.'
+        item.summary = f'הסטטוס של כל הילדים תואם את הרישומים{partial}.'
         return item
-    item.summary = f'{len(mismatched)} ילדים שהסטטוס שלהם לא תואם את מה שרשום עליהם.'
+    item.summary = f'{len(mismatched)} ילדים שהסטטוס שלהם לא תואם את מה שרשום עליהם{partial}.'
     for child, should_be in mismatched[:MAX_ROWS]:
         item.rows.append(_row(
             child.full_name,
@@ -719,7 +735,9 @@ def check_tranzila_reconciliation(today: date) -> BriefItem:
         item.rows.append(_row('טרנזילה', service.credential_error() or '', '/settings/billing'))
         return item
 
-    response = service.list_all_transactions(day, day)
+    # Two pages is 2,000 transactions — far more than a day here — and it
+    # keeps one slow gateway from eating the whole brief's time.
+    response = service.list_all_transactions(day, day, max_pages=2)
     if not response.get('success'):
         item.severity = YELLOW
         item.count = 1
@@ -772,26 +790,51 @@ EXTERNAL_CHECKS = {'tranzila_health', 'manychat_health', 'tranzila_reconciliatio
 
 
 def build_daily_brief(*, today: date | None = None, include_external: bool = True) -> dict:
-    """Run every check and return the brief. Never raises."""
+    """
+    Run every check and return the brief. Never raises, and always answers.
+
+    Cheap checks first: if the time budget runs out, what is dropped is the
+    part that talks to another company's server, and the brief names it as
+    unchecked instead of pretending it passed.
+    """
     day = today or _israel_today()
     started = timezone.now()
     items: list[dict] = []
+    skipped: list[str] = []
     for check in CHECKS:
         name = check.__name__.replace('check_', '')
         if not include_external and name in EXTERNAL_CHECKS:
             continue
+        elapsed = (timezone.now() - started).total_seconds()
+        if elapsed > TIME_BUDGET_SECONDS:
+            skipped.append(name)
+            continue
+        check_started = timezone.now()
         try:
-            items.append(check(day).as_dict())
+            item = check(day)
         except Exception as exc:  # noqa: BLE001 — a broken check is a finding, not a crash
             logger.exception('daily brief check failed: %s', name)
-            items.append(BriefItem(
+            item = BriefItem(
                 key=name,
                 title=f'הבדיקה "{name}" נכשלה',
                 severity=RED,
                 count=1,
                 summary=f'הבדיקה עצמה נכשלה ולכן אין עליה תשובה: {exc}',
                 action='לדווח למפתח — זו תקלה בבדיקה, לא בהכרח במערכת.',
-            ).as_dict())
+            )
+        item.duration_ms = int((timezone.now() - check_started).total_seconds() * 1000)
+        items.append(item.as_dict())
+
+    if skipped:
+        items.append(BriefItem(
+            key='skipped_checks',
+            title='בדיקות שלא הספיקו לרוץ',
+            severity=YELLOW,
+            count=len(skipped),
+            summary='הבדיקה נעצרה בזמן שהוקצב לה, ולכן החלק הזה לא נבדק הבוקר.',
+            action='הבריף הלילי בודק הכל. אפשר גם ללחוץ "בדוק עכשיו" שוב.',
+            rows=[_row(name, 'לא נבדק') for name in skipped],
+        ).as_dict())
 
     red = [i for i in items if i['severity'] == RED]
     yellow = [i for i in items if i['severity'] == YELLOW]
