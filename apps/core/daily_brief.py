@@ -34,8 +34,9 @@ GREEN = 'green'
 # Rows shown per item; `count` always carries the true total.
 MAX_ROWS = 25
 
-# A charge is only late once the billing cron has had the day to run.
-OVERDUE_GRACE_DAYS = 1
+# The billing cron charges in batches of 40, eight times a day, so on a busy
+# first-of-month a charge can honestly wait a day. Two days is late.
+OVERDUE_GRACE_DAYS = 2
 
 # The whole brief has to answer inside one request on the hosting platform.
 # Checks run cheapest first, so if the budget runs out it is the calls to
@@ -90,6 +91,8 @@ def check_overdue_recurring(today: date) -> BriefItem:
     """Standing orders whose day came and went without a charge."""
     from apps.customers.models import RecurringPayment
 
+    from apps.customers.models import TranzilaTransaction
+
     cutoff = today - timedelta(days=OVERDUE_GRACE_DAYS)
     rows = (
         RecurringPayment.objects
@@ -98,7 +101,17 @@ def check_overdue_recurring(today: date) -> BriefItem:
         .select_related('child')
         .order_by('next_billing_date')
     )
-    total = rows.count()
+    # The ones the billing cron is deliberately holding have their own item; a
+    # standing order should appear in one place, with one thing to do about it.
+    stuck = {
+        key.split('_')[1]
+        for key in TranzilaTransaction.objects
+        .filter(is_successful=False, idempotency_key__startswith='recurring_')
+        .values_list('idempotency_key', flat=True)
+        if len(key.split('_')) >= 3
+    }
+    rows = [row for row in rows if str(row.id) not in stuck]
+    total = len(rows)
     item = BriefItem(
         key='overdue_recurring',
         title='הוראות קבע שלא ירדו',
@@ -109,7 +122,10 @@ def check_overdue_recurring(today: date) -> BriefItem:
     if not total:
         item.summary = 'כל החיובים החודשיים יצאו בזמן.'
         return item
-    item.summary = f'{total} הוראות קבע שתאריך החיוב שלהן עבר ועדיין לא חויבו.'
+    item.summary = (
+        f'{total} הוראות קבע שתאריך החיוב שלהן עבר ביותר מיומיים ועדיין לא חויבו. '
+        'החיוב החודשי רץ בקבוצות, אז יום אחד של פיגור הוא נורמלי.'
+    )
     for recurring in rows[:MAX_ROWS]:
         days_late = (today - recurring.next_billing_date).days if recurring.next_billing_date else 0
         item.rows.append(_row(
@@ -187,13 +203,21 @@ def check_failed_payments(today: date) -> BriefItem:
     from apps.customers.models import Payment
 
     since = timezone.now() - timedelta(days=7)
-    rows = (
+    failures = list(
         Payment.objects
         .filter(status='failed', created_at__gte=since)
         .select_related('child')
         .order_by('-created_at')
     )
-    total = rows.count()
+    # A failure the office already put right — the parent updated the card and
+    # was charged — is history, not something to act on this morning.
+    recovered = set(
+        Payment.objects
+        .filter(child_id__in={row.child_id for row in failures}, status='completed', created_at__gte=since)
+        .values_list('child_id', flat=True)
+    )
+    rows = [row for row in failures if row.child_id not in recovered]
+    total = len(rows)
     item = BriefItem(
         key='failed_payments',
         title='תשלומים שנכשלו בשבוע האחרון',
@@ -202,9 +226,9 @@ def check_failed_payments(today: date) -> BriefItem:
         action='לשלוח להורה קישור לעדכון כרטיס, או לחייב שוב.',
     )
     if not total:
-        item.summary = 'לא נכשל אף תשלום בשבוע האחרון.'
+        item.summary = 'לא נכשל אף תשלום בשבוע האחרון, או שכל מה שנכשל כבר נגבה.'
         return item
-    item.summary = f'{total} תשלומים נכשלו בשבעת הימים האחרונים.'
+    item.summary = f'{total} תשלומים נכשלו בשבעת הימים האחרונים ועדיין לא נגבו.'
     for payment in rows[:MAX_ROWS]:
         item.rows.append(_row(
             payment.child.full_name if payment.child else 'ללא ילד משויך',
@@ -250,18 +274,25 @@ def check_expiring_cards(today: date) -> BriefItem:
 
 def check_status_mismatch(today: date) -> BriefItem:
     """
-    Children whose status does not match what the records support.
+    Children being charged, or sitting in a lesson, who are still marked as a trial.
 
-    The case the office keeps meeting: a child who did a trial, joined a
-    standing order, and stayed 'ניסיון' on every screen.
+    Statuses drift for all sorts of reasons and a list of every disagreement is
+    too long to act on — `manage.py audit_child_statuses` exists for that. This
+    is the half the office can do something about this morning: money is coming
+    in, or a place is taken, and the child still reads as "ניסיון" on every
+    screen.
     """
     from apps.customers.child_status import canonical_status, resolve_child_status, status_label
-    from apps.customers.models import Child
+    from apps.customers.models import Child, RecurringPayment
 
+    paying = set(
+        RecurringPayment.objects.filter(status='active').values_list('child_id', flat=True)
+    )
     base = Child.objects.exclude(status='ghost')
     total_children = base.count()
     children = (
         base
+        .filter(status__in=('trial_signed', 'trial_completed', 'pending'))
         .select_related('family')
         .prefetch_related('lesson_enrollments', 'payments')
         .order_by('-updated_at')[:MAX_CHILDREN_SCANNED]
@@ -269,21 +300,25 @@ def check_status_mismatch(today: date) -> BriefItem:
     mismatched = []
     for child in children.iterator(chunk_size=500):
         should_be = resolve_child_status(child)
-        if should_be and canonical_status(child.status) != should_be:
+        if not should_be or canonical_status(child.status) == should_be:
+            continue
+        if should_be == 'active' or child.id in paying:
             mismatched.append((child, should_be))
+
     item = BriefItem(
         key='status_mismatch',
-        title='ילדים בסטטוס לא נכון',
+        title='ילדים שרשומים כניסיון אבל כבר לומדים',
         severity=YELLOW if mismatched else GREEN,
         count=len(mismatched),
-        action='לפתוח את כרטיס הילד ולתקן את הסטטוס, או לבדוק למה הרישום לא עודכן.',
+        action='לפתוח את כרטיס הילד ולעדכן את הסטטוס לפעיל.',
     )
-    scanned = min(total_children, MAX_CHILDREN_SCANNED)
-    partial = '' if scanned >= total_children else f' (נבדקו {scanned} מתוך {total_children} האחרונים)'
     if not mismatched:
-        item.summary = f'הסטטוס של כל הילדים תואם את הרישומים{partial}.'
+        item.summary = f'אין ילד שנשאר בסטטוס ניסיון אחרי שנרשם או שילם (מתוך {total_children} ילדים).'
         return item
-    item.summary = f'{len(mismatched)} ילדים שהסטטוס שלהם לא תואם את מה שרשום עליהם{partial}.'
+    item.summary = (
+        f'{len(mismatched)} ילדים שהסטטוס שלהם עדיין ניסיון או ממתין, למרות שיש להם הוראת קבע פעילה '
+        'או רישום לחוג.'
+    )
     for child, should_be in mismatched[:MAX_ROWS]:
         item.rows.append(_row(
             child.full_name,
@@ -358,39 +393,65 @@ def check_recurring_without_lesson(today: date) -> BriefItem:
 
 def check_registration_only_payments(today: date) -> BriefItem:
     """
-    A sign-up that collected the registration fee and not the course.
+    A sign-up that paid the registration fee and never paid for the course.
 
     The owner's case: 260 for the course plus 120 registration, and only the
-    120 was taken. The charge looks successful everywhere, and the month is
-    simply missing.
+    120 was taken. But registration and course are two separate charges here —
+    the fee on the day of signing, the course on the monthly run — so a fee on
+    its own is the normal shape of a sign-up and says nothing. What says
+    something is a fee with no course charge behind it at all, and no standing
+    order waiting to make one.
     """
-    from apps.customers.models import Payment
+    from django.db.models import F
+
+    from apps.customers.models import Payment, RecurringPayment
 
     since = timezone.now() - timedelta(days=45)
-    rows = (
+    fees = list(
         Payment.objects
-        .filter(status='completed', created_at__gte=since, registration_fee__gt=0, lesson__isnull=False)
-        .filter(final_amount__lte=models.F('registration_fee'))
+        .filter(status='completed', created_at__gte=since, registration_fee__gt=0)
+        .filter(final_amount__lte=F('registration_fee'))
+        .exclude(child__isnull=True)
         .select_related('child')
         .order_by('-created_at')
     )
-    total = rows.count()
+    child_ids = {row.child_id for row in fees}
+
+    # Anyone who also paid for a course: a charge of their own beyond the fee.
+    paid_for_course = set(
+        Payment.objects
+        .filter(child_id__in=child_ids, status='completed')
+        .exclude(id__in=[row.id for row in fees])
+        .filter(Q(payment_type='recurring_subscription') | Q(final_amount__gt=F('registration_fee')))
+        .values_list('child_id', flat=True)
+    )
+    # Or is set up to be charged for one.
+    will_be_charged = set(
+        RecurringPayment.objects
+        .filter(child_id__in=child_ids, status='active')
+        .values_list('child_id', flat=True)
+    )
+    settled = paid_for_course | will_be_charged
+
+    open_rows = [row for row in fees if row.child_id not in settled]
     item = BriefItem(
         key='registration_only_payments',
-        title='נגבו דמי רישום בלבד',
-        severity=RED if total else GREEN,
-        count=total,
-        action='לבדוק מול ההורה ולגבות את החוג, או לתקן את ההרשמה.',
+        title='שולמו דמי רישום בלי תשלום על החוג',
+        severity=RED if open_rows else GREEN,
+        count=len(open_rows),
+        action='לבדוק מול ההורה: אם הילד לומד, לגבות את החוג או לפתוח הוראת קבע.',
     )
-    if not total:
-        item.summary = 'כל הרשמה ב-45 הימים האחרונים נגבתה במלואה.'
+    if not open_rows:
+        item.summary = 'לכל מי ששילם דמי רישום ב-45 הימים האחרונים יש גם חיוב על החוג או הוראת קבע.'
         return item
-    item.summary = f'{total} הרשמות שבהן נגבו דמי הרישום אבל לא התשלום על החוג.'
-    for payment in rows[:MAX_ROWS]:
+    item.summary = (
+        f'{len(open_rows)} ילדים ששילמו דמי רישום, ואין להם שום חיוב על החוג ולא הוראת קבע פעילה.'
+    )
+    for payment in open_rows[:MAX_ROWS]:
         item.rows.append(_row(
             payment.child.full_name if payment.child else 'ללא ילד משויך',
-            f'שולם {_money(payment.final_amount)} · דמי רישום {_money(payment.registration_fee)} · '
-            f'{timezone.localtime(payment.created_at):%d/%m}',
+            f'שילם {_money(payment.final_amount)} דמי רישום ב-{timezone.localtime(payment.created_at):%d/%m} · '
+            'אין חיוב על החוג',
             _child_href(payment.child_id) if payment.child_id else '',
         ))
     return item
@@ -406,7 +467,7 @@ def check_duplicate_charges(today: date) -> BriefItem:
     groups = (
         Payment.objects
         .filter(status='completed', created_at__gte=since, child__isnull=False)
-        .values('child_id', 'final_amount', 'created_at__date')
+        .values('child_id', 'final_amount', 'created_at__date', 'lesson_id')
         .annotate(times=Count('id'))
         .filter(times__gt=1)
         .order_by('-created_at__date')
@@ -422,7 +483,7 @@ def check_duplicate_charges(today: date) -> BriefItem:
     if not rows:
         item.summary = 'לא נמצא חיוב כפול בשבועיים האחרונים.'
         return item
-    item.summary = f'{len(rows)} מקרים של אותו ילד שחויב באותו סכום פעמיים באותו יום.'
+    item.summary = f'{len(rows)} מקרים של אותו ילד שחויב פעמיים באותו יום, על אותו שיעור ובאותו סכום.'
     from apps.customers.models import Child
 
     names = {
@@ -473,14 +534,13 @@ def check_revenue_drop(today: date) -> BriefItem:
         return item
     typical = sum(known) / len(known)
     item.summary = f'נכנסו {_money(actual)}, מול {_money(typical)} בממוצע באותו יום בשבוע.'
-    if actual == 0 and typical > 0:
+    # Only a day with nothing at all, where that same weekday always had money,
+    # is treated as a finding: the big charges land on one day of the month, so
+    # "less than usual" is the normal shape of most days here and would cry wolf.
+    if actual == 0 and len(known) == len(history):
         item.severity = RED
         item.count = 1
         item.rows.append(_row('לא נכנס כסף כלל', f'ממוצע רגיל {_money(typical)}', '/credit-charge'))
-    elif typical > 0 and actual < typical / 2:
-        item.severity = YELLOW
-        item.count = 1
-        item.rows.append(_row('פחות ממחצית מהרגיל', f'{_money(actual)} מול {_money(typical)}', '/credit-charge'))
     return item
 
 
@@ -523,8 +583,17 @@ def check_active_without_standing_order(today: date) -> BriefItem:
     """A child on the books as active with nothing set up to charge."""
     from apps.customers.models import Child, RecurringPayment
 
-    paying = set(
-        RecurringPayment.objects.filter(status='active').values_list('child_id', flat=True)
+    from apps.customers.models import Payment
+    from apps.documents.models import CashPlan, CheckPlan
+
+    paying = set(RecurringPayment.objects.filter(status='active').values_list('child_id', flat=True))
+    # Cash, cheques and a charge that already came in are all "being paid for".
+    paying |= set(CashPlan.objects.filter(status='active').values_list('child_id', flat=True))
+    paying |= set(CheckPlan.objects.values_list('child_id', flat=True))
+    paying |= set(
+        Payment.objects
+        .filter(status='completed', created_at__gte=timezone.now() - timedelta(days=60))
+        .values_list('child_id', flat=True)
     )
     children = (
         Child.objects
@@ -538,12 +607,14 @@ def check_active_without_standing_order(today: date) -> BriefItem:
         title='ילדים פעילים בלי הוראת קבע',
         severity=YELLOW if total else GREEN,
         count=total,
-        action='לבדוק אם הם משלמים בדרך אחרת (מזומן, צ׳קים, העברה) או שפשוט לא נגבה מהם.',
+        action='לבדוק למה לא נגבה מהם — מי שמשלם במזומן, בצ׳קים או שחויב לאחרונה כבר לא מופיע כאן.',
     )
     if not total:
-        item.summary = 'לכל ילד פעיל יש הוראת קבע.'
+        item.summary = 'לכל ילד פעיל יש הוראת קבע, תשלום אחר, או חיוב שנכנס לאחרונה.'
         return item
-    item.summary = f'{total} ילדים בסטטוס פעיל שאין להם הוראת קבע פעילה.'
+    item.summary = (
+        f'{total} ילדים בסטטוס פעיל בלי הוראת קבע, בלי מזומן או צ׳קים, ובלי חיוב בחודשיים האחרונים.'
+    )
     for child in children[:MAX_ROWS]:
         item.rows.append(_row(child.full_name, 'פעיל · אין הוראת קבע', _child_href(child.id)))
     return item
@@ -581,29 +652,61 @@ def check_ended_standing_orders(today: date) -> BriefItem:
 
 
 def check_overdue_instalments(today: date) -> BriefItem:
-    """Cash and cheque instalments whose date passed with no document issued."""
+    """
+    Cash and cheque instalments whose document never got issued.
+
+    The billing cron issues these itself, for active plans, in batches — so a
+    document that is a day late is the batch, not a problem, and an instalment
+    on a cancelled plan is not waiting for anything. What is left is a plan the
+    office believes is running whose paperwork stopped.
+    """
     from apps.documents.models import CashPlanMonth, CheckItem
 
-    cash = CashPlanMonth.objects.filter(status='pending', due_date__lt=today).select_related('plan')
-    checks = CheckItem.objects.filter(status='pending', due_date__lt=today).select_related('plan')
-    total = cash.count() + checks.count()
+    cutoff = today - timedelta(days=OVERDUE_GRACE_DAYS)
+    cash = list(
+        CashPlanMonth.objects
+        .filter(status='pending', due_date__lt=cutoff, plan__status='active')
+        .select_related('plan', 'plan__child')
+        .order_by('due_date')[:MAX_ROWS]
+    )
+    cheques = list(
+        CheckItem.objects
+        .filter(status='pending', due_date__lt=cutoff, plan__status='active')
+        .select_related('plan', 'plan__child')
+        .order_by('due_date')[:MAX_ROWS]
+    )
+    total = (
+        CashPlanMonth.objects.filter(status='pending', due_date__lt=cutoff, plan__status='active').count()
+        + CheckItem.objects.filter(status='pending', due_date__lt=cutoff, plan__status='active').count()
+    )
     item = BriefItem(
         key='overdue_instalments',
-        title='מזומן וצ׳קים שעבר מועדם',
+        title='מזומן וצ׳קים בלי מסמך',
         severity=YELLOW if total else GREEN,
         count=total,
-        action='להפיק את המסמך ולוודא שהכסף התקבל.',
+        action='לבדוק למה המסמך לא הופק, ושהכסף אכן התקבל.',
     )
     if not total:
-        item.summary = 'אין תשלום במזומן או בצ׳ק שעבר מועדו בלי מסמך.'
+        item.summary = 'לכל תשלום במזומן או בצ׳ק שהגיע מועדו הופק מסמך.'
         return item
-    item.summary = f'{total} תשלומים במזומן או בצ׳קים שהמועד שלהם עבר ולא הופק עליהם מסמך.'
-    for month in cash[:MAX_ROWS]:
-        item.rows.append(_row('מזומן', f'{_money(month.amount)} · לתאריך {month.due_date:%d/%m/%Y}', '/invoices'))
-    for check in checks[:max(0, MAX_ROWS - cash.count())]:
+    item.summary = (
+        f'{total} תשלומים בתוכניות מזומן או צ׳קים פעילות שהמועד שלהם עבר ולא הופק עליהם מסמך.'
+    )
+
+    def child_name(plan) -> str:
+        child = getattr(plan, 'child', None)
+        return child.full_name if child else 'ללא ילד משויך'
+
+    for month in cash:
         item.rows.append(_row(
-            f"צ׳ק {check.check_number}".strip(),
-            f'{_money(check.amount)} · לתאריך {check.due_date:%d/%m/%Y}',
+            f'מזומן · {child_name(month.plan)}',
+            f'{_money(month.amount)} · לתאריך {month.due_date:%d/%m/%Y}',
+            '/invoices',
+        ))
+    for cheque in cheques[:max(0, MAX_ROWS - len(cash))]:
+        item.rows.append(_row(
+            f"צ׳ק {cheque.check_number} · {child_name(cheque.plan)}".strip(),
+            f'{_money(cheque.amount)} · לתאריך {cheque.due_date:%d/%m/%Y}',
             '/invoices',
         ))
     return item
@@ -753,13 +856,21 @@ def check_tranzila_reconciliation(today: date) -> BriefItem:
         request_timestamp__date=day,
     ).count()
     theirs = len(gateway_rows)
-    item.count = abs(theirs - ours)
-    item.summary = f'במערכת {ours} חיובים מוצלחים, בטרנזילה {theirs}.'
-    if theirs != ours:
-        item.severity = RED if abs(theirs - ours) > 1 else YELLOW
-        item.rows.append(_row(
-            'פער בין המערכת לטרנזילה',
-            f'{ours} במערכת מול {theirs} בטרנזילה — לבדוק מי חויב ולא נרשם, או נרשם ולא חויב.',
+    item.summary = f'במערכת {ours} חיובים מוצלחים, בטרנזילה {theirs} עסקאות.'
+    item.rows.append(_row(
+        'להשוואה',
+        'רשימת טרנזילה כוללת גם עסקאות שנדחו וגם מה שרץ במסוף ממקורות אחרים, '
+        'ולכן הפרש אינו בהכרח תקלה.',
+        '/credit-charge',
+    ))
+    # One direction does mean something: charges we recorded and the terminal
+    # does not have cannot be explained by declines.
+    if ours > theirs:
+        item.severity = RED
+        item.count = ours - theirs
+        item.rows.insert(0, _row(
+            'יש במערכת יותר חיובים מאשר בטרנזילה',
+            f'{ours} מול {theirs} — לבדוק אם נרשם חיוב שלא באמת ירד.',
             '/credit-charge',
         ))
     return item
@@ -808,15 +919,15 @@ def check_catalogue() -> list[dict]:
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',
         'failed_payments': 'תשלומים שנכשלו',
-        'registration_only_payments': 'נגבו דמי רישום בלבד',
+        'registration_only_payments': 'דמי רישום בלי תשלום על החוג',
         'expiring_cards': 'כרטיסים שפג תוקפם',
         'duplicate_charges': 'חיובים כפולים',
         'revenue_drop': 'הכנסות אתמול',
         'refunds': 'זיכויים',
         'active_without_standing_order': 'ילדים פעילים בלי הוראת קבע',
         'ended_standing_orders': 'הוראות קבע שהסתיימו',
-        'overdue_instalments': 'מזומן וצ׳קים שעבר מועדם',
-        'status_mismatch': 'ילדים בסטטוס לא נכון',
+        'overdue_instalments': 'מזומן וצ׳קים בלי מסמך',
+        'status_mismatch': 'ילדים שרשומים כניסיון אבל כבר לומדים',
         'missing_receipts': 'תשלומים ללא חשבונית',
         'business_categories': 'עסקים בלי קטגוריה',
         'document_numbering': 'מספור מסמכים',
