@@ -378,6 +378,219 @@ def check_registration_only_payments(today: date) -> BriefItem:
     return item
 
 
+def check_duplicate_charges(today: date) -> BriefItem:
+    """The same child charged the same amount twice on one day."""
+    from django.db.models import Count
+
+    from apps.customers.models import Payment
+
+    since = timezone.now() - timedelta(days=14)
+    groups = (
+        Payment.objects
+        .filter(status='completed', created_at__gte=since, child__isnull=False)
+        .values('child_id', 'final_amount', 'created_at__date')
+        .annotate(times=Count('id'))
+        .filter(times__gt=1)
+        .order_by('-created_at__date')
+    )
+    rows = list(groups)
+    item = BriefItem(
+        key='duplicate_charges',
+        title='חיובים כפולים',
+        severity=RED if rows else GREEN,
+        count=len(rows),
+        action='לבדוק אם ההורה חויב פעמיים, ולהחזיר לו את ההפרש.',
+    )
+    if not rows:
+        item.summary = 'לא נמצא חיוב כפול בשבועיים האחרונים.'
+        return item
+    item.summary = f'{len(rows)} מקרים של אותו ילד שחויב באותו סכום פעמיים באותו יום.'
+    from apps.customers.models import Child
+
+    names = {
+        str(child.id): child.full_name
+        for child in Child.objects.filter(id__in=[r['child_id'] for r in rows[:MAX_ROWS]])
+    }
+    for row in rows[:MAX_ROWS]:
+        item.rows.append(_row(
+            names.get(str(row['child_id']), 'ילד'),
+            f"{_money(row['final_amount'])} · {row['times']} פעמים · {row['created_at__date']:%d/%m}",
+            _child_href(row['child_id']),
+        ))
+    return item
+
+
+def check_revenue_drop(today: date) -> BriefItem:
+    """
+    Yesterday's takings against the same weekday over the last month.
+
+    A billing day that quietly did not run shows up here first: the day is not
+    empty by accident, it is empty because nothing charged.
+    """
+    from django.db.models import Sum
+
+    from apps.customers.models import Payment
+
+    yesterday = today - timedelta(days=1)
+
+    def takings(day: date) -> Decimal:
+        total = (
+            Payment.objects
+            .filter(status='completed', created_at__date=day)
+            .aggregate(total=Sum('final_amount'))['total']
+        )
+        return Decimal(total or 0)
+
+    actual = takings(yesterday)
+    history = [takings(yesterday - timedelta(days=7 * week)) for week in range(1, 5)]
+    known = [value for value in history if value > 0]
+    item = BriefItem(
+        key='revenue_drop',
+        title=f'הכנסות {yesterday:%d/%m}',
+        severity=GREEN,
+        action='לוודא שהחיוב החודשי רץ, ושאין תקלה בסליקה.',
+    )
+    if not known:
+        item.summary = f'נכנסו {_money(actual)}. אין מספיק היסטוריה להשוואה.'
+        return item
+    typical = sum(known) / len(known)
+    item.summary = f'נכנסו {_money(actual)}, מול {_money(typical)} בממוצע באותו יום בשבוע.'
+    if actual == 0 and typical > 0:
+        item.severity = RED
+        item.count = 1
+        item.rows.append(_row('לא נכנס כסף כלל', f'ממוצע רגיל {_money(typical)}', '/credit-charge'))
+    elif typical > 0 and actual < typical / 2:
+        item.severity = YELLOW
+        item.count = 1
+        item.rows.append(_row('פחות ממחצית מהרגיל', f'{_money(actual)} מול {_money(typical)}', '/credit-charge'))
+    return item
+
+
+def check_refunds(today: date) -> BriefItem:
+    """Every refund of the last week, in one place, so none passes unseen."""
+    from django.db.models import Sum
+
+    from apps.customers.models import Payment
+
+    since = timezone.now() - timedelta(days=7)
+    rows = (
+        Payment.objects
+        .filter(status='refunded', updated_at__gte=since)
+        .select_related('child')
+        .order_by('-updated_at')
+    )
+    total = rows.count()
+    amount = rows.aggregate(total=Sum('final_amount'))['total'] or 0
+    item = BriefItem(
+        key='refunds',
+        title='זיכויים בשבוע האחרון',
+        severity=YELLOW if total else GREEN,
+        count=total,
+        action='לוודא שלכל זיכוי יש חשבונית זיכוי, ושהכסף אכן הוחזר בטרנזילה.',
+    )
+    if not total:
+        item.summary = 'לא בוצעו זיכויים בשבוע האחרון.'
+        return item
+    item.summary = f'{total} זיכויים בסך {_money(amount)}.'
+    for payment in rows[:MAX_ROWS]:
+        item.rows.append(_row(
+            payment.child.full_name if payment.child else 'ללא ילד משויך',
+            f'{_money(payment.final_amount)} · {timezone.localtime(payment.updated_at):%d/%m}',
+            _child_href(payment.child_id) if payment.child_id else '',
+        ))
+    return item
+
+
+def check_active_without_standing_order(today: date) -> BriefItem:
+    """A child on the books as active with nothing set up to charge."""
+    from apps.customers.models import Child, RecurringPayment
+
+    paying = set(
+        RecurringPayment.objects.filter(status='active').values_list('child_id', flat=True)
+    )
+    children = (
+        Child.objects
+        .filter(status='active')
+        .exclude(id__in=paying)
+        .select_related('family')
+    )
+    total = children.count()
+    item = BriefItem(
+        key='active_without_standing_order',
+        title='ילדים פעילים בלי הוראת קבע',
+        severity=YELLOW if total else GREEN,
+        count=total,
+        action='לבדוק אם הם משלמים בדרך אחרת (מזומן, צ׳קים, העברה) או שפשוט לא נגבה מהם.',
+    )
+    if not total:
+        item.summary = 'לכל ילד פעיל יש הוראת קבע.'
+        return item
+    item.summary = f'{total} ילדים בסטטוס פעיל שאין להם הוראת קבע פעילה.'
+    for child in children[:MAX_ROWS]:
+        item.rows.append(_row(child.full_name, 'פעיל · אין הוראת קבע', _child_href(child.id)))
+    return item
+
+
+def check_ended_standing_orders(today: date) -> BriefItem:
+    """Standing orders whose end date passed and are still charging."""
+    from apps.customers.models import RecurringPayment
+
+    rows = (
+        RecurringPayment.objects
+        .filter(status='active', end_date__lt=today)
+        .select_related('child')
+        .order_by('end_date')
+    )
+    total = rows.count()
+    item = BriefItem(
+        key='ended_standing_orders',
+        title='הוראות קבע שתאריך הסיום שלהן עבר',
+        severity=YELLOW if total else GREEN,
+        count=total,
+        action='לסגור אותן, אחרת ההורה ימשיך להיות מחויב אחרי שסיים.',
+    )
+    if not total:
+        item.summary = 'אין הוראת קבע פעילה שתאריך הסיום שלה עבר.'
+        return item
+    item.summary = f'{total} הוראות קבע פעילות שתאריך הסיום שלהן כבר עבר.'
+    for recurring in rows[:MAX_ROWS]:
+        item.rows.append(_row(
+            recurring.child.full_name if recurring.child else str(recurring.id),
+            f'{_money(recurring.amount)} · הסתיימה ב-{recurring.end_date:%d/%m/%Y}',
+            _child_href(recurring.child_id),
+        ))
+    return item
+
+
+def check_overdue_instalments(today: date) -> BriefItem:
+    """Cash and cheque instalments whose date passed with no document issued."""
+    from apps.documents.models import CashPlanMonth, CheckItem
+
+    cash = CashPlanMonth.objects.filter(status='pending', due_date__lt=today).select_related('plan')
+    checks = CheckItem.objects.filter(status='pending', due_date__lt=today).select_related('plan')
+    total = cash.count() + checks.count()
+    item = BriefItem(
+        key='overdue_instalments',
+        title='מזומן וצ׳קים שעבר מועדם',
+        severity=YELLOW if total else GREEN,
+        count=total,
+        action='להפיק את המסמך ולוודא שהכסף התקבל.',
+    )
+    if not total:
+        item.summary = 'אין תשלום במזומן או בצ׳ק שעבר מועדו בלי מסמך.'
+        return item
+    item.summary = f'{total} תשלומים במזומן או בצ׳קים שהמועד שלהם עבר ולא הופק עליהם מסמך.'
+    for month in cash[:MAX_ROWS]:
+        item.rows.append(_row('מזומן', f'{_money(month.amount)} · לתאריך {month.due_date:%d/%m/%Y}', '/invoices'))
+    for check in checks[:max(0, MAX_ROWS - cash.count())]:
+        item.rows.append(_row(
+            f"צ׳ק {check.check_number}".strip(),
+            f'{_money(check.amount)} · לתאריך {check.due_date:%d/%m/%Y}',
+            '/invoices',
+        ))
+    return item
+
+
 def check_business_categories(today: date) -> BriefItem:
     """A business with no active category blocks the invoice screen."""
     from apps.core.models import Business
@@ -397,6 +610,34 @@ def check_business_categories(today: date) -> BriefItem:
     item.summary = f'{len(empty)} עסקים פעילים בלי אף קטגוריה פעילה — הפקת חשבונית עבורם תיתקע.'
     for business in empty[:MAX_ROWS]:
         item.rows.append(_row(business.name, 'אין קטגוריה פעילה', '/settings/finance'))
+    return item
+
+
+def check_document_numbering(today: date) -> BriefItem:
+    """
+    That the next document number can actually be produced.
+
+    Numbering breaks quietly — a series with no opening, a counter that never
+    got set — and the office only learns when a receipt refuses to be issued
+    with money already taken.
+    """
+    from apps.documents.missing_receipts import next_receipt_number
+
+    item = BriefItem(
+        key='document_numbering',
+        title='מספור מסמכים',
+        severity=GREEN,
+        action='לבדוק את סדרות המספור בהגדרות ← מספור מסמכים.',
+    )
+    try:
+        number = next_receipt_number()
+    except Exception as exc:  # noqa: BLE001 — this is exactly the failure being looked for
+        item.severity = RED
+        item.count = 1
+        item.summary = 'לא ניתן להפיק את המספר הבא של קבלה — הפקת מסמכים תיכשל.'
+        item.rows.append(_row('מספור', str(exc), '/settings/numbering'))
+        return item
+    item.summary = f'הקבלה הבאה תקבל מספר {number}.'
     return item
 
 
@@ -511,9 +752,16 @@ CHECKS = (
     check_failed_payments,
     check_registration_only_payments,
     check_expiring_cards,
+    check_duplicate_charges,
+    check_revenue_drop,
+    check_refunds,
+    check_active_without_standing_order,
+    check_ended_standing_orders,
+    check_overdue_instalments,
     check_status_mismatch,
     check_missing_receipts,
     check_business_categories,
+    check_document_numbering,
     check_tranzila_health,
     check_manychat_health,
     check_tranzila_reconciliation,

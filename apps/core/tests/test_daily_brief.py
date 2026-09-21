@@ -23,8 +23,14 @@ from apps.core.daily_brief import (
     check_business_categories,
     check_expiring_cards,
     check_failed_payments,
+    check_active_without_standing_order,
+    check_duplicate_charges,
+    check_ended_standing_orders,
+    check_overdue_instalments,
     check_overdue_recurring,
+    check_refunds,
     check_registration_only_payments,
+    check_revenue_drop,
     check_recurring_without_lesson,
     check_unresolved_charges,
 )
@@ -179,6 +185,116 @@ class RegistrationOnlyTests(TestCase):
     def test_a_charge_with_no_registration_fee_is_not_examined(self):
         self._payment(_child('ללא רישום'), final='260', registration='0', lesson=self.lesson)
         self.assertEqual(check_registration_only_payments(TODAY).count, 0)
+
+
+class DuplicateChargeTests(TestCase):
+    def _paid(self, child, amount='260'):
+        return Payment.objects.create(
+            child=child, family=child.family, base_amount=Decimal(amount),
+            final_amount=Decimal(amount), status='completed',
+        )
+
+    def test_the_same_child_charged_twice_the_same_day(self):
+        child = _child('כפול')
+        self._paid(child)
+        self._paid(child)
+        item = check_duplicate_charges(TODAY)
+        self.assertEqual(item.severity, RED)
+        self.assertIn('2 פעמים', item.rows[0]['detail'])
+
+    def test_two_different_amounts_are_not_a_duplicate(self):
+        child = _child('שונה')
+        self._paid(child, '260')
+        self._paid(child, '120')
+        self.assertEqual(check_duplicate_charges(TODAY).severity, GREEN)
+
+
+class RevenueTests(TestCase):
+    def _paid_on(self, day, amount):
+        child = _child('הכנסה')
+        payment = Payment.objects.create(
+            child=child, family=child.family, base_amount=Decimal(amount),
+            final_amount=Decimal(amount), status='completed',
+        )
+        Payment.objects.filter(pk=payment.pk).update(
+            created_at=timezone.make_aware(timezone.datetime(day.year, day.month, day.day, 12, 0))
+        )
+
+    def test_a_day_with_no_takings_against_a_normal_week_is_red(self):
+        yesterday = TODAY - timedelta(days=1)
+        for week in range(1, 5):
+            self._paid_on(yesterday - timedelta(days=7 * week), '1000')
+        item = check_revenue_drop(TODAY)
+        self.assertEqual(item.severity, RED)
+        self.assertIn('לא נכנס כסף', item.rows[0]['label'])
+
+    def test_a_normal_day_is_quiet(self):
+        yesterday = TODAY - timedelta(days=1)
+        self._paid_on(yesterday, '1000')
+        for week in range(1, 5):
+            self._paid_on(yesterday - timedelta(days=7 * week), '1000')
+        self.assertEqual(check_revenue_drop(TODAY).severity, GREEN)
+
+    def test_without_history_it_does_not_guess(self):
+        item = check_revenue_drop(TODAY)
+        self.assertEqual(item.severity, GREEN)
+        self.assertIn('אין מספיק היסטוריה', item.summary)
+
+
+class RefundTests(TestCase):
+    def test_refunds_are_listed_with_their_total(self):
+        child = _child('זוכה')
+        Payment.objects.create(
+            child=child, family=child.family, base_amount=Decimal('260'),
+            final_amount=Decimal('260'), status='refunded',
+        )
+        item = check_refunds(TODAY)
+        self.assertEqual(item.count, 1)
+        self.assertIn('260', item.summary)
+
+
+class ActiveWithoutOrderTests(TestCase):
+    def test_an_active_child_with_nothing_to_charge_is_raised(self):
+        TestDataFactory.create_child(family=TestDataFactory.create_family(), first_name='בלי קבע', status='active')
+        item = check_active_without_standing_order(TODAY)
+        self.assertEqual(item.count, 1)
+
+    def test_a_child_with_a_standing_order_is_quiet(self):
+        child = TestDataFactory.create_child(
+            family=TestDataFactory.create_family(), first_name='עם קבע', status='active'
+        )
+        _recurring(child)
+        self.assertEqual(check_active_without_standing_order(TODAY).severity, GREEN)
+
+
+class EndedOrderTests(TestCase):
+    def test_an_order_past_its_end_date_still_charging(self):
+        _recurring(_child('נגמר'), end_date=TODAY - timedelta(days=2))
+        item = check_ended_standing_orders(TODAY)
+        self.assertEqual(item.count, 1)
+        self.assertIn('ימשיך להיות מחויב', item.action)
+
+    def test_an_open_ended_order_is_fine(self):
+        _recurring(_child('פתוח'), end_date=None)
+        self.assertEqual(check_ended_standing_orders(TODAY).severity, GREEN)
+
+
+class DocumentNumberingTests(TestCase):
+    def test_a_working_series_reports_the_next_number(self):
+        from apps.core.daily_brief import check_document_numbering
+
+        with patch('apps.documents.missing_receipts.next_receipt_number', return_value='2026-0042'):
+            item = check_document_numbering(TODAY)
+        self.assertEqual(item.severity, GREEN)
+        self.assertIn('2026-0042', item.summary)
+
+    def test_numbering_that_cannot_answer_is_red_before_a_receipt_fails(self):
+        from apps.core.daily_brief import check_document_numbering
+
+        with patch('apps.documents.missing_receipts.next_receipt_number', side_effect=RuntimeError('אין סדרה')):
+            item = check_document_numbering(TODAY)
+        self.assertEqual(item.severity, RED)
+        self.assertIn('הפקת מסמכים תיכשל', item.summary)
 
 
 class BusinessCategoryTests(TestCase):
