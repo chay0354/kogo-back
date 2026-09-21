@@ -492,3 +492,30 @@ class ManyChatContact(models.Model):
 
     def __str__(self):
         return f'{self.phone} → {self.subscriber_id}'
+
+
+class DailyBriefSnapshot(models.Model):
+    """
+    The last brief that was built, kept so the screen opens instantly.
+
+    Building it walks every child and asks Tranzila and ManyChat whether they
+    are alive, which is too slow to do while someone waits. A nightly run
+    stores the answer here and the screen reads it; a manager can still ask for
+    a fresh one from the screen.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payload = models.JSONField(verbose_name="הבריף")
+    red_count = models.PositiveIntegerField(default=0, verbose_name="נושאים דחופים")
+    yellow_count = models.PositiveIntegerField(default=0, verbose_name="נושאים לבדיקה")
+    duration_ms = models.PositiveIntegerField(default=0, verbose_name="זמן חישוב (מילישניות)")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="נוצר בתאריך")
+
+    class Meta:
+        db_table = 'daily_brief_snapshots'
+        verbose_name = "בריף יומי"
+        verbose_name_plural = "בריפים יומיים"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.created_at:%Y-%m-%d %H:%M} · {self.red_count} דחופים'
