@@ -279,6 +279,24 @@ class EndedOrderTests(TestCase):
         self.assertEqual(check_ended_standing_orders(TODAY).severity, GREEN)
 
 
+class StatusScanTests(TestCase):
+    def test_a_large_audience_is_capped_and_the_summary_says_so(self):
+        from apps.core.daily_brief import check_status_mismatch
+
+        family = TestDataFactory.create_family()
+        for index in range(3):
+            TestDataFactory.create_child(family=family, first_name=f'ילד {index}', status='pending')
+        with patch('apps.core.daily_brief.MAX_CHILDREN_SCANNED', 2):
+            item = check_status_mismatch(TODAY)
+        self.assertIn('נבדקו 2 מתוך 3', item.summary)
+
+    def test_a_normal_audience_says_nothing_about_limits(self):
+        from apps.core.daily_brief import check_status_mismatch
+
+        TestDataFactory.create_child(family=TestDataFactory.create_family(), first_name='יחיד')
+        self.assertNotIn('נבדקו', check_status_mismatch(TODAY).summary)
+
+
 class DocumentNumberingTests(TestCase):
     def test_a_working_series_reports_the_next_number(self):
         from apps.core.daily_brief import check_document_numbering
@@ -334,6 +352,19 @@ class BuildBriefTests(TestCase):
         broken = [i for i in brief['items'] if 'נכשלה' in i['title']]
         self.assertEqual(len(broken), 1)
         self.assertEqual(broken[0]['severity'], RED)
+
+    def test_each_check_reports_how_long_it_took(self):
+        brief = build_daily_brief(today=TODAY, include_external=False)
+        self.assertTrue(all('duration_ms' in item for item in brief['items']))
+
+    def test_when_the_time_runs_out_the_brief_says_what_was_not_checked(self):
+        """Better an honest gap than a screen that hangs on a request nobody answers."""
+        with patch('apps.core.daily_brief.TIME_BUDGET_SECONDS', -1):
+            brief = build_daily_brief(today=TODAY, include_external=False)
+        skipped = [i for i in brief['items'] if i['key'] == 'skipped_checks']
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]['severity'], YELLOW)
+        self.assertIn('לא נבדק', skipped[0]['rows'][0]['detail'])
 
     def test_the_outside_services_are_left_out_of_a_quick_brief(self):
         brief = build_daily_brief(today=TODAY, include_external=False)
