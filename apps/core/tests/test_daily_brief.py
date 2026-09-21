@@ -160,31 +160,82 @@ class UnchargeableOrderTests(TestCase):
 
 
 class RegistrationOnlyTests(TestCase):
-    """260 for the course plus 120 registration, and only the 120 was taken."""
+    """
+    Registration and course are two charges here, not one.
 
-    def _payment(self, child, *, final, registration, lesson):
-        return Payment.objects.create(
-            child=child, family=child.family, lesson=lesson,
-            base_amount=Decimal('260'), final_amount=Decimal(final),
-            registration_fee=Decimal(registration), status='completed',
-        )
+    A fee on its own is the normal shape of a sign-up — the course follows on
+    the monthly run — so a lone fee must raise nothing. 307 families were
+    reported this way before the check learned the difference.
+    """
 
     def setUp(self):
         self.lesson = TestDataFactory.create_lesson()
 
-    def test_only_the_registration_fee_was_charged(self):
-        self._payment(_child('חלקי'), final='120', registration='120', lesson=self.lesson)
+    def _fee(self, child, amount='120', days_ago=0):
+        payment = Payment.objects.create(
+            child=child, family=child.family, lesson=self.lesson,
+            base_amount=Decimal(amount), final_amount=Decimal(amount),
+            registration_fee=Decimal(amount), status='completed',
+        )
+        if days_ago:
+            Payment.objects.filter(pk=payment.pk).update(
+                created_at=timezone.now() - timedelta(days=days_ago)
+            )
+        return payment
+
+    def _course_charge(self, child, amount='225', payment_type='recurring_subscription'):
+        return Payment.objects.create(
+            child=child, family=child.family, lesson=self.lesson,
+            base_amount=Decimal(amount), final_amount=Decimal(amount),
+            registration_fee=Decimal('0'), status='completed', payment_type=payment_type,
+        )
+
+    def test_a_fee_with_the_course_charged_separately_is_not_a_problem(self):
+        """לני עוזר: 120 registration on 31/8, then 225 for the month on 2/9."""
+        child = _child('לני')
+        self._fee(child, days_ago=21)
+        self._course_charge(child)
+        item = check_registration_only_payments(TODAY)
+        self.assertEqual(item.severity, GREEN)
+        self.assertEqual(item.count, 0)
+
+    def test_a_fee_with_a_standing_order_waiting_is_not_a_problem(self):
+        child = _child('נרשם עכשיו')
+        self._fee(child)
+        _recurring(child)
+        self.assertEqual(check_registration_only_payments(TODAY).count, 0)
+
+    def test_a_fee_with_nothing_behind_it_is_raised(self):
+        child = _child('רק רישום')
+        self._fee(child)
         item = check_registration_only_payments(TODAY)
         self.assertEqual(item.severity, RED)
-        self.assertIn('חלקי', item.rows[0]['label'])
+        self.assertEqual(item.count, 1)
+        self.assertIn('רק רישום', item.rows[0]['label'])
+        self.assertIn('אין חיוב על החוג', item.rows[0]['detail'])
 
-    def test_the_full_charge_is_quiet(self):
-        self._payment(_child('מלא'), final='380', registration='120', lesson=self.lesson)
-        self.assertEqual(check_registration_only_payments(TODAY).severity, GREEN)
+    def test_a_cancelled_standing_order_is_not_cover(self):
+        child = _child('ביטל')
+        self._fee(child)
+        _recurring(child, status='cancelled')
+        self.assertEqual(check_registration_only_payments(TODAY).count, 1)
 
     def test_a_charge_with_no_registration_fee_is_not_examined(self):
-        self._payment(_child('ללא רישום'), final='260', registration='0', lesson=self.lesson)
+        child = _child('ללא רישום')
+        self._course_charge(child, payment_type='one_time')
         self.assertEqual(check_registration_only_payments(TODAY).count, 0)
+
+    def test_one_siblings_course_charge_does_not_cover_the_other(self):
+        family = TestDataFactory.create_family()
+        TestDataFactory.create_parent(family=family)
+        paid = TestDataFactory.create_child(family=family, first_name='לורן')
+        unpaid = TestDataFactory.create_child(family=family, first_name='לני')
+        self._fee(paid)
+        self._course_charge(paid)
+        self._fee(unpaid)
+        item = check_registration_only_payments(TODAY)
+        self.assertEqual(item.count, 1)
+        self.assertIn('לני', item.rows[0]['label'])
 
 
 class DuplicateChargeTests(TestCase):
@@ -279,22 +330,44 @@ class EndedOrderTests(TestCase):
         self.assertEqual(check_ended_standing_orders(TODAY).severity, GREEN)
 
 
-class StatusScanTests(TestCase):
-    def test_a_large_audience_is_capped_and_the_summary_says_so(self):
-        from apps.core.daily_brief import check_status_mismatch
+class StatusMismatchTests(TestCase):
+    """
+    Only the half the office can act on this morning.
 
+    Statuses drift in every direction and a list of every disagreement is too
+    long to be read; what matters is a child whose money is coming in, or whose
+    place is taken, who still reads as "ניסיון".
+    """
+
+    def _child_with(self, name, status):
         family = TestDataFactory.create_family()
-        for index in range(3):
-            TestDataFactory.create_child(family=family, first_name=f'ילד {index}', status='pending')
-        with patch('apps.core.daily_brief.MAX_CHILDREN_SCANNED', 2):
-            item = check_status_mismatch(TODAY)
-        self.assertIn('נבדקו 2 מתוך 3', item.summary)
+        TestDataFactory.create_parent(family=family)
+        return TestDataFactory.create_child(family=family, first_name=name, status=status)
 
-    def test_a_normal_audience_says_nothing_about_limits(self):
+    def test_a_trial_child_with_a_live_standing_order_is_raised(self):
         from apps.core.daily_brief import check_status_mismatch
 
-        TestDataFactory.create_child(family=TestDataFactory.create_family(), first_name='יחיד')
-        self.assertNotIn('נבדקו', check_status_mismatch(TODAY).summary)
+        child = self._child_with('עבר לחוג', 'trial_completed')
+        _recurring(child)
+        Payment.objects.create(
+            child=child, family=child.family, base_amount=Decimal('225'),
+            final_amount=Decimal('225'), status='completed',
+        )
+        item = check_status_mismatch(TODAY)
+        self.assertEqual(item.count, 1)
+        self.assertIn('עבר לחוג', item.rows[0]['label'])
+
+    def test_a_child_who_really_is_only_a_trial_is_left_alone(self):
+        from apps.core.daily_brief import check_status_mismatch
+
+        self._child_with('רק ניסיון', 'trial_signed')
+        self.assertEqual(check_status_mismatch(TODAY).count, 0)
+
+    def test_a_child_marked_active_is_not_second_guessed(self):
+        from apps.core.daily_brief import check_status_mismatch
+
+        self._child_with('פעיל', 'active')
+        self.assertEqual(check_status_mismatch(TODAY).count, 0)
 
 
 class DocumentNumberingTests(TestCase):
@@ -483,3 +556,151 @@ class PerCheckEndpointTests(TestCase):
             item = run_check(entry['key'], today=TODAY)
             self.assertEqual(item['key'], entry['key'])
             self.assertIn(item['severity'], (RED, YELLOW, GREEN))
+
+
+class NoiseControlTests(TestCase):
+    """
+    What each check must NOT say.
+
+    Every rule here was written after a real false alarm, or after reading the
+    code and finding the assumption behind a rule was wrong. A check that cries
+    wolf is worse than no check: the office stops reading the brief.
+    """
+
+    def setUp(self):
+        self.lesson = TestDataFactory.create_lesson()
+
+    def _paid(self, child, amount='225', lesson=None, days_ago=0, status='completed'):
+        payment = Payment.objects.create(
+            child=child, family=child.family, lesson=lesson,
+            base_amount=Decimal(amount), final_amount=Decimal(amount), status=status,
+        )
+        if days_ago:
+            Payment.objects.filter(pk=payment.pk).update(
+                created_at=timezone.now() - timedelta(days=days_ago)
+            )
+        return payment
+
+    def test_one_day_late_is_not_late_because_billing_runs_in_batches(self):
+        """The cron charges 40 at a time; a busy first-of-month honestly waits."""
+        _recurring(_child('אתמול'), next_billing_date=TODAY - timedelta(days=1))
+        self.assertEqual(check_overdue_recurring(TODAY).count, 0)
+
+    def test_an_order_reported_as_stuck_is_not_also_reported_as_late(self):
+        recurring = _recurring(_child('תקוע'), next_billing_date=TODAY - timedelta(days=10))
+        TranzilaTransaction.objects.create(
+            idempotency_key=f'recurring_{recurring.id}_2026-09-01',
+            is_successful=False, transaction_type='charge',
+        )
+        self.assertEqual(check_overdue_recurring(TODAY).count, 0)
+        self.assertEqual(check_unresolved_charges(TODAY).count, 1)
+
+    def test_a_failure_the_parent_already_fixed_is_not_this_mornings_news(self):
+        child = _child('שילם אחרי')
+        self._paid(child, status='failed')
+        self._paid(child)
+        self.assertEqual(check_failed_payments(TODAY).count, 0)
+
+    def test_two_courses_at_the_same_price_on_one_day_are_not_a_duplicate(self):
+        child = _child('שני חוגים')
+        other_lesson = TestDataFactory.create_lesson()
+        self._paid(child, lesson=self.lesson)
+        self._paid(child, lesson=other_lesson)
+        self.assertEqual(check_duplicate_charges(TODAY).count, 0)
+
+    def test_the_same_course_charged_twice_in_a_day_still_is(self):
+        child = _child('כפול אמיתי')
+        self._paid(child, lesson=self.lesson)
+        self._paid(child, lesson=self.lesson)
+        self.assertEqual(check_duplicate_charges(TODAY).count, 1)
+
+    def test_a_quiet_day_is_not_a_finding_when_quiet_days_are_normal(self):
+        """Most days here take nothing: the month's charges land on one day."""
+        yesterday = TODAY - timedelta(days=1)
+        child = _child('לפני שבוע')
+        payment = self._paid(child, amount='1000')
+        Payment.objects.filter(pk=payment.pk).update(
+            created_at=timezone.make_aware(timezone.datetime(
+                (yesterday - timedelta(days=7)).year,
+                (yesterday - timedelta(days=7)).month,
+                (yesterday - timedelta(days=7)).day, 12, 0,
+            ))
+        )
+        item = check_revenue_drop(TODAY)
+        self.assertEqual(item.severity, GREEN)
+
+    def test_a_child_paying_in_cash_is_not_a_child_nobody_charges(self):
+        from apps.documents.models import CashPlan
+
+        child = TestDataFactory.create_child(
+            family=TestDataFactory.create_family(), first_name='מזומן', status='active'
+        )
+        CashPlan.objects.create(
+            child=child, lesson=self.lesson, status='active',
+            total_amount=Decimal('2250'), monthly_amount=Decimal('225'),
+        )
+        self.assertEqual(check_active_without_standing_order(TODAY).count, 0)
+
+    def test_a_child_charged_last_month_is_not_a_child_nobody_charges(self):
+        child = TestDataFactory.create_child(
+            family=TestDataFactory.create_family(), first_name='חויב', status='active'
+        )
+        self._paid(child, days_ago=20)
+        self.assertEqual(check_active_without_standing_order(TODAY).count, 0)
+
+    def test_a_child_with_nothing_at_all_still_shows(self):
+        TestDataFactory.create_child(
+            family=TestDataFactory.create_family(), first_name='לא נגבה', status='active'
+        )
+        self.assertEqual(check_active_without_standing_order(TODAY).count, 1)
+
+
+class InstalmentNoiseTests(TestCase):
+    """
+    The billing cron issues these itself, for active plans, in batches.
+
+    So a document a day late is the batch doing its work, and an instalment on
+    a cancelled plan is not waiting for anybody.
+    """
+
+    def setUp(self):
+        from apps.documents.models import CashPlan
+
+        self.lesson = TestDataFactory.create_lesson()
+        self.child = _child('מזומן')
+        self.plan = CashPlan.objects.create(
+            child=self.child, lesson=self.lesson, status='active',
+            total_amount=Decimal('2250'), monthly_amount=Decimal('225'),
+        )
+
+    def _month(self, days_ago, status='pending', plan=None):
+        from apps.documents.models import CashPlanMonth
+
+        return CashPlanMonth.objects.create(
+            plan=plan or self.plan, due_date=TODAY - timedelta(days=days_ago),
+            amount=Decimal('225'), status=status,
+        )
+
+    def test_yesterdays_instalment_is_the_batch_not_a_backlog(self):
+        self._month(1)
+        self.assertEqual(check_overdue_instalments(TODAY).count, 0)
+
+    def test_an_instalment_a_week_old_is_a_backlog(self):
+        self._month(7)
+        item = check_overdue_instalments(TODAY)
+        self.assertEqual(item.count, 1)
+        self.assertIn('מזומן', item.rows[0]['label'])
+
+    def test_a_cancelled_plan_is_not_waiting_for_anything(self):
+        from apps.documents.models import CashPlan
+
+        cancelled = CashPlan.objects.create(
+            child=self.child, lesson=self.lesson, status='cancelled',
+            total_amount=Decimal('2250'), monthly_amount=Decimal('225'),
+        )
+        self._month(30, plan=cancelled)
+        self.assertEqual(check_overdue_instalments(TODAY).count, 0)
+
+    def test_an_issued_instalment_is_done(self):
+        self._month(30, status='invoiced')
+        self.assertEqual(check_overdue_instalments(TODAY).count, 0)

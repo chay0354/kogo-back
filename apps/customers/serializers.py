@@ -902,6 +902,10 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
             'id', 'child', 'child_name', 'initial_payment', 'initial_payment_details',
             'course_name', 'branch_name',
             'status', 'amount', 'pending_amount', 'pending_amount_effective_date',
+            # The price before discounts, what was taken off, and which discounts
+            # did it — so the customer's screen can answer "why this amount?"
+            # without anyone opening the discounts settings.
+            'base_amount', 'discount_amount', 'discount_details',
             'billing_day', 'start_date', 'end_date',
             'next_billing_date', 'last_charge_date', 'cancelled_at',
             'cancellation_reason', 'created_at', 'updated_at',
@@ -909,6 +913,7 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'child_name', 'initial_payment_details', 'course_name', 'branch_name',
+            'base_amount', 'discount_amount', 'discount_details',
             'tranzila_token', 'tranzila_recurring_index', 'created_at', 'updated_at'
         ]
 
