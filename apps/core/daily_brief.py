@@ -297,7 +297,9 @@ def check_missing_receipts(today: date) -> BriefItem:
     """Money that came in without its receipt."""
     from apps.documents.missing_receipts import payments_without_invoice
 
-    rows = payments_without_invoice(since=timezone.now() - timedelta(days=90))
+    # 30 days, not 90: the screen for the whole year already exists, and this
+    # one has to answer inside a single request.
+    rows = payments_without_invoice(since=timezone.now() - timedelta(days=30))
     item = BriefItem(
         key='missing_receipts',
         title='תשלומים ללא חשבונית',
@@ -306,9 +308,9 @@ def check_missing_receipts(today: date) -> BriefItem:
         action='להפיק את המסמכים החסרים במסך הקבלות החסרות.',
     )
     if not rows:
-        item.summary = 'לכל תשלום ב-90 הימים האחרונים יש מסמך.'
+        item.summary = 'לכל תשלום ב-30 הימים האחרונים יש מסמך.'
         return item
-    item.summary = f'{len(rows)} תשלומים ב-90 הימים האחרונים בלי חשבונית או קבלה.'
+    item.summary = f'{len(rows)} תשלומים ב-30 הימים האחרונים בלי חשבונית או קבלה.'
     for payment in rows[:MAX_ROWS]:
         item.rows.append(_row(
             payment.child.full_name if getattr(payment, 'child', None) else 'ללא ילד משויך',
@@ -787,6 +789,83 @@ CHECKS = (
 
 # Checks that call an outside service, so a quick brief can leave them out.
 EXTERNAL_CHECKS = {'tranzila_health', 'manychat_health', 'tranzila_reconciliation'}
+
+
+def check_key(check) -> str:
+    return check.__name__.replace('check_', '')
+
+
+# Asked for one at a time by the screen: a single request per check is the only
+# shape that survives a hosting platform's limit on how long one request may
+# take, and it lets a slow check be seen instead of hiding behind a spinner.
+CHECK_REGISTRY = {check_key(check): check for check in CHECKS}
+
+
+def check_catalogue() -> list[dict]:
+    """The checks in the order they should run: cheap first, outside services last."""
+    titles = {
+        'overdue_recurring': 'הוראות קבע שלא ירדו',
+        'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
+        'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',
+        'failed_payments': 'תשלומים שנכשלו',
+        'registration_only_payments': 'נגבו דמי רישום בלבד',
+        'expiring_cards': 'כרטיסים שפג תוקפם',
+        'duplicate_charges': 'חיובים כפולים',
+        'revenue_drop': 'הכנסות אתמול',
+        'refunds': 'זיכויים',
+        'active_without_standing_order': 'ילדים פעילים בלי הוראת קבע',
+        'ended_standing_orders': 'הוראות קבע שהסתיימו',
+        'overdue_instalments': 'מזומן וצ׳קים שעבר מועדם',
+        'status_mismatch': 'ילדים בסטטוס לא נכון',
+        'missing_receipts': 'תשלומים ללא חשבונית',
+        'business_categories': 'עסקים בלי קטגוריה',
+        'document_numbering': 'מספור מסמכים',
+        'tranzila_health': 'תקינות הסליקה',
+        'manychat_health': 'תקינות WhatsApp',
+        'tranzila_reconciliation': 'התאמה מול טרנזילה',
+    }
+    return [
+        {'key': key, 'title': titles.get(key, key), 'external': key in EXTERNAL_CHECKS}
+        for key in CHECK_REGISTRY
+    ]
+
+
+def run_check(key: str, *, today: date | None = None) -> dict:
+    """One check, by name. Never raises: a broken check comes back as a red item."""
+    check = CHECK_REGISTRY.get(key)
+    if check is None:
+        raise KeyError(key)
+    day = today or _israel_today()
+    started = timezone.now()
+    try:
+        item = check(day)
+    except Exception as exc:  # noqa: BLE001 — a broken check is a finding, not a crash
+        logger.exception('daily brief check failed: %s', key)
+        item = BriefItem(
+            key=key,
+            title=f'הבדיקה "{key}" נכשלה',
+            severity=RED,
+            count=1,
+            summary=f'הבדיקה עצמה נכשלה ולכן אין עליה תשובה: {exc}',
+            action='לדווח למפתח — זו תקלה בבדיקה, לא בהכרח במערכת.',
+        )
+    item.duration_ms = int((timezone.now() - started).total_seconds() * 1000)
+    return item.as_dict()
+
+
+def summarise(items: list[dict], *, day: date, duration_ms: int = 0) -> dict:
+    """Wrap items as a brief — used both by the nightly run and by the screen."""
+    red = [i for i in items if i['severity'] == RED]
+    yellow = [i for i in items if i['severity'] == YELLOW]
+    return {
+        'generated_at': timezone.now().isoformat(),
+        'for_date': day.isoformat(),
+        'duration_ms': duration_ms,
+        'red_count': len(red),
+        'yellow_count': len(yellow),
+        'headline': 'אין בעיות דחופות' if not red else f'{len(red)} נושאים דורשים טיפול היום',
+        'items': items,
+    }
 
 
 def build_daily_brief(*, today: date | None = None, include_external: bool = True) -> dict:
