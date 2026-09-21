@@ -407,3 +407,79 @@ class EndpointTests(TestCase):
     def test_the_cron_refuses_without_its_token(self):
         res = APIClient().get('/api/v1/core/cron/daily-brief/')
         self.assertEqual(res.status_code, 401)
+
+
+class PerCheckEndpointTests(TestCase):
+    """
+    The screen runs the checks one at a time.
+
+    One request per check is what survives a hosting platform's limit on how
+    long a request may take — and an interrupted run keeps whatever it got.
+    """
+
+    def _client(self, role=UserProfile.ROLE_MANAGER):
+        user = get_user_model().objects.create_user(
+            username=f'{role}-check@x.com', email=f'{role}-check@x.com', password='pass12345!'
+        )
+        UserProfile.objects.update_or_create(user=user, defaults={'role': role})
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Token {Token.objects.create(user=user).key}')
+        return client
+
+    def test_the_screen_is_told_which_checks_to_run_and_which_are_slow(self):
+        res = self._client().get('/api/v1/core/daily-brief/check/')
+        self.assertEqual(res.status_code, 200)
+        keys = [c['key'] for c in res.data['checks']]
+        self.assertIn('overdue_recurring', keys)
+        external = {c['key'] for c in res.data['checks'] if c['external']}
+        self.assertIn('tranzila_reconciliation', external)
+        # Cheap first, the outside services last.
+        self.assertLess(keys.index('overdue_recurring'), keys.index('tranzila_reconciliation'))
+
+    def test_one_check_runs_and_is_kept(self):
+        client = self._client()
+        res = client.post('/api/v1/core/daily-brief/check/', {'key': 'overdue_recurring'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.data['item']['key'], 'overdue_recurring')
+        self.assertIn('duration_ms', res.data['item'])
+        self.assertEqual(DailyBriefSnapshot.objects.count(), 1)
+
+    def test_a_second_check_joins_the_first_instead_of_replacing_it(self):
+        client = self._client()
+        client.post('/api/v1/core/daily-brief/check/', {'key': 'overdue_recurring'}, format='json')
+        res = client.post('/api/v1/core/daily-brief/check/', {'key': 'failed_payments'}, format='json')
+        keys = [i['key'] for i in res.data['brief']['items']]
+        self.assertEqual(keys, ['overdue_recurring', 'failed_payments'])
+        self.assertEqual(DailyBriefSnapshot.objects.count(), 1)
+
+    def test_running_the_same_check_again_replaces_its_answer(self):
+        client = self._client()
+        client.post('/api/v1/core/daily-brief/check/', {'key': 'overdue_recurring'}, format='json')
+        _recurring(_child('פספוס'), next_billing_date=date.today() - timedelta(days=4))
+        res = client.post('/api/v1/core/daily-brief/check/', {'key': 'overdue_recurring'}, format='json')
+        items = res.data['brief']['items']
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['severity'], RED)
+        self.assertEqual(res.data['brief']['red_count'], 1)
+
+    def test_an_unknown_check_is_refused_in_words(self):
+        res = self._client().post('/api/v1/core/daily-brief/check/', {'key': 'nonsense'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('nonsense', res.data['error'])
+
+    def test_only_a_manager_may_run_checks(self):
+        res = self._client(UserProfile.ROLE_WORKER).post(
+            '/api/v1/core/daily-brief/check/', {'key': 'overdue_recurring'}, format='json'
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_every_check_in_the_catalogue_can_actually_run(self):
+        """A name on the list that cannot run would hang the screen on it."""
+        from apps.core.daily_brief import check_catalogue, run_check
+
+        for entry in check_catalogue():
+            if entry['external']:
+                continue
+            item = run_check(entry['key'], today=TODAY)
+            self.assertEqual(item['key'], entry['key'])
+            self.assertIn(item['severity'], (RED, YELLOW, GREEN))
