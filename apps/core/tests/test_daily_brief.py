@@ -704,3 +704,127 @@ class InstalmentNoiseTests(TestCase):
     def test_an_issued_instalment_is_done(self):
         self._month(30, status='invoiced')
         self.assertEqual(check_overdue_instalments(TODAY).count, 0)
+
+
+class NextBillingRunTests(TestCase):
+    """
+    The owner's rule: the monthly charges have to go through.
+
+    So the brief says what the next run will do before it does it, using the
+    billing cron's own conditions — an order it would skip is a finding now,
+    not a discovery on the 2nd.
+    """
+
+    def setUp(self):
+        from apps.core.daily_brief import check_next_billing_run
+
+        self.check = check_next_billing_run
+        self.lesson = TestDataFactory.create_lesson()
+
+    def _order(self, name, **kwargs):
+        child = _child(name)
+        payment = Payment.objects.create(
+            child=child, family=child.family, lesson=self.lesson,
+            base_amount=Decimal('225'), final_amount=Decimal('225'), status='completed',
+        )
+        defaults = {'initial_payment': payment, 'next_billing_date': date(2026, 10, 1)}
+        defaults.update(kwargs)
+        return _recurring(child, **defaults)
+
+    def test_a_ready_order_is_counted_and_nothing_is_raised(self):
+        self._order('מוכן')
+        item = self.check(TODAY)
+        self.assertEqual(item.severity, GREEN)
+        self.assertIn('01/10', item.summary)
+        self.assertIn('כולן מוכנות', item.summary)
+
+    def test_an_order_with_no_saved_card_would_fail(self):
+        self._order('בלי כרטיס', tranzila_token='')
+        item = self.check(TODAY)
+        self.assertEqual(item.severity, RED)
+        self.assertIn('אין כרטיס שמור', item.rows[0]['detail'])
+
+    def test_an_order_with_no_lesson_would_be_skipped(self):
+        self._order('בלי שיעור', initial_payment=None)
+        self.assertIn('אין שיעור משויך', self.check(TODAY).rows[0]['detail'])
+
+    def test_an_order_stuck_from_a_previous_attempt_would_be_skipped(self):
+        order = self._order('תקוע')
+        TranzilaTransaction.objects.create(
+            idempotency_key=f'recurring_{order.id}_2026-09-01',
+            is_successful=False, transaction_type='charge',
+        )
+        self.assertIn('נתקע', self.check(TODAY).rows[0]['detail'])
+
+    def test_a_card_that_expires_before_the_run_would_decline(self):
+        self._order('פג תוקף', card_expire_month=9, card_expire_year=2026)
+        self.assertIn('פג בתוקף', self.check(TODAY).rows[0]['detail'])
+
+    def test_an_order_tranzila_itself_charges_is_counted_apart(self):
+        self._order('בטרנזילה', tranzila_recurring_index='77')
+        item = self.check(TODAY)
+        self.assertEqual(item.severity, GREEN)
+        self.assertIn('מנוהלות ישירות בטרנזילה', item.summary)
+
+
+class DeactivationTests(TestCase):
+    """A refund or a cancelled order that ran its course leaves a paying customer who is not one."""
+
+    def setUp(self):
+        from apps.core.daily_brief import check_children_to_deactivate
+
+        self.check = check_children_to_deactivate
+
+    def test_a_child_whose_paid_period_ended_is_offered_for_deactivation(self):
+        child = _child('סיים')
+        child.status = 'active'
+        child.paid_until_date = TODAY - timedelta(days=30)
+        child.save(update_fields=['status', 'paid_until_date'])
+        item = self.check(TODAY)
+        self.assertEqual(item.count, 1)
+        self.assertIn('סיים', item.rows[0]['label'])
+        self.assertIn('לא ייגבה מהם שוב', item.action)
+
+    def test_a_child_still_being_charged_is_never_offered(self):
+        child = _child('משלם')
+        child.status = 'active'
+        child.paid_until_date = TODAY - timedelta(days=30)
+        child.save(update_fields=['status', 'paid_until_date'])
+        _recurring(child)
+        self.assertEqual(self.check(TODAY).count, 0)
+
+    def test_a_child_whose_period_has_not_ended_is_left_alone(self):
+        child = _child('בתוקף')
+        child.status = 'active'
+        child.paid_until_date = TODAY + timedelta(days=30)
+        child.save(update_fields=['status', 'paid_until_date'])
+        self.assertEqual(self.check(TODAY).count, 0)
+
+
+class ReadinessWordingTests(TestCase):
+    """Two readiness checks read as alarms and are not. They must not show as red."""
+
+    def _report(self, checks):
+        from unittest.mock import patch
+
+        from apps.core.daily_brief import check_tranzila_health
+
+        with patch('apps.core.tranzila_service.TranzilaService.live_readiness', return_value={'checks': checks}):
+            return check_tranzila_health(TODAY)
+
+    def test_a_label_and_a_document_terminal_are_notes_not_failures(self):
+        item = self._report([
+            {'name': 'environment', 'ok': False, 'blocking': False, 'detail': 'TRANZILA_ENVIRONMENT=development'},
+            {'name': 'billing_terminal', 'ok': False, 'blocking': False, 'detail': 'empty'},
+        ])
+        self.assertEqual(item.severity, GREEN)
+        self.assertEqual(item.count, 0)
+        self.assertIn('חיוב בכרטיס יעבוד', item.summary)
+        self.assertTrue(all(row['label'].startswith('לידיעה') for row in item.rows))
+
+    def test_something_that_really_stops_a_charge_is_red(self):
+        item = self._report([
+            {'name': 'token_terminal', 'ok': False, 'blocking': True, 'detail': 'missing'},
+        ])
+        self.assertEqual(item.severity, RED)
+        self.assertIn('בלעדיו אין גבייה חודשית', item.rows[0]['label'])

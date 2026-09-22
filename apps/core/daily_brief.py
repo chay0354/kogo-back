@@ -457,6 +457,139 @@ def check_registration_only_payments(today: date) -> BriefItem:
     return item
 
 
+def check_next_billing_run(today: date) -> BriefItem:
+    """
+    What the next monthly run will do, before it does it.
+
+    The owner's rule: the charges have to go through. This walks the standing
+    orders that are due next and applies the billing cron's own conditions, so
+    an order that would be skipped is seen days before the 1st rather than
+    found missing afterwards.
+    """
+    from apps.customers.models import RecurringPayment, TranzilaTransaction
+
+    # The next 1st — the day the monthly run does its work.
+    run_day = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    due = list(
+        RecurringPayment.objects
+        .filter(status='active', next_billing_date__lte=run_day)
+        .select_related('child', 'initial_payment', 'initial_payment__lesson')
+    )
+    stuck = {
+        key.split('_')[1]
+        for key in TranzilaTransaction.objects
+        .filter(is_successful=False, idempotency_key__startswith='recurring_')
+        .values_list('idempotency_key', flat=True)
+        if len(key.split('_')) >= 3
+    }
+
+    blocked: list[tuple] = []
+    gateway_owned = 0
+    expected = Decimal('0')
+    for recurring in due:
+        if recurring.tranzila_recurring_index:
+            # Tranzila holds this one's schedule; our cron does not touch it.
+            gateway_owned += 1
+            continue
+        expected += Decimal(recurring.amount or 0)
+        if not recurring.tranzila_token:
+            blocked.append((recurring, 'אין כרטיס שמור — לא ניתן לחייב'))
+        elif str(recurring.id) in stuck:
+            blocked.append((recurring, 'ניסיון קודם נתקע — הגבייה עוצרת עד שמסדרים'))
+        elif not recurring.initial_payment or not recurring.initial_payment.lesson_id:
+            blocked.append((recurring, 'אין שיעור משויך — החיוב מדלג עליה'))
+        elif (
+            recurring.card_expire_year
+            and recurring.card_expire_month
+            and (
+                recurring.card_expire_year < run_day.year
+                or (recurring.card_expire_year == run_day.year and recurring.card_expire_month < run_day.month)
+            )
+        ):
+            blocked.append((recurring, f'הכרטיס פג בתוקף {recurring.card_expire_month:02d}/{recurring.card_expire_year}'))
+
+    item = BriefItem(
+        key='next_billing_run',
+        title=f'הגבייה הבאה ({run_day:%d/%m})',
+        severity=RED if blocked else GREEN,
+        count=len(blocked),
+        action='לטפל לפני ה-1: לשלוח קישור לעדכון כרטיס, לשייך שיעור, או להסדיר חיוב תקוע.',
+    )
+    charging = len(due) - gateway_owned
+    base = f'{charging} הוראות קבע אמורות להיגבות ב-{run_day:%d/%m} בסך {_money(expected)}'
+    if gateway_owned:
+        base += f' · {gateway_owned} מנוהלות ישירות בטרנזילה'
+    if not blocked:
+        item.summary = f'{base}. כולן מוכנות לחיוב.'
+        return item
+    item.summary = f'{base}. {len(blocked)} מהן ייכשלו מראש אם לא יטופלו.'
+    for recurring, reason in blocked[:MAX_ROWS]:
+        item.rows.append(_row(
+            recurring.child.full_name if recurring.child else str(recurring.id),
+            f'{_money(recurring.amount)} · {reason}',
+            _child_href(recurring.child_id),
+        ))
+    return item
+
+
+def check_children_to_deactivate(today: date) -> BriefItem:
+    """
+    Children the records say have left, still carried as paying customers.
+
+    A refund that closed the account, or a standing order that was cancelled
+    and whose paid period has run out: the child stops being charged and stays
+    "פעיל" on every screen and in every count. The rule used is the system's
+    own — `resolve_child_status` — so this agrees with the customers page
+    rather than inventing a second opinion.
+    """
+    from apps.customers.child_status import resolve_child_status, status_label
+    from apps.customers.models import Child, RecurringPayment
+
+    still_charged = set(
+        RecurringPayment.objects
+        .filter(status='active')
+        .exclude(tranzila_token='')
+        .values_list('child_id', flat=True)
+    )
+    children = (
+        Child.objects
+        .filter(status__in=('active', 'payment_problem'))
+        .select_related('family')
+        .prefetch_related('lesson_enrollments', 'payments')
+        .order_by('-updated_at')[:MAX_CHILDREN_SCANNED]
+    )
+    leaving = []
+    for child in children.iterator(chunk_size=500):
+        if child.id in still_charged:
+            # A live standing order with a card behind it: nobody has left.
+            continue
+        if resolve_child_status(child) == 'inactive':
+            leaving.append(child)
+
+    item = BriefItem(
+        key='children_to_deactivate',
+        title='ילדים שסיימו ועדיין רשומים כפעילים',
+        severity=YELLOW if leaving else GREEN,
+        count=len(leaving),
+        action='להעביר ללא פעיל. אין להם הוראת קבע עם כרטיס, ולכן לא ייגבה מהם שוב.',
+    )
+    if not leaving:
+        item.summary = 'אין ילד פעיל שהרישומים שלו אומרים שהוא כבר לא.'
+        return item
+    item.summary = (
+        f'{len(leaving)} ילדים שזוכו או שהוראת הקבע שלהם בוטלה והתקופה ששולמה נגמרה, '
+        'ועדיין רשומים כפעילים.'
+    )
+    for child in leaving[:MAX_ROWS]:
+        paid_until = f'שולם עד {child.paid_until_date:%d/%m/%Y}' if child.paid_until_date else 'ללא תקופה משולמת'
+        item.rows.append(_row(
+            child.full_name,
+            f'רשום {status_label(child.status)} · {paid_until} · אין הוראת קבע פעילה',
+            _child_href(child.id),
+        ))
+    return item
+
+
 def check_duplicate_charges(today: date) -> BriefItem:
     """The same child charged the same amount twice on one day."""
     from django.db.models import Count
@@ -762,27 +895,60 @@ def check_document_numbering(today: date) -> BriefItem:
     return item
 
 
+# What each readiness check means for the office, in its own words. Two of them
+# read as alarms and are not: the document terminal falls back to the payment
+# terminal, and the environment label is not used by anything that charges.
+READINESS_WORDING = {
+    'credentials': 'מפתחות הסליקה',
+    'token_terminal': 'מסוף החיוב בטוקן — בלעדיו אין גבייה חודשית',
+    'webhook_secret': 'אימות ההודעות מטרנזילה',
+    'notify_url': 'כתובת הדיווח על תשלום — אם אינה מוגדרת גם אצל טרנזילה, תשלומים לא יאושרו',
+    'handshake': 'לחיצת יד מול המסוף',
+    'environment': 'תווית סביבה בלבד — לא משפיעה על חיובים',
+    'billing_terminal': 'מסוף להפקת מסמכים בטרנזילה — כשהוא ריק, המסמכים מופקים במערכת עצמה',
+}
+
+
 def check_tranzila_health(today: date) -> BriefItem:
-    """The gateway's own readiness — the reason a charge screen suddenly errors."""
+    """
+    The gateway's own readiness — the reason a charge screen suddenly errors.
+
+    Only a blocking failure is a red here. The two non-blocking ones are
+    labels, and calling them failures sent the office looking for a fault that
+    was not there.
+    """
     from apps.core.tranzila_service import TranzilaService
 
     report = TranzilaService.production().live_readiness()
     checks = report.get('checks') if isinstance(report, dict) else []
     failed = [c for c in (checks or []) if not c.get('ok')]
     blocking = [c for c in failed if c.get('blocking')]
+    notes = [c for c in failed if not c.get('blocking')]
+
     item = BriefItem(
         key='tranzila_health',
         title='תקינות הסליקה',
-        severity=RED if blocking else (YELLOW if failed else GREEN),
-        count=len(failed),
+        severity=RED if blocking else GREEN,
+        count=len(blocking),
         action='לתקן בהגדרות ← סליקה, או במסוף של טרנזילה.',
     )
-    if not failed:
-        item.summary = 'החיבור לטרנזילה תקין.'
-        return item
-    item.summary = f'{len(failed)} בדיקות סליקה נכשלו. חיוב בכרטיס עלול להיכשל.'
-    for check in failed[:MAX_ROWS]:
-        item.rows.append(_row(str(check.get('name')), str(check.get('detail') or ''), '/settings/billing'))
+    if not blocking:
+        item.summary = 'החיבור לטרנזילה תקין — חיוב בכרטיס יעבוד.'
+    else:
+        item.summary = f'{len(blocking)} בדיקות חוסמות נכשלו. חיוב בכרטיס עלול להיכשל.'
+    for check in blocking[:MAX_ROWS]:
+        item.rows.append(_row(
+            READINESS_WORDING.get(str(check.get('name')), str(check.get('name'))),
+            str(check.get('detail') or ''),
+            '/settings/billing',
+        ))
+    # Said, but not as an alarm: these do not stop a charge.
+    for check in notes[:MAX_ROWS]:
+        item.rows.append(_row(
+            f"לידיעה · {READINESS_WORDING.get(str(check.get('name')), str(check.get('name')))}",
+            str(check.get('detail') or ''),
+            '/settings/billing',
+        ))
     return item
 
 
@@ -883,6 +1049,8 @@ CHECKS = (
     check_failed_payments,
     check_registration_only_payments,
     check_expiring_cards,
+    check_next_billing_run,
+    check_children_to_deactivate,
     check_duplicate_charges,
     check_revenue_drop,
     check_refunds,
@@ -921,6 +1089,8 @@ def check_catalogue() -> list[dict]:
         'failed_payments': 'תשלומים שנכשלו',
         'registration_only_payments': 'דמי רישום בלי תשלום על החוג',
         'expiring_cards': 'כרטיסים שפג תוקפם',
+        'next_billing_run': 'הגבייה הבאה',
+        'children_to_deactivate': 'ילדים שסיימו ועדיין פעילים',
         'duplicate_charges': 'חיובים כפולים',
         'revenue_drop': 'הכנסות אתמול',
         'refunds': 'זיכויים',
