@@ -703,6 +703,12 @@ def initiate_payment(request):
         )
 
 
+# A till charge Tranzila did not answer. Kept on the invoice so the office can
+# find it, and so a repeat of the same checkout charges nothing.
+TILL_CHARGE_UNCERTAIN_MARK = 'לא ודאי'
+TILL_CHARGE_UNCERTAIN_MESSAGE = 'לא ידוע אם החיוב עבר. בדקו בטרנזילה לפני שמנסים שוב.'
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated, IsManagerOrPartner])
 def charge_card(request):
@@ -727,7 +733,7 @@ def charge_card(request):
     Returns: {success: bool, invoice: {...}, token?: string}
     """
     from apps.store.models import StoreProduct, StoreInvoice, StoreSale
-    from apps.core.tranzila_service import TranzilaService
+    from apps.core.tranzila_service import TranzilaService, is_tranzila_uncertain_gateway_error
     from apps.store.pricing import line_charge_amount, sale_unit_and_total, tranzila_items_for_cart_line
     from apps.store.stock_utils import decrement_product_stock as _decrement_product_stock
     from apps.store.stock_utils import store_line_item_branch_id as _store_line_item_branch_id
@@ -749,6 +755,28 @@ def charge_card(request):
             missing = [f for f in ('card_number', 'expiry_month', 'expiry_year', 'cvv') if not card_details.get(f)]
             if missing:
                 return Response({'error': f"Missing card fields: {', '.join(missing)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # One checkout, one charge. The till sends the same key for every try
+        # of the same checkout until a card is plainly declined; a repeat of a
+        # sale that went through, or of one whose outcome is unknown, charges
+        # nothing. (Stored in the invoice's unique idempotency column.)
+        idempotency_key = str(request.data.get('idempotency_key') or '').strip()[:64] or None
+        if idempotency_key:
+            earlier = StoreInvoice.objects.filter(website_idempotency_key=idempotency_key).first()
+            if earlier is not None:
+                from apps.store.serializers import StoreInvoiceSerializer
+                if earlier.payment_status == 'completed':
+                    return Response({
+                        'success': True,
+                        'already_paid': True,
+                        'invoice': StoreInvoiceSerializer(earlier).data,
+                        'token_saved': False,
+                    })
+                return Response(
+                    {'success': False, 'uncertain': True, 'error': TILL_CHARGE_UNCERTAIN_MESSAGE,
+                     'invoice_number': earlier.invoice_number},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         # Calculate total
         total_amount = Decimal('0.00')
@@ -781,16 +809,26 @@ def charge_card(request):
                 total_amount += line_charge_amount(product, item['quantity'], item)
                 tranzila_items.extend(tranzila_items_for_cart_line(product, item))
 
-        # Create invoice
-        invoice = StoreInvoice.objects.create(
-            child_id=child_id,
-            customer_name=request.data.get('customer_info', {}).get('name', ''),
-            customer_phone=request.data.get('customer_info', {}).get('phone', ''),
-            total_amount=total_amount,
-            payment_method='credit_card',
-            payment_status='pending',
-            charged_with_token=use_token,
-        )
+        # Create invoice. A second click that raced the first one past the check
+        # above meets the unique key here and charges nothing.
+        from django.db import IntegrityError
+        try:
+            with db_transaction.atomic():
+                invoice = StoreInvoice.objects.create(
+                    child_id=child_id,
+                    customer_name=request.data.get('customer_info', {}).get('name', ''),
+                    customer_phone=request.data.get('customer_info', {}).get('phone', ''),
+                    total_amount=total_amount,
+                    payment_method='credit_card',
+                    payment_status='pending',
+                    charged_with_token=use_token,
+                    website_idempotency_key=idempotency_key,
+                )
+        except IntegrityError:
+            return Response(
+                {'success': False, 'uncertain': True, 'error': TILL_CHARGE_UNCERTAIN_MESSAGE},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         tranzila = TranzilaService.production()
 
@@ -851,42 +889,29 @@ def charge_card(request):
 
                     _decrement_product_stock(product, item)
             
-            # Save token for future use if child exists
-            token_created = result.get('token')
-            if token_created and child_id:
-                try:
-                    child = Child.objects.get(id=child_id)
-                    # Check if recurring payment exists
-                    recurring = RecurringPayment.objects.filter(
-                        child=child,
-                        status='active'
-                    ).first()
-                    
-                    if recurring:
-                        # Update existing token
-                        recurring.tranzila_token = token_created
-                        recurring.save()
-                    else:
-                        # Create new recurring payment record (for token storage)
-                        RecurringPayment.objects.create(
-                            child=child,
-                            tranzila_token=token_created,
-                            status='active',
-                            amount=Decimal('0.00'),  # Will be updated when used
-                            billing_day=1,
-                            start_date=date.today(),
-                            next_billing_date=date.today()
-                        )
-                    logger.info(f"Saved token for future use: child={child_id}")
-                except Exception as e:
-                    logger.warning(f"Could not save token: {e}")
-            
+            # The card is not saved on the child. A store purchase is not a
+            # standing order: this used to write the card over the standing
+            # order's own card, or open a new "active" standing order at 0 ₪.
             from apps.store.serializers import StoreInvoiceSerializer
             return Response({
                 'success': True,
                 'invoice': StoreInvoiceSerializer(invoice).data,
-                'token_saved': bool(token_created and child_id)
+                'token_saved': False,
             })
+        elif is_tranzila_uncertain_gateway_error(result):
+            # No answer from Tranzila: the card may have been charged. Not a
+            # decline — the invoice stays pending and is marked, and the till is
+            # told to look in Tranzila before trying again.
+            invoice.tranzila_confirmation_code = TILL_CHARGE_UNCERTAIN_MARK
+            invoice.notes = f"Payment uncertain — check Tranzila before retrying: {result.get('error')}"
+            invoice.save(update_fields=['tranzila_confirmation_code', 'notes'])
+            logger.error('Till card charge uncertain for invoice %s: %s', invoice.invoice_number, result.get('error'))
+            return Response({
+                'success': False,
+                'uncertain': True,
+                'error': TILL_CHARGE_UNCERTAIN_MESSAGE,
+                'invoice_number': invoice.invoice_number,
+            }, status=status.HTTP_409_CONFLICT)
         else:
             invoice.payment_status = 'failed'
             invoice.notes = f"Payment failed: {result.get('error')}"
