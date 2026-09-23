@@ -8,7 +8,7 @@ from .manychat_views import WhatsAppViewSet
 from .registration_terms_views import RegistrationTermsView
 from .credit_card_charge_views import CreditCardChargeView
 from .devops_views import DatabaseBackupView, EnvInfoView, TranzilaTerminalMapView
-from .daily_brief_views import DailyBriefCheckView, DailyBriefView, cron_daily_brief
+from .daily_brief_views import DailyBriefCheckView, DailyBriefView, SystemAuditView, cron_daily_brief
 
 router = DefaultRouter()
 router.register(r'cities', views.CityViewSet, basename='city')
@@ -33,6 +33,7 @@ urlpatterns = [
     path('tranzila/terminals/', TranzilaTerminalMapView.as_view(), name='tranzila-terminal-map'),
     path('daily-brief/', DailyBriefView.as_view(), name='daily-brief'),
     path('daily-brief/check/', DailyBriefCheckView.as_view(), name='daily-brief-check'),
+    path('system-audit/', SystemAuditView.as_view(), name='system-audit'),
     path('cron/daily-brief/', cron_daily_brief, name='cron-daily-brief'),
 ]
 
