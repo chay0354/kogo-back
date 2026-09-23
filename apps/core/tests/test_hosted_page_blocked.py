@@ -122,8 +122,9 @@ class TheWebsiteStore(TestCase):
             format='json', HTTP_X_INTEGRATION_KEY='test-key',
         )
 
-        self.assertEqual(res.status_code, 503)
-        self.assertNotIn('iframe_url', res.data)
+        self.assertTrue(res.data['payments_paused'])
+        self.assertTrue(res.data['iframe_url'].endswith('/store-closed'))
+        self.assertNotIn('iframenew.php', res.data['iframe_url'])
         self.assertFalse(StoreInvoice.objects.exists())
 
 

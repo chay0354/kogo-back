@@ -13,7 +13,6 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.store.models import StoreInvoice, StoreProduct
-from apps.store.widget_views import WEBSITE_PAYMENTS_PAUSED_MESSAGE
 
 URL = '/api/v1/store/widget/payment/initiate/'
 
@@ -50,13 +49,13 @@ class WebsiteCardPaymentsPaused(TestCase):
     def post(self, body):
         return self.client.post(URL, json.dumps(body), content_type='application/json', **self.headers)
 
-    def test_is_off_unless_turned_on(self):
+    def test_is_off_unless_turned_on_and_sends_the_buyer_to_the_closed_page(self):
         res = self.post(self.payload())
 
-        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.status_code, 200)
         self.assertTrue(res.data['payments_paused'])
-        self.assertEqual(res.data['error'], WEBSITE_PAYMENTS_PAUSED_MESSAGE)
-        self.assertNotIn('iframe_url', res.data)
+        self.assertTrue(res.data['iframe_url'].endswith('/store-closed'))
+        self.assertNotIn('invoice_id', res.data)
 
     def test_writes_no_order(self):
         self.post(self.payload())
@@ -70,13 +69,13 @@ class WebsiteCardPaymentsPaused(TestCase):
 
         retry = self.post(self.payload())
 
-        self.assertEqual(retry.status_code, 503)
-        self.assertNotIn('iframe_url', retry.data)
+        self.assertTrue(retry.data['payments_paused'])
+        self.assertTrue(retry.data['iframe_url'].endswith('/store-closed'))
 
     def test_still_refuses_a_caller_without_the_key(self):
         res = self.client.post(URL, json.dumps(self.payload()), content_type='application/json')
 
-        self.assertNotEqual(res.status_code, 503)
+        self.assertNotEqual(res.status_code, 200)
         self.assertNotIn('payments_paused', res.data)
 
     @override_settings(STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True, TRANZILA_HOSTED_PAGE_ENABLED=True)
