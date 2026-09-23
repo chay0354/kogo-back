@@ -1198,6 +1198,7 @@ class MyDashboardView(APIView):
             instructor_login_q,
             resolve_viewable_user,
         )
+        from apps.enrollments.enrollment_counts import paying_enrollments
         from apps.enrollments.models import LessonAttendance
 
         # A head instructor may hold links to colleagues' accounts. The id is
@@ -1241,9 +1242,13 @@ class MyDashboardView(APIView):
         if not lesson_ids:
             return Response(self._empty_payload(request, subject.user))
 
+        # The system's one definition of a paying student (paying_enrollments):
+        # an active row that is not a trial, on a child who is not in the trial
+        # flow. It used to require child.status == 'active', which dropped a
+        # child whose card had just failed — still in the room, still counted
+        # everywhere else — and made this screen disagree with the courses page.
         enrollments = list(
-            LessonEnrollment.objects
-            .filter(lesson_id__in=lesson_ids, status='active', child__status='active')
+            paying_enrollments(LessonEnrollment.objects.filter(lesson_id__in=lesson_ids))
             .values('lesson_id', 'child_id', 'start_date', 'end_date')
         )
 
