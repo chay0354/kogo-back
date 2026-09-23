@@ -222,6 +222,15 @@ def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
         enrollment.status = 'active'
         if not enrollment.start_date:
             enrollment.start_date = today
+        # A paid row runs until something ends it. The row reused here is often
+        # the trial's, which the trial cron closed with end_date = the trial day;
+        # left in place, that date ended a paying subscription the day it began.
+        # The register ignores end_date, so nobody saw it — but the instructor's
+        # dashboard, the salary tiers and the monthly snapshots read it, and all
+        # three quietly dropped the child from the month after the trial. On
+        # 23.9.2026 that was 82 paying children. A cancellation writes its own
+        # end_date after this, so clearing it here takes nothing away.
+        enrollment.end_date = None
         if bundle and not enrollment.bundle:
             enrollment.bundle = bundle
         # A trial row reused as the paying one kept its trial date, and the roster
