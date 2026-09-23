@@ -23,6 +23,7 @@ from apps.store.models import StoreInvoice, StoreProduct, StoreProductSize, Stor
     TRANZILA_PROD_SECRET_KEY='prod_sk',
     TRANZILA_BASE_URL='https://direct.tranzila.test',
     TRANZILA_HANDSHAKE_ENABLED=False,
+    STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True,
 )
 class WebsitePaymentInitiateTest(TestCase):
     def setUp(self):
@@ -184,6 +185,7 @@ class WebsitePaymentInitiateTest(TestCase):
     TRANZILA_PROD_SECRET_KEY='prod_sk',
     TRANZILA_BASE_URL='https://direct.tranzila.test',
     TRANZILA_HANDSHAKE_ENABLED=False,
+    STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True,
 )
 class WebsitePickupPaymentTest(TestCase):
     def setUp(self):

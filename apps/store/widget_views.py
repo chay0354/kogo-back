@@ -51,6 +51,8 @@ from apps.store.website_integration import (
 
 logger = logging.getLogger(__name__)
 
+WEBSITE_PAYMENTS_PAUSED_MESSAGE = 'התשלום בכרטיס באתר מושהה זמנית. אפשר לפנות אלינו ונשמח להשלים את ההזמנה.'
+
 
 def _check_integration_key(request) -> bool:
     expected = getattr(settings, 'WEBSITE_INTEGRATION_API_KEY', '') or ''
@@ -512,6 +514,14 @@ class WidgetStorePaymentInitiateView(APIView):
     def post(self, request):
         if not _check_integration_key(request):
             return _integration_denied()
+
+        # Paused before anything is written or any payment page is opened —
+        # for a new order and for one the site retries. See the setting.
+        if not settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED:
+            return Response(
+                {'error': WEBSITE_PAYMENTS_PAUSED_MESSAGE, 'payments_paused': True},
+                status=503,
+            )
 
         idempotency_key = (request.data.get('idempotency_key') or '').strip() or None
         website_order_number = (request.data.get('website_order_number') or '').strip() or None

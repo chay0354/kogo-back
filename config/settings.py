@@ -174,6 +174,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # B2C public website integration (stock sync + web orders)
 WEBSITE_INTEGRATION_URL = config('WEBSITE_INTEGRATION_URL', default='')
 WEBSITE_INTEGRATION_API_KEY = config('WEBSITE_INTEGRATION_API_KEY', default='')
+# Card payment for website store orders. Off since 23.9.2026: the hosted page
+# ran on TRANZILA_TERMINAL ('realtest', not a terminal of the business), so no
+# store order paid online ever reached the business's account. Turn back on
+# only once TRANZILA_TERMINAL is a terminal of the business and a real 1 ₪
+# purchase has gone through end to end.
+STORE_WEBSITE_CARD_PAYMENTS_ENABLED = config('STORE_WEBSITE_CARD_PAYMENTS_ENABLED', default=False, cast=bool)
 
 # CORS Settings
 CORS_ALLOWED_ORIGINS = [
