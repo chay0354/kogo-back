@@ -9,7 +9,9 @@ takings are checked against Tranzila itself so "the system says it was charged"
 and "the money arrived" are two separate statements.
 
 Rules the checks follow:
-  * read-only — nothing here charges, sends, fixes or writes a row;
+  * read-only — nothing here charges, sends or fixes, with one exception: the
+    morning fixes at the top of the list (apps/core/morning_fixes.py), which the
+    owner asked for and which touch only statuses and the dashboard's counts;
   * one failing check never hides the rest: it comes back as its own red item;
   * a quiet morning must read as quiet, so a check that finds nothing says so
     instead of filling the screen.
@@ -85,6 +87,81 @@ def _israel_today() -> date:
 
 
 # --- the checks ------------------------------------------------------------
+
+
+def check_fix_child_statuses(today: date) -> BriefItem:
+    """Morning fix: children on a status their own records contradict."""
+    from apps.core.morning_fixes import MAX_STATUS_FIXES_PER_MORNING, fix_child_statuses
+
+    result = fix_child_statuses()
+    applied = result['applied']
+    item = BriefItem(
+        key='fix_child_statuses',
+        title='תוקן אוטומטית: סטטוסים של ילדים',
+        severity=GREEN,
+        count=len(applied),
+        action='כל שינוי נרשם בהיסטוריית הסטטוסים של הילד, ואפשר להחזיר אותו משם.',
+    )
+    if not applied and not result['waiting']:
+        item.summary = 'לא היה סטטוס לתקן הבוקר.'
+        return item
+    item.summary = f'{len(applied)} ילדים עברו לסטטוס שהרישומים שלהם מראים.'
+    if result['waiting']:
+        item.severity = YELLOW
+        item.summary += (
+            f' עוד {result["waiting"]} ממתינים — עד {MAX_STATUS_FIXES_PER_MORNING} בבוקר, '
+            'כדי שטעות בכלל לא תשנה את כל הרשימה בבת אחת.'
+        )
+    for change in applied[:MAX_ROWS]:
+        item.rows.append(_row(change['name'], f"{change['from']} ← {change['to']}", _child_href(change['child_id'])))
+    return item
+
+
+def check_refresh_dashboard(today: date) -> BriefItem:
+    """Morning fix: this month's dashboard numbers, recounted."""
+    from apps.core.morning_fixes import refresh_dashboard_numbers
+
+    result = refresh_dashboard_numbers()
+    return BriefItem(
+        key='refresh_dashboard',
+        title='תוקן אוטומטית: מספרי הדשבורד',
+        severity=GREEN,
+        summary=f"מספרי הדשבורד של {result['month']} חושבו מחדש הבוקר.",
+        action='החישוב הלילי של הדשבורד לא רץ בשרת הזה, ולכן הוא נעשה כאן כל בוקר.',
+    )
+
+
+def check_monthly_finalization(today: date) -> BriefItem:
+    """
+    Last month closed? The job that locks a month's snapshots (and with them
+    the instructors' pay) on the 1st is a Celery task that never runs here.
+    Locking pay is not a small thing, so this reports and does not act.
+    """
+    from apps.core.models import InstructorMonthlySnapshot
+
+    first_of_month = today.replace(day=1)
+    previous = (first_of_month - timedelta(days=1)).strftime('%Y-%m')
+    rows = InstructorMonthlySnapshot.objects.filter(month=previous)
+    open_rows = rows.filter(is_finalized=False).count()
+    item = BriefItem(
+        key='monthly_finalization',
+        title=f'סגירת חודש {previous}',
+        severity=GREEN,
+        action='לסגור את החודש מסך המשכורות, או לאשר שהמערכת תסגור אותו לבד ב-1 לכל חודש.',
+    )
+    if not rows.exists():
+        item.summary = f'אין סיכומים שמורים לחודש {previous}.'
+        return item
+    if open_rows:
+        item.severity = YELLOW
+        item.count = open_rows
+        item.summary = (
+            f'{open_rows} סיכומי מדריכים של {previous} עדיין פתוחים. הסגירה האוטומטית ב-1 לחודש '
+            'היא משימת Celery שלא רצה בשרת הזה.'
+        )
+        return item
+    item.summary = f'חודש {previous} סגור.'
+    return item
 
 
 def check_overdue_recurring(today: date) -> BriefItem:
@@ -1042,7 +1119,58 @@ def check_tranzila_reconciliation(today: date) -> BriefItem:
     return item
 
 
+def check_weekly_audit(today: date) -> BriefItem:
+    """
+    Today's slice of the weekly audit: one area, every screen in it, and the
+    area's own checks. Seven days, seven areas, the whole system every week.
+    """
+    from apps.core.models import SystemAuditRun
+    from apps.core.system_audit import area_for_day, run_summary
+
+    area = area_for_day(today)
+    run = SystemAuditRun.objects.filter(day=today).first()
+    item = BriefItem(
+        key='weekly_audit',
+        title=f'בדיקת עומק היום: {area.title}',
+        severity=GREEN,
+        action='לפתוח את הנתיב שנכשל ולבדוק; שגיאה כאן היא כפתור שייכשל מול המשרד.',
+    )
+    if run is None:
+        item.severity = YELLOW
+        item.summary = 'בדיקת העומק של היום עוד לא התחילה. היא רצה אוטומטית בבוקר.'
+        return item
+    summary = run_summary(run)
+    if summary['verdict'] == 'running':
+        item.severity = YELLOW
+        item.summary = f"בדיקת העומק רצה: {summary['checked_routes']} מתוך {summary['total_routes']} נתיבים נבדקו."
+        return item
+
+    red_probes = [p for p in summary['probes'] if p['severity'] == 'red']
+    yellow_probes = [p for p in summary['probes'] if p['severity'] == 'yellow']
+    problems = len(summary['failures']) + len(red_probes)
+    item.severity = RED if problems else (YELLOW if summary['slow'] or yellow_probes else GREEN)
+    item.count = problems + len(summary['slow']) + len(yellow_probes)
+    item.summary = (
+        f"{summary['called']} מסכים נבדקו ב{area.title}: "
+        f"{len(summary['failures'])} שגיאות, {len(summary['slow'])} איטיים. "
+        f"{len(summary['probes'])} בדיקות עומק, {len(red_probes)} נכשלו."
+    )
+    for failure in summary['failures'][:MAX_ROWS]:
+        item.rows.append(_row(
+            f"שגיאה · /{failure['path']}",
+            f"{failure.get('status') or ''} {failure.get('error') or ''}".strip()[:200],
+        ))
+    for probe in red_probes + yellow_probes:
+        item.rows.append(_row(probe['title'], probe['summary']))
+    for slow in summary['slow'][:5]:
+        item.rows.append(_row(f"איטי · /{slow['path']}", f"{slow['ms'] / 1000:.1f} שניות"))
+    return item
+
+
 CHECKS = (
+    # The morning fixes run first, so every check after them sees the fixed state.
+    check_fix_child_statuses,
+    check_refresh_dashboard,
     check_overdue_recurring,
     check_unresolved_charges,
     check_recurring_without_lesson,
@@ -1061,6 +1189,8 @@ CHECKS = (
     check_missing_receipts,
     check_business_categories,
     check_document_numbering,
+    check_monthly_finalization,
+    check_weekly_audit,
     check_tranzila_health,
     check_manychat_health,
     check_tranzila_reconciliation,
@@ -1083,6 +1213,9 @@ CHECK_REGISTRY = {check_key(check): check for check in CHECKS}
 def check_catalogue() -> list[dict]:
     """The checks in the order they should run: cheap first, outside services last."""
     titles = {
+        'fix_child_statuses': 'תיקון סטטוסים',
+        'refresh_dashboard': 'עדכון מספרי הדשבורד',
+        'monthly_finalization': 'סגירת החודש הקודם',
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',
@@ -1101,6 +1234,7 @@ def check_catalogue() -> list[dict]:
         'missing_receipts': 'תשלומים ללא חשבונית',
         'business_categories': 'עסקים בלי קטגוריה',
         'document_numbering': 'מספור מסמכים',
+        'weekly_audit': 'בדיקת עומק יומית',
         'tranzila_health': 'תקינות הסליקה',
         'manychat_health': 'תקינות WhatsApp',
         'tranzila_reconciliation': 'התאמה מול טרנזילה',

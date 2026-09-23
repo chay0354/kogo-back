@@ -519,3 +519,37 @@ class DailyBriefSnapshot(models.Model):
 
     def __str__(self):
         return f'{self.created_at:%Y-%m-%d %H:%M} · {self.red_count} דחופים'
+
+
+class SystemAuditRun(models.Model):
+    """
+    One day of the weekly audit: which area, how far it got, what it found.
+
+    Kept per day so the week can be read back — seven rows, seven areas, and at
+    a glance which of them passed. Progress is saved as it goes, because the
+    audit runs in slices that each fit one request.
+    """
+
+    day = models.DateField(unique=True, verbose_name="יום")
+    area = models.CharField(max_length=32, verbose_name="אזור")
+    total_routes = models.PositiveIntegerField(default=0, verbose_name="נתיבים לבדיקה")
+    next_index = models.PositiveIntegerField(default=0, verbose_name="התקדמות")
+    called = models.PositiveIntegerField(default=0, verbose_name="נתיבים שנקראו")
+    failures = models.JSONField(default=list, blank=True, verbose_name="שגיאות")
+    slow = models.JSONField(default=list, blank=True, verbose_name="מסכים איטיים")
+    skipped = models.JSONField(default=list, blank=True, verbose_name="דולגו")
+    probes = models.JSONField(default=list, blank=True, verbose_name="בדיקות האזור")
+    probes_done = models.BooleanField(default=False, verbose_name="בדיקות האזור הסתיימו")
+    lease_until = models.DateTimeField(null=True, blank=True, verbose_name="תפוס עד")
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="הסתיים")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="התחיל")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן")
+
+    class Meta:
+        db_table = 'system_audit_runs'
+        verbose_name = "בדיקת עומק יומית"
+        verbose_name_plural = "בדיקות עומק יומיות"
+        ordering = ['-day']
+
+    def __str__(self):
+        return f'{self.day} · {self.area}'
