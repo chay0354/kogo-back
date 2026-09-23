@@ -64,7 +64,7 @@ class _Base(TestCase):
         return self.public.post(CALLBACK_URL, data, **headers)
 
 
-@override_settings(CRM_API_BASE_URL=API_BASE)
+@override_settings(CRM_API_BASE_URL=API_BASE, TRANZILA_HOSTED_PAGE_ENABLED=True)
 class PayerFlowTest(_Base):
     def test_the_payer_sees_title_and_active_options_only(self):
         PaymentLinkOption.objects.create(link=self.link, label='ישן', amount=Decimal('10'), is_active=False)

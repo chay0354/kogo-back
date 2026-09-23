@@ -295,6 +295,14 @@ TRANZILA_BASE_URL = config('TRANZILA_BASE_URL', default='https://direct.tranzila
 TRANZILA_ENVIRONMENT = config('TRANZILA_ENVIRONMENT', default='development')
 # When True (default), calls POST /v2/handshake/create and passes thtk to iframe (required on most terminals).
 TRANZILA_HANDSHAKE_ENABLED = config('TRANZILA_HANDSHAKE_ENABLED', default=True, cast=bool)
+# Tranzila's hosted payment page (iframe) runs on TRANZILA_TERMINAL, which is
+# 'realtest' — a Tranzila test terminal: nothing paid there is ever charged
+# (Tranzila ticket #176819790). Off, so no screen can send a customer there:
+# the website store, the till's walk-in and "secure page" options, and payment
+# links. Turn on only once TRANZILA_TERMINAL is a terminal of the business that
+# Tranzila has enabled for the hosted page (fxpmichalweb answered 141 there in
+# August).
+TRANZILA_HOSTED_PAGE_ENABLED = config('TRANZILA_HOSTED_PAGE_ENABLED', default=False, cast=bool)
 
 # Who runs the monthly הוראות קבע charge.
 #   False (default) — apps.customers.recurring_billing charges the saved token via cron,

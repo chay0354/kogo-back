@@ -105,6 +105,11 @@ class PublicPaymentStartView(_PublicView):
             # the customers webhook, which cannot resolve our row.
             logger.error('payment link start refused: CRM_API_BASE_URL is not set')
             return Response({'error': 'הסליקה אינה זמינה כרגע'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
+            # The link pays on Tranzila's hosted page, which runs on a test
+            # terminal: the payer would see "approved" and nothing would be
+            # charged. Refused before a payment row is written.
+            return Response({'error': 'הסליקה אינה זמינה כרגע'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         ip = _client_ip(request)
         now = timezone.now()
