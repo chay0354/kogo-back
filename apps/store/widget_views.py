@@ -516,8 +516,10 @@ class WidgetStorePaymentInitiateView(APIView):
             return _integration_denied()
 
         # Paused before anything is written or any payment page is opened —
-        # for a new order and for one the site retries. See the setting.
-        if not settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED:
+        # for a new order and for one the site retries. See both settings: the
+        # page this view opens is Tranzila's hosted page, which is switched off
+        # while it runs on the test terminal.
+        if not (settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED and settings.TRANZILA_HOSTED_PAGE_ENABLED):
             return Response(
                 {'error': WEBSITE_PAYMENTS_PAUSED_MESSAGE, 'payments_paused': True},
                 status=503,

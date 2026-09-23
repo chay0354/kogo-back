@@ -109,6 +109,16 @@ def is_tranzila_duplicate_paid(response: Optional[Dict]) -> bool:
     return any(snippet in blob for snippet in TRANZILA_DUPLICATE_PAID_SNIPPETS)
 
 
+HOSTED_PAGE_DISABLED_MESSAGE = (
+    'עמוד התשלום של טרנזילה מושבת: הוא מחובר למסוף בדיקות ולא גובה כסף. '
+    'חייבו בהזנת כרטיס ישירה.'
+)
+
+
+class HostedPageDisabled(RuntimeError):
+    """Tranzila's hosted payment page is switched off (TRANZILA_HOSTED_PAGE_ENABLED)."""
+
+
 def is_tranzila_uncertain_gateway_error(response: Optional[Dict]) -> bool:
     """Timeouts/connection errors — the card may already have been charged."""
     if not isinstance(response, dict):
@@ -508,6 +518,11 @@ class TranzilaService:
         **extra_params
     ) -> str:
         """Create iframe payment URL for one-time payment."""
+        # The hosted page runs on TRANZILA_TERMINAL, a test terminal ('realtest'):
+        # a customer who paid there was never charged. Refused here, once, for
+        # every screen that could open it.
+        if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
+            raise HostedPageDisabled(HOSTED_PAGE_DISABLED_MESSAGE)
         handshake_enabled = getattr(settings, 'TRANZILA_HANDSHAKE_ENABLED', True)
         if handshake_enabled and self.public_key and self.secret_key:
             thtk = self.create_handshake_token(amount)

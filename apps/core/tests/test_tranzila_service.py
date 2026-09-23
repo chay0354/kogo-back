@@ -25,6 +25,7 @@ from apps.core.tranzila_service import TranzilaService
     TRANZILA_BASE_URL='https://direct.tranzila.test',
     TRANZILA_API_BASE_URL='https://api.tranzila.test',
     TRANZILA_HANDSHAKE_ENABLED=False,
+    TRANZILA_HOSTED_PAGE_ENABLED=True,
 )
 class TranzilaServicePaymentRequestTest(TestCase):
     """Test TranzilaService payment request generation"""
@@ -409,6 +410,7 @@ class TranzilaServiceErrorHandlingTest(TestCase):
         self.assertEqual(success_response['amount'], 350.00)
 
 
+@override_settings(TRANZILA_HOSTED_PAGE_ENABLED=True)
 class TranzilaServiceIntegrationTest(TestCase):
     """Integration tests for TranzilaService"""
     
@@ -461,6 +463,7 @@ class TranzilaServiceIntegrationTest(TestCase):
     TRANZILA_PROD_SECRET_KEY='prod_sk',
     TRANZILA_BASE_URL='https://direct.tranzila.test',
     TRANZILA_HANDSHAKE_ENABLED=False,
+    TRANZILA_HOSTED_PAGE_ENABLED=True,
 )
 class TranzilaIframeVsProductionTerminalTest(TestCase):
     def test_iframe_uses_hosted_checkout_terminal(self):

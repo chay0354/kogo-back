@@ -1932,6 +1932,18 @@ class PaymentService:
                 child_id = None  # Fall through to iframe
         
         # IFRAME FALLBACK (no token or walk-in customer)
+        if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
+            # The hosted page is on a test terminal and charged nobody. The till
+            # types the card instead (store/payment/charge-card/, the business
+            # terminal). Refused before anything is written, so no pending
+            # invoice is left behind.
+            from apps.core.tranzila_service import HOSTED_PAGE_DISABLED_MESSAGE
+            return {
+                'requires_iframe': False,
+                'success': False,
+                'use_direct_card': True,
+                'error': HOSTED_PAGE_DISABLED_MESSAGE,
+            }
         logger.info("No token found or walk-in customer, using iframe")
         
         invoice = StoreInvoice.objects.create(

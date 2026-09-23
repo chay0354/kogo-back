@@ -64,7 +64,7 @@ class WebsiteCardPaymentsPaused(TestCase):
         self.assertFalse(StoreInvoice.objects.exists())
 
     def test_a_retry_of_an_order_left_pending_gets_no_payment_page(self):
-        with override_settings(STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True):
+        with override_settings(STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True, TRANZILA_HOSTED_PAGE_ENABLED=True):
             first = self.post(self.payload())
         self.assertEqual(first.status_code, 201, first.data)
 
@@ -79,7 +79,7 @@ class WebsiteCardPaymentsPaused(TestCase):
         self.assertNotEqual(res.status_code, 503)
         self.assertNotIn('payments_paused', res.data)
 
-    @override_settings(STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True)
+    @override_settings(STORE_WEBSITE_CARD_PAYMENTS_ENABLED=True, TRANZILA_HOSTED_PAGE_ENABLED=True)
     def test_opens_the_payment_page_when_turned_on(self):
         res = self.post(self.payload())
 
