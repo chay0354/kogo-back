@@ -50,6 +50,23 @@ BILLING_ENROLLMENT_STATUSES = ("active", "payments_problem")
 ALREADY_REGISTERED_LESSON_ERROR = 'הילד כבר רשום לחוג זה'
 
 
+def _sign_store_sale(invoice) -> None:
+    """
+    The paid sale's signed original: recorded now, signed after the commit
+    (apps/documents/signing; a no-op while DOCUMENT_SIGNING_ENABLED is off).
+    Only a website order is mailed by kogo (apps/store/invoice_email.py); a
+    till sale's original goes into the archive.
+    """
+    from apps.documents.models import SignedOriginal
+    from apps.documents.signing.service import KIND_STORE, issue
+
+    issue(
+        KIND_STORE, invoice,
+        channel=SignedOriginal.CHANNEL_STORE if invoice.website_order_number else '',
+        email_to=(invoice.customer_email or '').strip(),
+    )
+
+
 def parse_store_cart_notes(notes: Optional[str]) -> Optional[list]:
     """Return cart line items stored on a StoreInvoice.notes JSON blob, or None."""
     import json
@@ -1740,6 +1757,14 @@ class PaymentService:
                     product=getattr(payment, 'product', None)  # Use getattr for safer access
                 )
 
+            # The signed original's row commits with the receipt; the signature
+            # follows after the commit, never inside the charge (a no-op while
+            # DOCUMENT_SIGNING_ENABLED is off).
+            from apps.documents.models import SignedOriginal
+            from apps.documents.signing.service import KIND_IR, issue as issue_signed_original
+
+            issue_signed_original(KIND_IR, invoice, channel=SignedOriginal.CHANNEL_IR if send_email else '')
+
         logger.info(f"Created invoice: {invoice.invoice_number}")
 
         if send_email:
@@ -2108,7 +2133,8 @@ class PaymentService:
                     _decrement_product_stock(product, item)
 
                     logger.debug(f"Sold {item['quantity']}x {product.name}, new stock: {product.stock_quantity}")
-            
+
+            _sign_store_sale(invoice)
             log_payment_operation("STORE_CHARGE_SUCCESS", invoice=invoice.invoice_number, total=invoice.total_amount)
             return {
                 'success': True,
@@ -2232,6 +2258,7 @@ class PaymentService:
                     _decrement_product_stock(product, item)
 
             logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
+            _sign_store_sale(invoice)
 
             if invoice.website_order_number:
                 from apps.store.website_integration import (
@@ -2398,7 +2425,8 @@ class PaymentService:
                 )
 
         logger.info(f"Created {payment_method} invoice {invoice.invoice_number}")
-        
+        _sign_store_sale(invoice)
+
         return StoreInvoiceSerializer(invoice).data
     
     # ============================================================================

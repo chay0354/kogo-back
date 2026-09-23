@@ -912,6 +912,23 @@ class BusinessCustomer(models.Model):
         verbose_name="שיוך לסניף",
     )
     notes = models.TextField(blank=True, verbose_name="הערות")
+
+    # סעיף 18ב(ג), as on Family: a tax document goes by computer only to a
+    # customer who consented and has not withdrawn. The merchants and tenants
+    # get receipts and credit notes by mail too, and had no place to say so.
+    # All three nullable, so the columns land (Vercel migrates at build time)
+    # while the previous code — which inserts customers without them — serves.
+    computerized_docs_consent_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="הסכמה לקבלת מסמכים ממוחשבים"
+    )
+    computerized_docs_consent_source = models.CharField(
+        max_length=50, blank=True, null=True, verbose_name="מקור ההסכמה",
+        help_text="היכן ניתנה ההסכמה — CRM, אתר",
+    )
+    computerized_docs_consent_revoked_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="ביטול ההסכמה"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
@@ -927,6 +944,14 @@ class BusinessCustomer(models.Model):
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
+
+    @property
+    def accepts_computerized_documents(self) -> bool:
+        """Consent given and not since withdrawn — סעיף 18ב(ג), read as on Family."""
+        if not self.computerized_docs_consent_at:
+            return False
+        revoked = self.computerized_docs_consent_revoked_at
+        return not revoked or revoked < self.computerized_docs_consent_at
 
 
 class CronHeartbeat(models.Model):

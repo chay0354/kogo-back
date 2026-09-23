@@ -21,3 +21,12 @@ python-bidi==0.6.11
 # Reading the previous invoicing software's .xls export (BIFF, not xlsx).
 # Pure Python, no OS-level deps.
 xlrd==2.0.1
+
+# Secured electronic signature on the fiscal PDFs (apps/documents/signing):
+# pyHanko signs PAdES and validates; cryptography and asn1crypto are used
+# directly too (the KMS client's JWT, the self-issued certificate). The key
+# itself is Cloud KMS's, reached over plain HTTPS through requests.
+pyhanko==0.37.0
+pyhanko-certvalidator==0.32.1
+cryptography==50.0.1
+asn1crypto==1.5.1

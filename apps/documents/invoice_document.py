@@ -16,6 +16,7 @@ from django.utils import timezone
 from apps.documents.invoice_layout import Field, Note
 from apps.documents.issuer import (
     COMPUTERIZED_MARK,
+    SIGNED_MARK,
     ISSUER_ADDRESS,
     ISSUER_COMPANY_NUMBER,
     ISSUER_EMAIL,
@@ -138,6 +139,11 @@ def allocation_note(net_before_vat: Decimal, allocation_number: str = '', *,
 def computerized_note() -> Note:
     """סעיף 18ב(א): a document sent by computer says so, בצורה בולטת לעין."""
     return Note(f'{COMPUTERIZED_MARK}:', 'מסמך זה הופק באופן דיגיטלי.')
+
+
+def signature_note() -> Note:
+    """The signed original's line: it is signed, and how. Never on a copy — a copy is not signed."""
+    return Note('חתימה אלקטרונית:', f'{SIGNED_MARK}.')
 
 
 def late_note(issued_at, received_at) -> Note | None:

@@ -20,3 +20,8 @@ COPY_MARK = 'העתק'
 
 # סעיף 18ב(א): a document sent by computer carries these words "בצורה בולטת לעין".
 COMPUTERIZED_MARK = 'מסמך ממוחשב'
+
+# הוראה 1: a מסמך ממוחשב is signed with an approved or a secured electronic
+# signature. The signature is in the file (apps/documents/signing); this line
+# says so on the original's face, for a reader who never opens the signature panel.
+SIGNED_MARK = 'חתום בחתימה אלקטרונית מאובטחת'

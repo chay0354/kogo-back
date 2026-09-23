@@ -28,6 +28,10 @@
     {
       "path": "/api/v1/core/cron/daily-brief/",
       "schedule": "*/4 6-7 * * *"
+    },
+    {
+      "path": "/api/v1/documents/cron/sign-pending/",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

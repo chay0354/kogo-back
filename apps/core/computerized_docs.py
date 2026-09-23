@@ -12,6 +12,13 @@ recorded consent covers the active families, flip the call sites to refuse.
 The registration widget records consent when the parent ticks its box, and the
 office records or withdraws it from the family card. Both go through
 `record_consent` / `revoke_consent`, so the record has one shape whoever took it.
+
+A business customer (a merchant, a studio tenant) carries the same three fields
+and the same property, and every function here takes either.
+
+While apps/documents/signing is on, COMPUTERIZED_CONSENT_ENFORCED decides:
+off, a document without consent is only reported (as here); on, it is held and
+the office sees why.
 """
 from __future__ import annotations
 
@@ -34,7 +41,7 @@ _CONSENT_FIELDS = (
 
 
 def record_consent(family, source: str, *, when=None):
-    """Record that the family consented at `source`, and return the family.
+    """Record that the family (or business customer) consented at `source`, and return it.
 
     A family that already consents is left as it is: the consent on record keeps
     its moment and where it was given, so a parent ticking the box again on a
@@ -54,7 +61,7 @@ def record_consent(family, source: str, *, when=None):
 
 
 def revoke_consent(family, *, when=None):
-    """Withdraw the family's consent from `when` (default now), and return the family.
+    """Withdraw the family's (or business customer's) consent from `when` (default now), and return it.
 
     Only a standing consent is withdrawn. A family with none to withdraw is left
     as it is, so an earlier withdrawal keeps its date.
@@ -76,16 +83,24 @@ def _save_consent(family):
 
 
 def check_consent(family, document_ref: str) -> bool:
-    """Return whether the family consented, logging the gap when they have not."""
+    """Return whether the family (or business customer) consented, logging the gap when they have not."""
     if family is None:
         return False
     if family.accepts_computerized_documents:
         return True
 
-    logger.warning(
-        'Sending computerized document %s to family %s with no recorded consent '
-        '(סעיף 18ב(ג)) — record it on the family once collected',
-        document_ref,
-        family.pk,
-    )
+    if getattr(getattr(family, '_meta', None), 'model_name', 'family') == 'family':
+        logger.warning(
+            'Sending computerized document %s to family %s with no recorded consent '
+            '(סעיף 18ב(ג)) — record it on the family once collected',
+            document_ref,
+            family.pk,
+        )
+    else:
+        logger.warning(
+            'Sending computerized document %s to business customer %s with no recorded consent '
+            '(סעיף 18ב(ג)) — record it on the customer once collected',
+            document_ref,
+            family.pk,
+        )
     return False

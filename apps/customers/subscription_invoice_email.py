@@ -85,32 +85,55 @@ def send_subscription_invoice_email(invoice: Invoice) -> bool:
         logger.warning('No email provider — cannot send invoice %s', invoice.invoice_number)
         return False
 
-    check_consent(invoice.family if invoice.family_id else None, invoice.invoice_number)
+    from apps.documents import signing
+
+    claim = None
+    if signing.enabled():
+        # The signed original stored at issue, exactly — or nothing: a receipt
+        # paid other than 18ב(ד) allows, still unsigned, or (when enforced)
+        # without consent is not mailed, and the row says why.
+        from apps.documents.signing.service import KIND_IR, claim_email
+        from apps.documents.models import SignedOriginal
+
+        claim = claim_email(KIND_IR, invoice, channel=SignedOriginal.CHANNEL_IR, email_to=email)
+        if claim is None:
+            return False
+        pdf_bytes = claim.pdf
+    else:
+        check_consent(invoice.family if invoice.family_id else None, invoice.invoice_number)
 
     subject, text, html = build_subscription_invoice_email(invoice)
-    # The original, unless the office already downloaded it (then this is a copy).
-    from apps.customers.subscription_invoice_pdf import original_downloaded
+    if claim is None:
+        # The original, unless the office already downloaded it (then this is a copy).
+        from apps.customers.subscription_invoice_pdf import original_downloaded
 
-    pdf_bytes = generate_subscription_invoice_pdf(invoice, copy=original_downloaded(invoice))
+        pdf_bytes = generate_subscription_invoice_pdf(invoice, copy=original_downloaded(invoice))
     filename = f'{invoice.invoice_number}.pdf'
 
-    if resend_configured():
-        send_resend_email(
-            to=[email],
-            subject=subject,
-            text=text,
-            html=html,
-            attachments=[{
-                'filename': filename,
-                'content': base64.b64encode(pdf_bytes).decode('ascii'),
-            }],
-        )
-    else:
-        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
-        message = EmailMultiAlternatives(subject, text, from_email, [email])
-        message.attach_alternative(html, 'text/html')
-        message.attach(filename, pdf_bytes, 'application/pdf')
-        message.send(fail_silently=False)
+    try:
+        if resend_configured():
+            send_resend_email(
+                to=[email],
+                subject=subject,
+                text=text,
+                html=html,
+                attachments=[{
+                    'filename': filename,
+                    'content': base64.b64encode(pdf_bytes).decode('ascii'),
+                }],
+            )
+        else:
+            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
+            message = EmailMultiAlternatives(subject, text, from_email, [email])
+            message.attach_alternative(html, 'text/html')
+            message.attach(filename, pdf_bytes, 'application/pdf')
+            message.send(fail_silently=False)
+    except Exception as exc:
+        if claim is not None:
+            claim.failed(exc)
+        raise
+    if claim is not None:
+        claim.sent()
 
     Invoice.objects.filter(pk=invoice.pk).update(email_sent_at=timezone.now())
     logger.info('Sent subscription invoice email %s → %s', invoice.invoice_number, email)

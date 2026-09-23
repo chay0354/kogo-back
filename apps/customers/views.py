@@ -2214,6 +2214,33 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
             return scope_business_customers(BusinessCustomer.objects.all(), self.request.user)
         return scope_branches(BusinessCustomer.objects.all(), self.request.user, 'branch')
 
+    @action(detail=True, methods=['post'], url_path='computerized-consent',
+            permission_classes=[IsAuthenticated, IsManager])
+    def computerized_consent(self, request, pk=None):
+        """
+        The business customer's consent to receive tax documents by email (סעיף 18ב(ג)).
+
+        POST /api/v1/customers/business-customers/{id}/computerized-consent/  {"consent": true | false}
+        The family card's action, for merchants and tenants; managers only.
+        true records consent given to the office; false withdraws it. Answers
+        with the customer, consent fields included.
+        """
+        from apps.core.computerized_docs import CONSENT_SOURCE_CRM, record_consent, revoke_consent
+
+        customer = self.get_object()
+        consent = request.data.get('consent')
+        # A JSON boolean only: a missing or misspelt value must not withdraw anything.
+        if not isinstance(consent, bool):
+            return Response(
+                {'error': 'יש לשלוח consent עם true או false'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if consent:
+            record_consent(customer, CONSENT_SOURCE_CRM)
+        else:
+            revoke_consent(customer)
+        return Response(BusinessCustomerSerializer(customer).data)
+
     def destroy(self, request, *args, **kwargs):
         from apps.customers.document_retention import BUSINESS_REFUSAL, business_customer_holds_documents
 

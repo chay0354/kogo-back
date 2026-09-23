@@ -81,6 +81,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Keeps the request's x-vercel-oidc-token for the document signer (a no-op without it).
+    'apps.documents.signing.middleware.VercelOidcTokenMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -427,6 +429,41 @@ BLOCKED_TRIAL_LESSON_DATES = config(
 )
 # Shared secret — Vercel Cron / external scheduler must send this in the X-Cron-Token header.
 CRON_TOKEN = config('CRON_TOKEN', default='')
+
+# ==========================
+# DOCUMENT SIGNING (apps/documents/signing)
+# ==========================
+# חתימה אלקטרונית מאובטחת on every fiscal PDF, at the moment it is issued: the
+# signed original is stored once (signed_originals) and every email carries
+# exactly those bytes. Off by default, and with it off nothing changes — each
+# mail and download renders as before. Turned on by the owner only after the
+# key exists, `signing_selftest` passed, and פקיד השומה was notified (18ב(ב)).
+DOCUMENT_SIGNING_ENABLED = config('DOCUMENT_SIGNING_ENABLED', default=False, cast=bool)
+# סעיף 18ב(ג): off — a document to a customer with no recorded consent is only
+# reported (today's behaviour). On — it is held, and the office sees why. Takes
+# effect with DOCUMENT_SIGNING_ENABLED, whose record is what "held" is kept on.
+COMPUTERIZED_CONSENT_ENFORCED = config('COMPUTERIZED_CONSENT_ENFORCED', default=False, cast=bool)
+# The Cloud KMS key version that signs, in full:
+# projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>/cryptoKeyVersions/<n>. Not a secret.
+SIGNING_KMS_KEY_VERSION = config('SIGNING_KMS_KEY_VERSION', default='')
+# Vercel OIDC → GCP Workload Identity Federation: the provider's audience,
+# //iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>,
+# and the service account impersonated (roles/cloudkms.signerVerifier on the key
+# version, nothing else). Neither is a secret.
+SIGNING_GCP_WIF_AUDIENCE = config('SIGNING_GCP_WIF_AUDIENCE', default='')
+SIGNING_GCP_SERVICE_ACCOUNT = config('SIGNING_GCP_SERVICE_ACCOUNT', default='')
+# Fallback when no OIDC token reaches the function: the same service account's
+# JSON key. A secret (Vercel "sensitive"); the signing key still never leaves the HSM.
+SIGNING_GCP_SA_KEY_JSON = config('SIGNING_GCP_SA_KEY_JSON', default='')
+# Tests and local development only: an EC private key in PEM. Refused on Vercel.
+SIGNING_LOCAL_KEY_PEM = config('SIGNING_LOCAL_KEY_PEM', default='')
+# The public certificate of the signing key, in PEM. Empty → the committed
+# apps/documents/assets/signing_cert.pem. Neither → nothing is signed (held).
+SIGNING_CERT_PEM = config('SIGNING_CERT_PEM', default='')
+# How many archive-only originals (documents kogo does not email) one request
+# signs on the spot; the rest are signed by the sign-pending cron within minutes.
+# Keeps a cron that issues forty monthly documents from paying forty signatures.
+SIGNING_INLINE_BUDGET = config('SIGNING_INLINE_BUDGET', default=5, cast=int)
 
 # ==========================
 # EMAIL (invoice / reminders)

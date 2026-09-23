@@ -18,11 +18,12 @@ from apps.documents.invoice_document import (
     date_stamp,
     footer_line,
     issue_stamp,
+    signature_note,
 )
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, Note, money, render_invoice_pdf,
 )
-from apps.documents.issuer import ISSUER_NAME, ORIGINAL_MARK
+from apps.documents.issuer import COPY_MARK, ISSUER_NAME, ORIGINAL_MARK
 from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
 
 TYPE_LABELS = dict(DOCUMENT_TYPE_CHOICES)
@@ -231,7 +232,7 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
     return fields
 
 
-def _notes(doc: FormalDocument) -> list[Note]:
+def _notes(doc: FormalDocument, *, signed: bool = False) -> list[Note]:
     notes: list[Note] = []
     if doc.document_type == 'credit_invoice':
         linked = doc.linked_document.document_number if doc.linked_document_id else doc.linked_document_number
@@ -255,18 +256,26 @@ def _notes(doc: FormalDocument) -> list[Note]:
         notes.append(Note('חשבון עסקה:', 'אינו חשבונית מס. חשבונית מס תופק עם התשלום.'))
     if doc.document_type != 'draft':
         notes.append(computerized_note())
+        if signed:
+            notes.append(signature_note())
     return notes
 
 
-def build_document_layout(doc: FormalDocument) -> InvoiceLayout:
-    """The design's data for one hand-issued document. Separated out so tests can read it."""
+def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bool = False) -> InvoiceLayout:
+    """
+    The design's data for one hand-issued document. Separated out so tests can read it.
+
+    `copy` prints "העתק" (נספח ה'(א)(4)) — every print after the original;
+    `signed` adds the signature line of the one original that is signed and
+    stored (apps/documents/signing). A draft is marked a draft either way.
+    """
     label = TYPE_LABELS.get(doc.document_type, doc.document_type)
     is_draft = doc.document_type == 'draft'
     is_credit = doc.document_type == 'credit_invoice'
     price_word = 'כולל מע"מ' if doc.prices_include_vat else 'לפני מע"מ'
     return InvoiceLayout(
         title=f'{label} - {doc.document_number}',
-        copy_mark='טיוטה — אינו מסמך מס' if is_draft else ORIGINAL_MARK,
+        copy_mark='טיוטה — אינו מסמך מס' if is_draft else (COPY_MARK if copy else ORIGINAL_MARK),
         document_fields=_document_fields(doc),
         business_fields=business_fields(),
         items=_items(doc),
@@ -276,7 +285,7 @@ def build_document_layout(doc: FormalDocument) -> InvoiceLayout:
         totals=_totals(doc),
         grand_label='סה"כ זיכוי' if is_credit else 'סה"כ לתשלום',
         grand_value=money(doc.total_amount),
-        notes=_notes(doc),
+        notes=_notes(doc, signed=signed and not copy),
         footer=footer_line(),
         watermark='טיוטה' if is_draft else '',
         pdf_title=f'{label} {doc.document_number}',
@@ -284,8 +293,8 @@ def build_document_layout(doc: FormalDocument) -> InvoiceLayout:
     )
 
 
-def generate_document_pdf(doc: FormalDocument) -> bytes:
-    return render_invoice_pdf(build_document_layout(doc))
+def generate_document_pdf(doc: FormalDocument, *, copy: bool = False, signed: bool = False) -> bytes:
+    return render_invoice_pdf(build_document_layout(doc, copy=copy, signed=signed))
 
 
 __all__ = [

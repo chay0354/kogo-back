@@ -191,6 +191,13 @@ def _finish_checkout_invoice(invoice, paid, *, send_email: bool, total):
         },
     )
 
+    # Recorded now that its lines are written — the receipt prints them from
+    # the checkout log — and signed after the commit (off: a no-op).
+    from apps.documents.models import SignedOriginal
+    from apps.documents.signing.service import KIND_IR, issue as issue_signed_original
+
+    issue_signed_original(KIND_IR, invoice, channel=SignedOriginal.CHANNEL_IR if send_email else '')
+
     if send_email:
         try:
             from apps.customers.subscription_invoice_email import send_subscription_invoice_email

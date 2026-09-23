@@ -120,6 +120,15 @@ def issue_receipt(charge_id) -> FormalDocument:
         )
         TenantCharge.objects.filter(pk=charge.pk).update(receipt=doc, receipt_error='', updated_at=timezone.now())
 
+        # The signed original's row commits with the receipt; it is signed
+        # after the commit, before the mail below attaches it (off: a no-op).
+        from apps.documents.models import SignedOriginal
+        from apps.documents.signing.service import KIND_FORMAL, issue as issue_signed_original
+
+        issue_signed_original(
+            KIND_FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL, email_to=(tenant.email or '').strip(),
+        )
+
         doc_id = doc.pk
 
         def _email():

@@ -1072,6 +1072,8 @@ class BusinessCustomerSerializer(serializers.ModelSerializer):
         source='business_category', queryset=BusinessCategory.objects.all(), required=False, allow_null=True,
     )
     business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
+    # Recorded through computerized-consent/ only, never by editing the card.
+    accepts_computerized_documents = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = BusinessCustomer
@@ -1080,9 +1082,13 @@ class BusinessCustomerSerializer(serializers.ModelSerializer):
             'email', 'phone', 'id_number', 'company_number', 'address',
             'business_type', 'category', 'business_id', 'business_name',
             'business_category_id', 'business_category_name', 'branch_id', 'branch_name', 'notes',
+            'computerized_docs_consent_at', 'accepts_computerized_documents',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'full_name', 'branch_name', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'full_name', 'branch_name', 'computerized_docs_consent_at', 'accepts_computerized_documents',
+            'created_at', 'updated_at',
+        ]
         # An organisation has one name and no family name ("עיריית רמת גן" is
         # split like the wizard splits it, but a one-word studio is not). The
         # wizard saves the card again with every document, so a card imported

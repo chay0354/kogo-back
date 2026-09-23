@@ -14,7 +14,7 @@ class DocumentPaymentSerializer(serializers.ModelSerializer):
         model = DocumentPayment
         fields = [
             'id', 'payment_method', 'amount', 'reference', 'notes',
-            'check_date', 'check_bank', 'check_branch', 'check_account',
+            'check_date', 'check_bank', 'check_branch', 'check_account', 'check_crossed',
             'card_last_four', 'card_expiry', 'card_installments',
         ]
         read_only_fields = ['id']
@@ -118,6 +118,10 @@ class InvoiceDetailsInputSerializer(serializers.Serializer):
     payment_methods = serializers.ListField(
         child=serializers.CharField(), required=False, default=list
     )
+    # A combined document paid by check: the check is crossed "לא סחיר", in the
+    # customer's name (הוראה 18ב(ד)(2)). A receipt says it per check, in
+    # receipt_details.checks[].check_crossed.
+    check_crossed = serializers.BooleanField(required=False, default=False)
 
 
 class ReceiptDetailsInputSerializer(serializers.Serializer):
@@ -177,6 +181,11 @@ class CreateDocumentSerializer(serializers.Serializer):
     business_customer_id = serializers.UUIDField(required=False, allow_null=True)
     branch_id = serializers.UUIDField(required=False, allow_null=True)
     document_date = serializers.DateField(required=False)
+    # A combined document (חשבונית מס/קבלה) sends only its payment methods'
+    # names, no check lines: this says the check it was paid with is crossed
+    # "לא סחיר" in the customer's name (הוראה 18ב(ד)(2)), for every check row
+    # it creates. Absent or false → the signed original goes on paper.
+    check_crossed = serializers.BooleanField(required=False, default=False)
 
     invoice_details = InvoiceDetailsInputSerializer(required=False)
     receipt_details = ReceiptDetailsInputSerializer(required=False)

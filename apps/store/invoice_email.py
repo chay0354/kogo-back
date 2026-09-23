@@ -136,27 +136,47 @@ def send_store_invoice_email(invoice: StoreInvoice) -> bool:
         .get(pk=invoice.pk)
     )
 
+    from apps.documents import signing
+
+    claim = None
+    if signing.enabled():
+        # The signed original stored when the sale was paid, or no mail at all
+        # (the row says why — paper, held, or already sent).
+        from apps.documents.models import SignedOriginal
+        from apps.documents.signing.service import KIND_STORE, claim_email
+
+        claim = claim_email(KIND_STORE, invoice, channel=SignedOriginal.CHANNEL_STORE, email_to=email)
+        if claim is None:
+            return False
+
     subject, text, html = build_store_invoice_email(invoice)
-    pdf_bytes = generate_store_invoice_pdf(invoice)
+    pdf_bytes = claim.pdf if claim is not None else generate_store_invoice_pdf(invoice)
     filename = f'{invoice.invoice_number}.pdf'
 
-    if resend_configured():
-        send_resend_email(
-            to=[email],
-            subject=subject,
-            text=text,
-            html=html,
-            attachments=[{
-                'filename': filename,
-                'content': base64.b64encode(pdf_bytes).decode('ascii'),
-            }],
-        )
-    else:
-        from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
-        message = EmailMultiAlternatives(subject, text, from_email, [email])
-        message.attach_alternative(html, 'text/html')
-        message.attach(filename, pdf_bytes, 'application/pdf')
-        message.send(fail_silently=False)
+    try:
+        if resend_configured():
+            send_resend_email(
+                to=[email],
+                subject=subject,
+                text=text,
+                html=html,
+                attachments=[{
+                    'filename': filename,
+                    'content': base64.b64encode(pdf_bytes).decode('ascii'),
+                }],
+            )
+        else:
+            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
+            message = EmailMultiAlternatives(subject, text, from_email, [email])
+            message.attach_alternative(html, 'text/html')
+            message.attach(filename, pdf_bytes, 'application/pdf')
+            message.send(fail_silently=False)
+    except Exception as exc:
+        if claim is not None:
+            claim.failed(exc)
+        raise
+    if claim is not None:
+        claim.sent()
 
     StoreInvoice.objects.filter(pk=invoice.pk).update(invoice_email_sent_at=timezone.now())
     logger.info('Sent store invoice email %s → %s', invoice.invoice_number, email)
