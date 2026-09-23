@@ -520,10 +520,16 @@ class WidgetStorePaymentInitiateView(APIView):
         # page this view opens is Tranzila's hosted page, which is switched off
         # while it runs on the test terminal.
         if not (settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED and settings.TRANZILA_HOSTED_PAGE_ENABLED):
-            return Response(
-                {'error': WEBSITE_PAYMENTS_PAUSED_MESSAGE, 'payments_paused': True},
-                status=503,
-            )
+            # The website moves the whole page to whatever payment address it
+            # gets back, so while payment is off it gets ours: a kind
+            # "temporarily closed" page with a way to reach the office, in
+            # place of an error. Still nothing written, nothing charged.
+            from apps.core.frontend_url import public_frontend_url
+            return Response({
+                'ok': True,
+                'iframe_url': f'{public_frontend_url()}/store-closed',
+                'payments_paused': True,
+            })
 
         idempotency_key = (request.data.get('idempotency_key') or '').strip() or None
         website_order_number = (request.data.get('website_order_number') or '').strip() or None
