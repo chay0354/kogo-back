@@ -100,8 +100,8 @@ LABEL_COL_MAX_SHARE = 0.5
 LABEL_COL_GUTTER = 5.0
 
 # The signed original's seal, and the column it takes at the left of the small print.
-SEAL_DIAMETER = 84.0
-SEAL_COLUMN = SEAL_DIAMETER + 22.0
+SEAL_DIAMETER = 66.0
+SEAL_COLUMN = SEAL_DIAMETER + 18.0
 
 # The transaction table's six columns, left to right in page order. The widths
 # are the sample's, measured between its column dividers.
