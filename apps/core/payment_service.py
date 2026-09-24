@@ -801,11 +801,11 @@ class PaymentService:
         2. Get lesson pricing
         3. Calculate discounts
         4. Create Payment record (pending)
-        5. Generate Tranzila payment URL
-        6. Return payment details for frontend
+        5. Return payment details for frontend (`tranzila_url` is always None;
+           the card is charged afterwards through the REST API)
 
-        With `quote_only` steps 4 and 5 are skipped: the same figures come back
-        with `payment_id` and `tranzila_url` set to None, and nothing is written.
+        With `quote_only` step 4 is skipped: the same figures come back
+        with `payment_id` set to None, and nothing is written.
         The office's subscription dialog prices a lesson this way; the row it
         used to leave behind on every open carried a registration fee that hid
         the fee from the child's next signup and posed as a sibling signing up.
@@ -814,9 +814,8 @@ class PaymentService:
             child_id: UUID of child
             lesson_id: UUID of lesson
             payment_date: Date of payment (default: today)
-            success_url: URL to redirect on success
-            error_url: URL to redirect on error
-            callback_url: Webhook callback URL
+            success_url, error_url, callback_url: accepted for the callers that
+                still send them; unused since no hosted-page link is built here.
             bundle_id: when set, bill the widget combined_price on the first member
                 lesson (see resolve_billing_price). Caller is responsible for calling
                 this once per member lesson of the bundle.
@@ -828,7 +827,7 @@ class PaymentService:
                 bundle so only one standing order is created at the full widget price.
 
         Returns:
-            Dict with payment_id, tranzila_url, amount, discounts_applied
+            Dict with payment_id, tranzila_url (None), amount, discounts_applied
         """
         if payment_date is None:
             # The server clock is UTC; the discount ranges and the proration are
@@ -993,27 +992,13 @@ class PaymentService:
         if payment is None and not quote_only:
             raise RuntimeError("Failed to create payment record")
 
+        # No hosted-page link is built here any more. Nothing opened it — the widget
+        # and the office charge the card through the REST API on the production
+        # terminals — yet building it made a handshake on TRANZILA_TOKEN_TERMINAL,
+        # so a hosted-page terminal that refused the handshake failed every signup.
+        # The key stays in the answer, always None, for callers that read it.
         tranzila_url = None
         if not quote_only:
-            # Generate Tranzila payment URL
-            tranzila_url = self.iframe_tranzila_service.create_recurring_payment_request(
-                amount=prorated_final,
-                currency='ILS',
-                description=payment.description,
-                customer_name=child.family.name,
-                customer_email=child.family.email,
-                customer_phone=child.family.phone,
-                success_url=success_url,
-                error_url=error_url,
-                callback_url=callback_url,
-                transaction_id=str(payment.id),
-                # The initial charge carries דמי רישום (plus the pro-rated month unless
-                # monthly billing starts later); the standing order itself must run at the
-                # plain monthly price from the next billing date.
-                recur_sum=full_monthly_amount,
-                recur_start_date=next_billing_date.isoformat(),
-            )
-
             log_payment_operation(
                 "SUBSCRIPTION_INITIATED",
                 child=child.full_name,
