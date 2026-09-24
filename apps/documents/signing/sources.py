@@ -96,6 +96,15 @@ class Source:
     def render_original(self) -> bytes:
         raise NotImplementedError
 
+    def render_archive(self) -> bytes:
+        """
+        The document drawn again for the archive: "העתק לארכיון", never "מקור".
+
+        For a document issued before signing existed, whose customer already
+        holds the original (apps/documents/signing/archive.py).
+        """
+        raise NotImplementedError
+
 
 class LessonReceiptSource(Source):
     """A lesson receipt (Invoice, IR). Charged through Tranzila, so a card, in practice."""
@@ -153,6 +162,11 @@ class LessonReceiptSource(Source):
         from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
 
         return generate_subscription_invoice_pdf(self.obj, copy=False, signed=True)
+
+    def render_archive(self) -> bytes:
+        from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
+
+        return generate_subscription_invoice_pdf(self.obj, archive=True)
 
 
 class StoreSaleSource(Source):
@@ -215,6 +229,11 @@ class StoreSaleSource(Source):
         from apps.store.invoice_pdf import generate_store_invoice_pdf
 
         return generate_store_invoice_pdf(self.obj, copy=False, signed=True)
+
+    def render_archive(self) -> bytes:
+        from apps.store.invoice_pdf import generate_store_invoice_pdf
+
+        return generate_store_invoice_pdf(self.obj, archive=True)
 
 
 class FormalDocumentSource(Source):
@@ -298,6 +317,11 @@ class FormalDocumentSource(Source):
         from apps.documents.document_pdf import generate_document_pdf
 
         return generate_document_pdf(self.obj, signed=True)
+
+    def render_archive(self) -> bytes:
+        from apps.documents.document_pdf import generate_document_pdf
+
+        return generate_document_pdf(self.obj, archive=True)
 
 
 SOURCES = {

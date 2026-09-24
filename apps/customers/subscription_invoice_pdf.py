@@ -16,13 +16,13 @@ from apps.core.vat import (
 )
 from apps.customers.financial_models import Invoice, InvoiceActivityLog
 from apps.documents.invoice_document import (
-    allocation_note, business_fields, computerized_note, date_stamp, footer_line, issue_stamp,
-    late_note, signature_note,
+    allocation_note, business_fields, computerized_note, date_stamp, edition, footer_line, issue_stamp,
+    late_note,
 )
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, money, render_invoice_pdf,
 )
-from apps.documents.issuer import COPY_MARK, ISSUER_NAME, ORIGINAL_MARK
+from apps.documents.issuer import ISSUER_NAME
 
 STATUS_LABELS = {
     'paid': 'שולם',
@@ -113,8 +113,16 @@ def _late_dates(invoice: Invoice) -> tuple[str, str]:
     return (details.get('document_issued_at') or '')[:10], (details.get('money_received_at') or '')[:10]
 
 
-def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False, signed: bool = False) -> InvoiceLayout:
-    """The design's data for one lesson receipt. Separated out so tests can read it."""
+def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False, signed: bool = False,
+                                      archive: bool = False) -> InvoiceLayout:
+    """
+    The design's data for one lesson receipt. Separated out so tests can read it.
+
+    `copy` prints "העתק", `signed` the signed original's line and seal, and
+    `archive` the signed copy kept for the archive of a receipt issued before
+    signing existed — "העתק לארכיון", never "מקור" (invoice_document.edition).
+    """
+    print_as = edition(copy=copy, signed=signed, archive=archive)
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
     payer = (invoice.payer_name or invoice.family.name or '').strip()
     email = (invoice.payer_email or invoice.family.email or '').strip()
@@ -126,14 +134,13 @@ def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False, s
     issued_late, money_received = _late_dates(invoice)
     if issued_late or money_received:
         notes.insert(0, late_note(issued_late, money_received))
-    if signed and not copy:
-        notes.append(signature_note())
+    notes += print_as.closing_notes
 
     return InvoiceLayout(
         # Whatever the record holds — INV-20260815-A1B2C3D4 as readily as
         # IR-2026-000123. The number is never reshaped for the page.
         title=f'{DOCUMENT_TITLE} - {invoice.invoice_number}',
-        copy_mark=COPY_MARK if copy else ORIGINAL_MARK,
+        copy_mark=print_as.copy_mark,
         document_fields=[
             Field('מספר מסמך', invoice.invoice_number),
             Field('תאריך ושעה', issue_stamp(invoice.invoice_date)),
@@ -162,20 +169,22 @@ def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False, s
         grand_value=money(gross),
         notes=notes,
         footer=footer_line(),
-        signed_seal=signed and not copy,
+        signed_seal=print_as.seal,
+        seal_centre_text=print_as.seal_centre_text,
         pdf_title=invoice.invoice_number,
         pdf_author=ISSUER_NAME,
     )
 
 
-def generate_subscription_invoice_pdf(invoice: Invoice, *, copy: bool = False, signed: bool = False) -> bytes:
+def generate_subscription_invoice_pdf(invoice: Invoice, *, copy: bool = False, signed: bool = False,
+                                      archive: bool = False) -> bytes:
     invoice = (
         Invoice.objects
         .select_related('family', 'parent', 'branch', 'payment')
         .prefetch_related('children__child', 'children__course', 'children__lesson', 'activity_logs')
         .get(pk=invoice.pk)
     )
-    return render_invoice_pdf(build_subscription_invoice_layout(invoice, copy=copy, signed=signed))
+    return render_invoice_pdf(build_subscription_invoice_layout(invoice, copy=copy, signed=signed, archive=archive))
 
 
 # The receipt's "מקור" left the system once — by mail (email_sent_at) or, when
