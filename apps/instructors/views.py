@@ -269,6 +269,7 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         - Students = unique children enrolled in those lessons
         """
         from apps.courses.models import Lesson
+        from apps.enrollments.enrollment_counts import is_active_student
         from apps.instructors.utils import calculate_lesson_salary
         
         lessons = Lesson.objects.filter(
@@ -287,8 +288,7 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             active_enrollments = [
                 e for e in lesson.enrollments.all()
                 if e.status in ('active', 'payments_problem')
-                and getattr(e, 'child', None)
-                and e.child.status not in ('trial_signed', 'trial_completed')
+                and is_active_student(getattr(e, 'child', None))
             ]
             student_count = len(active_enrollments)
 
