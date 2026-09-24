@@ -51,6 +51,16 @@ def signing_on(**extra):
     return override_settings(**signing_settings(**extra))
 
 
+def archive_settings(**extra) -> dict:
+    """The archive switch on, the customer-facing one off — the order the owner turns them on in."""
+    return signing_settings(**{'DOCUMENT_SIGNING_ENABLED': False, 'SIGNING_ARCHIVE_ENABLED': True, **extra})
+
+
+def archive_on(**extra):
+    """override_settings: archive signing on (SIGNING_ARCHIVE_ENABLED), DOCUMENT_SIGNING_ENABLED off, local key."""
+    return override_settings(**archive_settings(**extra))
+
+
 def attachment_bytes(resend_mock) -> bytes:
     """The single PDF a patched send_resend_email was handed, decoded."""
     attachments = resend_mock.call_args.kwargs['attachments']
