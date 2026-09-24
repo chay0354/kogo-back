@@ -485,6 +485,16 @@ SIGNING_INLINE_BUDGET = config('SIGNING_INLINE_BUDGET', default=5, cast=int)
 # while DOCUMENT_SIGNING_ENABLED (the customer-facing one) is still off. It
 # still needs the key and the certificate above.
 SIGNING_ARCHIVE_ENABLED = config('SIGNING_ARCHIVE_ENABLED', default=False, cast=bool)
+# The moment DOCUMENT_SIGNING_ENABLED went on (ISO 8601 with its offset, e.g.
+# 2026-09-24T09:55:00+03:00). The archive takes only documents created before
+# it: anything created after is signed at issue as its original, and an archive
+# batch must never reach it first. Required while DOCUMENT_SIGNING_ENABLED is on.
+SIGNING_ARCHIVE_ISSUED_BEFORE = config('SIGNING_ARCHIVE_ISSUED_BEFORE', default='')
+# A Google Cloud Storage bucket every signed file is copied to
+# (apps/documents/signing/backup.py): the bucket keeps each object under a
+# retention policy, so a copy cannot be deleted or replaced — not even by
+# someone holding the database password. Empty = no copy.
+SIGNING_BACKUP_BUCKET = config('SIGNING_BACKUP_BUCKET', default='')
 # Setup only: lets the two setup calls (issue the certificate, run the self-test)
 # be made against a deployment before anyone has logged in to it. Empty = those
 # calls need a manager. Remove it from Vercel once the key is in place.

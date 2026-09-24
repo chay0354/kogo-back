@@ -350,6 +350,10 @@ def print_original(request, original_id):
 
 
 ARCHIVE_DISABLED = 'העתקי הארכיון כבויים — יש להפעיל את SIGNING_ARCHIVE_ENABLED'
+ARCHIVE_NEEDS_CUTOFF = (
+    'החתימה ללקוחות פעילה, ולא הוגדר ממתי היא פעילה (SIGNING_ARCHIVE_ISSUED_BEFORE) — '
+    'בלי המועד הזה הארכיון לא רץ, כדי שלא ייקח מסמך שצריך להיחתם כמקור'
+)
 ARCHIVE_UNAVAILABLE = 'שירות החתימה לא זמין כרגע — לא נחתמו מסמכים נוספים; נסו שוב מאוחר יותר'
 
 
@@ -358,8 +362,19 @@ ARCHIVE_UNAVAILABLE = 'שירות החתימה לא זמין כרגע — לא �
 def archive_status(request):
     """Where the signed archive of documents issued before signing stands, per kind. No network calls."""
     from apps.documents.signing.archive import archive_status as status_of_archive
+    from apps.documents.signing.backup import bucket
 
-    return Response({'enabled': archive_enabled(), **status_of_archive()})
+    signed = SignedOriginal.objects.filter(signed_at__isnull=False)
+    backup = {
+        'enabled': bool(bucket()),
+        'copied': signed.filter(backup_at__isnull=False).count(),
+        'pending': signed.filter(backup_at__isnull=True).count(),
+        'last_error': (
+            signed.filter(backup_at__isnull=True).exclude(backup_error__isnull=True).exclude(backup_error='')
+            .order_by('-updated_at').values_list('backup_error', flat=True).first() or ''
+        ),
+    }
+    return Response({'enabled': archive_enabled(), **status_of_archive(), 'backup': backup})
 
 
 @api_view(['POST'])
@@ -373,7 +388,7 @@ def archive_run(request):
     stopped — when the key or the certificate is out of reach.
     """
     from apps.documents.signing.archive import (
-        DEFAULT_BATCH, MAX_BATCH, ArchiveDisabled, run_archive_batch,
+        DEFAULT_BATCH, MAX_BATCH, ArchiveDisabled, ArchiveNeedsCutoff, run_archive_batch,
     )
 
     if not archive_enabled():
@@ -386,6 +401,8 @@ def archive_run(request):
         return Response({'error': str(bad)}, status=status.HTTP_400_BAD_REQUEST)
     try:
         result = run_archive_batch(limit=limit, since=since)
+    except ArchiveNeedsCutoff:
+        return Response({'error': ARCHIVE_NEEDS_CUTOFF}, status=status.HTTP_409_CONFLICT)
     except ArchiveDisabled:
         return Response({'error': ARCHIVE_DISABLED}, status=status.HTTP_409_CONFLICT)
     logger.info('Signing archive: batch run by user %s', request.user.pk)
@@ -488,12 +505,23 @@ def cron_sign_pending(request):
     The courses' cron auth: X-Cron-Token, ?token= or a Bearer matching
     CRON_TOKEN / CRON_SECRET. GET as well as POST: Vercel Cron calls with GET.
     While DOCUMENT_SIGNING_ENABLED is off it answers {"summary": {"disabled": true}}.
+
+    Then it copies signed files not yet in the locked backup bucket
+    (signing/backup.py) — originals and archive copies alike, whatever the
+    switch says. A backup failure never fails the cron: it is reported in
+    "backup" and the rows are tried again on the next run.
     """
     from apps.customers.views import _cron_request_authorized
+    from apps.documents.signing.backup import backup_pending
     from apps.documents.signing.service import sign_pending
 
     if not _cron_request_authorized(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
     limit = _int(request.query_params.get('limit'), 25, 1, MAX_PAGE)
     summary = sign_pending(limit=limit)
-    return Response({'ok': True, 'summary': summary})
+    try:
+        backup = backup_pending()
+    except Exception as exc:
+        logger.exception('Signing backup: the pass failed')
+        backup = {'error': type(exc).__name__}
+    return Response({'ok': True, 'summary': summary, 'backup': backup})

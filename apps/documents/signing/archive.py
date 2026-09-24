@@ -35,6 +35,13 @@ Which documents: exactly the ones the fiscal register counts as issued
   the signing service signs at issue. The copy is Tranzila's document, and
   Tranzila keeps its original.
 
+Only documents created before signing went on. Once DOCUMENT_SIGNING_ENABLED
+is on, a new document is signed at issue as its original; if an archive batch
+reached it first, the archive copy would take its number and the customer would
+never get a signed original. So the archive takes only documents created before
+SIGNING_ARCHIVE_ISSUED_BEFORE — the moment signing went on — and refuses to run
+at all while signing is on and that moment is not set.
+
 One row per number, as for the originals: a document that already has a row —
 its original, or an archive copy from an earlier run — is skipped, and a number
 that belongs to another document's row (NumberClash) is reported for a person,
@@ -50,7 +57,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import date
+from datetime import date, datetime
 
 from django.db import transaction
 from django.db.models import CharField, Exists, OuterRef, Q, QuerySet
@@ -59,7 +66,7 @@ from django.utils import timezone
 
 from apps.documents.models import SignedOriginal
 from apps.documents.numbering import LESSON_RUN_REGEX, STORE_RUN_REGEX
-from apps.documents.signing import SigningUnavailable, archive_enabled
+from apps.documents.signing import SigningUnavailable, archive_enabled, enabled as signing_enabled
 from apps.documents.signing.service import NumberClash, _short_error
 from apps.documents.signing.sources import StoreSaleSource, load_source
 
@@ -97,9 +104,44 @@ class ArchiveDisabled(Exception):
     """SIGNING_ARCHIVE_ENABLED is off."""
 
 
+class ArchiveNeedsCutoff(ArchiveDisabled):
+    """Signing is on and SIGNING_ARCHIVE_ISSUED_BEFORE is missing or unreadable."""
+
+
 # ── which documents ─────────────────────────────────────────────────────────
 
+def issued_before() -> datetime | None:
+    """
+    The moment signing went on (SIGNING_ARCHIVE_ISSUED_BEFORE), or None.
+
+    None only while signing is off — then every document is from before it.
+    With signing on, a missing or unreadable moment is ArchiveNeedsCutoff: the
+    archive must not guess where the originals begin.
+    """
+    from django.conf import settings
+
+    raw = (getattr(settings, 'SIGNING_ARCHIVE_ISSUED_BEFORE', '') or '').strip()
+    if not raw:
+        if signing_enabled():
+            raise ArchiveNeedsCutoff('DOCUMENT_SIGNING_ENABLED is on and SIGNING_ARCHIVE_ISSUED_BEFORE is not set')
+        return None
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ArchiveNeedsCutoff('SIGNING_ARCHIVE_ISSUED_BEFORE is not an ISO 8601 moment') from None
+    if timezone.is_naive(moment):
+        raise ArchiveNeedsCutoff('SIGNING_ARCHIVE_ISSUED_BEFORE needs its UTC offset')
+    return moment
+
+
 def eligible(kind: str) -> QuerySet:
+    """The documents of `kind` the fiscal register counts as issued before signing went on."""
+    documents = _issued(kind)
+    cutoff = issued_before()
+    return documents.filter(created_at__lt=cutoff) if cutoff is not None else documents
+
+
+def _issued(kind: str) -> QuerySet:
     """The documents of `kind` the fiscal register counts as issued (see the module's docstring)."""
     if kind == KIND_IR:
         from apps.customers.financial_models import Invoice
@@ -277,6 +319,7 @@ def run_archive_batch(*, limit: int = DEFAULT_BATCH, since: date | None = None,
     """
     if not archive_enabled():
         raise ArchiveDisabled('SIGNING_ARCHIVE_ENABLED is off')
+    issued_before()          # ArchiveNeedsCutoff before any document is touched
     limit = max(1, min(int(limit or DEFAULT_BATCH), MAX_BATCH))
     budget = max(0.0, float(time_budget_seconds))
     started = time.monotonic()
@@ -338,8 +381,14 @@ def archive_status() -> dict:
     Per kind: how many documents are eligible, archived, have an original, and remain.
 
     `archived` and `originals` count the stored rows of the kind; `remaining`
-    is what a batch would still try. No network, no key.
+    is what a batch would still try. No network, no key. `blocked` says why a
+    batch would refuse to run ('' when it would run); while it is blocked by a
+    missing cutoff the counts are left out rather than guessed.
     """
+    try:
+        cutoff = issued_before()
+    except ArchiveNeedsCutoff as exc:
+        return {'kinds': [], 'last_signed_at': None, 'issued_before': None, 'blocked': str(exc)}
     kinds = []
     for kind in KINDS:
         rows = SignedOriginal.objects.filter(kind=kind)
@@ -358,4 +407,5 @@ def archive_status() -> dict:
         .values_list('signed_at', flat=True)
         .first()
     )
-    return {'kinds': kinds, 'last_signed_at': last}
+    return {'kinds': kinds, 'last_signed_at': last,
+            'issued_before': cutoff.isoformat() if cutoff else None, 'blocked': ''}

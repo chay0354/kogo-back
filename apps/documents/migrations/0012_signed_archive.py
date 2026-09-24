@@ -9,6 +9,9 @@ originals without the column. Existing rows get 'original' (the column is added
 with that default, which Django then drops); a row the previous code inserts
 during the deploy is NULL, and the code reads NULL as an original.
 
+backup_at / backup_error record the copy in the locked backup bucket
+(signing/backup.py); nullable for the same reason.
+
 signed_file_access is a new table: one line per download or export of a stored
 signed file. Additive only; nothing existing is altered.
 """
@@ -30,6 +33,16 @@ class Migration(migrations.Migration):
             model_name='signedoriginal',
             name='purpose',
             field=models.CharField(blank=True, choices=[('original', 'מקור'), ('archive', 'העתק לארכיון')], db_index=True, default='original', max_length=10, null=True, verbose_name='מהות הקובץ'),
+        ),
+        migrations.AddField(
+            model_name='signedoriginal',
+            name='backup_at',
+            field=models.DateTimeField(blank=True, null=True, verbose_name='גובה לאחסון הנעול'),
+        ),
+        migrations.AddField(
+            model_name='signedoriginal',
+            name='backup_error',
+            field=models.CharField(blank=True, default='', max_length=300, null=True, verbose_name='שגיאת גיבוי אחרונה'),
         ),
         migrations.CreateModel(
             name='SignedFileAccess',

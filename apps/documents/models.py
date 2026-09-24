@@ -734,6 +734,12 @@ class SignedOriginal(models.Model):
         related_name='+', verbose_name="מי הדפיס את המקור",
     )
 
+    # The copy in the locked backup bucket (signing/backup.py): when it landed,
+    # or why the last try did not. Not frozen — a signed row is backed up after.
+    backup_at = models.DateTimeField(null=True, blank=True, verbose_name="גובה לאחסון הנעול")
+    # Nullable: the code already deployed inserts rows without it while Vercel migrates.
+    backup_error = models.CharField(max_length=300, blank=True, null=True, default='', verbose_name="שגיאת גיבוי אחרונה")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="נוצר")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן")
 
