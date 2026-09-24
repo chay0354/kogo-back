@@ -464,6 +464,10 @@ SIGNING_CERT_PEM = config('SIGNING_CERT_PEM', default='')
 # signs on the spot; the rest are signed by the sign-pending cron within minutes.
 # Keeps a cron that issues forty monthly documents from paying forty signatures.
 SIGNING_INLINE_BUDGET = config('SIGNING_INLINE_BUDGET', default=5, cast=int)
+# Setup only: lets the two setup calls (issue the certificate, run the self-test)
+# be made against a deployment before anyone has logged in to it. Empty = those
+# calls need a manager. Remove it from Vercel once the key is in place.
+SIGNING_ADMIN_TOKEN = config('SIGNING_ADMIN_TOKEN', default='')
 
 # ==========================
 # EMAIL (invoice / reminders)

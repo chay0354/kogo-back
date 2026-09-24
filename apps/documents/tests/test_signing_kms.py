@@ -322,7 +322,7 @@ class KmsFailuresTests(KmsTestCase):
 )
 class KmsEndToEndTests(KmsTestCase):
     def test_a_certificate_built_through_kms_and_a_pdf_signed_through_it_validate(self):
-        from apps.documents.management.commands.signing_selftest import sample_pdf
+        from apps.documents.signing.selftest import sample_pdf
 
         self.google()
         os.environ['VERCEL_OIDC_TOKEN'] = 'vercel-oidc-jwt'

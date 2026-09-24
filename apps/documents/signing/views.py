@@ -140,6 +140,81 @@ def print_original(request, original_id):
     return response
 
 
+def _setup_allowed(request) -> bool:
+    """A manager, or the setup token from SIGNING_ADMIN_TOKEN (compared in constant time)."""
+    import hmac
+    from django.conf import settings
+
+    user = getattr(request, 'user', None)
+    if user is not None and user.is_authenticated and IsManager().has_permission(request, None):
+        return True
+    expected = (getattr(settings, 'SIGNING_ADMIN_TOKEN', '') or '').strip()
+    given = (request.headers.get('X-Signing-Admin-Token') or '').strip()
+    return bool(expected) and bool(given) and hmac.compare_digest(expected, given)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def signing_selftest(request):
+    """
+    Sign a sample through the deployment's own key and validate it.
+
+    The one check that proves the Vercel → Google handshake and the key work
+    where they will actually run. Returns the signed sample so it can be opened
+    in Adobe Acrobat. No database writes, no mail.
+    """
+    import base64
+    from apps.documents.signing.certificate import fingerprint_sha256, subject_text
+    from apps.documents.signing.selftest import run_selftest
+
+    if not _setup_allowed(request):
+        return Response({'error': 'אין הרשאה'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        result = run_selftest()
+    except SigningUnavailable as exc:
+        logger.warning('Signing self-test failed: %s', exc)
+        return Response({'ok': False, 'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({
+        'ok': True,
+        'backend': result.backend.name,
+        'key_id': result.backend.key_id,
+        'cert_subject': subject_text(result.certificate),
+        'cert_fingerprint': fingerprint_sha256(result.certificate),
+        'pdf_base64': base64.b64encode(result.pdf).decode('ascii'),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def signing_issue_certificate(request):
+    """
+    Build the self-issued certificate for the deployment's key and return it.
+
+    Nothing is stored: the PEM is public, and it goes into the code (or
+    SIGNING_CERT_PEM) by hand, so a certificate never changes silently.
+    """
+    from apps.documents.signing.backends import get_backend
+    from apps.documents.signing.certificate import (
+        build_self_issued_certificate, certificate_pem, fingerprint_sha256, subject_text,
+    )
+
+    if not _setup_allowed(request):
+        return Response({'error': 'אין הרשאה'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        backend = get_backend()
+        certificate = build_self_issued_certificate(backend)
+    except SigningUnavailable as exc:
+        logger.warning('Signing: the certificate could not be built: %s', exc)
+        return Response({'ok': False, 'error': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({
+        'ok': True,
+        'key_id': backend.key_id,
+        'pem': certificate_pem(certificate),
+        'subject': subject_text(certificate),
+        'fingerprint_sha256': fingerprint_sha256(certificate),
+    })
+
+
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([AllowAny])

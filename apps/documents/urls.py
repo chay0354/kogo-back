@@ -23,6 +23,8 @@ urlpatterns = [
     path('signing/originals/<uuid:original_id>/print-original/', signing_views.print_original,
          name='signing-print-original'),
     path('signing/certificate/', signing_views.signing_certificate, name='signing-certificate'),
+    path('signing/certificate/issue/', signing_views.signing_issue_certificate, name='signing-certificate-issue'),
+    path('signing/selftest/', signing_views.signing_selftest, name='signing-selftest'),
     path('cron/sign-pending/', signing_views.cron_sign_pending, name='documents-cron-sign-pending'),
     path('', include(router.urls)),
 ]
