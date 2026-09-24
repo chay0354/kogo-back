@@ -20,8 +20,13 @@ urlpatterns = [
     # Signed originals (apps/documents/signing).
     path('signing/status/', signing_views.signing_status, name='signing-status'),
     path('signing/originals/', signing_views.signed_originals, name='signing-originals'),
+    path('signing/originals/export/', signing_views.originals_export, name='signing-originals-export'),
+    path('signing/originals/<uuid:original_id>/file/', signing_views.original_file, name='signing-original-file'),
     path('signing/originals/<uuid:original_id>/print-original/', signing_views.print_original,
          name='signing-print-original'),
+    # The signed archive of documents issued before signing (apps/documents/signing/archive.py).
+    path('signing/archive/status/', signing_views.archive_status, name='signing-archive-status'),
+    path('signing/archive/run/', signing_views.archive_run, name='signing-archive-run'),
     path('signing/certificate/', signing_views.signing_certificate, name='signing-certificate'),
     path('signing/certificate/issue/', signing_views.signing_issue_certificate, name='signing-certificate-issue'),
     path('signing/selftest/', signing_views.signing_selftest, name='signing-selftest'),

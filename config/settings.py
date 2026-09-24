@@ -203,6 +203,11 @@ if not config('CORS_DISABLE_VERCEL_REGEX', default=False, cast=bool):
     ]
 
 CORS_ALLOW_CREDENTIALS = True
+# The frontend calls this API from another origin, so a browser hides every
+# response header but the few CORS calls "simple". The signed files' download
+# and export (apps/documents/signing/views.py) answer with their file name, the
+# SHA-256 of the bytes, and where the next page of an export starts.
+CORS_EXPOSE_HEADERS = ['Content-Disposition', 'X-Content-SHA256', 'X-Export-Total', 'X-Export-Next-Offset']
 
 # Proxy and HTTPS settings for Fly.io
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
