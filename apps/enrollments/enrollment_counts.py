@@ -11,6 +11,17 @@ from apps.enrollments.models import LessonEnrollment
 # Children on trial flow — enrolled for a test lesson, not paying subscribers yet.
 TRIAL_CHILD_STATUSES = ('trial_signed', 'trial_completed')
 
+# Who counts as a student in a count of students (owner, 24.9.2026): "פעיל זה
+# פעיל — משלם", and a child whose card failed is still פעיל. So: the child's own
+# status is פעיל or בעיית תשלום. A sign-up nobody has paid for yet (ממתין) and a
+# child who left (לא פעיל) are not students, even while their enrolment row is
+# still marked active.
+#
+# This is for counting students, not seats. A sign-up waiting for its payment
+# still holds its place in the lesson, so capacity keeps using
+# `paying_enrollments`, which does not look at the child's status.
+ACTIVE_STUDENT_CHILD_STATUSES = ('active', 'payment_problem')
+
 
 def resolve_lesson_capacity(lesson) -> Optional[int]:
     """
@@ -45,6 +56,19 @@ def paying_enrollments(qs: QuerySet | None = None) -> QuerySet:
         base.filter(status='active', trial_lesson_date__isnull=True)
         .exclude(child__status__in=TRIAL_CHILD_STATUSES)
     )
+
+
+def active_student_enrollments(qs: QuerySet | None = None) -> QuerySet:
+    """
+    The enrolments behind a count of students: paying, and the child is פעיל or
+    בעיית תשלום. Not for capacity — see ACTIVE_STUDENT_CHILD_STATUSES.
+    """
+    return paying_enrollments(qs).filter(child__status__in=ACTIVE_STUDENT_CHILD_STATUSES)
+
+
+def is_active_student(child) -> bool:
+    """The same rule for a child already in hand."""
+    return getattr(child, 'status', None) in ACTIVE_STUDENT_CHILD_STATUSES
 
 
 def paying_enrollment_q(prefix: str = '') -> Q:

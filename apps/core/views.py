@@ -114,8 +114,9 @@ class BranchViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         # An enrollment booked for a test lesson is 'active' as well, so counting
         # on status alone reported every trial signup as a student of the branch
         # — 167 where 132 pay, in one branch, on the day this was found.
-        from apps.enrollments.enrollment_counts import paying_enrollments
-        active_students = paying_enrollments().filter(
+        # And whose own status says they are a student — פעיל or בעיית תשלום.
+        from apps.enrollments.enrollment_counts import active_student_enrollments
+        active_students = active_student_enrollments().filter(
             lesson__course__branch=branch,
         ).values('child').distinct().count()
         

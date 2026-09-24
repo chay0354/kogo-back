@@ -7,7 +7,11 @@ import calendar
 from typing import Optional
 from django.db import transaction
 from django.db.models import Count, Q, Sum
-from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, is_paying_enrollment
+from apps.enrollments.enrollment_counts import (
+    ACTIVE_STUDENT_CHILD_STATUSES,
+    TRIAL_CHILD_STATUSES,
+    is_paying_enrollment,
+)
 from apps.enrollments.models import LessonEnrollment
 
 
@@ -166,14 +170,18 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
     Count enrollments for a lesson that:
     - have status in statuses
     - overlap the requested [start_d, end_d] range
+    - belong to an active student: the child is פעיל or בעיית תשלום
+      (ACTIVE_STUDENT_CHILD_STATUSES), so a sign-up not yet paid and a child
+      who left are not counted — as students, as salary tiers or as revenue
     Uses prefetched enrollments when available.
     """
     enrollments = getattr(lesson, "enrollments", None)
     if enrollments is None:
         qs = LessonEnrollment.objects.filter(
             lesson=lesson, status__in=statuses, trial_lesson_date__isnull=True,
-        ).exclude(
-            child__status__in=TRIAL_CHILD_STATUSES,
+        ).filter(
+            # A student is a child whose own status is פעיל or בעיית תשלום.
+            child__status__in=ACTIVE_STUDENT_CHILD_STATUSES,
         )
         return qs.filter(
             Q(start_date__isnull=True) | Q(start_date__lte=end_d),
@@ -185,7 +193,7 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
         if e.status in statuses and _enrollment_overlaps_range(e, start_d, end_d):
             if e.trial_lesson_date:
                 continue
-            if getattr(e, 'child', None) and e.child.status in TRIAL_CHILD_STATUSES:
+            if getattr(getattr(e, 'child', None), 'status', None) not in ACTIVE_STUDENT_CHILD_STATUSES:
                 continue
             cnt += 1
     return cnt
@@ -193,15 +201,17 @@ def _count_enrollments_for_period(lesson, start_d: date, end_d: date, statuses: 
 
 def _unique_students_for_period(lesson, start_d: date, end_d: date, statuses: tuple[str, ...]) -> set:
     """
-    Unique child_ids for enrollments matching status + date overlap.
+    Unique child_ids for enrollments matching status + date overlap, active
+    students only (see _count_enrollments_for_period).
     """
     s: set = set()
     enrollments = getattr(lesson, "enrollments", None)
     if enrollments is None:
         qs = LessonEnrollment.objects.filter(
             lesson=lesson, status__in=statuses, trial_lesson_date__isnull=True,
-        ).exclude(
-            child__status__in=TRIAL_CHILD_STATUSES,
+        ).filter(
+            # A student is a child whose own status is פעיל or בעיית תשלום.
+            child__status__in=ACTIVE_STUDENT_CHILD_STATUSES,
         ).filter(
             Q(start_date__isnull=True) | Q(start_date__lte=end_d),
             Q(end_date__isnull=True) | Q(end_date__gte=start_d),
@@ -212,7 +222,7 @@ def _unique_students_for_period(lesson, start_d: date, end_d: date, statuses: tu
         if e.status in statuses and _enrollment_overlaps_range(e, start_d, end_d):
             if e.trial_lesson_date:
                 continue
-            if getattr(e, 'child', None) and e.child.status in TRIAL_CHILD_STATUSES:
+            if getattr(getattr(e, 'child', None), 'status', None) not in ACTIVE_STUDENT_CHILD_STATUSES:
                 continue
             s.add(e.child_id)
     return s
