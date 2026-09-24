@@ -23,7 +23,7 @@ from apps.core.vat import (
     DOCUMENT_TITLE, VAT_PERCENT_DISPLAY, split_vat_inclusive, split_vat_inclusive_lines,
 )
 from apps.documents.invoice_document import (
-    allocation_note, business_fields, computerized_note, footer_line, issue_stamp,
+    allocation_note, business_fields, computerized_note, footer_line, issue_stamp, signature_note,
 )
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, money as _money_shared, render_invoice_pdf,
@@ -163,7 +163,7 @@ def _payment_fields(invoice: StoreInvoice) -> list[Field]:
     ]
 
 
-def build_store_invoice_layout(invoice: StoreInvoice, *, copy: bool = False) -> InvoiceLayout:
+def build_store_invoice_layout(invoice: StoreInvoice, *, copy: bool = False, signed: bool = False) -> InvoiceLayout:
     """The design's data for one store sale. Separated out so tests can read it."""
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.total_amount)
     # A sale billed to the monthly standing order is not yet a receipt.
@@ -193,19 +193,21 @@ def build_store_invoice_layout(invoice: StoreInvoice, *, copy: bool = False) -> 
                 None if invoice.payment_method == 'monthly_billing'
                 else allocation_note(before_vat, to_business=False),
                 computerized_note(),
+                signature_note() if signed and not copy else None,
             ) if note is not None
         ],
         footer=footer_line(),
+        signed_seal=signed and not copy,
         pdf_title=invoice.invoice_number,
         pdf_author=ISSUER_NAME,
     )
 
 
-def generate_store_invoice_pdf(invoice: StoreInvoice, *, copy: bool = False) -> bytes:
+def generate_store_invoice_pdf(invoice: StoreInvoice, *, copy: bool = False, signed: bool = False) -> bytes:
     invoice = (
         StoreInvoice.objects
         .select_related('child')
         .prefetch_related('line_items__product')
         .get(pk=invoice.pk)
     )
-    return render_invoice_pdf(build_store_invoice_layout(invoice, copy=copy))
+    return render_invoice_pdf(build_store_invoice_layout(invoice, copy=copy, signed=signed))

@@ -427,13 +427,17 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='download')
     def download(self, request, pk=None):
         """GET /api/v1/store/invoices/{id}/download/ — branded store invoice PDF."""
+        from apps.documents.signing.service import office_copy
         from apps.store.invoice_pdf import generate_store_invoice_pdf
 
         invoice = self.get_object()
         try:
             # The original went to the buyer by mail; the office's print is a
-            # copy (נספח ה'(א)(4)). A sale never mailed prints as the original.
-            pdf_bytes = generate_store_invoice_pdf(invoice, copy=bool(invoice.invoice_email_sent_at))
+            # copy (נספח ה'(א)(4)). A sale never mailed prints as the original —
+            # until originals are signed and stored at issue: then always a copy.
+            pdf_bytes = generate_store_invoice_pdf(
+                invoice, copy=office_copy() or bool(invoice.invoice_email_sent_at),
+            )
         except Exception:
             logger.exception('Store invoice PDF failed for %s', invoice.invoice_number)
             return Response({'error': 'שגיאה ביצירת הקובץ'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -892,7 +896,10 @@ def charge_card(request):
                     )
 
                     _decrement_product_stock(product, item)
-            
+
+            from apps.core.payment_service import _sign_store_sale
+            _sign_store_sale(invoice)
+
             # The card is not saved on the child. A store purchase is not a
             # standing order: this used to write the card over the standing
             # order's own card, or open a new "active" standing order at 0 ₪.

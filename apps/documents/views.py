@@ -305,8 +305,11 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         Locally rendered PDF — for drafts, credit invoices, and documents Tranzila did not issue.
         """
         from apps.documents.document_pdf import generate_document_pdf
+        from apps.documents.signing.service import office_copy
         doc = self.get_object()
-        pdf_bytes = generate_document_pdf(doc)
+        # Once originals are signed and stored at issue, every print the office
+        # makes is a copy (נספח ה'(א)(4)); the original is the stored file.
+        pdf_bytes = generate_document_pdf(doc, copy=office_copy())
         response = HttpResponse(pdf_bytes, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{doc.document_number}.pdf"'
         return response

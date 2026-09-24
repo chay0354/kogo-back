@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from django.db import models
 from django.db import transaction
@@ -347,6 +348,15 @@ class DocumentPayment(models.Model):
     check_bank = models.CharField(max_length=100, blank=True, verbose_name="בנק")
     check_branch = models.CharField(max_length=50, blank=True, verbose_name="סניף")
     check_account = models.CharField(max_length=50, blank=True, verbose_name="מספר חשבון")
+    # הוראה 18ב(ד)(2): a document signed with a secured (not approved) signature
+    # may be emailed for a check only when the check is crossed "לא סחיר", in the
+    # customer's name, to the business's order. Nothing on a check row said so,
+    # so an unmarked check sends its receipt's original on paper. Nullable so the
+    # column can land (Vercel migrates at build time) while the previous code,
+    # which inserts payments without it, is still serving; NULL reads as not crossed.
+    check_crossed = models.BooleanField(
+        null=True, blank=True, default=False, verbose_name="צ'ק משורטט לא סחיר על שם הלקוח",
+    )
 
     # Card-specific
     card_last_four = models.CharField(max_length=4, blank=True, verbose_name="4 ספרות אחרונות")
@@ -568,3 +578,191 @@ class CheckItem(models.Model):
 
     def __str__(self):
         return f"צ'ק {self.check_number or self.id} ₪{self.amount}"
+
+
+# What a signed original is, once signed: never re-signed, never rewritten.
+SIGNED_ORIGINAL_FROZEN_FIELDS = ('pdf', 'sha256', 'size', 'key_id', 'cert_fingerprint', 'signed_at')
+
+
+class FrozenSignedOriginalError(Exception):
+    """An attempt to change or delete the signed bytes of an issued document."""
+
+
+class SignedOriginalQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        # A bulk update skips save(); it may sign a row that is not yet signed
+        # (nothing does that today, but the rule is the same), never re-sign one.
+        frozen = sorted(name for name in kwargs if name in SIGNED_ORIGINAL_FROZEN_FIELDS)
+        if frozen and self.filter(signed_at__isnull=False).exists():
+            raise FrozenSignedOriginalError(
+                f'{", ".join(frozen)} of a signed original never change once it is signed'
+            )
+        return super().update(**kwargs)
+
+    def delete(self):
+        raise FrozenSignedOriginalError('A signed original is kept for seven years and never deleted')
+
+
+class SignedOriginal(models.Model):
+    """
+    The original of an issued fiscal document, signed and kept as it was signed.
+
+    הוראה 1 להוראות ניהול פנקסי חשבונות: a document sent by computer is a
+    "מסמך ממוחשב" only when it carries an approved or secured electronic
+    signature; חוזר 24/2004 asks for it to be kept "בצורתו המקורית, כולל
+    החתימה" for seven years. Until this table every mail and every download
+    drew the PDF again, and reportlab stamps the moment it draws, so no two
+    renders were the same file and none was kept. Now the original is drawn
+    once, at issue, signed (apps/documents/signing), stored here as bytes with
+    its SHA-256 — the rental contracts' precedent (apps/rentals/models.py) —
+    and every email attaches exactly these bytes. A later print is a copy.
+
+    bytea and not storage: the originals then ride in the quarterly database
+    backup that סעיף 25(ו)(2) already requires, with nothing else to keep.
+
+    One row per document number, across every run kogo numbers (IR lesson
+    receipts, ST/SD store sales, and the FormalDocument runs — TI, IRM, RC,
+    TX, CR, RT). The row is written inside the transaction that issues the
+    document, before anything is signed, so a document issued while signing is
+    on is never left without one; the signature follows after the commit, or
+    from the sign-pending cron when the key was out of reach.
+    """
+    KIND_IR = 'ir'
+    KIND_STORE = 'store'
+    KIND_FORMAL = 'formal'
+    KIND_CHOICES = [
+        (KIND_IR, 'קבלת חוג'),
+        (KIND_STORE, 'מכירת חנות'),
+        (KIND_FORMAL, 'מסמך'),
+    ]
+
+    DELIVERY_EMAIL = 'email'
+    DELIVERY_PAPER = 'paper'
+    DELIVERY_HELD = 'held'
+    DELIVERY_NONE = 'none'
+    DELIVERY_CHOICES = [
+        (DELIVERY_EMAIL, 'במייל'),
+        (DELIVERY_PAPER, 'למסירה על נייר'),
+        (DELIVERY_HELD, 'ממתין'),
+        (DELIVERY_NONE, 'לא נשלח'),
+    ]
+
+    # How kogo itself sends the document, when it does; '' for a document that
+    # only goes into the archive (a hand-issued invoice, a till sale).
+    CHANNEL_IR = 'ir'
+    CHANNEL_STORE = 'store'
+    CHANNEL_CREDIT_NOTE = 'credit_note'
+    CHANNEL_RENTAL = 'rental'
+    CHANNEL_CHOICES = [
+        ('', 'לא נשלח על ידי המערכת'),
+        (CHANNEL_IR, 'מייל קבלת חוג'),
+        (CHANNEL_STORE, 'מייל חנות האתר'),
+        (CHANNEL_CREDIT_NOTE, 'מייל הודעת זיכוי'),
+        (CHANNEL_RENTAL, 'מייל קבלת שכירות'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    number = models.CharField(max_length=50, unique=True, verbose_name="מספר מסמך")
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, verbose_name="סוג מקור")
+    # The id of the issuing row: Invoice (ir), StoreInvoice (store), FormalDocument (formal).
+    source_id = models.CharField(max_length=64, verbose_name="מזהה המקור")
+    channel = models.CharField(
+        max_length=20, choices=CHANNEL_CHOICES, blank=True, default='', verbose_name="ערוץ שליחה",
+    )
+
+    # The signed file itself, NULL until it is signed.
+    pdf = models.BinaryField(null=True, blank=True, verbose_name="המקור החתום (PDF)")
+    sha256 = models.CharField(max_length=64, blank=True, default='', verbose_name="SHA-256 של הקובץ")
+    size = models.PositiveIntegerField(default=0, verbose_name="גודל בבתים")
+    key_id = models.CharField(max_length=300, blank=True, default='', verbose_name="מפתח החתימה")
+    cert_fingerprint = models.CharField(max_length=64, blank=True, default='', verbose_name="טביעת אצבע של התעודה")
+    signed_at = models.DateTimeField(null=True, blank=True, verbose_name="מועד החתימה")
+    sign_attempts = models.PositiveSmallIntegerField(default=0, verbose_name="ניסיונות חתימה")
+
+    delivery = models.CharField(
+        max_length=10, choices=DELIVERY_CHOICES, default=DELIVERY_HELD, verbose_name="מסירה",
+    )
+    # Written for the office, in Hebrew: why the original goes where it goes.
+    delivery_reason = models.CharField(max_length=300, blank=True, default='', verbose_name="סיבה")
+
+    # What the office list shows, as the document said it when it was issued.
+    document_type_label = models.CharField(max_length=50, blank=True, default='', verbose_name="סוג מסמך")
+    customer_name = models.CharField(max_length=200, blank=True, default='', verbose_name="שם הלקוח")
+    document_date = models.DateField(null=True, blank=True, verbose_name="תאריך המסמך")
+    total = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, verbose_name='סה"כ')
+    # Where the mail was meant to go when the document was issued — a refund's
+    # credit note is addressed by its caller, and the cron sends it later.
+    email_to = models.CharField(max_length=254, blank=True, default='', verbose_name="נשלח אל")
+
+    # Claimed before the mail goes out and cleared when it fails, so two
+    # senders — the issuing request and the cron — never both send it.
+    sent_at = models.DateTimeField(null=True, blank=True, verbose_name="נשלח במייל")
+    send_attempts = models.PositiveSmallIntegerField(default=0, verbose_name="ניסיונות שליחה")
+    last_error = models.CharField(max_length=300, blank=True, default='', verbose_name="שגיאה אחרונה")
+
+    # נספח ה'(א)(4): "מקור" once. The stored original handed over on paper,
+    # printed at most one time; every later print is a copy.
+    paper_original_printed_at = models.DateTimeField(null=True, blank=True, verbose_name="המקור הודפס")
+    paper_original_printed_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+', verbose_name="מי הדפיס את המקור",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="נוצר")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן")
+
+    objects = SignedOriginalQuerySet.as_manager()
+
+    class Meta:
+        db_table = 'signed_originals'
+        verbose_name = "מקור חתום"
+        verbose_name_plural = "מקורות חתומים"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['kind', 'source_id'], name='signed_orig_source_idx'),
+            models.Index(fields=['delivery', 'paper_original_printed_at'], name='signed_orig_delivery_idx'),
+            models.Index(fields=['signed_at'], name='signed_orig_signed_at_idx'),
+        ]
+        constraints = [
+            # A signed row carries its bytes and their fingerprint; an unsigned one neither.
+            models.CheckConstraint(
+                check=(
+                    models.Q(signed_at__isnull=True, pdf__isnull=True)
+                    | (models.Q(signed_at__isnull=False, pdf__isnull=False, size__gt=0) & ~models.Q(sha256=''))
+                ),
+                name='signed_original_bytes_with_signature',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.number} ({self.get_delivery_display()})'
+
+    @property
+    def is_signed(self) -> bool:
+        return self.signed_at is not None
+
+    def pdf_intact(self) -> bool:
+        """The stored bytes still hash to the fingerprint taken when they were signed."""
+        if self.pdf is None or not self.sha256:
+            return False
+        return hashlib.sha256(bytes(self.pdf)).hexdigest() == self.sha256
+
+    def save(self, *args, **kwargs):
+        # Signed once, never again: a save may sign an unsigned row, and may
+        # move its delivery, but never touches the bytes of one already signed.
+        if not self._state.adding:
+            stored = type(self).objects.filter(pk=self.pk).values(*SIGNED_ORIGINAL_FROZEN_FIELDS[1:]).first()
+            if stored and stored['signed_at'] is not None:
+                update_fields = kwargs.get('update_fields')
+                touched = set(SIGNED_ORIGINAL_FROZEN_FIELDS) if update_fields is None else set(update_fields)
+                changed = [name for name in touched & set(stored) if getattr(self, name) != stored[name]]
+                if 'pdf' in touched and not self.pdf_intact():
+                    changed.append('pdf')
+                if changed:
+                    raise FrozenSignedOriginalError(
+                        f'{self.number} is signed; {", ".join(sorted(changed))} never change'
+                    )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise FrozenSignedOriginalError('A signed original is kept for seven years and never deleted')

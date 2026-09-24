@@ -17,7 +17,7 @@ from apps.core.vat import (
 from apps.customers.financial_models import Invoice, InvoiceActivityLog
 from apps.documents.invoice_document import (
     allocation_note, business_fields, computerized_note, date_stamp, footer_line, issue_stamp,
-    late_note,
+    late_note, signature_note,
 )
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, money, render_invoice_pdf,
@@ -113,7 +113,7 @@ def _late_dates(invoice: Invoice) -> tuple[str, str]:
     return (details.get('document_issued_at') or '')[:10], (details.get('money_received_at') or '')[:10]
 
 
-def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False) -> InvoiceLayout:
+def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False, signed: bool = False) -> InvoiceLayout:
     """The design's data for one lesson receipt. Separated out so tests can read it."""
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.amount)
     payer = (invoice.payer_name or invoice.family.name or '').strip()
@@ -126,6 +126,8 @@ def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False) -
     issued_late, money_received = _late_dates(invoice)
     if issued_late or money_received:
         notes.insert(0, late_note(issued_late, money_received))
+    if signed and not copy:
+        notes.append(signature_note())
 
     return InvoiceLayout(
         # Whatever the record holds — INV-20260815-A1B2C3D4 as readily as
@@ -160,19 +162,20 @@ def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False) -
         grand_value=money(gross),
         notes=notes,
         footer=footer_line(),
+        signed_seal=signed and not copy,
         pdf_title=invoice.invoice_number,
         pdf_author=ISSUER_NAME,
     )
 
 
-def generate_subscription_invoice_pdf(invoice: Invoice, *, copy: bool = False) -> bytes:
+def generate_subscription_invoice_pdf(invoice: Invoice, *, copy: bool = False, signed: bool = False) -> bytes:
     invoice = (
         Invoice.objects
         .select_related('family', 'parent', 'branch', 'payment')
         .prefetch_related('children__child', 'children__course', 'children__lesson', 'activity_logs')
         .get(pk=invoice.pk)
     )
-    return render_invoice_pdf(build_subscription_invoice_layout(invoice, copy=copy))
+    return render_invoice_pdf(build_subscription_invoice_layout(invoice, copy=copy, signed=signed))
 
 
 # The receipt's "מקור" left the system once — by mail (email_sent_at) or, when
@@ -189,7 +192,14 @@ def reproduce_subscription_invoice_pdf(invoice: Invoice, *, user=None) -> bytes:
     """
     The PDF the office downloads: the original the first time the original has
     not yet left the system, a copy marked "העתק" every time after.
+
+    Once originals are signed and stored at issue (apps/documents/signing), the
+    original is that stored file, so every download is a copy.
     """
+    from apps.documents.signing.service import office_copy
+
+    if office_copy():
+        return generate_subscription_invoice_pdf(invoice, copy=True)
     with transaction.atomic():
         locked = Invoice.objects.select_for_update().get(pk=invoice.pk)
         copy = bool(locked.email_sent_at) or original_downloaded(locked)

@@ -35,6 +35,8 @@ def _normalize_checks(raw_checks: list) -> list[dict]:
             'check_number': (row.get('check_number') or '').strip(),
             'amount': amount,
             'confirmed': True,
+            # הוראה 18ב(ד)(2): crossed "לא סחיר" in the customer's name, or not.
+            'check_crossed': row.get('check_crossed') is True,
         })
     return checks
 

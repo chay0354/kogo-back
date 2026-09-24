@@ -21,6 +21,10 @@ dependencies = [
   "reportlab==5.0.0",
   "python-bidi==0.6.11",
   "xlrd==2.0.1",
+  "pyhanko==0.37.0",
+  "pyhanko-certvalidator==0.32.1",
+  "cryptography==50.0.1",
+  "asn1crypto==1.5.1",
 ]
 
 [tool.uv]

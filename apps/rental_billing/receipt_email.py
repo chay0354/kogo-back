@@ -92,21 +92,40 @@ def send_rental_receipt_email(doc_id) -> bool:
         logger.warning('No e-mail provider — rental receipt %s not sent', doc.document_number)
         return False
 
+    from apps.documents import signing
+
+    claim = None
+    if signing.enabled():
+        # The signed original stored at issue, or no mail (the row says why).
+        from apps.documents.models import SignedOriginal
+        from apps.documents.signing.service import KIND_FORMAL, claim_email
+
+        claim = claim_email(KIND_FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL, email_to=email)
+        if claim is None:
+            return False
+
     subject, text, html = build_rental_receipt_email(doc, charge)
-    pdf_bytes = generate_document_pdf(doc)
+    pdf_bytes = claim.pdf if claim is not None else generate_document_pdf(doc)
     filename = f'{doc.document_number}.pdf'
-    if resend_configured():
-        send_resend_email(
-            to=[email], subject=subject, text=text, html=html,
-            attachments=[{'filename': filename, 'content': base64.b64encode(pdf_bytes).decode('ascii')}],
-        )
-    else:
-        message = EmailMultiAlternatives(
-            subject, text, getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com'), [email],
-        )
-        message.attach_alternative(html, 'text/html')
-        message.attach(filename, pdf_bytes, 'application/pdf')
-        message.send(fail_silently=False)
+    try:
+        if resend_configured():
+            send_resend_email(
+                to=[email], subject=subject, text=text, html=html,
+                attachments=[{'filename': filename, 'content': base64.b64encode(pdf_bytes).decode('ascii')}],
+            )
+        else:
+            message = EmailMultiAlternatives(
+                subject, text, getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com'), [email],
+            )
+            message.attach_alternative(html, 'text/html')
+            message.attach(filename, pdf_bytes, 'application/pdf')
+            message.send(fail_silently=False)
+    except Exception as exc:
+        if claim is not None:
+            claim.failed(exc)
+        raise
+    if claim is not None:
+        claim.sent()
     TenantCharge.objects.filter(pk=charge.pk).update(receipt_emailed_at=timezone.now())
     logger.info('Rental receipt %s e-mailed', doc.document_number)
     return True

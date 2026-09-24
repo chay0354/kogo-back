@@ -730,6 +730,9 @@ class WidgetStoreWebsiteOrderView(APIView):
             logger.exception('Website order failed')
             return Response({'error': 'שגיאה ביצירת ההזמנה'}, status=500)
 
+        from apps.core.payment_service import _sign_store_sale
+        _sign_store_sale(invoice)
+
         try:
             from apps.store.invoice_email import send_store_invoice_email
             send_store_invoice_email(invoice)

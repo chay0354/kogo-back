@@ -55,6 +55,17 @@ def _generate_document_number(document_type: str) -> str:
     return formal_document_number(document_type)
 
 
+def _sign_at_issue(doc: FormalDocument, **delivery) -> None:
+    """
+    Record the document's signed original, to be signed after the commit
+    (apps/documents/signing). A no-op while DOCUMENT_SIGNING_ENABLED is off;
+    never raises into the document's own transaction.
+    """
+    from apps.documents.signing.service import KIND_FORMAL, issue
+
+    issue(KIND_FORMAL, doc, **delivery)
+
+
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,
                     vat_exempt: bool, round_total: bool, prices_include_vat: bool = False) -> dict:
     subtotal = sum(Decimal(str(i['quantity'])) * Decimal(str(i['price'])) for i in line_items)
@@ -126,6 +137,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         )
 
     _attempt_tranzila(doc)
+    _sign_at_issue(doc)
     return doc
 
 
@@ -190,6 +202,7 @@ def finalize_draft(doc: FormalDocument) -> FormalDocument:
     doc.document_number = _generate_document_number(target)
     doc.save(update_fields=['document_type', 'document_number', 'updated_at'])
     _attempt_tranzila(doc)
+    _sign_at_issue(doc)
     return doc
 
 
@@ -236,14 +249,21 @@ def create_combined(data: dict) -> FormalDocument:
             unit_price=Decimal(str(item.get('price', 0))),
         )
 
+    # A combined document names its methods, not its checks: one flag — on the
+    # payload, or in its invoice section — says the check it was paid with is
+    # crossed "לא סחיר" in the customer's name (הוראה 18ב(ד)(2)).
+    crossed = data.get('check_crossed') is True or invoice_data.get('check_crossed') is True
     for pm in invoice_data.get('payment_methods', []):
+        method = _map_payment_method(pm)
         DocumentPayment.objects.create(
             document=doc,
-            payment_method=_map_payment_method(pm),
+            payment_method=method,
             amount=doc.total_amount,
+            check_crossed=crossed if method == 'check' else False,
         )
 
     _attempt_tranzila(doc)
+    _sign_at_issue(doc)
     return doc
 
 
@@ -292,6 +312,9 @@ def create_receipt(data: dict) -> FormalDocument:
                 check_bank=chk.get('bank', ''),
                 check_branch=chk.get('branch', ''),
                 check_account=chk.get('account_number', ''),
+                # הוראה 18ב(ד)(2): only a check crossed "לא סחיר", in the
+                # customer's name, lets the signed receipt go by mail.
+                check_crossed=chk.get('check_crossed') is True,
             )
     elif method_key == 'credit_card':
         DocumentPayment.objects.create(
@@ -315,6 +338,7 @@ def create_receipt(data: dict) -> FormalDocument:
         DocumentPayment.objects.create(**payment_kwargs, notes=receipt.get('cash_notes', ''))
 
     _attempt_tranzila(doc)
+    _sign_at_issue(doc)
     return doc
 
 
@@ -365,6 +389,21 @@ def create_credit_invoice(data: dict) -> FormalDocument:
 
     _attempt_tranzila(doc)
 
+    from apps.documents import signing
+
+    if signing.enabled():
+        # Signed and mailed after the commit, never from inside it: mailed
+        # before, a transaction that then rolled back left the customer holding
+        # a number the run hands out again — and a retry mailed it twice. The
+        # signed original's row is the sent flag (SignedOriginal.sent_at).
+        from apps.documents.models import SignedOriginal
+
+        name, email = _credit_note_recipient(doc)
+        _sign_at_issue(doc, channel=SignedOriginal.CHANNEL_CREDIT_NOTE, email_to=email, customer_name=name)
+        doc_id = doc.pk
+        transaction.on_commit(lambda: _email_credit_note_after_commit(doc_id))
+        return doc
+
     # A credit note is only useful to the customer if it reaches them. Never let a
     # mail failure roll back a document that was already issued and numbered.
     try:
@@ -373,6 +412,15 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         logger.exception('Credit note email failed for %s (non-fatal)', doc.document_number)
 
     return doc
+
+
+def _email_credit_note_after_commit(doc_id, *, customer_name: str | None = None, email: str | None = None) -> None:
+    """The credit note's mail, after its document committed. Its failure is logged, never raised."""
+    doc = FormalDocument.objects.select_related('business_customer', 'child__family', 'linked_document').get(pk=doc_id)
+    try:
+        _email_credit_note(doc, customer_name=customer_name, email=email)
+    except Exception:
+        logger.exception('Credit note email failed for %s (non-fatal; the signing cron retries)', doc.document_number)
 
 
 def original_document_date(number: str):
@@ -412,33 +460,56 @@ def _credit_note_recipient(doc: FormalDocument) -> tuple[str, str]:
     return '', ''
 
 
-def _email_credit_note(doc: FormalDocument, *, customer_name: str | None = None, email: str | None = None) -> None:
-    """Send a credit note to the customer with its PDF attached."""
+def _email_credit_note(doc: FormalDocument, *, customer_name: str | None = None, email: str | None = None) -> bool:
+    """Send a credit note to the customer with its PDF attached. True when it was sent."""
     from apps.core.credit_note_email import CreditNote, send_credit_note_email
     from apps.documents.document_pdf import generate_document_pdf
+    from apps.documents import signing
 
     default_name, default_email = _credit_note_recipient(doc)
     name = customer_name or default_name or (doc.customer_name or '')
     email = email or default_email
     if not email:
         logger.info('No email for credit note %s — not sent', doc.document_number)
-        return
+        return False
+
+    claim = None
+    if signing.enabled():
+        # The signed original, once; or no mail, with the reason on its row.
+        from apps.documents.models import SignedOriginal
+        from apps.documents.signing.service import KIND_FORMAL, claim_email
+
+        claim = claim_email(KIND_FORMAL, doc, channel=SignedOriginal.CHANNEL_CREDIT_NOTE, email_to=email)
+        if claim is None:
+            return False
 
     linked = doc.linked_document
-    send_credit_note_email(
-        CreditNote(
-            customer_name=name,
-            email=email,
-            amount=doc.total_amount,
-            reason=doc.credit_reason,
-            original_number=doc.linked_document_number or (linked.document_number if linked else ''),
-            original_date=doc.linked_document_date or (linked.document_date if linked else None),
-            document_number=doc.document_number,
-            issued_at=doc.document_date,
-        ),
-        pdf_bytes=generate_document_pdf(doc),
-        pdf_filename=f'{doc.document_number}.pdf',
-    )
+    try:
+        sent = send_credit_note_email(
+            CreditNote(
+                customer_name=name,
+                email=email,
+                amount=doc.total_amount,
+                reason=doc.credit_reason,
+                original_number=doc.linked_document_number or (linked.document_number if linked else ''),
+                original_date=doc.linked_document_date or (linked.document_date if linked else None),
+                document_number=doc.document_number,
+                issued_at=doc.document_date,
+            ),
+            pdf_bytes=claim.pdf if claim is not None else generate_document_pdf(doc),
+            pdf_filename=f'{doc.document_number}.pdf',
+        )
+    except Exception as exc:
+        if claim is not None:
+            claim.failed(exc)
+        raise
+    if claim is not None:
+        if sent:
+            claim.sent()
+        else:
+            # No provider: nothing left the system, so the original is still unsent.
+            claim.failed(RuntimeError('not sent'))
+    return bool(sent)
 
 
 def issue_refund_credit_note(
@@ -490,6 +561,22 @@ def issue_refund_credit_note(
             credit_reason=reason or 'זיכוי',
             internal_notes='הופק אוטומטית עם זיכוי העסקה',
         )
+        from apps.documents import signing
+
+        if signing.enabled():
+            from apps.documents.models import SignedOriginal
+
+            # Addressed by the caller (a walk-in buyer has no card to look it
+            # up on), so the address is kept with the original for the cron.
+            _sign_at_issue(
+                doc, channel=SignedOriginal.CHANNEL_CREDIT_NOTE,
+                email_to=(email or '').strip(), customer_name=(customer_name or '').strip(),
+            )
+            doc_id = doc.pk
+            transaction.on_commit(lambda: _email_credit_note_after_commit(
+                doc_id, customer_name=customer_name or None, email=email or None,
+            ))
+            return doc
 
     try:
         _email_credit_note(doc, customer_name=customer_name or None, email=email or None)
@@ -537,12 +624,17 @@ def _attempt_tranzila(doc: FormalDocument) -> None:
         from apps.core.tranzila_service import TranzilaService
         svc = TranzilaService()
 
+        from apps.documents import signing
+
         client_name = ''
         client_email = ''
         if doc.child_id:
             client_name = doc.child.full_name
             family = getattr(doc.child, 'family', None)
-            if family:
+            # With an email Tranzila may mail its own copy of the document —
+            # unsigned, and a second original. Once kogo signs and mails its
+            # originals itself, Tranzila is not given the address.
+            if family and not signing.enabled():
                 client_email = (family.email or '').strip()
 
         result = svc.create_formal_document(

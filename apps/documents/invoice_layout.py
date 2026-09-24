@@ -42,6 +42,9 @@ from reportlab.platypus import (
     KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
+from apps.documents.issuer import ISSUER_COMPANY_NUMBER, ISSUER_NAME
+from apps.documents.signature_seal import SignatureSeal
+
 # --- the palette, taken from the sample -------------------------------------
 # Sampled out of design/invoice-sample.pdf's content stream; named once here so
 # no generator hard-codes a colour of its own.
@@ -95,6 +98,10 @@ BODY_BOTTOM = 800.0            # the story may not run past this
 # of the block — a card with no long label stays as tight as the sample's.
 LABEL_COL_MAX_SHARE = 0.5
 LABEL_COL_GUTTER = 5.0
+
+# The signed original's seal, and the column it takes at the left of the small print.
+SEAL_DIAMETER = 66.0
+SEAL_COLUMN = SEAL_DIAMETER + 18.0
 
 # The transaction table's six columns, left to right in page order. The widths
 # are the sample's, measured between its column dividers.
@@ -265,6 +272,8 @@ class InvoiceLayout:
     notes: list[Note] = dataclass_field(default_factory=list)
     footer: str = ''
     watermark: str = ''
+    # The round seal beside the small print — on the signed original only.
+    signed_seal: bool = False
     pdf_title: str = ''
     pdf_author: str = ''
 
@@ -691,19 +700,37 @@ def _note_paragraph(note: Note, style: ParagraphStyle, width: float) -> Paragrap
     return Paragraph('<br/>'.join(out), style)
 
 
+def _signature_seal() -> SignatureSeal:
+    return SignatureSeal(
+        SEAL_DIAMETER,
+        bold_font=FONT_BOLD,
+        regular_font=FONT_REGULAR,
+        ink=TITLE_COLOR,
+        accent=MARK_YELLOW,
+        fill=CARD_BG,
+        bottom_text=ISSUER_NAME,
+        company_number=ISSUER_COMPANY_NUMBER,
+    )
+
+
 def _notes_block(layout: InvoiceLayout, styles: dict) -> list:
-    """The small print between a grey rule and a cyan one."""
+    """The small print between a grey rule and a cyan one — with the seal at its left on a signed original."""
     lines = [n for n in layout.notes if (n.lead or n.text)]
-    if not lines:
+    if not lines and not layout.signed_seal:
         return []
-    rows = [[_note_paragraph(note, styles['note'], CONTENT_WIDTH)] for note in lines]
-    block = Table(rows, colWidths=[CONTENT_WIDTH])
-    block.setStyle(TableStyle([
+    width = CONTENT_WIDTH - SEAL_COLUMN if layout.signed_seal else CONTENT_WIDTH
+    rows = [[_note_paragraph(note, styles['note'], width)] for note in lines] or [['']]
+    block = Table(rows, colWidths=[width])
+    no_padding = [
         ('TOPPADDING', (0, 0), (-1, -1), 0),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-    ]))
+    ]
+    block.setStyle(TableStyle(no_padding))
+    if layout.signed_seal:
+        block = Table([[_signature_seal(), block]], colWidths=[SEAL_COLUMN, width])
+        block.setStyle(TableStyle(no_padding + [('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
     return [
         _Rule(RULE_GREY, 0.8), Spacer(1, 11),
         block,

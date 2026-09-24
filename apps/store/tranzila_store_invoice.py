@@ -102,6 +102,12 @@ def issue_store_tranzila_document(invoice: StoreInvoice) -> FormalDocument | Non
         return None
 
     customer_name, customer_email, customer_phone = _customer_details(invoice)
+    from apps.documents import signing
+
+    if signing.enabled():
+        # Tranzila mails its own document to an address it is given: unsigned,
+        # and a second original beside kogo's signed one. Not given one.
+        customer_email = ''
     payment_method = STORE_PAYMENT_METHOD.get(invoice.payment_method, 1)
     document_date = str(timezone.localtime(invoice.issue_date).date())
 
