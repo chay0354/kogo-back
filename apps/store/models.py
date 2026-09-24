@@ -381,6 +381,16 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="קוד אישור טרנזילה"
     )
+    # The terminal the card was charged on. A transaction number means nothing
+    # without it — the hosted page, the direct card and a saved card each
+    # charge on their own terminal — and a refund must go back to the same one.
+    # Empty on invoices from before 24.9.2026 and on cash.
+    tranzila_terminal = models.CharField(
+        max_length=40,
+        blank=True,
+        default='',
+        verbose_name="מסוף טרנזילה",
+    )
     formal_document = models.ForeignKey(
         'documents.FormalDocument',
         on_delete=models.SET_NULL,

@@ -52,10 +52,15 @@ class StoreCallbackGuardTest(TestCase):
         return self.client.post(CALLBACK_URL, payload)
 
     def _ledger(self, rows):
-        return patch.object(
-            TranzilaService, 'list_all_transactions',
-            return_value={'success': True, 'transactions': rows},
-        )
+        """The terminal's report, as looked up by the notify's index."""
+        def find(service, index):
+            match = next((row for row in rows if row.get('index') == str(index)), None)
+            return {'success': True, 'transaction': match}
+        return patch.object(TranzilaService, 'find_transaction', autospec=True, side_effect=find)
+
+    # The shape /v1/transactions really returns (cogolive, 23.9.2026): the
+    # amount in agorot and no pdesc — 8 ₪ is '800'.
+    PAID = {'index': '123456', 'amount': '800', 'processor_response_code': '000', 'tranmode': 'A'}
 
     def _state(self):
         self.invoice.refresh_from_db()
@@ -74,7 +79,7 @@ class StoreCallbackGuardTest(TestCase):
         self.assertEqual(self._state(), ('pending', 0, 10))
 
     def test_a_notify_with_another_sum_leaves_the_order_pending(self):
-        with self._ledger([{'index': '123456', 'sum': '1.00', 'pdesc': self.invoice.id.hex}]):
+        with self._ledger([{**self.PAID, 'amount': '100'}]):
             self._notify()
         self.assertEqual(self._state(), ('pending', 0, 10))
 
@@ -86,7 +91,7 @@ class StoreCallbackGuardTest(TestCase):
         self.assertEqual(self.invoice.tranzila_transaction_id, '123456')
 
     def test_a_verified_notify_completes_the_order_once(self):
-        ledger = [{'index': '123456', 'sum': '8.00', 'pdesc': self.invoice.id.hex}]
+        ledger = [self.PAID]
         with self._ledger(ledger):
             first = self._notify()
             second = self._notify()  # Tranzila retried
@@ -98,7 +103,7 @@ class StoreCallbackGuardTest(TestCase):
     def test_a_website_order_issues_its_document_once(self):
         self.invoice.website_order_number = 'CG-260915-AAA1'
         self.invoice.save(update_fields=['website_order_number'])
-        ledger = [{'index': '123456', 'sum': '8.00', 'pdesc': self.invoice.id.hex}]
+        ledger = [self.PAID]
         with self._ledger(ledger), \
                 patch('apps.store.tranzila_store_invoice.issue_store_tranzila_document') as issue, \
                 patch('apps.store.invoice_email.send_store_invoice_email') as email:
@@ -107,3 +112,37 @@ class StoreCallbackGuardTest(TestCase):
         issue.assert_called_once()
         email.assert_called_once()
         self.assertEqual(self._state(), ('completed', 1, 8))
+
+    def test_the_terminal_that_took_the_charge_is_kept(self):
+        with self._ledger([self.PAID]):
+            self._notify()
+        self.assertEqual(self._state(), ('completed', 1, 8))
+        self.assertEqual(self.invoice.tranzila_terminal, 'iframe_terminal')
+
+    def test_a_charge_that_already_paid_another_order_does_not_complete_this_one(self):
+        # A public notify can quote a real transaction of someone else's order.
+        StoreInvoice.objects.create(
+            total_amount=Decimal('8.00'), payment_method='credit_card', payment_status='completed',
+            tranzila_transaction_id='123456', tranzila_terminal='iframe_terminal',
+        )
+        with self._ledger([self.PAID]):
+            self._notify()
+        self.assertEqual(self._state(), ('pending', 0, 10))
+
+    def test_the_same_number_on_another_terminal_is_another_charge(self):
+        # Numbers repeat across terminals: an old order paid elsewhere blocks nothing.
+        StoreInvoice.objects.create(
+            total_amount=Decimal('8.00'), payment_method='credit_card', payment_status='completed',
+            tranzila_transaction_id='123456', tranzila_terminal='fxpmichalweb',
+        )
+        with self._ledger([self.PAID]):
+            self._notify()
+        self.assertEqual(self._state(), ('completed', 1, 8))
+
+    def test_a_notify_for_an_order_that_is_not_ours_changes_nothing(self):
+        # The other website on the terminal: its pdesc is no invoice of ours.
+        with self._ledger([self.PAID]):
+            response = self._notify(pdesc='a1b2c3d4e5f60718293a4b5c6d7e8f90')
+        self.assertFalse(response.data['success'])
+        self.assertEqual(response.data['error'], 'Invoice not found')
+        self.assertEqual(self._state(), ('pending', 0, 10))

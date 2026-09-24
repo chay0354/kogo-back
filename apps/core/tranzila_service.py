@@ -19,7 +19,7 @@ import uuid
 from datetime import date
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlencode
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.utils import timezone
@@ -127,6 +127,46 @@ def is_tranzila_uncertain_gateway_error(response: Optional[Dict]) -> bool:
         return True
     error = str(response.get('error') or response.get('message') or '').lower()
     return any(token in error for token in ('timeout', 'timed out', 'connection error', 'cannot connect'))
+
+
+# tranmode prefixes of a report row that moved no money to us: a credit, a
+# card check (J5) and a token made without a charge.
+NOT_A_CHARGE_TRANMODES = ('C', 'V', 'K')
+
+
+# Hosted-page parameter that shows each wallet button.
+WALLET_PARAMS = {'bit': 'bit_pay', 'google_pay': 'google_pay'}
+
+
+def wallet_params() -> Dict[str, str]:
+    """The hosted-page parameters for the wallets in TRANZILA_WALLETS."""
+    params = {}
+    for wallet in getattr(settings, 'TRANZILA_WALLETS', []) or []:
+        param = WALLET_PARAMS.get(wallet)
+        if param:
+            params[param] = '1'
+        else:
+            logger.warning("TRANZILA_WALLETS: unknown wallet %r ignored", wallet)
+    return params
+
+
+def report_transaction_amount(txn: Optional[Dict]) -> Optional[Decimal]:
+    """
+    What a /v1/transactions row charged, in shekels.
+
+    The report gives `amount` in agorot: '500' for a 5 ₪ charge (cogolive,
+    23.9.2026). A hosted-page notify echoes `sum` in shekels instead, so the
+    two are never compared raw. None when the row carries no readable amount.
+    """
+    if not isinstance(txn, dict):
+        return None
+    raw = str(txn.get('amount') or '').strip()
+    if not raw:
+        return None
+    try:
+        return (Decimal(raw) / 100).quantize(Decimal('0.01'))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def pdesc_for_tranzila(transaction_id: str) -> str:
@@ -283,6 +323,38 @@ class TranzilaService:
             public_key=settings.TRANZILA_PROD_PUBLIC_KEY,
             secret_key=settings.TRANZILA_PROD_SECRET_KEY,
         )
+
+    @classmethod
+    def for_terminal(cls, name: str) -> Optional['TranzilaService']:
+        """
+        A client that acts on terminal `name` with the keys that own it, or
+        None when no configured key set owns it.
+
+        A refund or a report lookup must reach the terminal that took the
+        charge. The hosted-page pair (TRANZILA_TERMINAL / TRANZILA_TOKEN_TERMINAL)
+        and the production pair (TRANZILA_PROD_*) have separate keys: cogolive's
+        keys are refused on the michal terminals (20002, 23.9.2026).
+        """
+        name = (name or '').strip()
+        if not name:
+            return None
+        production = (
+            getattr(settings, 'TRANZILA_PROD_TERMINAL', ''),
+            getattr(settings, 'TRANZILA_PROD_TOKEN_TERMINAL', ''),
+        )
+        hosted = (
+            getattr(settings, 'TRANZILA_TERMINAL', ''),
+            getattr(settings, 'TRANZILA_TOKEN_TERMINAL', ''),
+        )
+        if name in production:
+            client = cls.production()
+        elif name in hosted:
+            client = cls.iframe()
+        else:
+            return None
+        client.terminal = name
+        client.token_terminal = name
+        return client
 
     # ============================================================================
     # Logging Utilities
@@ -515,9 +587,14 @@ class TranzilaService:
         error_url: str = '',
         callback_url: str = '',
         transaction_id: str = '',
+        offer_wallets: bool = False,
         **extra_params
     ) -> str:
-        """Create iframe payment URL for one-time payment."""
+        """Create iframe payment URL for one-time payment.
+
+        `offer_wallets` adds the TRANZILA_WALLETS buttons (Bit, Google Pay).
+        Store purchases only: a wallet payment leaves no card to bill later.
+        """
         # The hosted page runs on TRANZILA_TERMINAL, a test terminal ('realtest'):
         # a customer who paid there was never charged. Refused here, once, for
         # every screen that could open it.
@@ -532,6 +609,8 @@ class TranzilaService:
                     'and that Handshake is enabled on your terminal.'
                 )
             extra_params = {**extra_params, 'thtk': thtk, 'new_process': '1'}
+        if offer_wallets:
+            extra_params = {**wallet_params(), **extra_params}
 
         params = self._build_payment_params(
             amount=amount,
@@ -1537,6 +1616,35 @@ class TranzilaService:
         if page:
             payload['page'] = page
         return self._make_api_request(params=payload, endpoint='/v1/transactions')
+
+    def find_transaction(self, transaction_index) -> Dict:
+        """
+        One transaction of this terminal, looked up by its number.
+
+        Returns {'success': True, 'transaction': row or None}, or
+        {'success': False, 'error': ...} when Tranzila could not be asked.
+        Asked by number, not by dates: a range longer than about a month comes
+        back empty (seen 23.9.2026). Read only.
+        """
+        index = str(transaction_index or '').strip()
+        if not index.isdigit():
+            return {'success': True, 'transaction': None}
+        if self.credential_error():
+            return {'success': False, 'error': self.credential_error()}
+        response = self._make_api_request(
+            params={'terminal_name': self.terminal, 'transaction_index': int(index)},
+            endpoint='/v1/transactions',
+        )
+        if not isinstance(response, dict) or response.get('success') is False:
+            error = response.get('error') if isinstance(response, dict) else 'Tranzila report failed'
+            return {'success': False, 'error': error}
+        # A refused key answers {'error_code': 20002, 'message': ...} with no rows.
+        if 'transactions' not in response and not is_tranzila_rest_ok(response.get('error_code', 0)):
+            return {'success': False, 'error': str(response.get('message') or response.get('error_code'))}
+        for row in self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows'):
+            if str(row.get('index') or row.get('transaction_index') or '').strip() == index:
+                return {'success': True, 'transaction': row}
+        return {'success': True, 'transaction': None}
 
     @staticmethod
     def extract_list_rows(response: Dict, *keys: str) -> list:

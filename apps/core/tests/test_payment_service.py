@@ -85,6 +85,33 @@ class PaymentServiceInitiateSubscriptionTest(TestCase):
         self.assertEqual(snapshots.count(), 1)
         self.assertEqual(snapshots.first().discount_name, "הנחת ילד שני")
 
+    @override_settings(
+        TRANZILA_HANDSHAKE_ENABLED=True,
+        TRANZILA_TOKEN_TERMINAL='cogolivetok',
+        TRANZILA_PUBLIC_KEY='pk-test',
+        TRANZILA_SECRET_KEY='sk-test',
+    )
+    @patch('apps.core.tranzila_service.TranzilaService._make_api_request')
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
+    def test_signup_does_not_touch_the_hosted_page_terminal(self, mock_discount, mock_api):
+        """Moving the hosted page to another terminal must not break signups.
+
+        The link built here was never opened, but its handshake on
+        TRANZILA_TOKEN_TERMINAL failed the whole signup when refused.
+        """
+        mock_discount.return_value = self.mock_discount_calculation
+        mock_api.return_value = {'error_code': 20002, 'message': 'Authorization failed'}
+
+        # Built here, under the test's settings, so its terminal and keys are live.
+        result = PaymentService().initiate_subscription_payment(
+            child_id=str(self.child.id),
+            lesson_id=str(self.lesson.id),
+        )
+
+        self.assertIsNone(result['tranzila_url'])
+        self.assertTrue(Payment.objects.filter(id=result['payment_id'], status='pending').exists())
+        mock_api.assert_not_called()
+
     @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request')
     @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment')
     def test_registration_fee_once_per_child(self, mock_discount, mock_tranzila):

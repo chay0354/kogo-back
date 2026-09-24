@@ -492,6 +492,7 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
         error_url=error_url,
         callback_url=callback_url,
         transaction_id=str(invoice.id),
+        offer_wallets=True,
     )
 
     return Response({

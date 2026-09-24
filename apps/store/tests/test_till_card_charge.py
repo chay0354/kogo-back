@@ -153,3 +153,32 @@ class TillCardCharge(TestCase):
 
         charge.assert_called_once()
         self.assertTrue(res.data['success'])
+
+    # --- the terminal is kept, for the refund ------------------------------
+
+    def test_a_typed_card_is_recorded_on_the_card_terminal(self):
+        self.charge(key='till-7')
+
+        self.assertEqual(StoreInvoice.objects.get().tranzila_terminal, 'prod_rest_terminal')
+
+    def test_no_answer_still_records_where_to_look(self):
+        self.charge(key='till-8', gateway=NO_ANSWER)
+
+        self.assertEqual(StoreInvoice.objects.get().tranzila_terminal, 'prod_rest_terminal')
+
+    @override_settings(TRANZILA_PROD_TOKEN_TERMINAL='prod_token_terminal')
+    def test_a_saved_card_is_recorded_on_the_token_terminal(self):
+        RecurringPayment.objects.create(
+            child=self.child, tranzila_token='the-standing-order-card', status='active', amount=Decimal('235'),
+            start_date=date(2026, 9, 1), next_billing_date=date(2026, 10, 1),
+        )
+        body = {
+            'items': [{'product_id': str(self.pants.id), 'quantity': 1}],
+            'child_id': str(self.child.id),
+            'charged_with_token': True,
+        }
+        with patch.object(TranzilaService, 'charge_with_token', return_value=APPROVED):
+            res = self.client.post('/api/v1/store/payment/charge-card/', body, format='json')
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(StoreInvoice.objects.get().tranzila_terminal, 'prod_token_terminal')

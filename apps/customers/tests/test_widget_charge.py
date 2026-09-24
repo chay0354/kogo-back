@@ -85,6 +85,32 @@ class WidgetChargeIdempotencyTest(TestCase):
             LessonEnrollment.objects.filter(child=self.child, lesson=self.lesson, status='active').exists()
         )
 
+    @override_settings(TRANZILA_TERMINAL='', TRANZILA_PUBLIC_KEY='', TRANZILA_SECRET_KEY='')
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
+    def test_signup_charges_without_the_hosted_page_keys(self, mock_charge, _whatsapp):
+        """The charge runs on the production terminal; the hosted page's keys are not asked."""
+        payment = _payment_for(self.child, self.lesson)
+        res = self.client.post(
+            '/api/v1/customers/widget/charge/',
+            {'payment_id': str(payment.id), 'card_details': CARD},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 200, res.content)
+        mock_charge.assert_called_once()
+
+    @override_settings(TRANZILA_PROD_PUBLIC_KEY='', TRANZILA_PROD_SECRET_KEY='')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
+    def test_signup_refused_before_charging_without_production_keys(self, mock_charge):
+        payment = _payment_for(self.child, self.lesson)
+        res = self.client.post(
+            '/api/v1/customers/widget/charge/',
+            {'payment_id': str(payment.id), 'card_details': CARD},
+            format='json',
+        )
+        self.assertEqual(res.status_code, 503, res.content)
+        mock_charge.assert_not_called()
+
     @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
     @patch('apps.core.tranzila_service.TranzilaService.charge_with_card')
     def test_nested_tranzila_token_still_creates_standing_order(self, mock_charge, _whatsapp):
