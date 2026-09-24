@@ -289,30 +289,18 @@ class SignatureSeal(Flowable):
         for x in (-36.8, 36.8):
             canvas.circle(x, 0, 1.55, stroke=0, fill=1)
 
-        self._draw_shield(canvas)
+        self._draw_tick(canvas)
         canvas.setFillColor(self.ink)
         draw_line(canvas, bold, CENTRE_TEXT, 6.6, 0, -11.5, tracking=0.2)
         draw_line(canvas, regular, f'ח.פ. {self.company_number}', 5.4, 0, -19.6, tracking=0.15)
 
-    def _draw_shield(self, canvas) -> None:
-        canvas.setFillColor(self.ink)
-        path = canvas.beginPath()
-        path.moveTo(0, 22.6)
-        path.curveTo(2.9, 20.9, 6.3, 20.0, 9.4, 19.8)
-        path.lineTo(9.4, 11.0)
-        path.curveTo(9.4, 5.2, 5.2, 1.6, 0, -0.9)
-        path.curveTo(-5.2, 1.6, -9.4, 5.2, -9.4, 11.0)
-        path.lineTo(-9.4, 19.8)
-        path.curveTo(-6.3, 20.0, -2.9, 20.9, 0, 22.6)
-        path.close()
-        canvas.drawPath(path, stroke=0, fill=1)
-
-        canvas.setStrokeColor(self.accent)
-        canvas.setLineWidth(2.1)
+    def _draw_tick(self, canvas) -> None:
+        canvas.setStrokeColor(self.ink)
+        canvas.setLineWidth(2.6)
         canvas.setLineCap(1)
         canvas.setLineJoin(1)
         tick = canvas.beginPath()
-        tick.moveTo(-4.3, 11.4)
-        tick.lineTo(-1.1, 8.2)
-        tick.lineTo(4.7, 14.9)
+        tick.moveTo(-7.0, 10.6)
+        tick.lineTo(-2.2, 5.8)
+        tick.lineTo(7.4, 16.2)
         canvas.drawPath(tick, stroke=1, fill=0)
