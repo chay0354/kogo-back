@@ -336,30 +336,64 @@ class CallbackVerificationTest(_Base):
             payer_name='דנה', payer_phone='0501234567',
         )
 
-    def _post_with_ledger(self, listing, **kw):
+    def _post_with_ledger(self, found, **kw):
+        """`found` is what the terminal's report answers for the notify's index."""
         with patch('apps.payment_links.public_views.TranzilaService.iframe') as iframe:
             svc = iframe.return_value
             svc.parse_webhook_response.side_effect = lambda payload: __import__('apps.core.tranzila_service', fromlist=['TranzilaService']).TranzilaService().parse_webhook_response(payload)
             svc.credential_error.return_value = ''
-            svc.list_all_transactions.return_value = listing
+            svc.terminal = 'cogolive'
+            svc.find_transaction.return_value = found
             return self._callback(self.row, **kw)
 
+    @staticmethod
+    def _report_row(**overrides):
+        # The shape /v1/transactions really returns (cogolive, 23.9.2026):
+        # amount in agorot, no pdesc.
+        row = {'index': '12345', 'amount': '5000', 'processor_response_code': '000', 'tranmode': 'A'}
+        row.update(overrides)
+        return {'success': True, 'transaction': row}
+
     def test_a_forged_success_without_a_ledger_match_is_review_not_income(self):
-        res = self._post_with_ledger({'success': True, 'transactions': []})
+        res = self._post_with_ledger({'success': True, 'transaction': None})
         self.assertEqual(res.status_code, 200)
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, 'review')
         self.assertEqual(self.row.review_reason, 'unverified_callback')
 
     def test_a_ledger_match_completes(self):
-        listing = {'success': True, 'transactions': [{'index': '12345', 'sum': '50.00', 'pdesc': str(self.row.id).replace('-', '')}]}
-        self._post_with_ledger(listing)
+        self._post_with_ledger(self._report_row())
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, 'completed')
 
     def test_a_ledger_row_with_another_sum_is_review(self):
-        listing = {'success': True, 'transactions': [{'index': '12345', 'sum': '10.00'}]}
-        self._post_with_ledger(listing)
+        self._post_with_ledger(self._report_row(amount='1000'))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
+
+    def test_the_sum_read_as_shekels_is_review(self):
+        # '50' would be 50 ₪ only if the report spoke shekels; it speaks agorot.
+        self._post_with_ledger(self._report_row(amount='50'))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
+
+    def test_a_declined_transaction_is_review(self):
+        self._post_with_ledger(self._report_row(processor_response_code='033'))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
+
+    def test_a_credit_is_not_a_payment(self):
+        self._post_with_ledger(self._report_row(tranmode='C'))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
+
+    def test_an_index_that_paid_a_store_order_is_review(self):
+        from apps.store.models import StoreInvoice
+        StoreInvoice.objects.create(
+            total_amount=Decimal('50.00'), payment_method='credit_card', payment_status='completed',
+            tranzila_transaction_id='12345', tranzila_terminal='cogolive',
+        )
+        self._post_with_ledger(self._report_row())
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, 'review')
 
@@ -369,8 +403,14 @@ class CallbackVerificationTest(_Base):
             from apps.core.tranzila_service import TranzilaService as Real
             svc.parse_webhook_response.side_effect = Real().parse_webhook_response
             svc.credential_error.return_value = ''
-            svc.list_all_transactions.side_effect = RuntimeError('down')
+            svc.find_transaction.side_effect = RuntimeError('down')
             self._callback(self.row)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
+        self.assertEqual(self.row.review_reason, 'verification_unavailable')
+
+    def test_a_refused_key_is_review(self):
+        self._post_with_ledger({'success': False, 'error': 'Authorization failed'})
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, 'review')
         self.assertEqual(self.row.review_reason, 'verification_unavailable')

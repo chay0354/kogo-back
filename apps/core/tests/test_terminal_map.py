@@ -80,7 +80,9 @@ class TerminalMapTests(APITestCase):
         self.client.force_authenticate(self.manager)
         res = self.client.get(URL)
         self.assertEqual(res.status_code, 200, res.content)
-        self.assertEqual(len(res.json()['flows']), 9)
+        # The till (walk-in, saved card), store refunds and standing-order
+        # cancels joined the map on 24.9.2026.
+        self.assertEqual(len(res.json()['flows']), 13)
 
         self.client.force_authenticate(self.worker)
         self.assertEqual(self.client.get(URL).status_code, 403)

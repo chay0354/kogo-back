@@ -831,6 +831,9 @@ def charge_card(request):
             )
 
         tranzila = TranzilaService.production()
+        # A saved card is billed on the token terminal, a typed card on the
+        # card terminal — a refund has to go back to the same one.
+        charged_on = tranzila.token_terminal if use_token else tranzila.terminal
 
         if use_token:
             # Charge using stored Tranzila token
@@ -864,6 +867,7 @@ def charge_card(request):
             invoice.payment_status = 'completed'
             invoice.tranzila_transaction_id = result.get('transaction_id', '')
             invoice.tranzila_confirmation_code = result.get('confirmation_code', '')
+            invoice.tranzila_terminal = charged_on
             invoice.save()
             
             # Create sales and update stock
@@ -903,8 +907,9 @@ def charge_card(request):
             # decline — the invoice stays pending and is marked, and the till is
             # told to look in Tranzila before trying again.
             invoice.tranzila_confirmation_code = TILL_CHARGE_UNCERTAIN_MARK
+            invoice.tranzila_terminal = charged_on  # where to look for it
             invoice.notes = f"Payment uncertain — check Tranzila before retrying: {result.get('error')}"
-            invoice.save(update_fields=['tranzila_confirmation_code', 'notes'])
+            invoice.save(update_fields=['tranzila_confirmation_code', 'tranzila_terminal', 'notes'])
             logger.error('Till card charge uncertain for invoice %s: %s', invoice.invoice_number, result.get('error'))
             return Response({
                 'success': False,

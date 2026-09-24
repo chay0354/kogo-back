@@ -1109,7 +1109,9 @@ class WidgetChargeView(APIView):
         except CardValidationError as exc:
             return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        credential_error = TranzilaService().credential_error()
+        # Asked of the terminal that charges here (production), not of the
+        # hosted page's: swapping the hosted page's keys must not stop signups.
+        credential_error = TranzilaService.production().credential_error()
         if credential_error:
             logger.error("Widget charge refused before contacting Tranzila: %s", credential_error)
             return Response(

@@ -1966,7 +1966,8 @@ class PaymentService:
             customer_email=customer_email,
             customer_phone=customer_phone,
             callback_url=callback_url,
-            transaction_id=str(invoice.id)
+            transaction_id=str(invoice.id),
+            offer_wallets=True,
         )
         
         # Store product items in invoice notes for webhook processing
@@ -2056,6 +2057,8 @@ class PaymentService:
             invoice.tranzila_txn = tranzila_transaction
             invoice.tranzila_transaction_id = result.get('transaction_id', '')
             invoice.tranzila_confirmation_code = result.get('confirmation_code', '')
+            # charge_with_token bills the token terminal.
+            invoice.tranzila_terminal = self.tranzila_service.token_terminal
             invoice.save()
             
             # Create sales records and update stock atomically
@@ -2176,7 +2179,10 @@ class PaymentService:
                     # with what was reported kept so a person can check the terminal.
                     invoice.tranzila_transaction_id = txn_index[:100]
                     invoice.tranzila_confirmation_code = str(tranzila_response.get('confirmation_code') or '')[:100]
-                    invoice.save(update_fields=['tranzila_transaction_id', 'tranzila_confirmation_code'])
+                    invoice.tranzila_terminal = self.iframe_tranzila_service.terminal
+                    invoice.save(update_fields=[
+                        'tranzila_transaction_id', 'tranzila_confirmation_code', 'tranzila_terminal',
+                    ])
                     logger.error(
                         "Store webhook for invoice %s not confirmed by Tranzila (%s); left pending",
                         invoice.invoice_number, verdict,
@@ -2194,6 +2200,9 @@ class PaymentService:
                 invoice.payment_status = 'completed'
                 invoice.tranzila_transaction_id = tranzila_response.get('transaction_id', '')
                 invoice.tranzila_confirmation_code = tranzila_response.get('confirmation_code', '')
+                # The hosted page charges on TRANZILA_TERMINAL — the one the
+                # verification above asked.
+                invoice.tranzila_terminal = self.iframe_tranzila_service.terminal
                 invoice.save()
 
                 # Create sales and update stock
@@ -2680,11 +2689,43 @@ class PaymentService:
                 'error': 'לא נמצא קוד אישור לעסקה'
             }
         
+        # The refund goes back to the terminal that took the charge, with that
+        # terminal's keys. Invoices from before 24.9.2026 carry no terminal and
+        # keep the old route: the production token terminal.
+        terminal = (invoice.tranzila_terminal or '').strip()
+        refund_service = self.tranzila_service
+        if terminal:
+            refund_service = TranzilaService.for_terminal(terminal)
+            if refund_service is None:
+                logger.error(f"Invoice {invoice_id} was charged on {terminal}, which is not configured")
+                return {
+                    'success': False,
+                    'error': f'החשבונית שולמה במסוף {terminal}, שאינו מוגדר עוד במערכת. יש לזכות ידנית בטרנזילה.',
+                }
+
         # Get card expiration and token from child's active recurring payment
         card_expire_month = None
         card_expire_year = None
         token = None
-        if invoice.child:
+        if terminal and not invoice.charged_with_token:
+            # A typed card or the hosted page: the card that paid is on the
+            # terminal's report, not on the child — who may have another card
+            # on a standing order, or be no child at all.
+            found = refund_service.find_transaction(transaction_id)
+            paid_with = found.get('transaction') or {}
+            card_expire_month = paid_with.get('expiration_month') or None
+            card_expire_year = paid_with.get('expiration_year') or None
+            token = str(paid_with.get('credit_card_token') or '').strip() or None
+            if not card_expire_month or not card_expire_year:
+                logger.error(
+                    f"Invoice {invoice_id}: card details of transaction {transaction_id} "
+                    f"not found on {terminal}: {found.get('error') or 'no row'}"
+                )
+                return {
+                    'success': False,
+                    'error': 'לא נמצאו בטרנזילה פרטי הכרטיס של העסקה. נסו שוב, או זכו ידנית בטרנזילה.',
+                }
+        elif invoice.child:
             recurring = invoice.child.recurring_payments.filter(
                 status='active'
             ).first()
@@ -2731,7 +2772,7 @@ class PaymentService:
             issued_date = issued.date() if hasattr(issued, 'date') else issued
             same_day = issued_date == timezone.now().astimezone(JERUSALEM_TZ).date()
 
-        result = self.tranzila_service.refund_transaction(
+        result = refund_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
             reason=reason,
@@ -2741,6 +2782,7 @@ class PaymentService:
             token=token,
             items=items,
             prefer_cancel=same_day,
+            terminal_name=terminal or None,
         )
         
         if result['success']:

@@ -62,10 +62,45 @@ FLOWS = [
     {
         'id': 'store_b2c',
         'title': 'חנות האתר (B2C)',
-        'detail': 'הזמנה מהאתר נסלקת בעמוד המתארח של טרנזילה — כאן עובדים Bit ו-Apple Pay.',
+        'detail': 'הזמנה מהאתר נסלקת בעמוד המתארח של טרנזילה — כאן עובדים Bit ו-Apple Pay. '
+                  'נסגרת רק אחרי שהעסקה נמצאה בדוח של המסוף, בסכום המדויק ובמספר שלא שייך להזמנה אחרת.',
         'setting': 'TRANZILA_TERMINAL',
         'method': 'create_payment_request (iframe)',
         'code': 'apps/store/widget_views.py',
+    },
+    {
+        'id': 'store_till_walkin',
+        'title': 'קופה — לקוח מזדמן באשראי',
+        'detail': 'כשהעמוד המתארח פתוח (TRANZILA_HOSTED_PAGE_ENABLED) הלקוח משלם בו, עם Bit ו-Apple Pay. '
+                  'כשהוא סגור, או בלחיצה על "הקלדת כרטיס במקום" — הקלדת כרטיס במסוף ה-REST.',
+        'setting': 'TRANZILA_TERMINAL',
+        'method': 'create_payment_request (iframe) / charge_with_card',
+        'code': 'apps/core/payment_service.py (initiate_store_purchase), apps/store/views.py (charge_card)',
+    },
+    {
+        'id': 'store_till_saved_card',
+        'title': 'קופה — ילד עם כרטיס שמור',
+        'detail': 'חיוב הכרטיס של הוראת הקבע של הילד. הוראת הקבע עצמה לא משתנה.',
+        'setting': 'TRANZILA_PROD_TOKEN_TERMINAL',
+        'method': 'charge_with_token',
+        'code': 'apps/core/payment_service.py, apps/store/views.py',
+    },
+    {
+        'id': 'store_refund',
+        'title': 'זיכוי חשבונית חנות',
+        'detail': 'הזיכוי יוצא למסוף שרשום על החשבונית (tranzila_terminal), עם המפתחות שלו. '
+                  'חשבוניות מלפני 24.9.2026 אין עליהן מסוף, והן מזוכות כאן.',
+        'setting': 'TRANZILA_PROD_TOKEN_TERMINAL',
+        'method': 'refund_transaction',
+        'code': 'apps/core/payment_service.py (refund_store_invoice)',
+    },
+    {
+        'id': 'sto_cancel',
+        'title': 'ביטול הוראת קבע',
+        'detail': 'ביטול הוראת קבע שטרנזילה מנהלת, כשמבטלים מנוי.',
+        'setting': 'TRANZILA_PROD_TOKEN_TERMINAL',
+        'method': 'cancel_recurring_payment',
+        'code': 'apps/core/payment_service.py (cancel_subscription)',
     },
     {
         'id': 'payment_links',
@@ -105,8 +140,10 @@ FLOWS = [
 ]
 
 SETTING_NOTES = {
-    'TRANZILA_TERMINAL': 'מסוף העמוד המתארח (iframe). היחיד שתומך ב-Bit וב-Apple Pay.',
-    'TRANZILA_TOKEN_TERMINAL': 'לא בשימוש בפרודקשן — נקרא רק כשיוצרים שירות בלי production().',
+    'TRANZILA_TERMINAL': 'מסוף העמוד המתארח (iframe). היחיד שתומך ב-Bit וב-Apple Pay. '
+                         'המפתחות TRANZILA_PUBLIC_KEY/SECRET_KEY שייכים אליו.',
+    'TRANZILA_TOKEN_TERMINAL': 'לא מחייב כלום. עד 24.9.2026 כל הרשמה לחוג עשתה עליו handshake '
+                               'לקישור שלא נפתח; הוסר, כך שהחלפת המסוף לא נוגעת בהרשמות.',
     'TRANZILA_PROD_TERMINAL': 'מסוף ה-REST להקלדת כרטיס.',
     'TRANZILA_PROD_TOKEN_TERMINAL': 'מסוף ה-REST לחיוב טוקן שמור (הוראות קבע).',
     'TRANZILA_BILLING_TERMINAL': 'מסוף הפקת מסמכים. ריק = אין חשבוניות.',

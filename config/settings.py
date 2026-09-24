@@ -303,6 +303,16 @@ TRANZILA_HANDSHAKE_ENABLED = config('TRANZILA_HANDSHAKE_ENABLED', default=True, 
 # Tranzila has enabled for the hosted page (fxpmichalweb answered 141 there in
 # August).
 TRANZILA_HOSTED_PAGE_ENABLED = config('TRANZILA_HOSTED_PAGE_ENABLED', default=False, cast=bool)
+# Wallet buttons on the hosted page, for store purchases only (a wallet leaves
+# no card for a standing order, so course signups never offer one). Comma
+# separated: 'bit', 'google_pay'. Each must first be enabled on the terminal
+# by Tranzila — on cogolive neither showed on 23.9.2026. Apple Pay has no
+# parameter: Tranzila turns it on per terminal and domain.
+TRANZILA_WALLETS = [
+    wallet.strip().lower()
+    for wallet in config('TRANZILA_WALLETS', default='').split(',')
+    if wallet.strip()
+]
 
 # Who runs the monthly הוראות קבע charge.
 #   False (default) — apps.customers.recurring_billing charges the saved token via cron,

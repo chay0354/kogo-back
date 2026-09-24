@@ -22,7 +22,13 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc
+from apps.core.tranzila_service import (
+    NOT_A_CHARGE_TRANMODES,
+    TranzilaService,
+    invoice_id_from_pdesc,
+    is_tranzila_approved,
+    report_transaction_amount,
+)
 from apps.customers.models import TranzilaTransaction
 from apps.payment_links.models import PaymentLink, PaymentLinkPayment, money
 from apps.payment_links.serializers import PublicPaymentLinkSerializer
@@ -191,46 +197,82 @@ def _reported_sum(raw, parsed_amount) -> Decimal:
             return Decimal('0.00')
 
 
-def verify_transaction_with_tranzila(row: PaymentLinkPayment, txn_index: str) -> tuple[str, dict | None]:
+def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> bool:
     """
-    Ask Tranzila whether this transaction really happened on our terminal.
+    True when this transaction number already paid for another order.
+
+    A notify is public, so it can quote a real transaction that paid for
+    something else — one of ours, or the other website that shares the
+    terminal. Only rows that were actually paid count, so a forged notify
+    left pending cannot block the real one. Store invoices are matched on
+    their terminal, since numbers repeat across terminals; payment links keep
+    no terminal, so any completed one with this number counts.
+    """
+    from apps.store.models import StoreInvoice
+
+    if (
+        StoreInvoice.objects.filter(tranzila_transaction_id=txn_index, tranzila_terminal=terminal)
+        .exclude(id=row_id)
+        .exclude(payment_status__in=['pending', 'failed'])
+        .exists()
+    ):
+        return True
+    return (
+        PaymentLinkPayment.objects.filter(
+            gateway_transaction_id=txn_index, status=PaymentLinkPayment.STATUS_COMPLETED,
+        )
+        .exclude(id=row_id)
+        .exists()
+    )
+
+
+def verify_transaction_with_tranzila(row, txn_index: str) -> tuple[str, dict | None]:
+    """
+    Ask Tranzila whether this transaction really paid for this row.
 
     The notify POST itself is not authenticated (Tranzila sends no signature),
-    so a row is marked completed only when the terminal's own transaction list
-    shows an approved transaction with this index and this sum. Anything else
-    lands on review for a person.
+    and the hosted-page terminal also takes the other website's payments. A
+    row is marked paid only when the terminal's own report shows, under this
+    number, an approved charge of exactly this sum that no other order of
+    ours already holds. Anything else lands on review for a person.
 
-    Returns ('verified', txn_row) | ('unverified', None) | ('unavailable', None).
+    `row` needs `id` and `amount` (shekels). Returns ('verified', txn_row) |
+    ('unverified', txn_row or None) | ('unavailable', None).
     """
-    if not txn_index:
+    txn_index = str(txn_index or '').strip()
+    if not txn_index.isdigit():
         return 'unverified', None
     try:
         service = TranzilaService.iframe()
         if service.credential_error():
             return 'unavailable', None
-        today = timezone.localdate()
-        listing = service.list_all_transactions(today - timedelta(days=1), today)
+        found = service.find_transaction(txn_index)
     except Exception as exc:  # network, auth — never a reason to trust the POST
-        logger.error('payment link %s: transaction lookup failed: %s', row.id, exc)
+        logger.error('payment %s: transaction lookup failed: %s', row.id, exc)
         return 'unavailable', None
-    if not isinstance(listing, dict) or listing.get('success') is False:
+    if not found.get('success'):
+        logger.error('payment %s: transaction lookup failed: %s', row.id, found.get('error'))
         return 'unavailable', None
-    for txn in listing.get('transactions') or []:
-        index = str(txn.get('index') or txn.get('transaction_index') or txn.get('id') or '').strip()
-        if index != str(txn_index).strip():
-            continue
-        raw_sum = txn.get('sum', txn.get('amount', txn.get('transaction_sum')))
-        try:
-            txn_sum = money(Decimal(str(raw_sum).strip()))
-        except (InvalidOperation, ValueError, TypeError):
-            txn_sum = None
-        pdesc = str(txn.get('pdesc') or '').strip()
-        if pdesc and invoice_id_from_pdesc(pdesc) != str(row.id):
-            continue
-        if txn_sum is not None and txn_sum == money(row.amount):
-            return 'verified', txn
+    txn = found.get('transaction')
+    if not txn:
+        return 'unverified', None
+
+    reasons = []
+    if not is_tranzila_approved(txn.get('processor_response_code') or txn.get('response_code')):
+        reasons.append('not approved')
+    if str(txn.get('tranmode') or '').strip().upper().startswith(NOT_A_CHARGE_TRANMODES):
+        reasons.append(f"tranmode {txn.get('tranmode')}")
+    if report_transaction_amount(txn) != money(row.amount):
+        reasons.append(f'sum {report_transaction_amount(txn)} != {money(row.amount)}')
+    pdesc = str(txn.get('pdesc') or '').strip()
+    if pdesc and invoice_id_from_pdesc(pdesc) != str(row.id):
+        reasons.append('pdesc of another order')
+    if _index_paid_for_something_else(row.id, txn_index, service.terminal):
+        reasons.append('index already paid for another order')
+    if reasons:
+        logger.error('payment %s: transaction %s not accepted: %s', row.id, txn_index, '; '.join(reasons))
         return 'unverified', txn
-    return 'unverified', None
+    return 'verified', txn
 
 
 def _amounts_match(locked: Decimal, reported) -> bool:
