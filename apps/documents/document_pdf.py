@@ -288,6 +288,7 @@ def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bo
         notes=_notes(doc, signed=signed and not copy),
         footer=footer_line(),
         watermark='טיוטה' if is_draft else '',
+        signed_seal=signed and not copy and not is_draft,
         pdf_title=f'{label} {doc.document_number}',
         pdf_author=ISSUER_NAME,
     )

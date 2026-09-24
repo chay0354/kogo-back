@@ -179,6 +179,7 @@ class FlagOffTests(CardReceiptMixin, TestCase):
         layout = build_document_layout(doc)
         self.assertEqual(layout.copy_mark, ORIGINAL_MARK)
         self.assertNotIn(SIGNED_MARK, notes_text(layout))
+        self.assertFalse(layout.signed_seal)
 
 
 class LayoutMarksTests(CardReceiptMixin, TestCase):
@@ -187,9 +188,11 @@ class LayoutMarksTests(CardReceiptMixin, TestCase):
         copy = build_document_layout(doc, copy=True, signed=True)
         self.assertEqual(copy.copy_mark, COPY_MARK)
         self.assertNotIn(SIGNED_MARK, notes_text(copy))
+        self.assertFalse(copy.signed_seal)
         original = build_document_layout(doc, signed=True)
         self.assertEqual(original.copy_mark, ORIGINAL_MARK)
         self.assertIn(SIGNED_MARK, notes_text(original))
+        self.assertTrue(original.signed_seal)
         self.assertIn(COPY_MARK, pdf_text(generate_document_pdf(doc, copy=True)))
 
     def test_a_draft_stays_a_draft_whatever_it_is_asked(self):
@@ -198,6 +201,7 @@ class LayoutMarksTests(CardReceiptMixin, TestCase):
             'invoice_details': {'document_date': '2026-09-18', 'line_items': [{'description': 'x', 'quantity': 1, 'price': 10}]},
         })
         self.assertEqual(build_document_layout(draft, copy=True).copy_mark, 'טיוטה — אינו מסמך מס')
+        self.assertFalse(build_document_layout(draft, signed=True).signed_seal)
 
 
 class CertificateTests(TestCase):

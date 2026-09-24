@@ -33,6 +33,7 @@ def sample_pdf() -> bytes:
         grand_value='0.00',
         notes=[Note('בדיקה:', 'קובץ לבדיקת החתימה בלבד. אינו מסמך מס.'), computerized_note(), signature_note()],
         footer=footer_line(),
+        signed_seal=True,
         pdf_title='TEST-SIGNATURE',
         pdf_author=ISSUER_NAME,
     ))

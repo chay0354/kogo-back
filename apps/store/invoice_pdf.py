@@ -197,6 +197,7 @@ def build_store_invoice_layout(invoice: StoreInvoice, *, copy: bool = False, sig
             ) if note is not None
         ],
         footer=footer_line(),
+        signed_seal=signed and not copy,
         pdf_title=invoice.invoice_number,
         pdf_author=ISSUER_NAME,
     )

@@ -162,6 +162,7 @@ def build_subscription_invoice_layout(invoice: Invoice, *, copy: bool = False, s
         grand_value=money(gross),
         notes=notes,
         footer=footer_line(),
+        signed_seal=signed and not copy,
         pdf_title=invoice.invoice_number,
         pdf_author=ISSUER_NAME,
     )
