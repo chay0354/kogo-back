@@ -15,9 +15,13 @@ The parts, each small and replaceable:
 - ``signer``: pyHanko, signing a PDF through a backend and checking the result.
 - ``service``: when a document is signed, where its original goes (email,
   paper, held) and the helpers the five email exits call.
+- ``archive``: a signed copy, marked "העתק לארכיון", of every document issued
+  before signing existed — for the business's own archive, never for a customer.
 
 Everything is behind DOCUMENT_SIGNING_ENABLED. With it off, nothing here runs
-and every mail and download is drawn exactly as before.
+and every mail and download is drawn exactly as before — except the archive,
+which has a switch of its own (SIGNING_ARCHIVE_ENABLED): it sends nothing to
+anyone, so it may run before the customer-facing switch is turned on.
 """
 from __future__ import annotations
 
@@ -38,3 +42,7 @@ def enabled() -> bool:
 
 def consent_enforced() -> bool:
     return bool(getattr(settings, 'COMPUTERIZED_CONSENT_ENFORCED', False))
+
+
+def archive_enabled() -> bool:
+    return bool(getattr(settings, 'SIGNING_ARCHIVE_ENABLED', False))

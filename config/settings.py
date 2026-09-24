@@ -474,6 +474,12 @@ SIGNING_CERT_PEM = config('SIGNING_CERT_PEM', default='')
 # signs on the spot; the rest are signed by the sign-pending cron within minutes.
 # Keeps a cron that issues forty monthly documents from paying forty signatures.
 SIGNING_INLINE_BUDGET = config('SIGNING_INLINE_BUDGET', default=5, cast=int)
+# The signed archive (apps/documents/signing/archive.py): documents issued before
+# signing existed are drawn again, marked "העתק לארכיון" — never "מקור" — signed
+# and kept. Nothing goes to a customer, so it is a switch of its own and works
+# while DOCUMENT_SIGNING_ENABLED (the customer-facing one) is still off. It
+# still needs the key and the certificate above.
+SIGNING_ARCHIVE_ENABLED = config('SIGNING_ARCHIVE_ENABLED', default=False, cast=bool)
 # Setup only: lets the two setup calls (issue the certificate, run the self-test)
 # be made against a deployment before anyone has logged in to it. Empty = those
 # calls need a manager. Remove it from Vercel once the key is in place.
