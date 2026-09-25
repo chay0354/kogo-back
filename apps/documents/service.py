@@ -305,6 +305,7 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
         vat_percent=Decimal('18'),
         customer_notes=invoice_data.get('customer_notes', ''),
         internal_notes=invoice_data.get('internal_notes', ''),
+        withholding_amount=_withholding(invoice_data.get('withholding_amount')),
         **totals,
         **_issued(issued_by),
     )
@@ -318,18 +319,8 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
             unit_price=Decimal(str(item.get('price', 0))),
         )
 
-    # A combined document names its methods, not its checks: one flag — on the
-    # payload, or in its invoice section — says the check it was paid with is
-    # crossed "לא סחיר" in the customer's name (הוראה 18ב(ד)(2)).
-    crossed = data.get('check_crossed') is True or invoice_data.get('check_crossed') is True
-    for pm in invoice_data.get('payment_methods', []):
-        method = _map_payment_method(pm)
-        DocumentPayment.objects.create(
-            document=doc,
-            payment_method=method,
-            amount=doc.total_amount,
-            check_crossed=crossed if method == 'check' else False,
-        )
+    for row in _combined_payment_rows(data, invoice_data, doc.total_amount):
+        DocumentPayment.objects.create(document=doc, **row)
 
     _attempt_tranzila(doc)
     _sign_at_issue(doc)
@@ -395,6 +386,7 @@ def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
             payment_method='credit_card',
             amount=Decimal(str(receipt.get('card_amount', 0))),
             card_last_four=receipt.get('card_last_four', ''),
+            card_brand=(receipt.get('card_brand') or '').strip() or None,
             card_expiry=receipt.get('card_expiry', ''),
             card_installments=receipt.get('card_installments', 1),
             notes=receipt.get('card_notes', ''),
@@ -684,6 +676,101 @@ def _map_payment_method(hebrew: str) -> str:
         'אשראי': 'credit_card',
         'העברה בנקאית': 'bank_transfer',
     }.get(hebrew, 'cash')
+
+
+_PAYMENT_KEYS = ('cash', 'check', 'credit_card', 'bank_transfer')
+
+
+def _payment_key(method: str) -> str:
+    """A payment method as stored: the dialog's Hebrew label or the stored key itself."""
+    return method if method in _PAYMENT_KEYS else _map_payment_method(method)
+
+
+def _withholding(value) -> Decimal | None:
+    """ניכוי במקור as stored: None when none was withheld."""
+    amount = Decimal(str(value or 0))
+    if amount < 0:
+        raise ValueError('ניכוי במקור אינו יכול להיות שלילי')
+    return amount if amount > 0 else None
+
+
+def _money_text(amount: Decimal) -> str:
+    return f'{amount:,.2f} ₪'
+
+
+def _combined_payment_rows(data: dict, invoice_data: dict, total: Decimal) -> list[dict]:
+    """
+    The payment rows of a חשבונית מס/קבלה (G) — how much was paid each way.
+
+    Each way it was paid is a row of its own amount, written as a receipt's
+    are, with what identifies it: a check's number, bank, branch, account and
+    due date (הוראה 5(ב)); a card's last four digits, brand and installments;
+    a transfer's reference and value date. Together with any ניכוי במקור they
+    come to the document's total exactly — a receipt for more or less than the
+    invoice is not what was paid.
+
+    Every method used to be written for the whole total, so a document paid
+    half in cash and half by check reported twice its money in the uniform
+    file. The older payload (payment_methods, names only) is still read when it
+    names one method — that method paid it all; naming several is refused,
+    since it cannot say how much each paid.
+    """
+    rows = invoice_data.get('payments') or []
+    withheld = _withholding(invoice_data.get('withholding_amount')) or Decimal('0')
+    due = total - withheld
+    # The older payload's single flag: the check it was paid with is crossed
+    # "לא סחיר" in the customer's name (הוראה 18ב(ד)(2)).
+    legacy_crossed = data.get('check_crossed') is True or invoice_data.get('check_crossed') is True
+
+    if not rows:
+        methods = invoice_data.get('payment_methods') or []
+        if not methods:
+            return []
+        if len(methods) > 1:
+            raise ValueError('חשבונית מס/קבלה בכמה אמצעי תשלום צריכה את הסכום של כל אחד מהם')
+        method = _payment_key(methods[0])
+        return [{
+            'payment_method': method,
+            'amount': due,
+            'check_crossed': legacy_crossed if method == 'check' else False,
+        }]
+
+    out = []
+    for row in rows:
+        method = _payment_key(row['method'])
+        amount = Decimal(str(row['amount']))
+        if amount <= 0:
+            raise ValueError('סכום של אמצעי תשלום חייב להיות גדול מאפס')
+        payment = {'payment_method': method, 'amount': amount, 'notes': row.get('notes', '') or ''}
+        if method == 'check':
+            payment.update(
+                reference=row.get('check_number', '') or '',
+                check_date=row.get('check_date') or None,
+                check_bank=row.get('check_bank', '') or '',
+                check_branch=row.get('check_branch', '') or '',
+                check_account=row.get('check_account', '') or '',
+                check_crossed=row.get('check_crossed') is True or legacy_crossed,
+            )
+        elif method == 'credit_card':
+            payment.update(
+                card_last_four=row.get('card_last_four', '') or '',
+                card_brand=(row.get('card_brand') or '').strip() or None,
+                card_installments=row.get('installments') or 1,
+                reference=row.get('reference', '') or '',
+                paid_on=row.get('paid_on') or None,
+            )
+        else:
+            payment.update(reference=row.get('reference', '') or '', paid_on=row.get('paid_on') or None)
+        out.append(payment)
+
+    paid = sum((row['amount'] for row in out), Decimal('0'))
+    if paid != due:
+        withheld_note = f' פחות ניכוי במקור של {_money_text(withheld)}' if withheld else ''
+        raise ValueError(
+            f'סכומי אמצעי התשלום ({_money_text(paid)}) אינם שווים לסכום החשבונית '
+            f'({_money_text(total)}{withheld_note}). כל שקל שהתקבל נרשם פעם אחת, באמצעי שבו שולם.'
+        )
+    return out
 
 
 def _attempt_tranzila(doc: FormalDocument) -> None:

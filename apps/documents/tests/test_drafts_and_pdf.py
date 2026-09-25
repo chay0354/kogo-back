@@ -84,7 +84,10 @@ class DraftDocumentTests(APITestCase):
         self.assertIn('invoice_details', res.data)
 
     def test_a_combined_document_needs_only_the_invoice_section(self):
-        res = self.client.post(CREATE, self.payload('combined'), format='json')
+        # Its payments are in the invoice section too (G): one row, the whole ₪424.80.
+        body = self.payload('combined')
+        body['invoice_details']['payments'] = [{'method': 'מזומן', 'amount': '424.80'}]
+        res = self.client.post(CREATE, body, format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
     def test_a_transaction_invoice_carries_no_vat_however_it_was_issued(self):

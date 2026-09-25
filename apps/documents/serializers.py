@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from apps.documents.models import CashPlan, CashPlanMonth, FormalDocument, DocumentLineItem, DocumentPayment, CheckPlan, CheckItem
 
@@ -15,7 +17,7 @@ class DocumentPaymentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'payment_method', 'amount', 'reference', 'notes',
             'check_date', 'check_bank', 'check_branch', 'check_account', 'check_crossed',
-            'card_last_four', 'card_expiry', 'card_installments',
+            'card_last_four', 'card_expiry', 'card_installments', 'card_brand', 'paid_on',
         ]
         read_only_fields = ['id']
 
@@ -101,6 +103,41 @@ class LineItemInputSerializer(serializers.Serializer):
     price = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
 
 
+# How a payment is named: the dialog's Hebrew labels, or the stored keys.
+PAYMENT_METHOD_INPUTS = ['מזומן', "צ'ק", 'אשראי', 'העברה בנקאית', 'cash', 'check', 'credit_card', 'bank_transfer']
+
+
+class InvoicePaymentInputSerializer(serializers.Serializer):
+    """
+    One way a חשבונית מס/קבלה was paid, for the amount paid that way (G).
+
+    The rows of a document add up to its total exactly — the service checks
+    that, since the total is worked out there. A check names itself (הוראה
+    5(ב)): number, bank, branch, account and due date; a card its last four
+    digits, brand and installments; a transfer its reference and value date.
+    """
+    method = serializers.ChoiceField(choices=PAYMENT_METHOD_INPUTS)
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+        error_messages={'min_value': 'סכום של אמצעי תשלום חייב להיות גדול מאפס'},
+    )
+    check_number = serializers.CharField(required=False, allow_blank=True, default='', max_length=50)
+    check_bank = serializers.CharField(required=False, allow_blank=True, default='', max_length=100)
+    check_branch = serializers.CharField(required=False, allow_blank=True, default='', max_length=50)
+    check_account = serializers.CharField(required=False, allow_blank=True, default='', max_length=50)
+    check_date = serializers.DateField(required=False, allow_null=True, default=None)
+    check_crossed = serializers.BooleanField(required=False, default=False)
+    card_last_four = serializers.RegexField(
+        r'^[0-9]{0,4}$', required=False, allow_blank=True, default='',
+        error_messages={'invalid': '4 הספרות האחרונות של הכרטיס — ספרות בלבד'},
+    )
+    card_brand = serializers.CharField(required=False, allow_blank=True, default='', max_length=30)
+    installments = serializers.IntegerField(required=False, default=1, min_value=1, max_value=99)
+    reference = serializers.CharField(required=False, allow_blank=True, default='', max_length=200)
+    paid_on = serializers.DateField(required=False, allow_null=True, default=None)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+
 class InvoiceDetailsInputSerializer(serializers.Serializer):
     document_date = serializers.DateField()
     due_date = serializers.DateField(required=False, allow_null=True)
@@ -115,6 +152,14 @@ class InvoiceDetailsInputSerializer(serializers.Serializer):
     payment_terms = serializers.CharField(required=False, allow_blank=True, default='')
     customer_notes = serializers.CharField(required=False, allow_blank=True, default='')
     internal_notes = serializers.CharField(required=False, allow_blank=True, default='')
+    # A חשבונית מס/קבלה's payments, one row per way it was paid, adding up to
+    # its total (G). The older payment_methods — names only, no amounts — is
+    # still read when it names a single method: that one method paid it all.
+    payments = InvoicePaymentInputSerializer(many=True, required=False)
+    # ניכוי במקור the customer withheld: the payments and it come to the total.
+    withholding_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False, default=0, min_value=Decimal('0'),
+    )
     payment_methods = serializers.ListField(
         child=serializers.CharField(), required=False, default=list
     )
@@ -135,6 +180,7 @@ class ReceiptDetailsInputSerializer(serializers.Serializer):
     card_last_four = serializers.CharField(required=False, allow_blank=True, default='')
     card_expiry = serializers.CharField(required=False, allow_blank=True, default='')
     card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    card_brand = serializers.CharField(required=False, allow_blank=True, default='', max_length=30)
     card_installments = serializers.IntegerField(default=1)
     card_notes = serializers.CharField(required=False, allow_blank=True, default='')
     bank_date = serializers.DateField(required=False, allow_null=True)
@@ -218,6 +264,18 @@ class CreateDocumentSerializer(serializers.Serializer):
         }
         if missing:
             raise serializers.ValidationError(missing)
+        if attrs.get('document_type') == 'combined':
+            details = attrs['invoice_details']
+            if not details.get('payments'):
+                methods = details.get('payment_methods') or []
+                if not methods:
+                    raise serializers.ValidationError({'invoice_details': [
+                        'חשבונית מס/קבלה צריכה לפחות אמצעי תשלום אחד וסכומו',
+                    ]})
+                if len(methods) > 1:
+                    raise serializers.ValidationError({'invoice_details': [
+                        'חשבונית מס/קבלה בכמה אמצעי תשלום צריכה את הסכום של כל אחד מהם',
+                    ]})
         return attrs
 
 

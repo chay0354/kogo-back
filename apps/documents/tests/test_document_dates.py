@@ -51,7 +51,7 @@ class Fixture:
         return row.counter if row else 0
 
     def invoice_payload(self, kind, day):
-        return {
+        payload = {
             'document_type': kind,
             'client_type': 'existing',
             'child_id': str(self.kid.id),
@@ -60,6 +60,10 @@ class Fixture:
                 'line_items': [{'description': 'סדנה', 'quantity': 1, 'price': '100.00'}],
             },
         }
+        if kind == 'combined':
+            # ₪100 + 18%, paid in cash (G: an invoice-receipt names its payments).
+            payload['invoice_details']['payments'] = [{'method': 'מזומן', 'amount': '118.00'}]
+        return payload
 
 
 class ValidateDocumentDateTests(Fixture, TestCase):
