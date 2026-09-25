@@ -101,7 +101,31 @@ class DashboardViewSet(viewsets.ViewSet):
                 return True, [], [], []
             return True, partner_course_ids(user), branch_ids, partner_instructor_ids(user)
         return False, None, None, None
-    
+
+    @staticmethod
+    def _paying_in_branches(branch_ids=None, branch_id=None, city_id=None):
+        """Paying enrollments in lessons of the given branches (None = no limit)."""
+        from apps.enrollments.enrollment_counts import paying_enrollments
+
+        qs = paying_enrollments().filter(child__isnull=False)
+        if branch_ids is not None:
+            qs = qs.filter(lesson__course__branch_id__in=branch_ids)
+        if branch_id:
+            qs = qs.filter(lesson__course__branch_id=branch_id)
+        if city_id:
+            qs = qs.filter(lesson__course__branch__city_id=city_id)
+        return qs
+
+    @classmethod
+    def _paying_students_by_branch(cls, branch_ids) -> dict:
+        """{branch id: children with a paying enrollment there}. A child in two branches counts in each."""
+        rows = (
+            cls._paying_in_branches(branch_ids)
+            .values('lesson__course__branch_id')
+            .annotate(count=Count('child_id', distinct=True))
+        )
+        return {str(row['lesson__course__branch_id']): row['count'] for row in rows}
+
     @action(detail=False, methods=['get'], url_path='financial')
     def financial_data(self, request):
         """
@@ -1107,25 +1131,19 @@ class DashboardViewSet(viewsets.ViewSet):
                 )
         
         # KPIs - Only total_students and total_profit (removed active_branches and avg_room_utilization)
-        # A walk-in was never a registration, and a child who left is not a
-        # current student. 'non_active' and 'sign_in' are not statuses this
-        # model has ever defined, so neither exclusion matched anything and
-        # everyone who had left was being counted.
-        children_query = Child.objects.exclude(
-            status__in=['ghost', 'inactive']
+        # A student is a child with a paying enrollment, and belongs to the
+        # branch of the lesson they attend — the rule the instructor dashboard,
+        # the course pages and the capacity counts already use. This used to
+        # count every child not ghost/inactive by the family's branch: every
+        # trial and every pending sign-up went in, and a family registered in
+        # one branch put its children in the wrong one. On 23.9.2026 that read
+        # 1181 against 614 paying.
+        paying = self._paying_in_branches(
+            scoped_branch_ids if scoped else None,
+            branch_id if branch_id and branch_id != 'all' else None,
+            city_id if city_id and city_id != 'all' else None,
         )
-        if scoped:
-            children_query = children_query.filter(family__branch_id__in=scoped_branch_ids)
-        
-        # Apply branch filter
-        if branch_id and branch_id != 'all':
-            children_query = children_query.filter(family__branch_id=branch_id)
-        
-        # Apply city filter
-        if city_id and city_id != 'all':
-            children_query = children_query.filter(family__branch__city_id=city_id)
-        
-        total_students = children_query.count()
+        total_students = paying.values('child_id').distinct().count()
         
         # Total profit is sum across all months in the period
         total_profit_agg = snapshots.aggregate(Sum('profit'))
@@ -1144,14 +1162,10 @@ class DashboardViewSet(viewsets.ViewSet):
         total_profit = total_profit + rental_dec
         
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Total Students (from Child model): %s", total_students)
+            logger.debug("Total Students (paying, by lesson branch): %s", total_students)
             logger.debug("Total Profit aggregation result: %s", total_profit_agg)
             logger.debug("Total Profit (sum of snapshots.profit): %s", total_profit)
         
-        # Same two names that never matched anything, so the per-branch counts
-        # carried departed children too.
-        excluded_child_statuses = ['ghost', 'inactive']
-
         branch_rows = snapshots.values(
             'branch_id',
             'branch__name',
@@ -1163,13 +1177,7 @@ class DashboardViewSet(viewsets.ViewSet):
         )
 
         branch_ids_in_snapshots = [row['branch_id'] for row in branch_rows]
-        student_counts = {
-            str(row['family__branch_id']): row['count']
-            for row in Child.objects.filter(family__branch_id__in=branch_ids_in_snapshots).exclude(
-                status__in=excluded_child_statuses
-            ).values('family__branch_id').annotate(count=Count('id'))
-            if row['family__branch_id']
-        }
+        student_counts = self._paying_students_by_branch(branch_ids_in_snapshots)
 
         # Municipality children per branch, and which branches are external.
         # Kept beside `students` rather than added to it: that figure counts
@@ -1208,16 +1216,9 @@ class DashboardViewSet(viewsets.ViewSet):
             str(b.id): b
             for b in Branch.objects.filter(pk__in=missing_rental_ids).select_related('city')
         }
-        if missing_rental_ids:
-            rental_student_counts = {
-                str(row['family__branch_id']): row['count']
-                for row in Child.objects.filter(family__branch_id__in=missing_rental_ids).exclude(
-                    status__in=excluded_child_statuses
-                ).values('family__branch_id').annotate(count=Count('id'))
-                if row['family__branch_id']
-            }
-        else:
-            rental_student_counts = {}
+        rental_student_counts = (
+            self._paying_students_by_branch(missing_rental_ids) if missing_rental_ids else {}
+        )
 
         for bid_str in missing_rental_ids:
             b = extra_branches.get(bid_str)
