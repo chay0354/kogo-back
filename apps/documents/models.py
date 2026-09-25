@@ -691,8 +691,10 @@ class SignedOriginal(models.Model):
         (DELIVERY_NONE, 'לא נשלח'),
     ]
 
-    # How kogo itself sends the document, when it does; '' for a document that
-    # only goes into the archive (a hand-issued invoice, a till sale).
+    # How kogo mails the original. Since 25.9.2026 every original has one — the
+    # caller's, or its kind's own (signing/sources.Source.default_channel) — and
+    # '' is left only on an archive copy and on rows written before then
+    # (the reroute_undelivered command gives those theirs).
     CHANNEL_IR = 'ir'
     CHANNEL_STORE = 'store'
     CHANNEL_CREDIT_NOTE = 'credit_note'

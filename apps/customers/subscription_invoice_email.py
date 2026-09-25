@@ -69,12 +69,18 @@ def build_subscription_invoice_email(invoice: Invoice) -> tuple[str, str, str]:
     return subject, text, html
 
 
-def send_subscription_invoice_email(invoice: Invoice) -> bool:
-    """Send invoice PDF to payer email. Idempotent via invoice.email_sent_at."""
+def send_subscription_invoice_email(invoice: Invoice, *, email: str = '') -> bool:
+    """
+    Send invoice PDF to payer email. Idempotent via invoice.email_sent_at.
+
+    `email` is an address the office typed for this one send (the signing
+    service's send endpoint, for a family whose card has none); otherwise the
+    payer's address, else the family's.
+    """
     if invoice.email_sent_at:
         return True
 
-    email = (invoice.payer_email or '').strip()
+    email = (email or invoice.payer_email or '').strip()
     if not email and invoice.family_id:
         email = (invoice.family.email or '').strip()
     if not email:

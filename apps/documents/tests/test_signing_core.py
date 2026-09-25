@@ -25,7 +25,7 @@ from apps.documents.signing import SigningUnavailable
 from apps.documents.signing.backends import LocalKeyBackend, get_backend
 from apps.documents.signing.certificate import fingerprint_sha256, load_certificate
 from apps.documents.signing.service import (
-    REASON_ARCHIVE, REASON_UNAVAILABLE, sign_original,
+    REASON_NO_EMAIL, REASON_UNAVAILABLE, sign_original,
 )
 from apps.documents.signing.signer import check_signed_pdf, validation_context
 from apps.documents.tests.signing_support import local_cert_pem, local_key_pem, pdf_text, signing_on
@@ -65,8 +65,10 @@ class SignedOnceAtIssueTests(CardReceiptMixin, TestCase):
         self.assertEqual(row.cert_fingerprint, fingerprint_sha256(load_certificate()))
         # Validated by pyHanko against our own certificate: intact, valid, trusted, whole file.
         check_signed_pdf(stored, load_certificate())
-        # A receipt kogo does not mail: its original goes into the archive.
-        self.assertEqual((row.delivery, row.delivery_reason), (SignedOriginal.DELIVERY_NONE, REASON_ARCHIVE))
+        # The family has no address: the original goes on the hand-delivery list
+        # (until 25.9.2026 it was 'none' — archived and never delivered).
+        self.assertEqual((row.channel, row.delivery, row.delivery_reason),
+                         (SignedOriginal.CHANNEL_FORMAL, SignedOriginal.DELIVERY_PAPER, REASON_NO_EMAIL))
         self.assertEqual(row.document_type_label, 'קבלה')
         self.assertEqual(row.customer_name, self.kid.full_name)
         self.assertEqual(row.total, Decimal('100.00'))

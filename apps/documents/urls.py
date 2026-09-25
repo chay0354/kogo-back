@@ -24,6 +24,7 @@ urlpatterns = [
     path('signing/originals/<uuid:original_id>/file/', signing_views.original_file, name='signing-original-file'),
     path('signing/originals/<uuid:original_id>/print-original/', signing_views.print_original,
          name='signing-print-original'),
+    path('signing/originals/<uuid:original_id>/send/', signing_views.send_original, name='signing-send-original'),
     # The signed archive of documents issued before signing (apps/documents/signing/archive.py).
     path('signing/archive/status/', signing_views.archive_status, name='signing-archive-status'),
     path('signing/archive/run/', signing_views.archive_run, name='signing-archive-run'),
