@@ -4,7 +4,8 @@
 linked to their documents. The office gets exactly that on the child's card:
 every lesson receipt, store sale and manual document — credit notes included —
 newest first. A receipt used to live only in the mail sent at charge time; this
-is the way back to it.
+is the way back to it. Each row also says how its signed original reached the
+family (delivery_status, document_delivery.py), or None when none is stored.
 """
 from __future__ import annotations
 
@@ -17,8 +18,9 @@ from django.http import HttpResponse
 
 from apps.core.permissions import IsManagerOrPartner
 from apps.core.scoping import is_scoped_partner, partner_branch_ids
+from apps.customers.document_delivery import delivery_lookup
 from apps.customers.financial_models import Invoice
-from apps.documents.models import FormalDocument
+from apps.documents.models import FormalDocument, SignedOriginal
 from apps.store.models import StoreInvoice
 
 
@@ -117,8 +119,29 @@ def child_documents(child) -> list[dict]:
             'download_url': f'/documents/documents/{doc.id}/pdf/',
         })
 
+    _attach_delivery(rows)
     rows.sort(key=lambda row: (row['date'], row['document_number']), reverse=True)
     return rows
+
+
+# The card's kind of row, as the signed originals name the issuing table.
+_SIGNED_KIND = {
+    'receipt': SignedOriginal.KIND_IR,
+    'store': SignedOriginal.KIND_STORE,
+    'formal': SignedOriginal.KIND_FORMAL,
+}
+
+
+def _attach_delivery(rows: list[dict]) -> None:
+    """
+    Each row's delivery_status: how its signed original reached the family —
+    mailed, handed over on paper, held, or an archive copy — or None for a
+    document with no stored original (issued before signing). One query.
+    """
+    keys = [(_SIGNED_KIND[row['kind']], row['id'], row['document_number']) for row in rows]
+    found = delivery_lookup(keys)
+    for row, (kind, source_id, _number) in zip(rows, keys):
+        row['delivery_status'] = found.get((kind, str(source_id)))
 
 
 class InvoicePdfView(APIView):
