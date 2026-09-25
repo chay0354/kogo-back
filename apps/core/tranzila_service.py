@@ -25,6 +25,8 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.utils import timezone
 
+from apps.core.card_data import scrub_card_data
+
 logger = logging.getLogger(__name__)
 
 # Tranzila notify/callback: success only when Response == "000".
@@ -401,6 +403,9 @@ class TranzilaService:
     def _build_success_response(self, **kwargs) -> Dict:
         """Build standardized success response."""
         response = {'success': True}
+        if 'raw_response' in kwargs:
+            # Callers store this and send it to the browser: never a CVV.
+            kwargs['raw_response'] = scrub_card_data(kwargs['raw_response'])
         response.update(kwargs)
         return response
 
@@ -1791,7 +1796,7 @@ class TranzilaService:
                 if isinstance(response_data, dict) and (
                     'error_code' in response_data or 'transaction_result' in response_data
                 ):
-                    return response_data
+                    return scrub_card_data(response_data)
                 if isinstance(response_data, dict):
                     return self._build_error_response(
                         response_data.get('message', f'HTTP {response.status_code}'),
@@ -1806,7 +1811,9 @@ class TranzilaService:
 
             if not isinstance(response_data, dict):
                 return self._build_error_response('Invalid JSON response', '999', 'Invalid response format')
-            return response_data
+            # Tranzila echoes the request it received (original_request), CVV
+            # included for a typed card. Nothing downstream may see it.
+            return scrub_card_data(response_data)
 
         except requests.exceptions.Timeout:
             logger.error("Tranzila API request timed out")
