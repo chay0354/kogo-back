@@ -36,6 +36,7 @@ from apps.core.payment_service import (
     enrolled_or_billed_lesson_ids,
     lessons_covered_by_selection,
 )
+from apps.instructors.group_freshness import mark_child_groups_stale
 
 
 WIDGET_STALE_PROCESSING_SECONDS = 90
@@ -1053,6 +1054,8 @@ class WidgetTrialRegisterView(APIView):
             whatsapp_result = {'sent': False, 'reason': 'exception'}
 
         Child.objects.filter(pk=child.pk).update(status='trial_signed')
+        # Around the model, so no signal: the child's groups are recounted on the next look.
+        mark_child_groups_stale(child.pk)
 
         _record_signature(
             request, family=family, child=child, branch=lesson.course.branch, data=data,
@@ -1490,6 +1493,7 @@ class WidgetChargeView(APIView):
                     enrollment_id_for_whatsapp = str(enrollment.id)
 
                     Child.objects.filter(pk=child.pk).update(status='trial_signed')
+                    mark_child_groups_stale(child.pk)
                 else:
                     token = _charge_result_token(result) or _token_from_stored_transaction(payment)
                     if not token:
@@ -1603,6 +1607,7 @@ class WidgetChargeView(APIView):
             Child.objects.filter(pk=child.pk).update(
                 status=_status_after_failed_charge(child, is_trial_payment),
             )
+            mark_child_groups_stale(child.pk)
         # Always answer. This return used to sit inside the `if` above, so a
         # bundle whose first lesson was paid and whose second was declined fell
         # off the end of the function with None — and the loop's
