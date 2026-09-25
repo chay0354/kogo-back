@@ -814,6 +814,15 @@ class TranzilaTransaction(models.Model):
             models.Index(fields=['-created_at']),
         ]
     
+    def save(self, *args, **kwargs):
+        # The last line against keeping card data: whatever a caller hands in,
+        # no security code and no full card number is written (see card_data).
+        from apps.core.card_data import scrub_card_data
+
+        self.request_data = scrub_card_data(self.request_data)
+        self.response_data = scrub_card_data(self.response_data)
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Tranzila {self.transaction_id} - {self.get_transaction_type_display()}"
 
