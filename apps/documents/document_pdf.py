@@ -110,7 +110,9 @@ def _document_fields(doc: FormalDocument) -> list[Field]:
         # Printed exactly as issued — TI-…, CR-…, or an older shape.
         Field('מספר מסמך', doc.document_number),
         Field('תאריך המסמך', date_stamp(doc.document_date)),
-        Field('תאריך ושעה', issue_stamp(doc.created_at)),
+        # The moment it was issued — for an approved draft, the approval; a
+        # document from before issued_at existed shows when its row was made.
+        Field('תאריך ושעה', issue_stamp(doc.issued_at or doc.created_at)),
         *_customer_fields(doc),
         Field('תאריך פירעון', date_stamp(doc.due_date)),
         Field('פרטים', doc.description or ''),

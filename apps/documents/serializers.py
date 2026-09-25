@@ -52,10 +52,10 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
             'linked_document', 'linked_document_number', 'credit_reason',
             'tranzila_doc_id', 'pdf_url', 'tranzila_issued',
             'allocation_number', 'allocation_required', 'allocation_entered_at',
-            'branch', 'created_at', 'updated_at',
+            'branch', 'created_at', 'updated_at', 'issued_at',
             'line_items', 'payments',
         ]
-        read_only_fields = ['id', 'document_number', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'document_number', 'created_at', 'updated_at', 'issued_at']
 
     def get_allocation_required(self, obj):
         return _allocation_required(obj)

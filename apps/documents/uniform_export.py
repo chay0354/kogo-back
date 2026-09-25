@@ -218,7 +218,8 @@ def _manual(row, doc, formal_types: dict) -> UniformDocument:
         # and a private family has none.
         customer_vat=_digits(customer.company_number or customer.id_number) if customer else '',
         linked=linked,
-        produced_at=doc.created_at,
+        # Issued, not typed: an approved draft was produced when it took its number.
+        produced_at=doc.issued_at or doc.created_at,
     )
 
 

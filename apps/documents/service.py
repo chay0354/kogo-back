@@ -8,6 +8,7 @@ from apps.documents.models import (
     FormalDocument, DocumentLineItem, DocumentPayment,
     TRANZILA_DOCUMENT_TYPE,
 )
+from apps.documents.numbering import israel_today
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,22 @@ def _income_tags(data: dict) -> dict:
             business_id = customer.business_id
             category_id = category_id or customer.business_category_id
     return {'business_id': business_id, 'business_category_id': category_id}
+
+
+def _actor(user):
+    """The user a document is recorded as issued by — None for a system run or an anonymous caller."""
+    return user if getattr(user, 'is_authenticated', False) else None
+
+
+def _issued(issued_by) -> dict:
+    """
+    When and by whom a document was issued (FormalDocument.issued_at/issued_by).
+
+    The page's "תאריך ושעה" and the uniform file's 1205/1206 read issued_at:
+    the moment the document took its number, which for an approved draft is the
+    approval, not the day it was typed.
+    """
+    return {'issued_at': timezone.now(), 'issued_by': _actor(issued_by)}
 
 
 def _generate_document_number(document_type: str) -> str:
@@ -91,7 +108,7 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
 
 
 @transaction.atomic
-def create_invoice(data: dict, document_type: str) -> FormalDocument:
+def create_invoice(data: dict, document_type: str, *, issued_by=None) -> FormalDocument:
     """Create a tax invoice or transaction invoice."""
     invoice_data = data['invoice_details']
     # A חשבונית עסקה is not a tax document and carries no VAT — the same rule
@@ -125,6 +142,7 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         customer_notes=invoice_data.get('customer_notes', ''),
         internal_notes=invoice_data.get('internal_notes', ''),
         **totals,
+        **_issued(issued_by),
     )
 
     for item in invoice_data['line_items']:
@@ -190,24 +208,43 @@ def create_draft(data: dict) -> FormalDocument:
 
 
 @transaction.atomic
-def finalize_draft(doc: FormalDocument) -> FormalDocument:
-    """Approve a draft: it becomes its target type and takes the next fiscal number."""
+def finalize_draft(doc: FormalDocument, *, issued_by=None) -> FormalDocument:
+    """
+    Approve a draft: it becomes its target type, takes the next fiscal number,
+    and is dated and stamped the day and moment it is approved.
+
+    The row is locked before it is looked at. Checked first on the caller's
+    copy, two approvals of the same draft both saw a draft: the second waited
+    for the first's lock and then numbered the now-issued document again —
+    leaving its first number a gap in the run and a second signed original.
+    Read under the lock, the second finds a document that is no longer a draft.
+
+    The date is today in Israel, not the day the draft was typed: a document
+    is dated when it is issued (הוראה 17), and a draft kept for a week would
+    otherwise take a number after documents dated later than it.
+    """
+    doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
     if doc.document_type != DRAFT_TYPE:
         raise ValueError('המסמך אינו טיוטה')
     target = doc.draft_target_type or 'tax_invoice'
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'סוג יעד לא נתמך: {target}')
-    doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
     doc.document_type = target
     doc.document_number = _generate_document_number(target)
-    doc.save(update_fields=['document_type', 'document_number', 'updated_at'])
+    doc.document_date = israel_today()
+    issued = _issued(issued_by)
+    doc.issued_at = issued['issued_at']
+    doc.issued_by = issued['issued_by']
+    doc.save(update_fields=[
+        'document_type', 'document_number', 'document_date', 'issued_at', 'issued_by', 'updated_at',
+    ])
     _attempt_tranzila(doc)
     _sign_at_issue(doc)
     return doc
 
 
 @transaction.atomic
-def create_combined(data: dict) -> FormalDocument:
+def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a combined tax invoice + receipt."""
     invoice_data = data['invoice_details']
     totals = _compute_totals(
@@ -238,6 +275,7 @@ def create_combined(data: dict) -> FormalDocument:
         customer_notes=invoice_data.get('customer_notes', ''),
         internal_notes=invoice_data.get('internal_notes', ''),
         **totals,
+        **_issued(issued_by),
     )
 
     for item in invoice_data['line_items']:
@@ -268,7 +306,7 @@ def create_combined(data: dict) -> FormalDocument:
 
 
 @transaction.atomic
-def create_receipt(data: dict) -> FormalDocument:
+def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a standalone receipt."""
     receipt = data['receipt_details']
     method_key = _map_payment_method(receipt['payment_method'])
@@ -293,6 +331,7 @@ def create_receipt(data: dict) -> FormalDocument:
         total_amount=amount,
         linked_document_number=receipt.get('linked_invoice_id', ''),
         customer_notes=receipt.get('check_notes', '') or receipt.get('cash_notes', '') or receipt.get('bank_notes', '') or receipt.get('card_notes', ''),
+        **_issued(issued_by),
     )
 
     payment_kwargs = dict(
@@ -343,7 +382,7 @@ def create_receipt(data: dict) -> FormalDocument:
 
 
 @transaction.atomic
-def create_credit_invoice(data: dict) -> FormalDocument:
+def create_credit_invoice(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a credit note (חשבונית מס זיכוי)."""
     credit = data['credit_invoice_details']
     amount_before_vat = Decimal(str(credit['credit_amount_before_vat']))
@@ -385,6 +424,7 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         credit_reason=credit.get('credit_reason', ''),
         customer_notes=credit.get('customer_notes', ''),
         internal_notes=credit.get('internal_notes', ''),
+        **_issued(issued_by),
     )
 
     _attempt_tranzila(doc)
@@ -560,6 +600,7 @@ def issue_refund_credit_note(
             linked_document_date=original_date,
             credit_reason=reason or 'זיכוי',
             internal_notes='הופק אוטומטית עם זיכוי העסקה',
+            **_issued(None),
         )
         from apps.documents import signing
 

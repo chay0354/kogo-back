@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 
@@ -80,6 +81,14 @@ STORE_RUN_REGEX = r'^(ST|SD)-[0-9]{4}-[0-9]{6,}$'
 # (apps/rental_billing), that the register files under a channel of its own.
 RENTAL_RUN_REGEX = r'^RT-[0-9]{4}-[0-9]{6,}$'
 _RENTAL_RUN = re.compile(RENTAL_RUN_REGEX)
+
+
+ISRAEL_TZ = ZoneInfo('Asia/Jerusalem')
+
+
+def israel_today() -> date:
+    """Today on the calendar in Israel — what a document issued now is dated, whatever the server's clock."""
+    return timezone.localdate(timezone=ISRAEL_TZ)
 
 
 def is_rental_number(number) -> bool:

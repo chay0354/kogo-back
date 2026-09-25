@@ -94,10 +94,13 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         if business_customer_id:
             qs = qs.filter(business_customer_id=business_customer_id)
 
-        # Exclude credit invoices from the "open invoices" list when requested
+        # The "open invoices" pickers (a receipt's link, a credit note's original)
+        # ask for exclude_credits: neither a credit note nor a draft is a
+        # document anything can be paid or credited against — a draft has no
+        # number yet, and is not a tax document until it is approved.
         exclude_credits = self.request.query_params.get('exclude_credits')
         if exclude_credits:
-            qs = qs.exclude(document_type='credit_invoice')
+            qs = qs.exclude(document_type__in=('credit_invoice', 'draft'))
 
         return qs
 
@@ -263,15 +266,16 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         data = serializer.validated_data
         doc_type = data['document_type']
 
+        user = request.user
         try:
             if doc_type in ('tax_invoice', 'transaction_invoice'):
-                doc = service.create_invoice(data, doc_type)
+                doc = service.create_invoice(data, doc_type, issued_by=user)
             elif doc_type == 'combined':
-                doc = service.create_combined(data)
+                doc = service.create_combined(data, issued_by=user)
             elif doc_type == 'receipt':
-                doc = service.create_receipt(data)
+                doc = service.create_receipt(data, issued_by=user)
             elif doc_type == 'credit_invoice':
-                doc = service.create_credit_invoice(data)
+                doc = service.create_credit_invoice(data, issued_by=user)
             elif doc_type == 'draft':
                 doc = service.create_draft(data)
             else:
@@ -293,7 +297,7 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         """
         doc = self.get_object()
         try:
-            doc = service.finalize_draft(doc)
+            doc = service.finalize_draft(doc, issued_by=request.user)
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(FormalDocumentSerializer(doc).data)
