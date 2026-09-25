@@ -225,7 +225,7 @@ def _issue_month(month: CashPlanMonth) -> None:
             ),
             'customer_notes': 'שולם במזומן מראש',
         },
-    }, plan.monthly_document_type)
+    }, plan.monthly_document_type, skip_date_rules=True)  # dated on the month's 1st; WS-3 fixes the dating
 
     month.status = 'invoiced'
     month.document = document

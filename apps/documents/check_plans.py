@@ -142,7 +142,7 @@ def _issue_item_invoice(item: CheckItem) -> None:
                 f"צ'ק {item.check_number}" if item.check_number else "תשלום בצ'ק"
             ),
         },
-    }, 'tax_invoice')
+    }, 'tax_invoice', skip_date_rules=True)  # dated on the check's day; WS-3 fixes the dating
     item.status = 'invoiced'
     item.tax_invoice = invoice
     item.invoiced_at = timezone.now()

@@ -8,7 +8,7 @@ from apps.documents.models import (
     FormalDocument, DocumentLineItem, DocumentPayment,
     TRANZILA_DOCUMENT_TYPE,
 )
-from apps.documents.numbering import israel_today
+from apps.documents.numbering import israel_today, validate_document_date
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,29 @@ def _generate_document_number(document_type: str) -> str:
     return formal_document_number(document_type)
 
 
+def _number_and_date(document_type: str, document_date, *, skip_date_rules: bool = False):
+    """
+    (the next number of the type's run, the date the document carries).
+
+    The number is taken first — DocumentSeries.next_number holds the run's row
+    lock until the transaction ends — and the date is checked against the run
+    after it (numbering.validate_document_date: not in the future, in this tax
+    year, not before the run's latest date). Two documents issued at the same
+    moment are so checked one after the other, and a refused date rolls its
+    number back with the rest of the transaction: no gap.
+
+    `skip_date_rules` is for the office's check and cash plans only
+    (check_plans.py, cash_plans.py). They date a month's document on its
+    check's or month's day, which can be earlier than a document already in
+    the run; their dating is being fixed on its own (work stream WS-3). No
+    other caller passes it.
+    """
+    number = _generate_document_number(document_type)
+    if skip_date_rules:
+        return number, document_date
+    return number, validate_document_date(document_type, document_date)
+
+
 def _sign_at_issue(doc: FormalDocument, **delivery) -> None:
     """
     Record the document's signed original, to be signed after the commit
@@ -108,8 +131,13 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
 
 
 @transaction.atomic
-def create_invoice(data: dict, document_type: str, *, issued_by=None) -> FormalDocument:
-    """Create a tax invoice or transaction invoice."""
+def create_invoice(data: dict, document_type: str, *, issued_by=None,
+                   skip_date_rules: bool = False) -> FormalDocument:
+    """
+    Create a tax invoice or transaction invoice.
+
+    `skip_date_rules=True` only from the check and cash plans (see _number_and_date).
+    """
     invoice_data = data['invoice_details']
     # A חשבונית עסקה is not a tax document and carries no VAT — the same rule
     # the draft path applies, so approving a draft and issuing directly agree.
@@ -123,15 +151,18 @@ def create_invoice(data: dict, document_type: str, *, issued_by=None) -> FormalD
         invoice_data.get('prices_include_vat', False),
     )
 
+    number, document_date = _number_and_date(
+        document_type, invoice_data['document_date'], skip_date_rules=skip_date_rules,
+    )
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number(document_type),
+        document_number=number,
         document_type=document_type,
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=invoice_data['document_date'],
+        document_date=document_date,
         due_date=invoice_data.get('due_date') or None,
         description=invoice_data.get('description', ''),
         currency=invoice_data.get('currency', 'ILS'),
@@ -230,8 +261,7 @@ def finalize_draft(doc: FormalDocument, *, issued_by=None) -> FormalDocument:
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'סוג יעד לא נתמך: {target}')
     doc.document_type = target
-    doc.document_number = _generate_document_number(target)
-    doc.document_date = israel_today()
+    doc.document_number, doc.document_date = _number_and_date(target, israel_today())
     issued = _issued(issued_by)
     doc.issued_at = issued['issued_at']
     doc.issued_by = issued['issued_by']
@@ -256,15 +286,16 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
         invoice_data.get('prices_include_vat', False),
     )
 
+    number, document_date = _number_and_date('combined', invoice_data['document_date'])
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number('combined'),
+        document_number=number,
         document_type='combined',
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=invoice_data['document_date'],
+        document_date=document_date,
         due_date=invoice_data.get('due_date') or None,
         description=invoice_data.get('description', ''),
         currency=invoice_data.get('currency', 'ILS'),
@@ -312,15 +343,18 @@ def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
     method_key = _map_payment_method(receipt['payment_method'])
     amount = _receipt_amount(receipt)
 
+    # Today in Israel when no date is given — the server's UTC date was the
+    # previous day for the first two or three hours of every Israeli morning.
+    number, document_date = _number_and_date('receipt', data.get('document_date') or israel_today())
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number('receipt'),
+        document_number=number,
         document_type='receipt',
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=data.get('document_date', str(timezone.now().date())),
+        document_date=document_date,
         currency='ILS',
         vat_exempt=True,
         vat_percent=Decimal('18'),
@@ -402,15 +436,16 @@ def create_credit_invoice(data: dict, *, issued_by=None) -> FormalDocument:
     # kogo issued it, else as typed (a number from the previous software).
     linked_date = credit.get('linked_document_date') or original_document_date(linked_number)
 
+    number, document_date = _number_and_date('credit_invoice', credit['document_date'])
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number('credit_invoice'),
+        document_number=number,
         document_type='credit_invoice',
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=credit['document_date'],
+        document_date=document_date,
         vat_exempt=vat_exempt,
         vat_percent=Decimal('18'),
         subtotal=amount_before_vat,
@@ -588,7 +623,9 @@ def issue_refund_credit_note(
             customer_name=(customer_name or '').strip() or None,
             branch_id=branch_id,
             business_id=business_id,
-            document_date=timezone.localdate(),
+            # Dated by the system, today: not put to validate_document_date,
+            # since the money has already gone back and the note must follow it.
+            document_date=israel_today(),
             vat_exempt=False,
             vat_percent=Decimal('18'),
             subtotal=before,

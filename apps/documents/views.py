@@ -284,6 +284,12 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             out = FormalDocumentSerializer(doc)
             return Response(out.data, status=status.HTTP_201_CREATED)
 
+        except ValueError as exc:
+            # The service's refusals (a date its run refuses, a payment that
+            # does not add up, a credit above what is left to credit) say why
+            # in Hebrew; nothing was issued and no number was used.
+            logger.info('Document creation refused: %s', exc)
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Document creation failed: {e}", exc_info=True)
             return Response({'error': f'שגיאה ביצירת המסמך: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
