@@ -651,14 +651,22 @@ def _payment_block(layout: InvoiceLayout, styles: dict, width: float) -> Table:
     return block
 
 
-def _bottom_row(layout: InvoiceLayout, styles: dict) -> Table:
-    totals_w = 204.9
-    gap = 24.4
-    payment_w = CONTENT_WIDTH - totals_w - gap
+TOTALS_WIDTH = 204.9
+TOTALS_GAP = 24.4
+# The payment details sit beside the totals in one table row, and a table row
+# cannot break across pages: a row taller than the page is a LayoutError, and
+# the document does not render at all. A receipt for a check plan — a dozen
+# checks, three rows each — is that tall. Past this height the payment details
+# go under the totals instead, as rows that break across pages.
+BOTTOM_ROW_MAX_HEIGHT = (BODY_BOTTOM - BODY_TOP) * 0.6
+
+
+def _bottom_row(layout: InvoiceLayout, styles: dict, *, with_payment: bool = True) -> Table:
+    payment_w = CONTENT_WIDTH - TOTALS_WIDTH - TOTALS_GAP
     row = Table(
-        [[_payment_block(layout, styles, payment_w), '',
-          _totals_card(layout, styles, totals_w)]],
-        colWidths=[payment_w, gap, totals_w],
+        [[_payment_block(layout, styles, payment_w) if with_payment else '', '',
+          _totals_card(layout, styles, TOTALS_WIDTH)]],
+        colWidths=[payment_w, TOTALS_GAP, TOTALS_WIDTH],
     )
     row.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -668,6 +676,29 @@ def _bottom_row(layout: InvoiceLayout, styles: dict) -> Table:
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     return row
+
+
+def _bottom(layout: InvoiceLayout, styles: dict) -> list:
+    """
+    The payment details beside the totals — the sample's layout, and every
+    ordinary document's. When they run taller than BOTTOM_ROW_MAX_HEIGHT, the
+    totals come first and the payment details follow at full width, their rows
+    free to continue on the next page.
+    """
+    row = _bottom_row(layout, styles)
+    _, height = row.wrap(CONTENT_WIDTH, PAGE_HEIGHT)
+    if height <= BOTTOM_ROW_MAX_HEIGHT:
+        return [row]
+    tall: list = [
+        _bottom_row(layout, styles, with_payment=False),
+        Spacer(1, 17),
+        para(layout.payment_heading, styles['heading'], CONTENT_WIDTH),
+        Spacer(1, 8),
+        _pairs_table(layout.payment_fields, styles, CONTENT_WIDTH),
+    ]
+    if layout.payment_note:
+        tall += [Spacer(1, 4), para(layout.payment_note, styles['payment_note'], CONTENT_WIDTH)]
+    return tall
 
 
 def _note_paragraph(note: Note, style: ParagraphStyle, width: float) -> Paragraph:
@@ -757,7 +788,7 @@ def build_story(layout: InvoiceLayout) -> list:
         Spacer(1, 9),
         _items_table(layout, styles),
         Spacer(1, 17),
-        _bottom_row(layout, styles),
+        *_bottom(layout, styles),
     ]
     notes = _notes_block(layout, styles)
     if notes:

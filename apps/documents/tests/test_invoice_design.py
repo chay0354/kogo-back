@@ -373,6 +373,51 @@ class HandIssuedDocumentDesignTests(MandatoryMarkingsMixin, TestCase):
         self.assertIn('02/09/2026', squashed(pdf))
         self.assert_money(pdf, '₪1000.00', '₪180.00', '₪1180.00')
 
+    def test_a_receipt_for_a_dozen_checks_renders_and_names_every_check(self):
+        """
+        A check plan's receipt: twelve checks, three rows each. Beside the totals
+        the payment details are one table row taller than a page, which is a
+        LayoutError — the document did not render at all (office download 500,
+        no signed original). They now go under the totals, across pages.
+        """
+        doc = self.make_document(
+            document_number='RC-2026-000031', document_type='receipt',
+            subtotal=Decimal('14400.00'), vat_amount=Decimal('0.00'), total_amount=Decimal('14400.00'),
+        )
+        for month in range(1, 13):
+            DocumentPayment.objects.create(
+                document=doc, payment_method='check', amount=Decimal('1200.00'),
+                reference=f'{9000000 + month}', check_date=date(2026, month, 10),
+                check_bank='12', check_branch='345', check_account='678901',
+            )
+
+        pdf = generate_document_pdf(doc)
+        save_sample('12-receipt-for-twelve-checks', pdf)
+
+        self.assert_statutory_markings(pdf, 'RC-2026-000031', 'קבלה')
+        self.assert_money(pdf, '₪14400.00')
+        # One details row per check on the page. (pypdf drops a Hebrew run once
+        # a digit interrupts it, so the numbers themselves are checked on the
+        # layout the page was drawn from.)
+        self.assertEqual(squashed(pdf).count("פרטיהצ'ק"), 12)
+        from apps.documents.document_pdf import build_document_layout
+
+        details = [f.value for f in build_document_layout(doc).payment_fields if f.label.startswith("פרטי הצ'ק")]
+        self.assertEqual(len(details), 12)
+        for month, value in enumerate(details, start=1):
+            self.assertIn(f"מס' {9000000 + month}", value)
+            self.assertIn(f'לפירעון 10/{month:02d}/2026', value)
+
+    def test_an_ordinary_document_keeps_the_payment_details_beside_the_totals(self):
+        from apps.documents.document_pdf import build_document_layout
+        from apps.documents.invoice_layout import _bottom, _styles
+
+        doc = self.make_document()
+        DocumentPayment.objects.create(
+            document=doc, payment_method='credit_card', amount=Decimal('1180.00'), card_last_four='4242',
+        )
+        self.assertEqual(len(_bottom(build_document_layout(doc), _styles())), 1)
+
     def test_a_credit_note_names_the_document_it_credits_and_why(self):
         original = self.make_document(document_number='TI-2026-000077')
         credit = self.make_document(
