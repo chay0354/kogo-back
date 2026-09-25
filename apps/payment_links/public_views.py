@@ -23,11 +23,13 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core.tranzila_service import (
-    NOT_A_CHARGE_TRANMODES,
+    CHARGE_TRANMODES,
     TranzilaService,
     invoice_id_from_pdesc,
     is_tranzila_approved,
     report_transaction_amount,
+    report_transaction_time,
+    same_authorization_number,
 )
 from apps.customers.models import TranzilaTransaction
 from apps.payment_links.models import PaymentLink, PaymentLinkPayment, money
@@ -226,18 +228,31 @@ def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> boo
     )
 
 
-def verify_transaction_with_tranzila(row, txn_index: str) -> tuple[str, dict | None]:
+# A report row may predate the row it pays for by this much (clock skew
+# between our server and Tranzila's), never more.
+TRANSACTION_CLOCK_SKEW = timedelta(minutes=10)
+
+
+def verify_transaction_with_tranzila(
+    row, txn_index: str, *, confirmation_code,
+) -> tuple[str, dict | None]:
     """
     Ask Tranzila whether this transaction really paid for this row.
 
     The notify POST itself is not authenticated (Tranzila sends no signature),
     and the hosted-page terminal also takes the other website's payments. A
     row is marked paid only when the terminal's own report shows, under this
-    number, an approved charge of exactly this sum that no other order of
-    ours already holds. Anything else lands on review for a person.
+    number:
+      * an approved charge — tranmode A or AK only (a J2 check comes back
+        approved with the same sum and moves no money);
+      * of exactly this sum;
+      * with the approval number the notify reported;
+      * made after this row was created;
+      * that no other order of ours already holds.
+    Anything else lands on review for a person.
 
-    `row` needs `id` and `amount` (shekels). Returns ('verified', txn_row) |
-    ('unverified', txn_row or None) | ('unavailable', None).
+    `row` needs `id`, `amount` (shekels) and `created_at`. Returns
+    ('verified', txn_row) | ('unverified', txn_row or None) | ('unavailable', None).
     """
     txn_index = str(txn_index or '').strip()
     if not txn_index.isdigit():
@@ -260,10 +275,17 @@ def verify_transaction_with_tranzila(row, txn_index: str) -> tuple[str, dict | N
     reasons = []
     if not is_tranzila_approved(txn.get('processor_response_code') or txn.get('response_code')):
         reasons.append('not approved')
-    if str(txn.get('tranmode') or '').strip().upper().startswith(NOT_A_CHARGE_TRANMODES):
-        reasons.append(f"tranmode {txn.get('tranmode')}")
+    if str(txn.get('tranmode') or '').strip().upper() not in CHARGE_TRANMODES:
+        reasons.append(f"tranmode {txn.get('tranmode')!r} is not a charge")
     if report_transaction_amount(txn) != money(row.amount):
         reasons.append(f'sum {report_transaction_amount(txn)} != {money(row.amount)}')
+    if not same_authorization_number(txn.get('authorization_number'), confirmation_code):
+        reasons.append('approval number differs from the notify')
+    made_at = report_transaction_time(txn)
+    if made_at is None:
+        reasons.append('no transaction time on the report')
+    elif made_at < row.created_at - TRANSACTION_CLOCK_SKEW:
+        reasons.append(f'transaction made before this order ({made_at.isoformat()})')
     pdesc = str(txn.get('pdesc') or '').strip()
     if pdesc and invoice_id_from_pdesc(pdesc) != str(row.id):
         reasons.append('pdesc of another order')
@@ -370,7 +392,9 @@ def payment_link_callback(request):
             row.review_reason = f'currency:{currency}'[:200]
         else:
             # The POST is unauthenticated; only Tranzila's own ledger makes it income.
-            verdict, _txn_row = verify_transaction_with_tranzila(row, txn_index)
+            verdict, _txn_row = verify_transaction_with_tranzila(
+                row, txn_index, confirmation_code=parsed.get('confirmation_code'),
+            )
             if verdict == 'verified':
                 row.status = PaymentLinkPayment.STATUS_COMPLETED
                 row.review_reason = ''

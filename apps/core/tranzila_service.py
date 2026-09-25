@@ -16,7 +16,8 @@ import requests
 import secrets
 import time
 import uuid
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlencode
 from decimal import Decimal, InvalidOperation
@@ -129,9 +130,15 @@ def is_tranzila_uncertain_gateway_error(response: Optional[Dict]) -> bool:
     return any(token in error for token in ('timeout', 'timed out', 'connection error', 'cannot connect'))
 
 
-# tranmode prefixes of a report row that moved no money to us: a credit, a
-# card check (J5) and a token made without a charge.
-NOT_A_CHARGE_TRANMODES = ('C', 'V', 'K')
+# The report tranmodes that moved money to us: a charge, and a charge that
+# also made a token. An allow-list, not a block-list: the handshake locks only
+# the sum, so a payer can change tranmode in the page URL — to N (J2), a card
+# check that moves no money yet comes back approved with the same sum.
+CHARGE_TRANMODES = frozenset({'A', 'AK'})
+
+# The report's transaction_date / transaction_time are Israel local time
+# ('2026-09-23' '16:30:30' for a 16:30 charge, 23.9.2026).
+TRANZILA_REPORT_TZ = ZoneInfo('Asia/Jerusalem')
 
 
 # Hosted-page parameter that shows each wallet button.
@@ -148,6 +155,31 @@ def wallet_params() -> Dict[str, str]:
         else:
             logger.warning("TRANZILA_WALLETS: unknown wallet %r ignored", wallet)
     return params
+
+
+def report_transaction_time(txn: Optional[Dict]) -> Optional[datetime]:
+    """When a /v1/transactions row was made, timezone-aware; None if unreadable."""
+    if not isinstance(txn, dict):
+        return None
+    day = str(txn.get('transaction_date') or '').strip()
+    clock = str(txn.get('transaction_time') or '').strip() or '00:00:00'
+    try:
+        naive = datetime.strptime(f'{day} {clock}', '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return None
+    return naive.replace(tzinfo=TRANZILA_REPORT_TZ)
+
+
+def same_authorization_number(reported, notified) -> bool:
+    """
+    The approval number on the report row equals the one in the notify.
+
+    Compared without leading zeros ('0000777' and '777' are one number). An
+    empty number on either side never matches.
+    """
+    left = str(reported or '').strip().lstrip('0')
+    right = str(notified or '').strip().lstrip('0')
+    return bool(left) and left == right
 
 
 def report_transaction_amount(txn: Optional[Dict]) -> Optional[Decimal]:
@@ -237,19 +269,6 @@ def extract_card_token(*sources: Optional[Dict]) -> str:
             if token:
                 return token
     return ''
-
-
-def default_notify_url() -> str:
-    """
-    Webhook URL handed to Tranzila when a caller does not supply one.
-
-    Without it Tranzila never calls back, so iframe payments would stay pending
-    forever. Empty when CRM_API_BASE_URL is unset (local dev).
-    """
-    base = (getattr(settings, 'CRM_API_BASE_URL', '') or '').strip().rstrip('/')
-    if not base or 'localhost' in base or '127.0.0.1' in base:
-        return ''
-    return f"{base}/api/v1/customers/payments/webhook/"
 
 
 class TranzilaService:
@@ -449,11 +468,13 @@ class TranzilaService:
             bool(self.webhook_secret),
             'configured' if self.webhook_secret else 'TRANZILA_WEBHOOK_SECRET missing — webhook callbacks are unverified',
         )
-        notify_url = default_notify_url()
+        # There is no default notify address any more: every hosted page is
+        # built with its own callback. Payment links build theirs from this.
+        crm_api_base = (getattr(settings, 'CRM_API_BASE_URL', '') or '').strip()
         add(
-            'notify_url',
-            bool(notify_url),
-            notify_url or 'CRM_API_BASE_URL missing — iframe payments would never be confirmed',
+            'crm_api_base_url',
+            bool(crm_api_base),
+            crm_api_base or 'CRM_API_BASE_URL missing — payment links cannot be confirmed',
         )
         add(
             'environment',
@@ -533,14 +554,14 @@ class TranzilaService:
             params['success_url_address'] = success_url
         if error_url and 'localhost' not in error_url:
             params['fail_url_address'] = error_url
-        notify_url = callback_url or default_notify_url()
+        # No fallback: the default used to be the course webhook, which trusted
+        # any POST and is closed. A page built without its own callback is
+        # never confirmed, and says so in the log.
+        notify_url = callback_url
         if notify_url and 'localhost' not in notify_url and '127.0.0.1' not in notify_url:
             params['notify_url_address'] = notify_url
         elif not notify_url:
-            logger.warning(
-                "Tranzila iframe built without notify_url_address; set CRM_API_BASE_URL "
-                "so payments are confirmed by webhook"
-            )
+            logger.warning("Tranzila hosted page built without a callback: it will never be confirmed")
         if transaction_id:
             params['cred_type'] = '1'
             params['pdesc'] = pdesc_for_tranzila(transaction_id)

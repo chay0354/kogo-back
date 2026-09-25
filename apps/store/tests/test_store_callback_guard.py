@@ -5,16 +5,25 @@ an approved transaction with that index and that sum — and a notify that
 arrives twice must not sell the cart twice.
 """
 import json
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.core.tranzila_service import TranzilaService
 from apps.store.models import StoreInvoice, StoreProduct, StoreSale
 
 CALLBACK_URL = '/api/v1/store/payment/callback/'
+
+
+def report_clock(moment):
+    """transaction_date / transaction_time as the report writes them: Israel local time."""
+    local = moment.astimezone(ZoneInfo('Asia/Jerusalem'))
+    return {'transaction_date': local.strftime('%Y-%m-%d'), 'transaction_time': local.strftime('%H:%M:%S')}
 
 
 @override_settings(
@@ -59,8 +68,14 @@ class StoreCallbackGuardTest(TestCase):
         return patch.object(TranzilaService, 'find_transaction', autospec=True, side_effect=find)
 
     # The shape /v1/transactions really returns (cogolive, 23.9.2026): the
-    # amount in agorot and no pdesc — 8 ₪ is '800'.
-    PAID = {'index': '123456', 'amount': '800', 'processor_response_code': '000', 'tranmode': 'A'}
+    # amount in agorot and no pdesc — 8 ₪ is '800' — with the approval number
+    # the notify quotes and the time it was made.
+    @property
+    def PAID(self):
+        return {
+            'index': '123456', 'amount': '800', 'processor_response_code': '000', 'tranmode': 'A',
+            'authorization_number': '0001234', **report_clock(timezone.now()),
+        }
 
     def _state(self):
         self.invoice.refresh_from_db()
@@ -146,3 +161,33 @@ class StoreCallbackGuardTest(TestCase):
         self.assertFalse(response.data['success'])
         self.assertEqual(response.data['error'], 'Invoice not found')
         self.assertEqual(self._state(), ('pending', 0, 10))
+
+    # --- 25.9.2026: only a real charge, with its own approval, after the order ---
+
+    def test_a_card_check_with_the_same_sum_is_not_a_payment(self):
+        # The handshake locks the sum, not tranmode: a payer can turn the page
+        # into a J2 check (tranmode N), which comes back approved and moves no money.
+        with self._ledger([{**self.PAID, 'tranmode': 'N'}]):
+            self._notify()
+        self.assertEqual(self._state(), ('pending', 0, 10))
+
+    def test_another_approval_number_is_not_this_payment(self):
+        with self._ledger([{**self.PAID, 'authorization_number': '0009999'}]):
+            self._notify()
+        self.assertEqual(self._state(), ('pending', 0, 10))
+
+    def test_a_notify_without_an_approval_number_is_not_trusted(self):
+        with self._ledger([self.PAID]):
+            self._notify(ConfirmationCode='')
+        self.assertEqual(self._state(), ('pending', 0, 10))
+
+    def test_a_charge_made_before_the_order_did_not_pay_for_it(self):
+        earlier = {**self.PAID, **report_clock(timezone.now() - timedelta(hours=2))}
+        with self._ledger([earlier]):
+            self._notify()
+        self.assertEqual(self._state(), ('pending', 0, 10))
+
+    def test_leading_zeros_do_not_make_another_approval(self):
+        with self._ledger([{**self.PAID, 'authorization_number': '1234'}]):
+            self._notify()
+        self.assertEqual(self._state(), ('completed', 1, 8))

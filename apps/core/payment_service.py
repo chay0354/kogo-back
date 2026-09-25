@@ -2193,12 +2193,15 @@ class PaymentService:
 
                 # The notify POST is public and unsigned: anyone who knows an
                 # invoice id can send `Response=000`. Only Tranzila's own ledger
-                # — an approved transaction with this index and this sum, the
-                # same check the payment links make — turns it into a sale. The
-                # helper reads `id` and `amount` off the row it is handed.
+                # — an approved charge with this index, this sum and this
+                # approval number, made after the invoice, the same check the
+                # payment links make — turns it into a sale. The helper reads
+                # `id`, `amount` and `created_at` off the row it is handed.
                 txn_index = str(tranzila_response.get('transaction_id') or '').strip()
                 verdict, _txn_row = verify_transaction_with_tranzila(
-                    SimpleNamespace(id=invoice.id, amount=invoice.total_amount), txn_index,
+                    SimpleNamespace(id=invoice.id, amount=invoice.total_amount, created_at=invoice.created_at),
+                    txn_index,
+                    confirmation_code=tranzila_response.get('confirmation_code'),
                 )
                 if verdict != 'verified':
                     # Stays pending — nothing sold, no stock moved, no document —
