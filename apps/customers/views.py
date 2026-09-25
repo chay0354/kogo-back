@@ -2215,6 +2215,24 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
             revoke_consent(customer)
         return Response(BusinessCustomerSerializer(customer).data)
 
+    @action(detail=True, methods=['get'], url_path='summary')
+    def summary(self, request, pk=None):
+        """
+        GET /api/v1/customers/business-customers/{id}/summary/ — the business customer's card.
+
+        Identity, consent, every document issued to them with how its signed
+        original was delivered, drafts apart, the previous software's history
+        (managers only, as /legacy-import/documents/), the tenancies they hold
+        and the totals. Read only. The customer is found through get_object(),
+        so a partner gets a 404 for anyone outside their scope; what is inside
+        is narrowed for them too (apps/customers/business_customer_summary.py).
+        """
+        from apps.customers.business_customer_summary import business_customer_summary
+
+        customer = self.get_object()
+        include_legacy = IsManager().has_permission(request, self)
+        return Response(business_customer_summary(customer, request.user, include_legacy=include_legacy))
+
     def destroy(self, request, *args, **kwargs):
         from apps.customers.document_retention import BUSINESS_REFUSAL, business_customer_holds_documents
 

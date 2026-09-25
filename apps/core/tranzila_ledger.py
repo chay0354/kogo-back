@@ -262,6 +262,8 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'allocation_required': _allocation_required(doc),
             'origin': ORIGIN_MANUAL,
             'origin_label': ORIGIN_LABELS[ORIGIN_MANUAL],
+            # The business customer's card opens from the row (…/business-customers/{id}/summary/).
+            'business_customer_id': str(doc.business_customer_id) if doc.business_customer_id else None,
             **row_dimensions(branch=doc.branch, business=doc.business),
             'branch': doc.branch.name if doc.branch_id else '',
             'branch_id': str(doc.branch_id) if doc.branch_id else None,
@@ -431,6 +433,8 @@ def _merge_documents(*groups: list[dict]) -> list[dict]:
                         existing['pdf_url'] = row['pdf_url']
                     if not existing.get('store_invoice_id') and row.get('store_invoice_id'):
                         existing['store_invoice_id'] = row['store_invoice_id']
+                    if not existing.get('business_customer_id') and row.get('business_customer_id'):
+                        existing['business_customer_id'] = row['business_customer_id']
                 continue
             for key in keys:
                 if key:
