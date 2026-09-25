@@ -166,10 +166,19 @@ class InvoiceDetailsInputSerializer(serializers.Serializer):
     payment_methods = serializers.ListField(
         child=serializers.CharField(), required=False, default=list
     )
+    # מספר הקצאה, when the office already has it from the Tax Authority's
+    # portal: printed on the original from the start (B). Nine digits.
+    allocation_number = serializers.CharField(required=False, allow_blank=True, default='', max_length=20)
     # A combined document paid by check: the check is crossed "לא סחיר", in the
     # customer's name (הוראה 18ב(ד)(2)). A receipt says it per check, in
     # receipt_details.checks[].check_crossed.
     check_crossed = serializers.BooleanField(required=False, default=False)
+
+    def validate_allocation_number(self, value):
+        digits = ''.join(ch for ch in (value or '') if ch.isdigit())
+        if (value or '').strip() and len(digits) != 9:
+            raise serializers.ValidationError('מספר הקצאה הוא 9 ספרות')
+        return digits
 
 
 class ReceiptDetailsInputSerializer(serializers.Serializer):
@@ -270,6 +279,11 @@ class CreateDocumentSerializer(serializers.Serializer):
         }
         if missing:
             raise serializers.ValidationError(missing)
+        details = attrs.get('invoice_details') or {}
+        if details.get('allocation_number') and attrs.get('document_type') not in ('tax_invoice', 'combined'):
+            raise serializers.ValidationError({'invoice_details': {'allocation_number': [
+                'מספר הקצאה נרשם על חשבונית מס או חשבונית מס/קבלה בלבד',
+            ]}})
         if attrs.get('document_type') == 'credit_invoice':
             # סעיף 9(ה)(4): the original's number AND its date. kogo finds the
             # date of a document it issued; a number it never issued (the

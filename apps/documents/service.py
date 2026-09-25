@@ -66,6 +66,22 @@ def _issued(issued_by) -> dict:
     return {'issued_at': timezone.now(), 'issued_by': _actor(issued_by)}
 
 
+def _allocation_at_issue(invoice_data: dict, issued_by) -> dict:
+    """
+    מספר הקצאה typed with the document (B), so the original carries it from
+    the first print — a number added later is only ever on a copy. Checked to
+    nine digits by the serializer; entered by the issuing user, now.
+    """
+    number = (invoice_data.get('allocation_number') or '').strip()
+    if not number:
+        return {}
+    return {
+        'allocation_number': number,
+        'allocation_entered_at': timezone.now(),
+        'allocation_entered_by': _actor(issued_by),
+    }
+
+
 def _generate_document_number(document_type: str) -> str:
     """The next number in the run of the document's type (numbering.FORMAL_SERIES, סעיף 5(ג))."""
     from apps.documents.numbering import formal_document_number
@@ -174,6 +190,7 @@ def create_invoice(data: dict, document_type: str, *, issued_by=None,
         internal_notes=invoice_data.get('internal_notes', ''),
         **totals,
         **_issued(issued_by),
+        **_allocation_at_issue(invoice_data, issued_by),
     )
 
     for item in invoice_data['line_items']:
@@ -308,6 +325,7 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
         withholding_amount=_withholding(invoice_data.get('withholding_amount')),
         **totals,
         **_issued(issued_by),
+        **_allocation_at_issue(invoice_data, issued_by),
     )
 
     for item in invoice_data['line_items']:
