@@ -416,17 +416,18 @@ def create_credit_invoice(data: dict, *, issued_by=None) -> FormalDocument:
     vat_amount = Decimal('0') if vat_exempt else (amount_before_vat * VAT_RATE).quantize(AGORA, rounding=ROUND_HALF_UP)
     total = amount_before_vat + vat_amount
 
-    # Try to resolve linked document
-    linked_number = credit.get('linked_invoice_id', '').strip()
-    linked_doc = None
-    if linked_number:
-        try:
-            linked_doc = FormalDocument.objects.get(document_number=linked_number)
-        except FormalDocument.DoesNotExist:
-            pass
-    # The original's date is printed beside its number: from the document when
-    # kogo issued it, else as typed (a number from the previous software).
-    linked_date = credit.get('linked_document_date') or original_document_date(linked_number)
+    if amount_before_vat <= 0:
+        raise ValueError('סכום הזיכוי חייב להיות גדול מאפס')
+    linked_number = (credit.get('linked_invoice_id') or '').strip()
+    # What it credits, when kogo issued it: checked (type, customer, what is
+    # left to credit) under a lock on the original, so two credits at once
+    # cannot together pass its total.
+    linked_doc = _check_creditable(linked_number, data, amount_before_vat)
+    # The original's date is printed beside its number (סעיף 9(ה)(4)): kogo's
+    # own record of it when kogo issued it — a date typed beside a number kogo
+    # knows is not trusted over the document — else as typed (the previous
+    # software's number).
+    linked_date = original_document_date(linked_number) or credit.get('linked_document_date')
 
     number, document_date = _number_and_date('credit_invoice', credit['document_date'])
     doc = FormalDocument.objects.create(
@@ -481,6 +482,35 @@ def create_credit_invoice(data: dict, *, issued_by=None) -> FormalDocument:
     return doc
 
 
+def record_customer_ack(doc: FormalDocument, note: str) -> FormalDocument:
+    """
+    Record that the customer confirmed receiving a credit note (הוראה 23א(3)):
+    the credit reduces the VAT only once they have. `note` says how — a
+    signature on the copy, registered mail, a signed reply. Recorded once.
+    """
+    note = (note or '').strip()
+    if doc.document_type != 'credit_invoice':
+        raise ValueError('אישור לקוח נרשם על חשבונית זיכוי בלבד')
+    if not note:
+        raise ValueError('יש לציין איך הלקוח אישר את קבלת הזיכוי (חתימה על העתק, דואר רשום, תשובה חתומה)')
+    with transaction.atomic():
+        locked = FormalDocument.objects.select_for_update().get(pk=doc.pk)
+        if locked.customer_ack_at is not None:
+            raise AlreadyAcknowledged(locked.customer_ack_at)
+        locked.customer_ack_at = timezone.now()
+        locked.customer_ack_note = note[:300]
+        locked.save(update_fields=['customer_ack_at', 'customer_ack_note', 'updated_at'])
+    return locked
+
+
+class AlreadyAcknowledged(Exception):
+    """The customer's confirmation of a credit note is on record already — it is not written over."""
+
+    def __init__(self, at):
+        super().__init__(at)
+        self.at = at
+
+
 def _email_credit_note_after_commit(doc_id, *, customer_name: str | None = None, email: str | None = None) -> None:
     """The credit note's mail, after its document committed. Its failure is logged, never raised."""
     doc = FormalDocument.objects.select_related('business_customer', 'child__family', 'linked_document').get(pk=doc_id)
@@ -488,6 +518,73 @@ def _email_credit_note_after_commit(doc_id, *, customer_name: str | None = None,
         _email_credit_note(doc, customer_name=customer_name, email=email)
     except Exception:
         logger.exception('Credit note email failed for %s (non-fatal; the signing cron retries)', doc.document_number)
+
+
+# What a credit note may credit (הוראה 23א, סעיף 9(ה)): a tax invoice, or a
+# tax invoice-receipt. Not a receipt (no VAT was charged on it), not a
+# transaction invoice (a demand for payment, not a tax document), not a draft
+# (no number yet), and not another credit note.
+CREDITABLE_TYPES = ('tax_invoice', 'combined')
+
+
+def _check_creditable(number: str, data: dict, amount_before_vat: Decimal):
+    """
+    The original a credit note credits, checked — or None for a number kogo
+    never issued (the previous software's, which only its date can vouch for).
+
+    A FormalDocument must be a tax invoice or invoice-receipt of the same
+    customer. Whatever kogo issued it through — the office, a lesson receipt
+    (IR) or a store sale (ST) — the credit may not pass what is left of it
+    before VAT: its amount less the credit notes already issued against it.
+    """
+    if not number:
+        return None
+    from django.db.models import Q, Sum
+
+    from apps.core.vat import split_vat_inclusive
+    from apps.customers.financial_models import Invoice
+    from apps.store.models import StoreInvoice
+
+    original = FormalDocument.objects.select_for_update().filter(document_number=number).first()
+    if original is not None:
+        if original.document_type not in CREDITABLE_TYPES:
+            label = original.get_document_type_display()
+            raise ValueError(
+                f'{number} הוא {label}. חשבונית זיכוי מזכה חשבונית מס או חשבונית מס/קבלה בלבד.'
+            )
+        other_child = original.child_id and str(original.child_id) != str(data.get('child_id') or '')
+        other_business = (
+            original.business_customer_id
+            and str(original.business_customer_id) != str(data.get('business_customer_id') or '')
+        )
+        if other_child or other_business:
+            raise ValueError(f'{number} הונפק ללקוח אחר. זיכוי ניתן רק ללקוח שקיבל את המסמך המקורי.')
+        net = original.subtotal - original.discount_amount
+    elif number.startswith('SD-'):
+        raise ValueError(
+            f'{number} הוא חשבונית עסקה של החנות — דרישת תשלום ולא מסמך מס, ואין מה לזכות בה.'
+        )
+    else:
+        lesson = Invoice.objects.select_for_update().filter(invoice_number=number).first()
+        sale = None if lesson else StoreInvoice.objects.select_for_update().filter(invoice_number=number).first()
+        if lesson is None and sale is None:
+            return None
+        if lesson is not None and lesson.status in ('pending', 'failed'):
+            raise ValueError(f'{number} לא הפך למסמך (החיוב לא הושלם), ואין מה לזכות בו.')
+        net = split_vat_inclusive(lesson.amount if lesson else sale.total_amount)[0]
+
+    credited = (
+        FormalDocument.objects.filter(document_type='credit_invoice')
+        .filter(Q(linked_document_number=number) | (Q(linked_document=original) if original else Q(pk__in=[])))
+        .aggregate(total=Sum('subtotal'))['total'] or Decimal('0')
+    )
+    left = net - credited
+    if amount_before_vat > left:
+        raise ValueError(
+            f'אפשר לזכות את {number} עד {_money_text(max(left, Decimal("0")))} לפני מע"מ '
+            f'(סכומו {_money_text(net)}, וכבר זוכו {_money_text(credited)}).'
+        )
+    return original
 
 
 def original_document_date(number: str):

@@ -7,6 +7,7 @@ from django.db.models import Q
 from django.core.mail import send_mail
 from django.conf import settings
 from django.http import HttpResponse
+from django.utils import timezone
 
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.customers.models import Child
@@ -77,6 +78,34 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             'id': str(doc.id),
             'allocation_number': doc.allocation_number,
             'allocation_entered_at': doc.allocation_entered_at,
+        })
+
+    @action(detail=True, methods=['post'], url_path='customer-ack',
+            permission_classes=[IsAuthenticated, IsManager])
+    def customer_ack(self, request, pk=None):
+        """
+        POST /api/v1/documents/documents/{id}/customer-ack/  {note}
+
+        הוראה 23א(3): a credit note reduces the VAT once the customer confirms
+        receiving it. Records when, and how (`note`: a signature on the copy,
+        registered mail, a signed reply). Once — a second answer is 409.
+        """
+        doc = self.get_object()
+        try:
+            doc = service.record_customer_ack(doc, request.data.get('note') or '')
+        except service.AlreadyAcknowledged as exc:
+            return Response(
+                {'error': f'אישור הלקוח כבר נרשם ({timezone.localtime(exc.at):%d/%m/%Y %H:%M})'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info('Credit note %s: customer acknowledgement recorded by %s',
+                    doc.document_number, getattr(request.user, 'email', request.user))
+        return Response({
+            'id': str(doc.id),
+            'customer_ack_at': doc.customer_ack_at,
+            'customer_ack_note': doc.customer_ack_note,
         })
 
     def get_queryset(self):

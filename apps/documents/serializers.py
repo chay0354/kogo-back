@@ -51,13 +51,16 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
             'vat_exempt', 'vat_percent',
             'subtotal', 'discount_amount', 'discount_percent', 'vat_amount', 'total_amount',
             'customer_notes', 'internal_notes',
-            'linked_document', 'linked_document_number', 'credit_reason',
+            'linked_document', 'linked_document_number', 'linked_document_date', 'credit_reason',
+            'customer_ack_at', 'customer_ack_note', 'withholding_amount',
             'tranzila_doc_id', 'pdf_url', 'tranzila_issued',
             'allocation_number', 'allocation_required', 'allocation_entered_at',
             'branch', 'created_at', 'updated_at', 'issued_at',
             'line_items', 'payments',
         ]
-        read_only_fields = ['id', 'document_number', 'created_at', 'updated_at', 'issued_at']
+        read_only_fields = [
+            'id', 'document_number', 'created_at', 'updated_at', 'issued_at', 'customer_ack_at', 'customer_ack_note',
+        ]
 
     def get_allocation_required(self, obj):
         return _allocation_required(obj)
@@ -204,7 +207,10 @@ class CreditInvoiceInputSerializer(serializers.Serializer):
     )
     linked_document_date = serializers.DateField(required=False, allow_null=True)
     credit_reason = serializers.CharField()
-    credit_amount_before_vat = serializers.DecimalField(max_digits=12, decimal_places=2)
+    credit_amount_before_vat = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+        error_messages={'min_value': 'סכום הזיכוי חייב להיות גדול מאפס'},
+    )
     vat_exempt = serializers.BooleanField(default=False)
     customer_notes = serializers.CharField(required=False, allow_blank=True, default='')
     internal_notes = serializers.CharField(required=False, allow_blank=True, default='')
@@ -264,6 +270,18 @@ class CreateDocumentSerializer(serializers.Serializer):
         }
         if missing:
             raise serializers.ValidationError(missing)
+        if attrs.get('document_type') == 'credit_invoice':
+            # סעיף 9(ה)(4): the original's number AND its date. kogo finds the
+            # date of a document it issued; a number it never issued (the
+            # previous software's) has to come with its date.
+            from apps.documents.service import original_document_date
+
+            credit = attrs['credit_invoice_details']
+            number = (credit.get('linked_invoice_id') or '').strip()
+            if number and not credit.get('linked_document_date') and original_document_date(number) is None:
+                raise serializers.ValidationError({'credit_invoice_details': {'linked_document_date': [
+                    f'{number} אינו מסמך שהופק בקוגו — יש לציין את תאריך המסמך המקורי',
+                ]}})
         if attrs.get('document_type') == 'combined':
             details = attrs['invoice_details']
             if not details.get('payments'):
