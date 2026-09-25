@@ -553,3 +553,68 @@ class SystemAuditRun(models.Model):
 
     def __str__(self):
         return f'{self.day} · {self.area}'
+
+
+class LoginSession(models.Model):
+    """
+    One signed-in device.
+
+    The DRF Token is one per user and shared by every device the user signs in
+    on, so signing out anywhere signed out everywhere: on 24.9.2026 a phone had
+    23 attendance marks refused mid-lesson because the same account had signed
+    out on another device minutes before. Each sign-in now gets a key of its
+    own; signing out ends that key only, and a password reset ends them all.
+
+    Only a hash of the key is stored. The key itself is handed to the device
+    once, at sign-in, and a copy of this table is no use to anyone.
+    """
+
+    # Marks a per-device key, so the authentication class knows which table to
+    # look in without trying both. Old shared keys are plain hex and keep
+    # working until their user signs out.
+    KEY_PREFIX = 'kd_'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='login_sessions', verbose_name="משתמש",
+    )
+    key_hash = models.CharField(max_length=64, unique=True, verbose_name="טביעת המפתח")
+    user_agent = models.CharField(max_length=255, blank=True, verbose_name="דפדפן")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="התחבר")
+    last_used_at = models.DateTimeField(null=True, blank=True, verbose_name="שימוש אחרון")
+
+    class Meta:
+        db_table = 'login_sessions'
+        verbose_name = "התחברות ממכשיר"
+        verbose_name_plural = "התחברויות ממכשירים"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.user} · {self.created_at:%d.%m.%Y %H:%M}'
+
+    @staticmethod
+    def hash_key(key: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(key.encode('utf-8')).hexdigest()
+
+    @classmethod
+    def is_device_key(cls, key: str) -> bool:
+        return bool(key) and key.startswith(cls.KEY_PREFIX)
+
+    @classmethod
+    def issue(cls, user, *, user_agent: str = '') -> str:
+        """Start a session for this device and return its key — the only copy."""
+        import secrets
+
+        key = f'{cls.KEY_PREFIX}{secrets.token_urlsafe(32)}'
+        cls.objects.create(user=user, key_hash=cls.hash_key(key), user_agent=(user_agent or '')[:255])
+        return key
+
+    @classmethod
+    def end_all(cls, user) -> None:
+        """Sign the user out of every device: their sessions and the old shared key."""
+        from rest_framework.authtoken.models import Token
+
+        cls.objects.filter(user=user).delete()
+        Token.objects.filter(user=user).delete()

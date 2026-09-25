@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from django.contrib.auth import get_user_model
-from apps.core.models import UserProfile
+from apps.core.models import LoginSession, UserProfile
 from apps.core.auth_serializers import (
     LoginSerializer,
     CurrentUserSerializer,
@@ -49,8 +49,8 @@ class LoginView(APIView):
         if not user:
             return Response({'error': 'שם משתמש או סיסמה שגויים'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Create or reuse token
-        token, _ = Token.objects.get_or_create(user=user)
+        # A key of this device's own: signing out here ends this key and no other.
+        key = LoginSession.issue(user, user_agent=request.META.get('HTTP_USER_AGENT', ''))
 
         # Count this sign-in. F() so two tabs signing in at once cannot both
         # read the same value and write the same increment.
@@ -63,7 +63,7 @@ class LoginView(APIView):
             {
                 'user': CurrentUserSerializer(user).data,
                 # Lets SPA on another origin authenticate (SameSite=Lax cookies are not sent on cross-site XHR).
-                'token': token.key,
+                'token': key,
             },
             status=status.HTTP_200_OK,
         )
@@ -72,7 +72,7 @@ class LoginView(APIView):
         max_age = int(timedelta(days=30).total_seconds())
         response.set_cookie(
             key='auth_token',
-            value=token.key,
+            value=key,
             max_age=max_age,
             httponly=True,
             secure=not settings.DEBUG,
@@ -128,8 +128,14 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Invalidate token (simple + safe)
-        Token.objects.filter(user=request.user).delete()
+        # A device signed in with its own key ends that key only, so the user's
+        # other devices stay signed in. An old shared key (from before per-device
+        # keys) is still revoked for every device that holds it — they sign in
+        # again and get keys of their own.
+        if isinstance(request.auth, LoginSession):
+            LoginSession.objects.filter(pk=request.auth.pk).delete()
+        else:
+            Token.objects.filter(user=request.user).delete()
 
         response = Response({'ok': True}, status=status.HTTP_200_OK)
         response.delete_cookie('auth_token', path='/')

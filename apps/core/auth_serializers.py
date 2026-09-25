@@ -43,12 +43,13 @@ class ResetPasswordSerializer(serializers.Serializer):
         return attrs
 
     def save(self):
-        from rest_framework.authtoken.models import Token
+        from apps.core.models import LoginSession
 
         user = self.validated_data['user']
         user.set_password(self.validated_data['password'])
         user.save(update_fields=['password'])
-        Token.objects.filter(user=user).delete()
+        # A new password signs the user out of every device.
+        LoginSession.end_all(user)
         return user
 
 

@@ -14,13 +14,13 @@ import logging
 
 from django.http import HttpResponse
 from rest_framework import status
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.core.authentication import CookieTokenAuthentication
 from apps.rentals.models import RentalContract
 from apps.rentals.signing import (
     NOT_FOUND,
@@ -54,7 +54,7 @@ def _opened_by_staff(request) -> bool:
     views authenticate nobody, so the token is read here and only for this.
     """
     try:
-        found = TokenAuthentication().authenticate(request)
+        found = CookieTokenAuthentication().authenticate(request)
     except AuthenticationFailed:
         return False
     return bool(found and found[0] and found[0].is_active)
