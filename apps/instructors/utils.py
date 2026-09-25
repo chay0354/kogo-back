@@ -1091,14 +1091,22 @@ def _drop_cancelled_lesson_snapshots(month: str) -> None:
         LessonMonthlySnapshot.objects.filter(lesson__in=cancelled_lessons, month=month).delete()
 
 
-def _store_lesson_snapshot(lesson, month: str, cancellations_dict: dict, should_finalize: bool) -> bool:
-    """One group's month, recounted and stored. True when the row is new."""
+def _store_lesson_snapshot(
+    lesson, month: str, cancellations_dict: dict, should_finalize: bool, profitability: Optional[dict] = None,
+) -> bool:
+    """
+    One group's month, recounted and stored. True when the row is new.
+
+    `profitability` is the count already made for this group and month, when
+    the caller has one; otherwise it is made here.
+    """
     from apps.core.models import LessonMonthlySnapshot
 
-    profitability = calculate_lesson_profitability(
-        lesson, lesson.instructor, month=month,
-        cancellations_dict=cancellations_dict
-    )
+    if profitability is None:
+        profitability = calculate_lesson_profitability(
+            lesson, lesson.instructor, month=month,
+            cancellations_dict=cancellations_dict
+        )
     _, created = LessonMonthlySnapshot.objects.update_or_create(
         lesson=lesson,
         month=month,
@@ -1310,6 +1318,11 @@ def instructor_lesson_rows(instructor, month: str, *, force_refresh: bool = Fals
     used when it belongs to this instructor and was stored after `fresh_since`
     (STORED_ROW_FRESH_HOURS ago by default: the morning recount plus a margin);
     every other group is counted live.
+
+    A row is also out of date as soon as something changes the group's numbers
+    — a registration, a payment, a child's status (see group_freshness). Those
+    groups are counted again here, and for the running month the new count is
+    stored, so the next look at the page is fast and already up to date.
     """
     from django.utils import timezone
 
@@ -1320,7 +1333,7 @@ def instructor_lesson_rows(instructor, month: str, *, force_refresh: bool = Fals
 
     lessons = list(
         instructor_current_lessons(instructor)
-        .select_related('course', 'course__branch', 'course__course_type', 'room')
+        .select_related('instructor', 'course', 'course__branch', 'course__course_type', 'room')
         .prefetch_related(
             # The live count reads each enrolment's child status.
             Prefetch('enrollments', queryset=LessonEnrollment.objects.select_related('child')),
@@ -1349,16 +1362,39 @@ def instructor_lesson_rows(instructor, month: str, *, force_refresh: bool = Fals
             _lessons_by_id(live), month_start, month_end, effective_end=None,
         )
 
+    store_back = month == timezone.now().strftime('%Y-%m')
     rows = []
     for lesson in lessons:
         snap = stored.get(lesson.id)
         if snap is not None:
             rows.append(lesson_profitability_from_snapshot(snap))
-        else:
-            rows.append(calculate_lesson_profitability(
-                lesson, instructor, month=month, cancellations_dict=cancellations_dict,
-            ))
+            continue
+        row = calculate_lesson_profitability(
+            lesson, instructor, month=month, cancellations_dict=cancellations_dict,
+        )
+        rows.append(row)
+        if store_back:
+            _store_counted_row(lesson, month, cancellations_dict, row)
     return rows
+
+
+def _store_counted_row(lesson, month: str, cancellations_dict: dict, row: dict) -> None:
+    """
+    Keep a count the page just made. Never raises: the page has its answer
+    either way, and a second viewer storing the same group at the same moment
+    only means one of the two writes is the one kept.
+    """
+    from django.db import IntegrityError
+
+    try:
+        with transaction.atomic():
+            _store_lesson_snapshot(lesson, month, cancellations_dict, should_finalize=False, profitability=row)
+    except IntegrityError:
+        pass
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).exception('could not store the count of group %s', lesson.id)
 
 
 def _lessons_by_id(lessons):
