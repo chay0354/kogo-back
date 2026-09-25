@@ -321,40 +321,12 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
             'salary_is_finalized': False,
         }
     
-    def retrieve(self, request, *args, **kwargs):
-        """
-        Retrieve single instructor with detailed financial information
-        """
-        from apps.core.models import InstructorMonthlySnapshot, LessonMonthlySnapshot
-        from apps.instructors.serializers import InstructorMonthlySnapshotSerializer
-        from apps.instructors.utils import lesson_profitability_from_snapshot, _batch_load_cancellations, _month_start_end, _parse_month_str
-        
-        instructor = self.get_object()
-        month = request.query_params.get('month', None)
-        target_month = month or timezone.now().strftime('%Y-%m')
-        force_refresh = request.query_params.get('refresh', '').lower() in ('1', 'true', 'yes')
-
-        snap = InstructorMonthlySnapshot.objects.filter(
-            instructor=instructor,
-            month=target_month,
-        ).first()
-
-        if snap is not None and not force_refresh:
-            metrics = {
-                'students_count': snap.total_students,
-                'revenue': snap.total_revenue,
-                'salary': snap.total_salary,
-                'profit': snap.profit,
-            }
-        elif force_refresh:
-            metrics = calculate_instructor_monthly_metrics(instructor, month)
-        else:
-            metrics = {
-                'students_count': snap.total_students if snap else 0,
-                'revenue': snap.total_revenue if snap else Decimal('0.00'),
-                'salary': snap.total_salary if snap else Decimal('0.00'),
-                'profit': snap.profit if snap else Decimal('0.00'),
-            }
+    def _closed_month_lessons(self, instructor, target_month, force_refresh):
+        """A month already over: its stored rows, or a live count when it has none."""
+        from apps.core.models import LessonMonthlySnapshot
+        from apps.instructors.utils import (
+            _batch_load_cancellations, _month_start_end, _parse_month_str, lesson_profitability_from_snapshot,
+        )
 
         lesson_snaps = list(LessonMonthlySnapshot.objects.filter(
             instructor=instructor,
@@ -411,6 +383,68 @@ class InstructorViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
                         'name': lesson.course.name,
                         'course_type': lesson.course.course_type.name if lesson.course.course_type else None,
                     }
+        return lessons_data, unique_courses
+
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Retrieve single instructor with detailed financial information
+        """
+        from uuid import UUID
+
+        from apps.core.models import InstructorMonthlySnapshot
+        from apps.instructors.serializers import InstructorMonthlySnapshotSerializer
+        from apps.instructors.utils import instructor_lesson_rows
+
+        instructor = self.get_object()
+        month = request.query_params.get('month', None)
+        target_month = month or timezone.now().strftime('%Y-%m')
+        force_refresh = request.query_params.get('refresh', '').lower() in ('1', 'true', 'yes')
+
+        snap = InstructorMonthlySnapshot.objects.filter(
+            instructor=instructor,
+            month=target_month,
+        ).first()
+
+        if snap is not None and not force_refresh:
+            metrics = {
+                'students_count': snap.total_students,
+                'revenue': snap.total_revenue,
+                'salary': snap.total_salary,
+                'profit': snap.profit,
+            }
+        elif force_refresh:
+            metrics = calculate_instructor_monthly_metrics(instructor, month)
+        else:
+            metrics = {
+                'students_count': snap.total_students if snap else 0,
+                'revenue': snap.total_revenue if snap else Decimal('0.00'),
+                'salary': snap.total_salary if snap else Decimal('0.00'),
+                'profit': snap.profit if snap else Decimal('0.00'),
+            }
+
+        # The month that is running (or one ahead) lists the groups themselves.
+        # Listing the stored monthly rows instead left out every group whose row
+        # the morning recount had not reached — more than half of them on
+        # 25.9.2026 — and any group handed over from another instructor. A
+        # closed month keeps reading its stored rows: they are the record.
+        if target_month >= timezone.now().strftime('%Y-%m'):
+            lessons_data = instructor_lesson_rows(instructor, target_month, force_refresh=force_refresh)
+            course_types = dict(
+                Lesson.objects.filter(id__in=[row['lesson_id'] for row in lessons_data])
+                .values_list('course_id', 'course__course_type__name')
+            )
+            unique_courses = {}
+            for row in lessons_data:
+                course_id = row.get('course_id')
+                if course_id and course_id not in unique_courses:
+                    unique_courses[course_id] = {
+                        'id': course_id,
+                        'display_id': row.get('course_display_id'),
+                        'name': row.get('course_name'),
+                        'course_type': course_types.get(UUID(course_id)),
+                    }
+        else:
+            lessons_data, unique_courses = self._closed_month_lessons(instructor, target_month, force_refresh)
 
         snapshots = InstructorMonthlySnapshot.objects.filter(
             instructor=instructor

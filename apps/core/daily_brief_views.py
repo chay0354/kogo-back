@@ -9,7 +9,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.core.daily_brief import build_daily_brief, check_catalogue, run_check, summarise
+from apps.core.daily_brief import RESUMABLE_CHECKS, build_daily_brief, check_catalogue, run_check, summarise
 from apps.core.models import DailyBriefSnapshot
 from apps.core.permissions import IsManager
 
@@ -76,7 +76,10 @@ class DailyBriefCheckView(APIView):
         key = str(request.data.get('key') or '').strip()
         if key not in {entry['key'] for entry in check_catalogue()}:
             return Response({'error': f'אין בדיקה בשם {key}'}, status=status.HTTP_400_BAD_REQUEST)
-        merge_into_today(started_marker(key))
+        # A slice of a resumable check is short by design, and its last answer
+        # holds the place the next slice starts from — a marker would wipe it.
+        if key not in RESUMABLE_CHECKS:
+            merge_into_today(started_marker(key))
         item = run_check(key)
         snapshot = merge_into_today(item)
         return Response({'item': item, 'brief': snapshot.payload, 'stored_at': snapshot.created_at})
@@ -149,7 +152,15 @@ def started_marker(key: str) -> dict:
 
 
 def run_pending_checks(*, budget_seconds: float) -> int:
-    """Run the checks today's brief does not have yet. Returns how many ran."""
+    """
+    Run the checks today's brief does not have yet. Returns how many ran.
+
+    The ordinary checks first, until `budget_seconds` is spent. Then one slice
+    of the first morning fix that is not finished (RESUMABLE_CHECKS): those take
+    several minutes in all, so each call moves one of them forward and the
+    calls every few minutes around 9:00 finish them. A check whose answer says
+    `continues` is not done yet.
+    """
     import time as _time
 
     from django.utils import timezone as dj_timezone
@@ -158,18 +169,27 @@ def run_pending_checks(*, budget_seconds: float) -> int:
     snapshot = DailyBriefSnapshot.objects.order_by('-created_at').first()
     done = set()
     if snapshot is not None and (snapshot.payload or {}).get('for_date') == today:
-        done = {item.get('key') for item in (snapshot.payload or {}).get('items') or []}
+        done = {
+            item.get('key')
+            for item in (snapshot.payload or {}).get('items') or []
+            if not item.get('continues')
+        }
 
     started = _time.monotonic()
     ran = 0
     for entry in check_catalogue():
         # The audit's line is refreshed at the end of every call instead.
-        if entry['key'] in done or entry['key'] == 'weekly_audit':
+        if entry['key'] in done or entry['key'] == 'weekly_audit' or entry['key'] in RESUMABLE_CHECKS:
             continue
         if _time.monotonic() - started > budget_seconds:
             break
         merge_into_today(started_marker(entry['key']))
         merge_into_today(run_check(entry['key']))
+        ran += 1
+
+    unfinished = [key for key in RESUMABLE_CHECKS if key not in done]
+    if unfinished:
+        merge_into_today(run_check(unfinished[0]))
         ran += 1
     return ran
 

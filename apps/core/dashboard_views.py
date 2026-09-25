@@ -36,6 +36,12 @@ from apps.customers.models import Child, Family
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.external_students.roster import external_counts_by_branch, external_counts_by_course
 
+# The manual "refresh this month" works in slices (see refresh_current_month):
+# this long per request, and a row recounted within this many minutes counts
+# as done, so the next press carries on rather than starting over.
+REFRESH_SLICE_SECONDS = 90
+REFRESH_KEEP_MINUTES = 30
+
 
 def parse_date_filters(request):
     """Parse date_from and date_to from request params"""
@@ -1483,18 +1489,29 @@ class DashboardViewSet(viewsets.ViewSet):
         Dashboard GET endpoints read existing snapshots only (fast). Use this
         endpoint or the Celery beat task to regenerate current-month data.
         """
-        from apps.instructors.utils import generate_monthly_snapshots
-        
+        from apps.instructors.utils import refresh_month_snapshots
+
         today = timezone.now().date()
         current_month = today.strftime('%Y-%m')
-        
+
         try:
-            # Generate snapshots for current month (not finalized)
-            summary = generate_monthly_snapshots(current_month, finalize=False)
-            
+            # The whole month is longer than one request may run, so this does
+            # a slice and says whether it finished; the screen calls again
+            # until it has. Rows recounted in the last few minutes are kept, so
+            # every call moves forward instead of starting over.
+            summary = refresh_month_snapshots(
+                current_month,
+                budget_seconds=REFRESH_SLICE_SECONDS,
+                since=timezone.now() - timedelta(minutes=REFRESH_KEEP_MINUTES),
+            )
+
             return Response({
                 'success': True,
-                'message': f'נתוני {current_month} עודכנו בהצלחה',
+                'finished': summary['finished'],
+                'message': (
+                    f'נתוני {current_month} עודכנו בהצלחה' if summary['finished']
+                    else f"מעדכן את {current_month}: {summary['lessons_done']} מתוך {summary['lessons_total']} קבוצות"
+                ),
                 'summary': summary
             })
         except Exception as e:

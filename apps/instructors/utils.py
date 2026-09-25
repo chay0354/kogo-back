@@ -6,7 +6,7 @@ from datetime import datetime, date, timedelta
 import calendar
 from typing import Optional
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from apps.enrollments.enrollment_counts import (
     ACTIVE_STUDENT_CHILD_STATUSES,
     TRIAL_CHILD_STATUSES,
@@ -19,6 +19,11 @@ from apps.enrollments.models import LessonEnrollment
 DEFAULT_LESSON_SALARY = Decimal('250.00')
 LESSONS_PER_MONTH = 4
 
+
+# The instructor page trusts a group's stored monthly row for this long: the
+# morning recount refreshes every row daily, and a row older than this means it
+# has not, so the group is counted live instead.
+STORED_ROW_FRESH_HOURS = 36
 
 SALARY_STUDENT_STATUSES = ("active", "payments_problem")
 REVENUE_ENROLLMENT_STATUSES = ("active",)  # revenue approximated as "paid" enrollments only
@@ -997,12 +1002,9 @@ def generate_monthly_snapshots(month, finalize=False):
     Returns:
         dict: Summary of created snapshots
     """
-    from apps.instructors.models import Instructor, InstructorBonus
+    from apps.instructors.models import Instructor
     from apps.courses.models import Lesson
-    from apps.core.models import (
-        Branch,
-        InstructorMonthlySnapshot, LessonMonthlySnapshot, BranchMonthlySnapshot
-    )
+    from apps.core.models import Branch
     from django.utils import timezone
     
     # Determine if we should finalize based on the month
@@ -1020,35 +1022,13 @@ def generate_monthly_snapshots(month, finalize=False):
     year, m = _parse_month_str(month)
     
     # Generate instructor snapshots
-    instructors = Instructor.objects.filter(is_active=True)
-    for instructor in instructors:
-        metrics = calculate_instructor_monthly_metrics(instructor, month)
-        
-        snapshot, created = InstructorMonthlySnapshot.objects.update_or_create(
-            instructor=instructor,
-            month=month,
-            defaults={
-                'total_lessons': metrics['lessons_count'],
-                'total_students': metrics['students_count'],
-                'base_revenue': metrics.get('base_revenue', Decimal('0.00')),
-                'total_discounts': metrics.get('total_discounts', Decimal('0.00')),
-                'total_revenue': metrics['revenue'],
-                'total_salary': metrics['salary'],
-                'total_bonuses': metrics['bonuses'],
-                'profit': metrics['profit'],
-                'cancelled_count': metrics['cancelled_count'],
-                'avg_attendance_rate': metrics['avg_attendance_rate'],
-                'is_finalized': should_finalize
-            }
-        )
-        if created:
+    for instructor in Instructor.objects.filter(is_active=True):
+        if _store_instructor_snapshot(instructor, month, should_finalize):
             instructors_created += 1
-    
+
     # Clean up stale snapshots: if a lesson template itself is cancelled (Lesson.status='cancelled'),
     # remove its monthly snapshots so branch aggregation won't include it.
-    cancelled_lessons = Lesson.objects.filter(status='cancelled')
-    if cancelled_lessons.exists():
-        LessonMonthlySnapshot.objects.filter(lesson__in=cancelled_lessons, month=month).delete()
+    _drop_cancelled_lesson_snapshots(month)
 
     # Generate snapshots for active lessons
     lessons = Lesson.objects.exclude(
@@ -1061,95 +1041,14 @@ def generate_monthly_snapshots(month, finalize=False):
 
     for lesson in lessons:
         if lesson.instructor:
-            profitability = calculate_lesson_profitability(
-                lesson, lesson.instructor, month=month,
-                cancellations_dict=cancellations_dict
-            )
-
-            snapshot, created = LessonMonthlySnapshot.objects.update_or_create(
-                lesson=lesson,
-                month=month,
-                defaults={
-                    'instructor': lesson.instructor,
-                    'course': lesson.course,
-                    'branch': lesson.course.branch,
-                    'enrolled_students': profitability['student_count'],
-                    'base_revenue': Decimal(profitability['base_revenue']),
-                    'total_discounts': Decimal(profitability['total_discounts']),
-                    'revenue': Decimal(profitability['revenue']),
-                    'instructor_salary': Decimal(profitability['salary']),
-                    'profit': Decimal(profitability['profit']),
-                    'is_finalized': should_finalize
-                }
-            )
-            if created:
+            if _store_lesson_snapshot(lesson, month, cancellations_dict, should_finalize):
                 lessons_created += 1
 
     # Generate branch snapshots
-    branches = Branch.objects.all()
-    for branch in branches:
-        # Aggregate from lesson snapshots
-        lesson_snaps = LessonMonthlySnapshot.objects.filter(
-            branch=branch,
-            month=month
-        )
-        
-        total_students = sum(ls.enrolled_students for ls in lesson_snaps)
-        base_revenue = sum(ls.base_revenue for ls in lesson_snaps)
-        total_discounts = sum(ls.total_discounts for ls in lesson_snaps)
-        total_revenue = sum(ls.revenue for ls in lesson_snaps)
-        
-        # COMPONENT 1: Instructor salaries from lessons
-        instructor_salaries = sum(ls.instructor_salary for ls in lesson_snaps)
-        
-        # COMPONENT 2: Instructor bonuses for this branch in this month
-        # Get all instructors teaching in this branch
-        instructor_ids = lesson_snaps.values_list('instructor_id', flat=True).distinct()
-        bonuses = InstructorBonus.objects.filter(
-            instructor_id__in=instructor_ids,
-            bonus_date__year=year,
-            bonus_date__month=m
-        )
-        instructor_bonuses = sum(bonus.amount for bonus in bonuses)
-        
-        # COMPONENT 3: Branch operational costs (cleaning, monthly expenses)
-        operational_costs = Decimal('0.00')
-        if branch.cleaning_cost:
-            operational_costs += branch.cleaning_cost
-        if branch.monthly_cost:
-            operational_costs += branch.monthly_cost
-        
-        # TOTAL EXPENSES = Salaries + Bonuses + Operational Costs
-        total_expenses = instructor_salaries + instructor_bonuses + operational_costs
-        profit = total_revenue - total_expenses
-        
-        # Count active courses - using same filter logic as lesson snapshots
-        active_courses = Lesson.objects.filter(
-            course__branch=branch
-        ).exclude(
-            status='cancelled'
-        ).values('course').distinct().count()
-        
-        snapshot, created = BranchMonthlySnapshot.objects.update_or_create(
-            branch=branch,
-            month=month,
-            defaults={
-                'total_students': total_students,
-                'base_revenue': base_revenue,
-                'total_discounts': total_discounts,
-                'total_revenue': total_revenue,
-                'instructor_salaries': instructor_salaries,
-                'instructor_bonuses': instructor_bonuses,
-                'operational_costs': operational_costs,
-                'instructor_costs': total_expenses,  # Total of all 3 components
-                'profit': profit,
-                'active_courses_count': active_courses,
-                'is_finalized': should_finalize
-            }
-        )
-        if created:
+    for branch in Branch.objects.all():
+        if _store_branch_snapshot(branch, month, should_finalize):
             branches_created += 1
-    
+
     return {
         'month': month,
         'instructors_created': instructors_created,
@@ -1157,3 +1056,313 @@ def generate_monthly_snapshots(month, finalize=False):
         'branches_created': branches_created
     }
 
+
+def _store_instructor_snapshot(instructor, month: str, should_finalize: bool) -> bool:
+    """One instructor's month, recounted and stored. True when the row is new."""
+    from apps.core.models import InstructorMonthlySnapshot
+
+    metrics = calculate_instructor_monthly_metrics(instructor, month)
+    _, created = InstructorMonthlySnapshot.objects.update_or_create(
+        instructor=instructor,
+        month=month,
+        defaults={
+            'total_lessons': metrics['lessons_count'],
+            'total_students': metrics['students_count'],
+            'base_revenue': metrics.get('base_revenue', Decimal('0.00')),
+            'total_discounts': metrics.get('total_discounts', Decimal('0.00')),
+            'total_revenue': metrics['revenue'],
+            'total_salary': metrics['salary'],
+            'total_bonuses': metrics['bonuses'],
+            'profit': metrics['profit'],
+            'cancelled_count': metrics['cancelled_count'],
+            'avg_attendance_rate': metrics['avg_attendance_rate'],
+            'is_finalized': should_finalize
+        }
+    )
+    return created
+
+
+def _drop_cancelled_lesson_snapshots(month: str) -> None:
+    from apps.core.models import LessonMonthlySnapshot
+    from apps.courses.models import Lesson
+
+    cancelled_lessons = Lesson.objects.filter(status='cancelled')
+    if cancelled_lessons.exists():
+        LessonMonthlySnapshot.objects.filter(lesson__in=cancelled_lessons, month=month).delete()
+
+
+def _store_lesson_snapshot(lesson, month: str, cancellations_dict: dict, should_finalize: bool) -> bool:
+    """One group's month, recounted and stored. True when the row is new."""
+    from apps.core.models import LessonMonthlySnapshot
+
+    profitability = calculate_lesson_profitability(
+        lesson, lesson.instructor, month=month,
+        cancellations_dict=cancellations_dict
+    )
+    _, created = LessonMonthlySnapshot.objects.update_or_create(
+        lesson=lesson,
+        month=month,
+        defaults={
+            'instructor': lesson.instructor,
+            'course': lesson.course,
+            'branch': lesson.course.branch,
+            'enrolled_students': profitability['student_count'],
+            'base_revenue': Decimal(profitability['base_revenue']),
+            'total_discounts': Decimal(profitability['total_discounts']),
+            'revenue': Decimal(profitability['revenue']),
+            'instructor_salary': Decimal(profitability['salary']),
+            'profit': Decimal(profitability['profit']),
+            'is_finalized': should_finalize
+        }
+    )
+    return created
+
+
+def _store_branch_snapshot(branch, month: str, should_finalize: bool) -> bool:
+    """A branch's month, summed from its groups' rows. True when the row is new."""
+    from apps.core.models import BranchMonthlySnapshot, LessonMonthlySnapshot
+    from apps.courses.models import Lesson
+    from apps.instructors.models import InstructorBonus
+
+    year, m = _parse_month_str(month)
+
+    # Aggregate from lesson snapshots
+    lesson_snaps = LessonMonthlySnapshot.objects.filter(
+        branch=branch,
+        month=month
+    )
+
+    total_students = sum(ls.enrolled_students for ls in lesson_snaps)
+    base_revenue = sum(ls.base_revenue for ls in lesson_snaps)
+    total_discounts = sum(ls.total_discounts for ls in lesson_snaps)
+    total_revenue = sum(ls.revenue for ls in lesson_snaps)
+
+    # COMPONENT 1: Instructor salaries from lessons
+    instructor_salaries = sum(ls.instructor_salary for ls in lesson_snaps)
+
+    # COMPONENT 2: Instructor bonuses for this branch in this month
+    # Get all instructors teaching in this branch
+    instructor_ids = lesson_snaps.values_list('instructor_id', flat=True).distinct()
+    bonuses = InstructorBonus.objects.filter(
+        instructor_id__in=instructor_ids,
+        bonus_date__year=year,
+        bonus_date__month=m
+    )
+    instructor_bonuses = sum(bonus.amount for bonus in bonuses)
+
+    # COMPONENT 3: Branch operational costs (cleaning, monthly expenses)
+    operational_costs = Decimal('0.00')
+    if branch.cleaning_cost:
+        operational_costs += branch.cleaning_cost
+    if branch.monthly_cost:
+        operational_costs += branch.monthly_cost
+
+    # TOTAL EXPENSES = Salaries + Bonuses + Operational Costs
+    total_expenses = instructor_salaries + instructor_bonuses + operational_costs
+    profit = total_revenue - total_expenses
+
+    # Count active courses - using same filter logic as lesson snapshots
+    active_courses = Lesson.objects.filter(
+        course__branch=branch
+    ).exclude(
+        status='cancelled'
+    ).values('course').distinct().count()
+
+    _, created = BranchMonthlySnapshot.objects.update_or_create(
+        branch=branch,
+        month=month,
+        defaults={
+            'total_students': total_students,
+            'base_revenue': base_revenue,
+            'total_discounts': total_discounts,
+            'total_revenue': total_revenue,
+            'instructor_salaries': instructor_salaries,
+            'instructor_bonuses': instructor_bonuses,
+            'operational_costs': operational_costs,
+            'instructor_costs': total_expenses,  # Total of all 3 components
+            'profit': profit,
+            'active_courses_count': active_courses,
+            'is_finalized': should_finalize
+        }
+    )
+    return created
+
+
+def refresh_month_snapshots(month: str, *, budget_seconds: Optional[float] = None, since=None) -> dict:
+    """
+    generate_monthly_snapshots, in slices that fit inside one request.
+
+    The whole month takes longer than the hosting allows a single request (300
+    seconds), and the request is killed part-way: every morning the same first
+    groups were recounted and the rest never got a row at all, so the
+    instructor page — which lists the stored rows — showed fewer than half of
+    the groups (25.9.2026: 111 of 236).
+
+    Here a row counts as done once it was stored after `since` (the start of
+    today by default), so the next call carries on where this one stopped
+    without any cursor of its own. Groups first, because the instructor page
+    reads them; then instructors; then branches, which are summed from the
+    groups' rows and so only once every group is in.
+
+    Returns progress, with `finished` true once all three are stored. Never
+    finalises: this is for the month that is still running.
+    """
+    import time
+
+    from django.utils import timezone
+
+    from apps.core.models import Branch, InstructorMonthlySnapshot, LessonMonthlySnapshot
+    from apps.courses.models import Lesson
+    from apps.instructors.models import Instructor
+
+    started = time.monotonic()
+
+    def out_of_time() -> bool:
+        return budget_seconds is not None and time.monotonic() - started > budget_seconds
+
+    if since is None:
+        since = timezone.localtime(timezone.now()).replace(hour=0, minute=0, second=0, microsecond=0)
+    year, m = _parse_month_str(month)
+    month_start, month_end = _month_start_end(year, m)
+
+    _drop_cancelled_lesson_snapshots(month)
+
+    lessons = (
+        Lesson.objects.exclude(status='cancelled')
+        .filter(instructor__isnull=False)
+        .select_related('instructor', 'course', 'course__branch')
+        # Every enrolment and its child in one read. Without it each group read
+        # its roster twice and then every child on it one by one — most of the
+        # time the full recount took.
+        .prefetch_related(Prefetch('enrollments', queryset=LessonEnrollment.objects.select_related('child')))
+        # Groups that are running come first: those are the ones on screen.
+        .order_by('-course__is_active', 'id')
+    )
+    fresh_lessons = set(
+        LessonMonthlySnapshot.objects.filter(month=month, updated_at__gte=since)
+        .values_list('lesson_id', flat=True)
+    )
+    lesson_list = list(lessons)
+    pending_lessons = [lesson for lesson in lesson_list if lesson.id not in fresh_lessons]
+    if pending_lessons:
+        cancellations_dict = _batch_load_cancellations(
+            _lessons_by_id(pending_lessons), month_start, month_end, effective_end=None,
+        )
+        for lesson in pending_lessons:
+            if out_of_time():
+                break
+            _store_lesson_snapshot(lesson, month, cancellations_dict, should_finalize=False)
+            fresh_lessons.add(lesson.id)
+
+    lessons_done = sum(1 for lesson in lesson_list if lesson.id in fresh_lessons)
+
+    instructors = list(Instructor.objects.filter(is_active=True).order_by('id'))
+    fresh_instructors = set(
+        InstructorMonthlySnapshot.objects.filter(month=month, updated_at__gte=since)
+        .values_list('instructor_id', flat=True)
+    )
+    if lessons_done == len(lesson_list):
+        for instructor in instructors:
+            if instructor.id in fresh_instructors:
+                continue
+            if out_of_time():
+                break
+            _store_instructor_snapshot(instructor, month, should_finalize=False)
+            fresh_instructors.add(instructor.id)
+    instructors_done = sum(1 for instructor in instructors if instructor.id in fresh_instructors)
+
+    finished = lessons_done == len(lesson_list) and instructors_done == len(instructors)
+    if finished:
+        for branch in Branch.objects.all():
+            _store_branch_snapshot(branch, month, should_finalize=False)
+
+    return {
+        'month': month,
+        'finished': finished,
+        'lessons_done': lessons_done,
+        'lessons_total': len(lesson_list),
+        'instructors_done': instructors_done,
+        'instructors_total': len(instructors),
+    }
+
+
+def instructor_current_lessons(instructor):
+    """
+    The groups an instructor teaches now, as the schedule shows them: weekly,
+    not cancelled, in a course and a course type that are still active.
+    """
+    from apps.courses.models import Lesson
+
+    return (
+        Lesson.objects.filter(instructor=instructor, is_recurring=True, course__is_active=True)
+        .exclude(status='cancelled')
+        .filter(Q(course__course_type__is_active=True) | Q(course__course_type__isnull=True))
+    )
+
+
+def instructor_lesson_rows(instructor, month: str, *, force_refresh: bool = False, fresh_since=None) -> list[dict]:
+    """
+    One row per group the instructor teaches now, for the instructor page.
+
+    The list comes from the groups themselves, not from the stored monthly rows:
+    a group whose row was never stored (or was stored under the instructor it
+    had before) used to be missing from the page altogether. A stored row is
+    used when it belongs to this instructor and was stored after `fresh_since`
+    (STORED_ROW_FRESH_HOURS ago by default: the morning recount plus a margin);
+    every other group is counted live.
+    """
+    from django.utils import timezone
+
+    from apps.core.models import LessonMonthlySnapshot
+
+    if fresh_since is None:
+        fresh_since = timezone.now() - timedelta(hours=STORED_ROW_FRESH_HOURS)
+
+    lessons = list(
+        instructor_current_lessons(instructor)
+        .select_related('course', 'course__branch', 'course__course_type', 'room')
+        .prefetch_related(
+            # The live count reads each enrolment's child status.
+            Prefetch('enrollments', queryset=LessonEnrollment.objects.select_related('child')),
+        )
+    )
+    stored = {}
+    if not force_refresh:
+        stored = {
+            snap.lesson_id: snap
+            for snap in LessonMonthlySnapshot.objects.filter(
+                month=month,
+                lesson__in=lessons,
+                instructor=instructor,
+                updated_at__gte=fresh_since,
+            ).select_related(
+                'lesson', 'lesson__room', 'course', 'course__branch', 'course__course_type', 'branch',
+            )
+        }
+
+    live = [lesson for lesson in lessons if lesson.id not in stored]
+    cancellations_dict = {}
+    if live:
+        year, m = _parse_month_str(month)
+        month_start, month_end = _month_start_end(year, m)
+        cancellations_dict = _batch_load_cancellations(
+            _lessons_by_id(live), month_start, month_end, effective_end=None,
+        )
+
+    rows = []
+    for lesson in lessons:
+        snap = stored.get(lesson.id)
+        if snap is not None:
+            rows.append(lesson_profitability_from_snapshot(snap))
+        else:
+            rows.append(calculate_lesson_profitability(
+                lesson, instructor, month=month, cancellations_dict=cancellations_dict,
+            ))
+    return rows
+
+
+def _lessons_by_id(lessons):
+    """The same lessons as a queryset, for helpers that filter further."""
+    from apps.courses.models import Lesson
+
+    return Lesson.objects.filter(id__in=[lesson.id for lesson in lessons])
