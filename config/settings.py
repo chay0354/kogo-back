@@ -252,6 +252,8 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'customers_broadcast': '30/min',
         'external_broadcast': '30/min',
+        # The manager's read-only "check a transaction against Tranzila" tool.
+        'tranzila_check': '30/min',
         'payment_link_view': '60/min',
         'payment_link_start': '30/min',
         'payment_link_status': '120/min',

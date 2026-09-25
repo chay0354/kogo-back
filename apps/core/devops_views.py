@@ -6,6 +6,7 @@ from django.conf import settings
 from django.core import management
 from django.http import HttpResponse, JsonResponse
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsManager, IsSuperUser
@@ -111,3 +112,34 @@ class TranzilaTerminalMapView(APIView):
         from apps.core.terminal_map import terminal_map
 
         return JsonResponse(terminal_map())
+
+
+class TranzilaTransactionCheckView(APIView):
+    """
+    USAGE: GET /api/v1/core/tranzila/transaction-check/?invoice=ST-2026-000021
+    USAGE: GET /api/v1/core/tranzila/transaction-check/?terminal=cogolive&index=2
+    USAGE: One transaction as Tranzila's report has it, beside our record.
+
+    Managers only, read only. The server asks the terminal's report with the
+    keys it holds; no card, token or expiry is returned.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'tranzila_check'
+
+    def get(self, request):
+        from apps.core.tranzila_check import CheckError, check_transaction
+
+        try:
+            result = check_transaction(
+                invoice_number=request.query_params.get('invoice', ''),
+                terminal=request.query_params.get('terminal', ''),
+                index=request.query_params.get('index', ''),
+            )
+        except CheckError as exc:
+            return JsonResponse({'error': str(exc)}, status=400)
+        logger.info(
+            'Tranzila transaction check by %s: %s/%s',
+            request.user.pk, result['terminal'], result['index'],
+        )
+        return JsonResponse(result)
