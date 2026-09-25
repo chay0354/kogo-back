@@ -15,6 +15,7 @@ document stored it with VAT in, because a D110 line is "before VAT" (1265).
 """
 from __future__ import annotations
 
+import re
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.utils import timezone
@@ -50,6 +51,27 @@ ZERO = Decimal('0.00')
 RECEIPT_CODE = DOCUMENT_TYPE_CODES['receipt']
 # 1257 holds up to twenty characters; a longer number is left off, never cut.
 LINK_WIDTH = 20
+
+# 2.4(ד): "a document number that also holds letters naming its series is written
+# with the series at the left of the field; a series may be up to 5 positions"
+# (AA123, or AA000000000000000123). Kogo prints 'IR-2026-000123': the part
+# before the running number, 'IR-2026-', is eight positions. The file writes
+# the same number as its letters, the tax year's last two digits and the running
+# number in full — 'IR26000123', 'IRM26000001' — so the series part stays within
+# five, nothing of the number is cut, and every record that repeats it (1204,
+# 1257, D110 1254, D120 1304) repeats the same value. The register CSV carries
+# both forms side by side. Numbers of any other shape (the closed shared run
+# '2026-0042', a Tranzila number) already fit and are written as printed.
+_KOGO_RUN_NUMBER = re.compile(r'^([A-Z]{1,3})-(\d{4})-(\d+)$')
+
+
+def uniform_number(number: str) -> str:
+    """The number as the uniform-structure file writes it: 'IR-2026-000123' -> 'IR26000123'."""
+    match = _KOGO_RUN_NUMBER.match((number or '').strip())
+    if not match:
+        return number
+    letters, year, running = match.groups()
+    return f'{letters}{year[2:]}{running}'
 
 
 def _digits(value) -> str:
@@ -130,7 +152,7 @@ def _document(row, type_code: int, lines, payments, *, customer_vat: str = '',
     linked_type, linked_number = linked
     return UniformDocument(
         type_code=type_code,
-        number=row.document_number,
+        number=uniform_number(row.document_number),
         issue_date=issue_date,
         issue_time=issue_time,
         document_date=row.document_date,
@@ -162,13 +184,14 @@ def _one_line(row, vat_rate: Decimal, description: str) -> UniformLine:
 def _linked(number: str, formal_types: dict) -> tuple:
     """(type, number) of the document a credit note names — or nothing, rather than a guess."""
     number = (number or '').strip()
-    if not number or len(number) > LINK_WIDTH:
+    written = uniform_number(number)
+    if not number or len(written) > LINK_WIDTH:
         return None, ''
     code = _RUN_TYPES.get(series_of(number))
     if code is None and number in formal_types:
         # A document numbered in the closed shared run: its own record says what it is.
         code = DOCUMENT_TYPE_CODES.get(formal_types[number])
-    return (code, number) if code is not None else (None, '')
+    return (code, written) if code is not None else (None, '')
 
 
 def _manual(row, doc, formal_types: dict) -> UniformDocument:

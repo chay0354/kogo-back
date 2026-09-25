@@ -201,10 +201,12 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         GET /api/v1/documents/documents/register-export/?month=YYYY-MM
         (or start_date/end_date). The same rows as the period report
         (apps/documents/register.py), and the numbers that never became a
-        document. Read-only; managers only, like the report.
+        document; below them, the period's income without a document.
+        Read-only; managers only, like the report.
         """
         from apps.documents.period_report import ReportInputError, build_report, parse_period
         from apps.documents.register import register_csv
+        from apps.documents.undocumented_income import collect_undocumented
 
         try:
             start, end, label = parse_period(request.query_params)
@@ -212,7 +214,17 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         except ReportInputError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        response = HttpResponse(register_csv(report), content_type='text/csv; charset=utf-8')
+        # The income with no document behind it goes in a second section, as on
+        # the period report. A failure there is said in the file, never hidden.
+        failed = False
+        try:
+            report.undocumented = collect_undocumented(request.user, start, end)
+        except Exception:
+            logger.exception('Register export: undocumented income failed')
+            failed = True
+
+        response = HttpResponse(register_csv(report, undocumented_failed=failed),
+                                content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = (
             f'attachment; filename="documents-{start.isoformat()}-{end.isoformat()}.csv"'
         )

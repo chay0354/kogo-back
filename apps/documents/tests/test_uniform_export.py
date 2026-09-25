@@ -14,6 +14,7 @@ from rest_framework.test import APITestCase
 from apps.core.models import UserProfile
 from apps.documents.models import DocumentLineItem, FormalDocument
 from apps.documents.tests.test_register import RegisterFixture, make_user
+from apps.documents.uniform_export import uniform_number
 
 URL = '/api/v1/documents/documents/uniform-export/'
 
@@ -50,11 +51,12 @@ class UniformExportTests(RegisterFixture, APITestCase):
         folder = f'OPENFRMT/51650441.{timezone.localdate():%y}/'
         self.assertTrue(all(name.startswith(folder) for name in names), names)
         headers = [line for line in records if line.startswith('C100')]
+        # 2.4(ד): the series part at most five positions — 'IR-2026-000001' is written 'IR26000001'.
         self.assertEqual(
             {line[25:45].strip() for line in headers},
-            {'IR-2026-000001', sale.invoice_number, 'TI-2026-000001', 'CR-2026-000001'},
+            {'IR26000001', uniform_number(sale.invoice_number), 'TI26000001', 'CR26000001'},
         )
-        self.assertNotIn(failed.invoice_number, '\n'.join(records))
+        self.assertNotIn(uniform_number(failed.invoice_number), '\n'.join(records))
         # The lesson receipt and the store sale were paid, and each says how.
         self.assertEqual(sum(1 for line in records if line.startswith('D120')), 2)
         self.assertIn('C100' + '4'.rjust(15, '0'), ini)
@@ -66,8 +68,8 @@ class UniformExportTests(RegisterFixture, APITestCase):
 
         _names, _ini, records = self.files(self.client.get(URL, {'month': '2026-08'}))
 
-        credit_line = next(line for line in records if line.startswith('D110') and 'CR-2026-000001' in line)
-        self.assertIn('IR-2026-000001', credit_line)
+        credit_line = next(line for line in records if line.startswith('D110') and 'CR26000001' in line)
+        self.assertIn('IR26000001', credit_line)
 
     def test_a_range_across_two_tax_years_is_refused(self):
         self.client.force_authenticate(self.manager)
