@@ -349,10 +349,28 @@ class CallbackVerificationTest(_Base):
     @staticmethod
     def _report_row(**overrides):
         # The shape /v1/transactions really returns (cogolive, 23.9.2026):
-        # amount in agorot, no pdesc.
-        row = {'index': '12345', 'amount': '5000', 'processor_response_code': '000', 'tranmode': 'A'}
+        # amount in agorot, no pdesc, the approval number the notify quotes
+        # (ConfirmationCode '0000123' in `_callback`) and the Israel-time clock.
+        from zoneinfo import ZoneInfo
+        local = timezone.now().astimezone(ZoneInfo('Asia/Jerusalem'))
+        row = {
+            'index': '12345', 'amount': '5000', 'processor_response_code': '000', 'tranmode': 'A',
+            'authorization_number': '0000123',
+            'transaction_date': local.strftime('%Y-%m-%d'), 'transaction_time': local.strftime('%H:%M:%S'),
+        }
         row.update(overrides)
         return {'success': True, 'transaction': row}
+
+    def test_a_card_check_is_not_a_payment(self):
+        # tranmode N (J2): approved, same sum, no money moved.
+        self._post_with_ledger(self._report_row(tranmode='N'))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
+
+    def test_another_approval_number_is_review(self):
+        self._post_with_ledger(self._report_row(authorization_number='0000999'))
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
 
     def test_a_forged_success_without_a_ledger_match_is_review_not_income(self):
         res = self._post_with_ledger({'success': True, 'transaction': None})

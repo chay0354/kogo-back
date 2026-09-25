@@ -31,7 +31,7 @@ from apps.customers.serializers import (
     PaymentSerializer, PaymentLedgerSerializer, RecurringPaymentSerializer,
     RecurringPaymentEditSerializer,
     PaymentInitiationRequestSerializer, PaymentInitiationResponseSerializer,
-    WebhookCallbackSerializer,     RecurringPaymentUpdateSerializer, RecurringPaymentScheduleAmountSerializer,
+    RecurringPaymentUpdateSerializer, RecurringPaymentScheduleAmountSerializer,
     RecurringPaymentCancelSerializer, BusinessCustomerSerializer,
     RecurringPaymentSetMonthAmountSerializer, RecurringPaymentClearMonthAmountSerializer,
 )
@@ -1281,7 +1281,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     - POST /api/v1/payments/initiate-subscription/ - Initiate subscription payment
     - POST /api/v1/payments/initiate-one-time/ - Initiate one-time payment
     - GET /api/v1/payments/{id}/ - Get payment status
-    - POST /api/v1/payments/webhook/ - Tranzila webhook callback (public)
+    - POST /api/v1/payments/webhook/ - closed (410); the old course notify
     """
     queryset = Payment.objects.all().select_related(
         'child', 'family', 'parent', 'tranzila_transaction', 'branch', 'lesson', 'lesson__course'
@@ -1513,50 +1513,24 @@ class PaymentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     def webhook(self, request):
         """
-        Tranzila webhook callback endpoint.
-        
-        POST /api/v1/payments/webhook/
-        
-        This endpoint receives callbacks from Tranzila after payment processing.
-        It's public (no authentication) but validates webhook signature.
+        Closed (25.9.2026). POST /api/v1/customers/payments/webhook/
+
+        The old hosted-page notify for course payments. It trusted the POST:
+        anyone holding a payment id could mark it paid, open a standing order
+        with a token of their choosing and enroll the child, without any money
+        moving; a forged decline flagged the child and sent WhatsApp. Nothing
+        builds a page that notifies here any more (every hosted page carries its
+        own callback), so it answers 410 and changes nothing. Course signups on
+        the hosted page will get their own verified endpoint.
         """
-        # === ENHANCED LOGGING FOR MONITORING ===
-        logger.info("=" * 80)
-        logger.info("🔔 WEBHOOK RECEIVED FROM TRANZILA")
-        logger.info("=" * 80)
-        logger.info(f"Method: {request.method}")
-        logger.info(f"Path: {request.path}")
-        logger.info(f"Content-Type: {request.content_type}")
-        logger.info(f"Headers: {dict(request.headers)}")
-        logger.info(f"GET params: {dict(request.GET)}")
-        logger.info(f"POST data: {request.POST.dict()}")  # Use request.POST instead of request.body
-        logger.info("=" * 80)
-        
-        serializer = WebhookCallbackSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        # Get signature from headers if provided
-        signature = request.headers.get('X-Tranzila-Signature', '')
-        
-        try:
-            payment_service = PaymentService()
-            result = payment_service.process_webhook_callback(
-                webhook_payload=serializer.validated_data,
-                signature=signature
-            )
-            
-            if result['success']:
-                logger.info(f"✅ Webhook processed successfully: {result}")
-                return Response(result, status=status.HTTP_200_OK)
-            else:
-                logger.warning(f"⚠️  Webhook processing failed: {result}")
-                return Response(result, status=status.HTTP_400_BAD_REQUEST)
-                
-        except Exception as e:
-            logger.exception(f"❌ Webhook processing error: {str(e)}")
-            return Response({
-                'error': f'שגיאה בעיבוד webhook: {str(e)}'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        logger.warning(
+            'Closed course webhook called (pdesc present: %s); ignored',
+            bool(request.data.get('pdesc')) if hasattr(request, 'data') else False,
+        )
+        return Response(
+            {'success': False, 'error': 'endpoint closed'},
+            status=status.HTTP_410_GONE,
+        )
     
     @action(detail=False, methods=['post'])
     def charge_subscription(self, request):
