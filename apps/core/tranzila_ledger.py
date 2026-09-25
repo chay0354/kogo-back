@@ -206,7 +206,7 @@ def normalize_tranzila_transaction(row: dict) -> dict:
     }
 
 
-def _local_formal_rows(start: date, end: date) -> list[dict]:
+def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.documents.models import FormalDocument
 
     docs = (
@@ -215,6 +215,11 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
         .filter(document_date__gte=start, document_date__lte=end)
         .order_by('-document_date', '-created_at')
     )
+    if branch_ids is not None:
+        # A partner's branches, by the rule the period report files documents under.
+        from apps.documents.partner_scope import document_branch_q
+
+        docs = docs.filter(document_branch_q(branch_ids)).distinct() if branch_ids else docs.none()
     rows = []
     for doc in docs:
         if doc.child_id:
@@ -291,7 +296,7 @@ def _late_issue(invoice) -> dict:
     return {'issued_late': False, 'paid_at': _iso_date(paid_at) if paid_at else ''}
 
 
-def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
+def _local_crm_invoice_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.customers.financial_models import Invoice
 
     invoices = (
@@ -304,6 +309,10 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
         .filter(invoice_date__date__gte=start, invoice_date__date__lte=end)
         .order_by('-invoice_date')
     )
+    if branch_ids is not None:
+        from apps.documents.partner_scope import lesson_receipt_branch_q
+
+        invoices = invoices.filter(lesson_receipt_branch_q(branch_ids)) if branch_ids else invoices.none()
     rows = []
     for inv in invoices:
         amount = _parse_amount(inv.amount)
@@ -343,7 +352,7 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
     return rows
 
 
-def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
+def _local_store_invoice_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.store.models import StoreInvoice
 
     # Every store invoice in the range belongs here. The old filter demanded a
@@ -356,6 +365,8 @@ def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
         .filter(issue_date__date__gte=start, issue_date__date__lte=end)
         .order_by('-issue_date')
     )
+    if branch_ids is not None:
+        invoices = invoices.filter(branch_id__in=branch_ids)
     rows = []
     for inv in invoices:
         amount = _parse_amount(inv.total_amount)
@@ -444,13 +455,18 @@ def list_ledger_documents(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     local_only: bool = False,
+    branch_ids=None,
 ) -> dict:
+    """
+    The documents page's rows. `branch_ids` (a partner's branches; None = all)
+    narrows the local rows and skips Tranzila, whose list carries no branch.
+    """
     start, end = _default_range(start_date, end_date)
     tranzila_rows = []
     source = 'local'
     error = None
-    local_formal = _local_formal_rows(start, end)
-    if not local_only:
+    local_formal = _local_formal_rows(start, end, branch_ids)
+    if not local_only and branch_ids is None:
         try:
             service = _tranzila_client()
             result = service.list_documents(start, end)
@@ -478,8 +494,8 @@ def list_ledger_documents(
     documents = _merge_documents(
         tranzila_rows,
         local_formal,
-        _local_crm_invoice_rows(start, end),
-        _local_store_invoice_rows(start, end),
+        _local_crm_invoice_rows(start, end, branch_ids),
+        _local_store_invoice_rows(start, end, branch_ids),
     )
     return {
         'documents': documents,
