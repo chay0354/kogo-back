@@ -10,11 +10,21 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.core.payment_service import JERUSALEM_TZ, subscription_tranzila_items
-from apps.core.tranzila_service import TranzilaService, is_tranzila_uncertain_gateway_error
+from apps.core.tranzila_service import (
+    TOKEN_CHARGED,
+    TOKEN_DECLINED,
+    TOKEN_SETUP_PROBLEM,
+    TranzilaService,
+    token_charge_outcome,
+)
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 from apps.customers.recurring_amount import amount_for_charge, apply_due_pending_recurring_amounts
 
 logger = logging.getLogger(__name__)
+
+# Said to the office for a standing order the run did not charge because
+# something on our side is wrong — never to the parent, whose card is fine.
+SETUP_PROBLEM = 'תקלת הגדרות, לא נשלח חיוב ולא נשלחה הודעה להורה'
 
 
 def _next_month_first(from_day: date) -> date:
@@ -53,7 +63,12 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
     apply_due_pending_recurring_amounts()
     today = timezone.now().astimezone(JERUSALEM_TZ).date()
     service = PaymentService()
-    tranzila = TranzilaService.production()
+    # One client per terminal the saved cards were made on: a token charged on
+    # another terminal, or with another pair's keys, is refused. Empty is every
+    # card saved before 25.9.2026 and gets production(), as it always did.
+    clients: dict[str, TranzilaService | None] = {}
+    # A terminal whose keys failed in this run is not tried again in it.
+    broken_terminals: dict[str, str] = {}
     batch = max(1, min(int(limit or 40), 200))
 
     due = (
@@ -74,8 +89,16 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
     )
     due_rows = list(due)
 
-    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0,
+    summary = {'checked': len(due_rows), 'charged': 0, 'failed': 0, 'skipped': 0, 'setup_problems': 0,
                'errors': list(scheduled.get('errors') or []), 'scheduled_changes': scheduled}
+
+    def setup_problem(recurring, reason: str) -> None:
+        # Nothing was charged and the card is not at fault: the standing order
+        # stays active and due, the child keeps its status, no message goes out.
+        # The next run tries again; the office sees it in the morning brief.
+        logger.error('Recurring charge not sent for %s — %s', recurring.id, reason)
+        summary['setup_problems'] += 1
+        summary['errors'].append(f'{recurring.id}: {SETUP_PROBLEM} — {reason}')
 
     for recurring in due_rows:
         if recurring.last_charge_date and recurring.last_charge_date >= today:
@@ -138,6 +161,22 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 amount,
             )
         lesson_part = (amount - store_part).quantize(Decimal('0.01'))
+
+        terminal = (recurring.tranzila_terminal or '').strip()
+        if terminal in broken_terminals:
+            setup_problem(recurring, broken_terminals[terminal])
+            continue
+        if terminal not in clients:
+            clients[terminal] = TranzilaService.for_saved_card(terminal)
+        tranzila = clients[terminal]
+        if tranzila is None:
+            broken_terminals[terminal] = f'למסוף {terminal} אין מפתחות בשרת'
+            setup_problem(recurring, broken_terminals[terminal])
+            continue
+        if not recurring.card_expire_month or not recurring.card_expire_year:
+            setup_problem(recurring, 'חסר תוקף כרטיס')
+            continue
+
         if dry_run:
             summary['charged'] += 1
             continue
@@ -160,6 +199,7 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                     response_data={},
                     idempotency_key=idempotency_key,
                     is_successful=False,
+                    tranzila_terminal=terminal,
                 )
         except IntegrityError:
             summary['skipped'] += 1
@@ -212,11 +252,29 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             duplicate_guard_key=f'recurring-{recurring.id}-{today:%Y-%m}',
         )
 
-        if is_tranzila_uncertain_gateway_error(result):
-            # No answer came back — the card may already have been charged. This
-            # is not a decline: the standing order stays active, the child is not
-            # flagged, no "update your card" message goes out, and the claim above
-            # keeps every later run away until the office has checked the terminal.
+        outcome = token_charge_outcome(result)
+
+        if outcome == TOKEN_SETUP_PROBLEM:
+            # Refused before it reached the card — our keys or our settings
+            # (20002, or no keys at all). Not a decline: see setup_problem.
+            reason = str(result.get('error') or result.get('message') or 'הסליקה סירבה למפתח')[:300]
+            TranzilaTransaction.objects.filter(pk=claim.pk, is_successful=False).delete()
+            payment.status = 'cancelled'
+            payment.failure_reason = f'{SETUP_PROBLEM}: {reason}'
+            payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
+            # The card's own gaps (no token, no expiry) are filtered out above,
+            # so what is left is the terminal's keys: every card on it would
+            # meet the same refusal.
+            broken_terminals[terminal] = reason
+            setup_problem(recurring, reason)
+            continue
+
+        if outcome not in (TOKEN_CHARGED, TOKEN_DECLINED):
+            # No answer came back, or one that says nothing certain — the card
+            # may already have been charged. This is not a decline: the standing
+            # order stays active, the child is not flagged, no "update your card"
+            # message goes out, and the claim above keeps every later run away
+            # until the office has checked the terminal.
             payment.status = 'processing'
             payment.failure_reason = result.get('error', 'no answer from the gateway')
             payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
@@ -228,7 +286,7 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             summary['errors'].append(f'{recurring.id}: לא התקבלה תשובה מהסליקה — {payment.failure_reason}')
             continue
 
-        if not result.get('success'):
+        if outcome == TOKEN_DECLINED:
             TranzilaTransaction.objects.filter(pk=claim.pk, is_successful=False).delete()
             payment.status = 'failed'
             payment.failure_reason = result.get('error', 'charge failed')

@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
@@ -206,9 +207,9 @@ def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> boo
     A notify is public, so it can quote a real transaction that paid for
     something else — one of ours, or the other website that shares the
     terminal. Only rows that were actually paid count, so a forged notify
-    left pending cannot block the real one. Store invoices are matched on
-    their terminal, since numbers repeat across terminals; payment links keep
-    no terminal, so any completed one with this number counts.
+    left pending cannot block the real one. Matched on the terminal, since
+    numbers repeat across terminals; a payment link paid before 25.9.2026
+    kept no terminal, so a completed one with this number counts on any.
     """
     from apps.store.models import StoreInvoice
 
@@ -221,6 +222,7 @@ def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> boo
         return True
     return (
         PaymentLinkPayment.objects.filter(
+            Q(tranzila_terminal=terminal) | Q(tranzila_terminal=''),
             gateway_transaction_id=txn_index, status=PaymentLinkPayment.STATUS_COMPLETED,
         )
         .exclude(id=row_id)
@@ -314,6 +316,9 @@ def payment_link_callback(request):
     signature, so the gateway does not keep retrying a row we have settled.
     """
     tranzila = TranzilaService.iframe()
+    # The hosted page runs on this terminal; its transaction numbers mean
+    # something only together with it.
+    terminal = (tranzila.terminal or '')[:40]
     signature = request.headers.get('X-Tranzila-Signature', '')
     parsed = tranzila.parse_webhook_response(request.data)
     if signature and not tranzila.verify_webhook_signature(parsed, signature):
@@ -344,7 +349,7 @@ def payment_link_callback(request):
             if parsed.get('is_successful') and txn_index and txn_index != row.gateway_transaction_id:
                 TranzilaTransaction.objects.get_or_create(
                     idempotency_key=idempotency_key,
-                    defaults=_txn_defaults(parsed, request, txn_index),
+                    defaults=_txn_defaults(parsed, request, txn_index, terminal),
                 )
                 row.review_reason = f'second_charge:{txn_index}'[:200]
                 row.save(update_fields=['review_reason', 'updated_at'])
@@ -352,11 +357,17 @@ def payment_link_callback(request):
             return Response({'success': True, 'message': 'Already processed'})
 
         # The same gateway index can belong to one payment only.
-        if txn_index and PaymentLinkPayment.objects.filter(gateway_transaction_id=txn_index).exclude(id=row.id).exists():
+        if txn_index and (
+            PaymentLinkPayment.objects
+            .filter(Q(tranzila_terminal=terminal) | Q(tranzila_terminal=''), gateway_transaction_id=txn_index)
+            .exclude(id=row.id)
+            .exists()
+        ):
             row.status = PaymentLinkPayment.STATUS_REVIEW
             row.review_reason = f'index_reused:{txn_index}'[:200]
             row.gateway_transaction_id = txn_index[:100]
-            row.save(update_fields=['status', 'review_reason', 'gateway_transaction_id', 'updated_at'])
+            row.tranzila_terminal = terminal
+            row.save(update_fields=['status', 'review_reason', 'gateway_transaction_id', 'tranzila_terminal', 'updated_at'])
             logger.error('payment link %s: index %s already belongs to another payment', row.id, txn_index)
             return Response({'success': True, 'status': row.status})
 
@@ -365,15 +376,19 @@ def payment_link_callback(request):
             row.failure_code = str(parsed.get('response_code') or '')[:10]
             row.failure_reason = (parsed.get('error_message') or 'התשלום נדחה')[:500]
             row.gateway_transaction_id = txn_index[:100]
-            row.save(update_fields=['status', 'failure_code', 'failure_reason', 'gateway_transaction_id', 'updated_at'])
+            row.tranzila_terminal = terminal
+            row.save(update_fields=[
+                'status', 'failure_code', 'failure_reason', 'gateway_transaction_id', 'tranzila_terminal', 'updated_at',
+            ])
             return Response({'success': False, 'status': row.status})
 
         txn, created = TranzilaTransaction.objects.get_or_create(
             idempotency_key=idempotency_key,
-            defaults=_txn_defaults(parsed, request, txn_index),
+            defaults=_txn_defaults(parsed, request, txn_index, terminal),
         )
         row.tranzila_transaction = txn
         row.gateway_transaction_id = txn_index[:100]
+        row.tranzila_terminal = terminal
         row.gateway_confirmation_code = str(parsed.get('confirmation_code') or '')[:100]
         row.card_last4 = str(parsed.get('card_last4') or '')[:4]
         row.card_type = str(parsed.get('card_type') or '')[:30]
@@ -407,7 +422,7 @@ def payment_link_callback(request):
     return Response({'success': True, 'status': row.status, 'new_transaction': created})
 
 
-def _txn_defaults(parsed: dict, request, txn_index: str) -> dict:
+def _txn_defaults(parsed: dict, request, txn_index: str, terminal: str) -> dict:
     return {
         'transaction_id': txn_index[:100],
         'confirmation_code': str(parsed.get('confirmation_code') or '')[:100],
@@ -418,6 +433,7 @@ def _txn_defaults(parsed: dict, request, txn_index: str) -> dict:
         'response_data': _jsonable(parsed.get('raw_payload') or {}),
         'is_successful': True,
         'response_timestamp': timezone.now(),
+        'tranzila_terminal': terminal,
     }
 
 

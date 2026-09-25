@@ -39,7 +39,7 @@ from apps.core.payment_service import (
     _compute_prorate,
     get_lesson_price_for_course_index,
 )
-from apps.core.tranzila_service import TranzilaService, is_tranzila_uncertain_gateway_error
+from apps.core.tranzila_service import TOKEN_UNKNOWN, TranzilaService, token_charge_outcome
 from apps.courses.models import Lesson, LessonBundle
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 from apps.customers.recurring_amount import (
@@ -293,6 +293,14 @@ def _start_difference_charge(recurring: RecurringPayment, enrollment: LessonEnro
     family = child.family
     lesson = target_lessons[0]
     description = f'{DIFF_DESCRIPTION}: {quote["target_label"]} ({quote["remaining_occurrences"]}/{quote["total_occurrences"]} שיעורים החודש)'[:200]
+    # The saved card is charged on the terminal it was made on, with that
+    # terminal's keys; one with no keys here is refused before any row is written.
+    tranzila = TranzilaService.for_saved_card(recurring.tranzila_terminal)
+    if tranzila is None:
+        raise ChangePricingError(
+            f'למסוף של הכרטיס השמור ({recurring.tranzila_terminal}) אין מפתחות בשרת — לא נשלח חיוב. '
+            'יש לפנות למי שמנהל את הגדרות הסליקה.'
+        )
     with transaction.atomic():
         RecurringPayment.objects.select_for_update(of=('self',)).get(id=recurring.id)
         stuck = Payment.objects.filter(
@@ -320,7 +328,7 @@ def _start_difference_charge(recurring: RecurringPayment, enrollment: LessonEnro
             registration_fee=Decimal('0.00'),
             description=description,
         )
-    result = TranzilaService.production().charge_with_token(
+    result = tranzila.charge_with_token(
         token=recurring.tranzila_token,
         amount=amount,
         description=description,
@@ -334,7 +342,9 @@ def _start_difference_charge(recurring: RecurringPayment, enrollment: LessonEnro
         duplicate_guard_key=f'change-diff-{recurring.id}-{timezone.now():%Y-%m}',
     )
     if not result.get('success'):
-        if is_tranzila_uncertain_gateway_error(result):
+        # Only a refusal Tranzila states is 'failed' (it frees the child for
+        # another try); an answer that says nothing certain may hide a charge.
+        if token_charge_outcome(result) == TOKEN_UNKNOWN:
             payment.failure_reason = str(result.get('error') or 'uncertain')[:500]
             payment.save(update_fields=['failure_reason', 'updated_at'])   # stays 'processing' — a person checks
             logger.error('change diff charge %s uncertain: %s', payment.id, result.get('error'))
@@ -349,8 +359,11 @@ def _start_difference_charge(recurring: RecurringPayment, enrollment: LessonEnro
     return payment, result
 
 
-def _record_difference(payment: Payment, result: dict, enrollment: LessonEnrollment) -> TranzilaTransaction:
-    """Inside the caller's transaction: the money moved, write it down."""
+def _record_difference(payment: Payment, result: dict, enrollment: LessonEnrollment, *, terminal: str = '') -> TranzilaTransaction:
+    """
+    Inside the caller's transaction: the money moved, write it down. `terminal`
+    is the saved card's (RecurringPayment.tranzila_terminal); '' is the michal pair.
+    """
     payment.status = 'completed'
     payment.payment_date = timezone.now()
     payment.save(update_fields=['status', 'payment_date', 'updated_at'])
@@ -366,6 +379,7 @@ def _record_difference(payment: Payment, result: dict, enrollment: LessonEnrollm
             'response_data': result.get('raw_response', {}) or {},
             'is_successful': True,
             'response_timestamp': timezone.now(),
+            'tranzila_terminal': terminal,
         },
     )
     payment.tranzila_transaction = txn
@@ -461,7 +475,10 @@ def apply_unit_change(
             with transaction.atomic():
                 result = replace_unit(enrollment=enrollment, target_lessons=target_lessons, target_bundle=target_bundle)
                 schedule_recurring_amount(recurring, new_amount)
-                txn = _record_difference(payment, gateway_result, enrollment) if (payment is not None and gateway_result is not None) else None
+                txn = (
+                    _record_difference(payment, gateway_result, enrollment, terminal=recurring.tranzila_terminal)
+                    if (payment is not None and gateway_result is not None) else None
+                )
         except Exception as exc:
             if payment is not None and gateway_result is not None:
                 # The card was charged; the row stays 'processing' and blocks a

@@ -326,6 +326,84 @@ def check_unresolved_charges(today: date) -> BriefItem:
     return item
 
 
+def check_saved_card_setup(today: date) -> BriefItem:
+    """
+    Standing orders the billing run did not charge because of us, not the card.
+
+    Two sources, neither of them a call to Tranzila: a terminal that active
+    saved cards sit on and that has no keys here, and the last day's billing
+    runs that met a setup problem (our key refused, a card with no expiry).
+    Nobody was charged and no parent was told; the standing orders stay due and
+    are tried again every run until it is fixed. The michal pair ('') is
+    tranzila_health's to report.
+    """
+    from apps.core.tranzila_service import TranzilaService
+    from apps.customers.models import CronHeartbeat, RecurringPayment
+    from apps.customers.recurring_billing import SETUP_PROBLEM
+
+    rows = []
+    terminals = (
+        RecurringPayment.objects
+        .filter(status='active', tranzila_recurring_index='')
+        .exclude(tranzila_token='')
+        .exclude(tranzila_terminal='')
+        .values('tranzila_terminal')
+        .annotate(n=models.Count('id'))
+        .order_by('tranzila_terminal')
+    )
+    for entry in terminals:
+        name = entry['tranzila_terminal']
+        client = TranzilaService.for_saved_card(name)
+        problem = 'אין לו מפתחות בשרת' if client is None else client.credential_error()
+        if problem:
+            rows.append(_row(f'מסוף {name}', f"{entry['n']} הוראות קבע · {problem}", '/settings/billing'))
+
+    # The newest run that met one says what is wrong now; each hourly run meets
+    # the same standing orders again, so runs are not added up.
+    latest = next(
+        (
+            run for run in CronHeartbeat.objects
+            .filter(invoked_at__gte=timezone.now() - timedelta(days=1), dry_run=False)
+            .order_by('-invoked_at')[:50]
+            if int((run.summary or {}).get('setup_problems') or 0) > 0
+        ),
+        None,
+    )
+    skipped = 0
+    if latest is not None:
+        skipped = int(latest.summary.get('setup_problems') or 0)
+        messages = [str(m) for m in latest.summary.get('errors') or [] if SETUP_PROBLEM in str(m)]
+        ids = [m.split(':', 1)[0].strip() for m in messages]
+        children = {
+            str(r.id): r.child
+            for r in RecurringPayment.objects.filter(id__in=[i for i in ids if len(i) == 36]).select_related('child')
+        }
+        for recurring_id, message in list(zip(ids, messages))[:MAX_ROWS]:
+            child = children.get(recurring_id)
+            rows.append(_row(
+                child.full_name if child else recurring_id,
+                f"{timezone.localtime(latest.invoked_at):%d/%m %H:%M} · {message.split('—', 1)[-1].strip()[:120]}",
+                _child_href(child.id) if child else '',
+            ))
+
+    item = BriefItem(
+        key='saved_card_setup',
+        title='חיובים שלא נשלחו בגלל הגדרות',
+        severity=RED if rows else GREEN,
+        count=len(rows),
+        action='לתקן את מפתחות המסוף ב־Vercel, או את תוקף הכרטיס. ההורים לא קיבלו הודעה, והחיוב ינסה שוב בריצה הבאה.',
+        rows=rows[:MAX_ROWS],
+    )
+    if not rows:
+        item.summary = 'כל הכרטיסים השמורים נמצאים על מסוף שיש לו מפתחות, ואף חיוב לא נעצר בגלל הגדרות.'
+        return item
+    item.summary = (
+        f'{skipped} הוראות קבע לא חויבו בריצה האחרונה בגלל תקלת הגדרות.' if skipped
+        else 'יש כרטיסים שמורים על מסוף שאין לו מפתחות בשרת. החיוב החודשי שלהם לא יישלח.'
+    )
+    return item
+
+
 def check_failed_payments(today: date) -> BriefItem:
     """Charges the gateway refused in the last week."""
     from apps.customers.models import Payment
@@ -1224,6 +1302,7 @@ CHECKS = (
     check_refresh_dashboard,
     check_overdue_recurring,
     check_unresolved_charges,
+    check_saved_card_setup,
     check_recurring_without_lesson,
     check_failed_payments,
     check_registration_only_payments,
@@ -1269,6 +1348,7 @@ def check_catalogue() -> list[dict]:
         'monthly_finalization': 'סגירת החודש הקודם',
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
+        'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',
         'failed_payments': 'תשלומים שנכשלו',
         'registration_only_payments': 'דמי רישום בלי תשלום על החוג',

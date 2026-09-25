@@ -416,6 +416,9 @@ def replace_card(
         for target in live:
             locked = RecurringPayment.objects.select_for_update(of=('self',)).get(id=target.recurring.id)
             locked.tranzila_token = token
+            # Verified by production() — the michal pair, stored as ''. A card
+            # saved elsewhere before is replaced, and so is its terminal.
+            locked.tranzila_terminal = ''
             locked.card_expire_month = card['expiry_month']
             locked.card_expire_year = card['expiry_year']
             locked.status = 'active'
@@ -423,7 +426,7 @@ def replace_card(
             locked.card_update_reminders_sent = 0
             locked.card_update_last_reminder_at = None
             locked.save(update_fields=[
-                'tranzila_token', 'card_expire_month', 'card_expire_year', 'status',
+                'tranzila_token', 'tranzila_terminal', 'card_expire_month', 'card_expire_year', 'status',
                 'cancellation_reason', 'card_update_reminders_sent',
                 'card_update_last_reminder_at', 'updated_at',
             ])

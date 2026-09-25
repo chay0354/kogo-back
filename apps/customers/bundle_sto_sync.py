@@ -294,10 +294,23 @@ def apply_bundle_sto_fixes(limit: int = DEFAULT_LIMIT) -> dict:
     chosen = pending[:limit]
     synced = []
     failed = []
-    tranzila = TranzilaService.production()
+    # A standing order sits on the terminal its card was saved on.
+    clients: dict = {}
     for fix in chosen:
         keep = RecurringPayment.objects.get(pk=fix.keep.pk)
         token = (keep.tranzila_token or '').strip()
+        terminal = (keep.tranzila_terminal or '').strip()
+        if terminal not in clients:
+            clients[terminal] = TranzilaService.for_saved_card(terminal)
+        tranzila = clients[terminal]
+        if tranzila is None:
+            failed.append({
+                'child': fix.child_name,
+                'phone': fix.phone,
+                'course': fix.course_name,
+                'error': f'למסוף {terminal} אין מפתחות בשרת',
+            })
+            continue
         gateway = tranzila.sync_standing_order_to_amount(
             token=token,
             amount=fix.expected,

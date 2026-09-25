@@ -421,6 +421,7 @@ class CallbackVerificationTest(_Base):
             from apps.core.tranzila_service import TranzilaService as Real
             svc.parse_webhook_response.side_effect = Real().parse_webhook_response
             svc.credential_error.return_value = ''
+            svc.terminal = 'cogolive'
             svc.find_transaction.side_effect = RuntimeError('down')
             self._callback(self.row)
         self.row.refresh_from_db()
@@ -441,6 +442,29 @@ class CallbackVerificationTest(_Base):
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, 'review')
         self.assertTrue(self.row.review_reason.startswith('index_reused'))
+
+    def test_a_paid_row_keeps_the_terminal_it_was_paid_on(self):
+        self._post_with_ledger(self._report_row())
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'completed')
+        self.assertEqual(self.row.tranzila_terminal, 'cogolive')
+        self.assertEqual(self.row.tranzila_transaction.tranzila_terminal, 'cogolive')
+
+    def test_the_same_number_on_another_terminal_is_another_transaction(self):
+        # Numbers repeat across terminals: 12345 on fxpmichalweb is not 12345 on cogolive.
+        PaymentLinkPayment.objects.create(link=self.link, option=self.single, amount=50, payer_name='x',
+                                          status='completed', gateway_transaction_id='12345',
+                                          tranzila_terminal='fxpmichalweb')
+        self._post_with_ledger(self._report_row())
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'completed')
+
+    def test_a_number_paid_before_terminals_were_kept_still_blocks(self):
+        PaymentLinkPayment.objects.create(link=self.link, option=self.single, amount=50, payer_name='x',
+                                          status='completed', gateway_transaction_id='12345')
+        self._post_with_ledger(self._report_row())
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, 'review')
 
     def test_a_second_approved_index_on_a_completed_row_is_recorded_and_flagged(self):
         with patch('apps.payment_links.public_views.verify_transaction_with_tranzila', return_value=('verified', {})):

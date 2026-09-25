@@ -154,7 +154,9 @@ class UpgradeTest(_Base):
 
     def test_a_declined_difference_leaves_everything_as_it_was(self):
         with patch('apps.enrollments.change_pricing.TranzilaService.production') as prod:
-            prod.return_value.charge_with_token.return_value = {'success': False, 'error': 'declined'}
+            prod.return_value.charge_with_token.return_value = {
+                'success': False, 'error': 'declined', 'response_code': '004', 'message': 'Charge failed: declined',
+            }
             res = self._post(expected_new_amount='335.00')
         self.assertEqual(res.status_code, 400)
         self.assertIn('נדחה', res.data['error'])
@@ -413,7 +415,7 @@ class DowngradeTest(_Base):
              patch('apps.enrollments.change_pricing.replace_unit', side_effect=lambda **kw: order.append('move')), \
              patch('apps.customers.recurring_billing.TranzilaService') as svc:
             tz.now.return_value = oct_first
-            svc.production.return_value.charge_with_token.return_value = dict(OK_CHARGE)
+            svc.for_saved_card.return_value.charge_with_token.return_value = dict(OK_CHARGE)
             summary = recurring_billing.process_due_recurring_charges(dry_run=False)
         self.assertEqual(order, ['move', 'promote'])
         self.assertEqual(summary['scheduled_changes']['applied'], 1)

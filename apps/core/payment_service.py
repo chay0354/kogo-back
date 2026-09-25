@@ -455,18 +455,23 @@ def should_create_recurring_for_payment(*, child, bundle, monthly_amount: Decima
     ).exists()
 
 
-def saved_card_token_for_child(child) -> str:
+def saved_card_token_for_child(child, terminal: str = '') -> str:
     """
     Token already stored for this child from an earlier lesson in the same signup.
 
     A twice-a-week bundle charges דמי רישום on the first day only; the other days
     are ₪0 and must not call Tranzila verify (that path returned schema 20004).
+
+    Only a card saved on `terminal` is reused ('' — the michal pair, where the
+    signup's own card is made by production()). The new standing order is
+    written with that terminal; a card from another terminal would be charged
+    on the wrong one and declined.
     """
     if child is None:
         return ''
     rec = (
         RecurringPayment.objects
-        .filter(child=child, status='active')
+        .filter(child=child, status='active', tranzila_terminal=(terminal or '').strip())
         .exclude(tranzila_token='')
         .order_by('-created_at')
         .first()
@@ -1786,10 +1791,18 @@ class PaymentService:
 
         tranzila_result = {'success': True}
         if recurring_payment.tranzila_token:
-            tranzila_service = TranzilaService.production()
-            tranzila_result = tranzila_service.cancel_recurring_payment(
-                token=recurring_payment.tranzila_token
-            )
+            # The terminal the card was saved on, with its own keys.
+            tranzila_service = TranzilaService.for_saved_card(recurring_payment.tranzila_terminal)
+            if tranzila_service is None:
+                tranzila_result = {
+                    'success': False,
+                    'error': f'למסוף {recurring_payment.tranzila_terminal} אין מפתחות בשרת',
+                    'manual_cancellation_required': True,
+                }
+            else:
+                tranzila_result = tranzila_service.cancel_recurring_payment(
+                    token=recurring_payment.tranzila_token
+                )
             if not tranzila_result.get('success'):
                 logger.warning(
                     f"Tranzila STO cancel failed for recurring {recurring_payment.id}: "
