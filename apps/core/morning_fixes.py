@@ -17,6 +17,7 @@ morning routine". What counts as small is narrow on purpose:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 
 from django.db import transaction
@@ -42,8 +43,17 @@ AUTO_TRANSITIONS = {
 FIX_REASON = 'תוקן אוטומטית בשגרת הבוקר'
 
 
-def status_fix_candidates(*, limit_scan: int = 3000) -> list[tuple]:
-    """(child, from, to) for every child the rule says is on the wrong status."""
+def status_fix_candidates(*, after_id=None, budget_seconds=None, progress: dict | None = None) -> list[tuple]:
+    """
+    (child, from, to) for every child the rule says is on the wrong status.
+
+    Walks the children in id order. Working a child's status out asks the
+    database several questions per child, and three thousand children took
+    about 400 seconds — longer than the hosting allows one request, so the
+    morning routine was cut off right here. With a `budget_seconds` the walk
+    stops when the time is up; `progress` is then filled with `last_id` (carry
+    on after this child) and `finished`.
+    """
     from apps.customers.child_status import CHILD_STATUSES, canonical_status, resolve_child_status
     from apps.customers.models import Child, RecurringPayment
     from apps.documents.models import CashPlan, CheckPlan
@@ -60,10 +70,20 @@ def status_fix_candidates(*, limit_scan: int = 3000) -> list[tuple]:
         Child.objects.exclude(status='ghost')
         .select_related('family')
         .prefetch_related('lesson_enrollments', 'payments')
-        .order_by('-updated_at')[:limit_scan]
+        .order_by('id')
     )
+    if after_id:
+        children = children.filter(id__gt=after_id)
+
+    started = time.monotonic()
+    last_id = after_id
+    finished = True
     found = []
-    for child in children.iterator(chunk_size=500):
+    for child in children.iterator(chunk_size=200):
+        if budget_seconds is not None and time.monotonic() - started > budget_seconds:
+            finished = False
+            break
+        last_id = child.id
         current = canonical_status(child.status)
         target = resolve_child_status(child)
         if not target or target == current:
@@ -74,17 +94,29 @@ def status_fix_candidates(*, limit_scan: int = 3000) -> list[tuple]:
         if target == 'inactive' and child.id in still_paying:
             continue
         found.append((child, child.status, target))
+
+    if progress is not None:
+        progress['last_id'] = str(last_id) if last_id else None
+        progress['finished'] = finished
     return found
 
 
-def fix_child_statuses() -> dict:
-    """Move the children the rule says are wrong, within the morning's ceiling."""
+def fix_child_statuses(*, after_id=None, budget_seconds=None, already_applied: int = 0) -> dict:
+    """
+    Move the children the rule says are wrong, within the morning's ceiling.
+
+    Called once with no arguments it does the whole list. The morning routine
+    calls it in slices instead — `after_id` where the last slice stopped, and
+    `already_applied` so the ceiling covers the whole morning, not each slice.
+    """
     from apps.customers.child_status import status_label
     from apps.customers.status_history_models import ChildStatusHistory
 
-    candidates = status_fix_candidates()
+    progress: dict = {}
+    candidates = status_fix_candidates(after_id=after_id, budget_seconds=budget_seconds, progress=progress)
+    room = max(0, MAX_STATUS_FIXES_PER_MORNING - already_applied)
     applied = []
-    for child, was, target in candidates[:MAX_STATUS_FIXES_PER_MORNING]:
+    for child, was, target in candidates[:room]:
         with transaction.atomic():
             # Re-read under a lock: the office may have changed it a moment ago.
             locked = type(child).objects.select_for_update().get(pk=child.pk)
@@ -104,21 +136,24 @@ def fix_child_statuses() -> dict:
         })
     return {
         'applied': applied,
-        'waiting': max(0, len(candidates) - MAX_STATUS_FIXES_PER_MORNING),
+        'waiting': max(0, len(candidates) - room),
+        'last_id': progress.get('last_id'),
+        'finished': progress.get('finished', True),
     }
 
 
-def refresh_dashboard_numbers() -> dict:
+def refresh_dashboard_numbers(*, budget_seconds=None) -> dict:
     """
     Recount this month's dashboard.
 
     The dashboard reads counts stored per month and never recounts them itself.
     The job meant to do it every night is a Celery task, and nothing runs Celery
     on this hosting — so the numbers stayed where the last manual refresh left
-    them. This is the same call the dashboard's own refresh makes.
+    them. The whole month does not fit in one request, so with a
+    `budget_seconds` this does a slice and says whether the month is finished
+    (see refresh_month_snapshots); the next call carries on.
     """
-    from apps.instructors.utils import generate_monthly_snapshots
+    from apps.instructors.utils import refresh_month_snapshots
 
     month = timezone.localtime(timezone.now()).date().strftime('%Y-%m')
-    summary = generate_monthly_snapshots(month, finalize=False)
-    return {'month': month, 'summary': summary if isinstance(summary, dict) else {}}
+    return refresh_month_snapshots(month, budget_seconds=budget_seconds)

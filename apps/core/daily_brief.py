@@ -51,6 +51,13 @@ TIME_BUDGET_SECONDS = 40
 # beyond this many children the check says how far it got instead of running on.
 MAX_CHILDREN_SCANNED = 3000
 
+# The two morning fixes are too long for one request on the hosting (300
+# seconds), so each call does this much and the next call carries on. An item
+# that is not finished says so with `continues`, and keeps in `progress` what
+# the next slice needs.
+RESUMABLE_CHECKS = ('fix_child_statuses', 'refresh_dashboard')
+RESUMABLE_SLICE_SECONDS = 60
+
 
 @dataclass
 class BriefItem:
@@ -62,6 +69,8 @@ class BriefItem:
     action: str = ''
     rows: list = field(default_factory=list)
     duration_ms: int = 0
+    continues: bool = False
+    progress: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -86,6 +95,19 @@ def _israel_today() -> date:
     return timezone.localtime(timezone.now()).date()
 
 
+def _progress_so_far(key: str, today: date) -> dict:
+    """What an unfinished slice of this morning left for the next one, or {}."""
+    from apps.core.models import DailyBriefSnapshot
+
+    snapshot = DailyBriefSnapshot.objects.order_by('-created_at').first()
+    if snapshot is None or (snapshot.payload or {}).get('for_date') != today.isoformat():
+        return {}
+    for item in (snapshot.payload or {}).get('items') or []:
+        if item.get('key') == key and item.get('continues'):
+            return dict(item.get('progress') or {})
+    return {}
+
+
 # --- the checks ------------------------------------------------------------
 
 
@@ -93,8 +115,15 @@ def check_fix_child_statuses(today: date) -> BriefItem:
     """Morning fix: children on a status their own records contradict."""
     from apps.core.morning_fixes import MAX_STATUS_FIXES_PER_MORNING, fix_child_statuses
 
-    result = fix_child_statuses()
-    applied = result['applied']
+    so_far = _progress_so_far('fix_child_statuses', today)
+    earlier = list(so_far.get('applied') or [])
+    result = fix_child_statuses(
+        after_id=so_far.get('after_id'),
+        budget_seconds=RESUMABLE_SLICE_SECONDS,
+        already_applied=len(earlier),
+    )
+    applied = earlier + result['applied']
+    waiting = int(so_far.get('waiting') or 0) + result['waiting']
     item = BriefItem(
         key='fix_child_statuses',
         title='תוקן אוטומטית: סטטוסים של ילדים',
@@ -102,18 +131,27 @@ def check_fix_child_statuses(today: date) -> BriefItem:
         count=len(applied),
         action='כל שינוי נרשם בהיסטוריית הסטטוסים של הילד, ואפשר להחזיר אותו משם.',
     )
-    if not applied and not result['waiting']:
+    for change in applied[:MAX_ROWS]:
+        item.rows.append(_row(change['name'], f"{change['from']} ← {change['to']}", _child_href(change['child_id'])))
+    if not result['finished']:
+        item.severity = YELLOW
+        item.continues = True
+        item.progress = {'after_id': result['last_id'], 'applied': applied, 'waiting': waiting}
+        item.summary = (
+            f'עדיין עובר על הילדים — {len(applied)} תוקנו עד עכשיו. '
+            'ממשיך מאותה נקודה בסבב הבא של שגרת הבוקר.'
+        )
+        return item
+    if not applied and not waiting:
         item.summary = 'לא היה סטטוס לתקן הבוקר.'
         return item
     item.summary = f'{len(applied)} ילדים עברו לסטטוס שהרישומים שלהם מראים.'
-    if result['waiting']:
+    if waiting:
         item.severity = YELLOW
         item.summary += (
-            f' עוד {result["waiting"]} ממתינים — עד {MAX_STATUS_FIXES_PER_MORNING} בבוקר, '
+            f' עוד {waiting} ממתינים — עד {MAX_STATUS_FIXES_PER_MORNING} בבוקר, '
             'כדי שטעות בכלל לא תשנה את כל הרשימה בבת אחת.'
         )
-    for change in applied[:MAX_ROWS]:
-        item.rows.append(_row(change['name'], f"{change['from']} ← {change['to']}", _child_href(change['child_id'])))
     return item
 
 
@@ -121,14 +159,27 @@ def check_refresh_dashboard(today: date) -> BriefItem:
     """Morning fix: this month's dashboard numbers, recounted."""
     from apps.core.morning_fixes import refresh_dashboard_numbers
 
-    result = refresh_dashboard_numbers()
-    return BriefItem(
+    result = refresh_dashboard_numbers(budget_seconds=RESUMABLE_SLICE_SECONDS)
+    item = BriefItem(
         key='refresh_dashboard',
         title='תוקן אוטומטית: מספרי הדשבורד',
         severity=GREEN,
         summary=f"מספרי הדשבורד של {result['month']} חושבו מחדש הבוקר.",
         action='החישוב הלילי של הדשבורד לא רץ בשרת הזה, ולכן הוא נעשה כאן כל בוקר.',
     )
+    if not result['finished']:
+        item.severity = YELLOW
+        item.continues = True
+        item.progress = {key: result[key] for key in (
+            'lessons_done', 'lessons_total', 'instructors_done', 'instructors_total',
+        )}
+        item.summary = (
+            f"מחשב מחדש את {result['month']}: "
+            f"{result['lessons_done']} מתוך {result['lessons_total']} קבוצות, "
+            f"{result['instructors_done']} מתוך {result['instructors_total']} מדריכים. "
+            'ממשיך בסבב הבא של שגרת הבוקר.'
+        )
+    return item
 
 
 def check_monthly_finalization(today: date) -> BriefItem:
@@ -1240,7 +1291,12 @@ def check_catalogue() -> list[dict]:
         'tranzila_reconciliation': 'התאמה מול טרנזילה',
     }
     return [
-        {'key': key, 'title': titles.get(key, key), 'external': key in EXTERNAL_CHECKS}
+        {
+            'key': key,
+            'title': titles.get(key, key),
+            'external': key in EXTERNAL_CHECKS,
+            'resumable': key in RESUMABLE_CHECKS,
+        }
         for key in CHECK_REGISTRY
     ]
 

@@ -221,7 +221,12 @@ class CutShortCheckTests(TestCase):
         from apps.core import daily_brief_views
         from apps.core.daily_brief import check_catalogue
 
-        catalogue = [entry['key'] for entry in check_catalogue() if entry['key'] != 'weekly_audit']
+        # The morning fixes run in slices and carry on by themselves (see the
+        # test below); this is about an ordinary check.
+        catalogue = [
+            entry['key'] for entry in check_catalogue()
+            if entry['key'] != 'weekly_audit' and not entry['resumable']
+        ]
         doomed = catalogue[0]
         real_run_check = daily_brief_views.run_check
 
@@ -242,3 +247,32 @@ class CutShortCheckTests(TestCase):
         self.assertIn('לא הספיקה להסתיים', items[doomed]['summary'])
         self.assertGreater(ran, 0, 'the next call got stuck on the same check')
         self.assertIn(catalogue[1], items)
+
+    @override_settings(CRON_TOKEN='cron-secret')
+    def test_a_morning_fix_that_dies_does_not_hold_up_the_ordinary_checks(self):
+        """It is tried again on the next call, after the ordinary checks have run."""
+        from apps.core import daily_brief_views
+        from apps.core.daily_brief import RESUMABLE_CHECKS, check_catalogue
+
+        real_run_check = daily_brief_views.run_check
+
+        class Killed(BaseException):
+            """Stands in for the platform ending the request."""
+
+        def run_check(key, **kwargs):
+            if key in RESUMABLE_CHECKS:
+                raise Killed()
+            return real_run_check(key, **kwargs)
+
+        with patch.object(daily_brief_views, 'run_check', side_effect=run_check):
+            with self.assertRaises(Killed):
+                daily_brief_views.run_pending_checks(budget_seconds=600)
+
+        items = {item['key'] for item in DailyBriefSnapshot.objects.first().payload['items']}
+        ordinary = {
+            entry['key'] for entry in check_catalogue()
+            if entry['key'] != 'weekly_audit' and not entry['resumable']
+        }
+        self.assertEqual(ordinary - items, set())
+        # No "started and never finished" line to stop the next call from retrying it.
+        self.assertFalse(items & set(RESUMABLE_CHECKS))
