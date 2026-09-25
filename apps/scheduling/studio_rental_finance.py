@@ -106,6 +106,14 @@ def _months_with_a_receipt(tenancy_ids, date_from: date, date_to: date) -> set:
     exactly the test the reports apply: a document is counted when its
     document_date falls in the period. A charge whose receipt failed has none,
     and its month stays here as income with no document behind it.
+
+    However the month was paid: a card charge's receipt, and the receipt of a
+    month the tenant paid at the office in cash, by check or by transfer
+    (apps/rental_billing/offline.py), are the same RT document on the charge.
+    A voided month has no receipt and stays here — which is also where a
+    month voided before offline payments existed, and paid by a receipt issued
+    by hand from the documents page, is still counted a second time: that
+    document is tied to no charge, so nothing here can tell.
     """
     if not tenancy_ids:
         return set()

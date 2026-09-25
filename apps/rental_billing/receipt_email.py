@@ -3,6 +3,9 @@
 Sent once per receipt (TenantCharge.receipt_emailed_at). A tenant with no
 e-mail, or a deployment with no mail provider, is skipped and logged; a
 failure never touches the charge or the receipt (the caller swallows it).
+While signing is on, the signing package decides whether the original may be
+mailed at all: a month paid in cash, or by a check not crossed "לא סחיר", goes
+to the tenant on paper (הוראה 18ב(ד)) and this sends nothing.
 """
 from __future__ import annotations
 
@@ -29,13 +32,33 @@ def _email_configured() -> bool:
     return bool((getattr(settings, 'EMAIL_HOST', '') or '').strip())
 
 
+def paid_with_text(doc: FormalDocument, charge: TenantCharge) -> str:
+    """
+    'שולם בכרטיס אשראי ****4242 · אישור C100' — or, for a month paid at the
+    office, the means on the receipt's payment line: cash, the check by its
+    number, the transfer by its reference.
+    """
+    payment = next(
+        (row for row in doc.payments.all() if row.payment_method in ('cash', 'check', 'bank_transfer')), None,
+    )
+    if payment is None:
+        card = f'כרטיס אשראי ****{charge.card_last4}' if charge.card_last4 else 'כרטיס אשראי'
+        confirmation = f' · אישור {charge.confirmation_code}' if charge.confirmation_code else ''
+        return f'שולם ב{card}{confirmation}'
+    reference = (payment.reference or '').strip()
+    if payment.payment_method == 'cash':
+        return 'שולם במזומן'
+    if payment.payment_method == 'check':
+        return "שולם בצ'ק" + (f" מס' {reference}" if reference else '')
+    return 'שולם בהעברה בנקאית' + (f' · אסמכתא {reference}' if reference else '')
+
+
 def build_rental_receipt_email(doc: FormalDocument, charge: TenantCharge) -> tuple[str, str, str]:
     """(subject, plain text, html)."""
     name = (doc.business_customer.full_name if doc.business_customer_id else doc.customer_name) or 'שוכר/ת'
     net = doc.subtotal - doc.discount_amount
     period = month_label(charge.period)
-    card = f'כרטיס אשראי ****{charge.card_last4}' if charge.card_last4 else 'כרטיס אשראי'
-    confirmation = f' · אישור {charge.confirmation_code}' if charge.confirmation_code else ''
+    paid_with = paid_with_text(doc, charge)
     subject = f'{DOCUMENT_TITLE} {doc.document_number} — קוגומלו'
     issued = doc.document_date.strftime('%d/%m/%Y')
 
@@ -48,7 +71,7 @@ def build_rental_receipt_email(doc: FormalDocument, charge: TenantCharge) -> tup
         f'סה"כ לפני מע"מ: ₪{net:.2f}\n'
         f'מע"מ {VAT_PERCENT_DISPLAY:g}%: ₪{doc.vat_amount:.2f}\n'
         f'סה"כ כולל מע"מ: ₪{doc.total_amount:.2f}\n'
-        f'שולם ב{card}{confirmation}\n\n'
+        f'{paid_with}\n\n'
         f'המסמך מצורף למייל בקובץ PDF.\n\n'
         f'{ISSUER_LINE}\n{ISSUER_ADDRESS} · {ISSUER_PHONE}\n\n'
         f'{COMPUTERIZED_MARK}\n\n'
@@ -63,7 +86,7 @@ def build_rental_receipt_email(doc: FormalDocument, charge: TenantCharge) -> tup
     סה"כ לפני מע"מ: <span dir="ltr">₪{net:.2f}</span><br>
     מע"מ {VAT_PERCENT_DISPLAY:g}%: <span dir="ltr">₪{doc.vat_amount:.2f}</span><br>
     <b>סה"כ כולל מע"מ: <span dir="ltr">₪{doc.total_amount:.2f}</span></b><br>
-    שולם ב{card}{confirmation}
+    {paid_with}
   </p>
   <p style="color:#303094;font-weight:bold;margin-top:12px">המסמך מצורף למייל בקובץ PDF.</p>
   <p style="color:#666;margin-top:22px;line-height:1.8">{ISSUER_LINE}<br>{ISSUER_ADDRESS} · <span dir="ltr">{ISSUER_PHONE}</span></p>

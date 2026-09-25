@@ -16,12 +16,54 @@ from apps.rental_billing import billing
 from apps.rental_billing.billing import UNDECIDED_STATUSES, is_undecided, shekels, split_amount
 from apps.rental_billing.links import public_url
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
+from apps.rental_billing.offline import late_card_charge, offline_payment_of
+from apps.rental_billing.receipts import OFFLINE_METHOD_LABELS
 
 
 def _name(user) -> str:
     if not user:
         return ''
     return (user.get_full_name() or user.username or '').strip()
+
+
+# The chip of a month paid at the office. Its status is 'charged' — every reader
+# takes that for "paid, never charge again" — and this says how it was paid.
+OFFLINE_STATUS_LABELS = {
+    'cash': 'שולם במזומן',
+    'check': "שולם בצ'ק",
+    'bank_transfer': 'שולם בהעברה',
+}
+
+
+def signed_originals_by_number(charges) -> dict:
+    """
+    The signed originals of these charges' receipts, by number — one query for
+    a whole list, and never the PDF bytes. Empty while signing is off (no rows).
+    """
+    from apps.documents.models import SignedOriginal
+
+    numbers = [charge.receipt.document_number for charge in charges if charge.receipt_id]
+    if not numbers:
+        return {}
+    rows = SignedOriginal.objects.filter(number__in=numbers).only(
+        'id', 'number', 'purpose', 'delivery', 'delivery_reason', 'sent_at', 'email_to', 'signed_at',
+        'paper_original_printed_at',
+    )
+    return {row.number: row for row in rows}
+
+
+def _delivery_payload(row) -> dict | None:
+    """Where the receipt's signed original went: by mail, on paper (and whether it was handed over), or why it waits."""
+    if row is None or row.is_archive_copy:
+        return None
+    return {
+        'delivery': row.delivery,
+        'label': row.get_delivery_display(),
+        'reason': row.delivery_reason,
+        'signed': row.signed_at is not None,
+        'sent_at': row.sent_at.isoformat() if row.sent_at else None,
+        'paper_printed_at': row.paper_original_printed_at.isoformat() if row.paper_original_printed_at else None,
+    }
 
 
 def card_link_payload(link: TenantCardLink | None, request=None) -> dict | None:
@@ -164,7 +206,7 @@ class TenantChargeSerializer(serializers.ModelSerializer):
     tenant_name = serializers.SerializerMethodField()
     branch_id = serializers.SerializerMethodField()
     branch_name = serializers.SerializerMethodField()
-    status_label = serializers.CharField(source='get_status_display', read_only=True)
+    status_label = serializers.SerializerMethodField()
     trigger_label = serializers.CharField(source='get_trigger_display', read_only=True)
     amount_before_vat_agorot = serializers.IntegerField(source='amount_before_vat', read_only=True)
     vat_amount_agorot = serializers.IntegerField(source='vat_amount', read_only=True)
@@ -180,6 +222,8 @@ class TenantChargeSerializer(serializers.ModelSerializer):
     needs_receipt = serializers.SerializerMethodField()
     undecided = serializers.SerializerMethodField()
     resolved_by_name = serializers.SerializerMethodField()
+    offline_payment = serializers.SerializerMethodField()
+    late_card_charge = serializers.SerializerMethodField()
 
     class Meta:
         model = TenantCharge
@@ -192,11 +236,42 @@ class TenantChargeSerializer(serializers.ModelSerializer):
             'card_last4', 'transaction_id', 'confirmation_code', 'response_code', 'error',
             'reserved_at', 'charged_at', 'receipt', 'receipt_error', 'receipt_emailed_at', 'needs_receipt',
             'undecided', 'resolved_by_name', 'resolved_at', 'resolution_note', 'created_at',
+            'offline_payment', 'late_card_charge',
         ]
         read_only_fields = fields
 
     def get_tenancy_id(self, obj) -> str:
         return str(obj.tenancy_id)
+
+    def get_status_label(self, obj) -> str:
+        payment = offline_payment_of(obj) if obj.status == TenantCharge.STATUS_CHARGED else None
+        if payment is not None:
+            return OFFLINE_STATUS_LABELS.get(payment.payment_method, obj.get_status_display())
+        return obj.get_status_display()
+
+    def get_offline_payment(self, obj):
+        """How a month paid at the office was paid, as its receipt names it; None for a card, or no payment."""
+        payment = offline_payment_of(obj)
+        if payment is None:
+            return None
+        is_check = payment.payment_method == 'check'
+        return {
+            'method': payment.payment_method,
+            'method_label': OFFLINE_METHOD_LABELS.get(payment.payment_method, payment.payment_method),
+            'amount': str(payment.amount),
+            'paid_on': payment.paid_on.isoformat() if payment.paid_on else None,
+            'reference': '' if is_check else payment.reference,
+            'check_number': payment.reference if is_check else '',
+            'check_bank': payment.check_bank,
+            'check_branch': payment.check_branch,
+            'check_account': payment.check_account,
+            'check_date': payment.check_date.isoformat() if payment.check_date else None,
+            'check_crossed': bool(payment.check_crossed),
+        }
+
+    def get_late_card_charge(self, obj) -> bool:
+        """Tranzila charged the card on a month already voided or paid at the office: the office must decide."""
+        return late_card_charge(obj)
 
     def get_tenant_name(self, obj) -> str:
         return obj.standing_order.tenant.full_name
@@ -235,7 +310,19 @@ class TenantChargeSerializer(serializers.ModelSerializer):
             'issued_late': doc.document_date != charged_on,
             # The documents module serves the PDF; the screen downloads it with its own credentials.
             'pdf_url': reverse('document-pdf', args=[doc.pk]),
+            # Where its signed original went (by mail, on paper, held and why);
+            # None while signing is off. receipt_emailed_at says when the mail left.
+            'delivery': _delivery_payload(self._signed_original(doc.document_number)),
         }
+
+    def _signed_original(self, number: str):
+        """From the view's one query for the list when it made one, else looked up for this receipt alone."""
+        originals = self.context.get('signed_originals')
+        if originals is not None:
+            return originals.get(number)
+        from apps.documents.models import SignedOriginal
+
+        return SignedOriginal.objects.filter(number=number).defer('pdf').first()
 
     def get_needs_receipt(self, obj) -> bool:
         """Charged, and no receipt: the office issues it again from here."""
