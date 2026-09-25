@@ -681,7 +681,10 @@ class PrintOriginalTests(ReceiptsMixin, APITestCase):
         self.assertEqual(set(item), {
             'id', 'number', 'kind', 'document_type_label', 'customer_name', 'document_date', 'total',
             'delivery', 'delivery_reason', 'signed_at', 'sent_at', 'paper_original_printed_at',
+            # Added with the signed archive (test_signed_archive.py); the fields above are unchanged.
+            'purpose', 'sha256', 'size',
         })
+        self.assertEqual(item['purpose'], 'original')
         self.assertEqual((item['number'], item['kind'], item['document_type_label'], item['total']),
                          (cash.document_number, 'formal', 'קבלה', '100.00'))
         self.assertEqual((item['delivery'], item['delivery_reason']), ('paper', REASON_CASH))

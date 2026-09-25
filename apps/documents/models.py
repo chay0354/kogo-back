@@ -580,8 +580,10 @@ class CheckItem(models.Model):
         return f"צ'ק {self.check_number or self.id} ₪{self.amount}"
 
 
-# What a signed original is, once signed: never re-signed, never rewritten.
-SIGNED_ORIGINAL_FROZEN_FIELDS = ('pdf', 'sha256', 'size', 'key_id', 'cert_fingerprint', 'signed_at')
+# What a signed original is, once signed: never re-signed, never rewritten. Its
+# purpose is part of it — an archive copy never becomes an original, which the
+# office could then print or mail as "מקור".
+SIGNED_ORIGINAL_FROZEN_FIELDS = ('pdf', 'sha256', 'size', 'key_id', 'cert_fingerprint', 'signed_at', 'purpose')
 
 
 class FrozenSignedOriginalError(Exception):
@@ -661,6 +663,20 @@ class SignedOriginal(models.Model):
         (CHANNEL_RENTAL, 'מייל קבלת שכירות'),
     ]
 
+    # What the stored file is. An original is the one "מקור", signed at issue.
+    # An archive copy is a document kogo issued before signing existed, drawn
+    # again from its record and signed only to be kept (apps/documents/signing/
+    # archive.py): its customer already holds the original, and תקנה 9א(א)(2) /
+    # הוראה 18(ב)(2) forbid producing "מקור" twice, so the copy says "העתק
+    # לארכיון" on its face and is never mailed, printed as an original or put
+    # on the hand-delivery list.
+    PURPOSE_ORIGINAL = 'original'
+    PURPOSE_ARCHIVE = 'archive'
+    PURPOSE_CHOICES = [
+        (PURPOSE_ORIGINAL, 'מקור'),
+        (PURPOSE_ARCHIVE, 'העתק לארכיון'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     number = models.CharField(max_length=50, unique=True, verbose_name="מספר מסמך")
     kind = models.CharField(max_length=10, choices=KIND_CHOICES, verbose_name="סוג מקור")
@@ -668,6 +684,16 @@ class SignedOriginal(models.Model):
     source_id = models.CharField(max_length=64, verbose_name="מזהה המקור")
     channel = models.CharField(
         max_length=20, choices=CHANNEL_CHOICES, blank=True, default='', verbose_name="ערוץ שליחה",
+    )
+    # NULL is an original. The column is nullable for the same reason as
+    # document_payments.check_crossed (0011): Vercel migrates the production
+    # database while the previous code still serves, and that code inserts
+    # originals without this column. Django 4.2 has no db_default, and its
+    # default is written by Django, not by the database — so every reader asks
+    # "is it an archive copy?" (purpose == 'archive'), never "is it 'original'?".
+    purpose = models.CharField(
+        max_length=10, choices=PURPOSE_CHOICES, default=PURPOSE_ORIGINAL, null=True, blank=True,
+        db_index=True, verbose_name="מהות הקובץ",
     )
 
     # The signed file itself, NULL until it is signed.
@@ -708,6 +734,12 @@ class SignedOriginal(models.Model):
         related_name='+', verbose_name="מי הדפיס את המקור",
     )
 
+    # The copy in the locked backup bucket (signing/backup.py): when it landed,
+    # or why the last try did not. Not frozen — a signed row is backed up after.
+    backup_at = models.DateTimeField(null=True, blank=True, verbose_name="גובה לאחסון הנעול")
+    # Nullable: the code already deployed inserts rows without it while Vercel migrates.
+    backup_error = models.CharField(max_length=300, blank=True, null=True, default='', verbose_name="שגיאת גיבוי אחרונה")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="נוצר")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="עודכן")
 
@@ -741,6 +773,10 @@ class SignedOriginal(models.Model):
     def is_signed(self) -> bool:
         return self.signed_at is not None
 
+    @property
+    def is_archive_copy(self) -> bool:
+        return self.purpose == self.PURPOSE_ARCHIVE
+
     def pdf_intact(self) -> bool:
         """The stored bytes still hash to the fingerprint taken when they were signed."""
         if self.pdf is None or not self.sha256:
@@ -766,3 +802,41 @@ class SignedOriginal(models.Model):
 
     def delete(self, *args, **kwargs):
         raise FrozenSignedOriginalError('A signed original is kept for seven years and never deleted')
+
+
+class SignedFileAccess(models.Model):
+    """
+    One time a stored signed file left kogo: who took it, when, how, and from where.
+
+    The stored files are the business's fiscal record — the originals and the
+    archive copies (SignedOriginal). Handing one out is logged before the bytes
+    go, so the log never misses a file that left; a download that fails after
+    the log is an extra line, never a missing one. Kept like the files it
+    points at: the original is PROTECTed from deletion by its own log.
+    """
+    ACTION_DOWNLOAD = 'download'
+    ACTION_EXPORT = 'export'
+    ACTION_CHOICES = [
+        (ACTION_DOWNLOAD, 'הורדה'),
+        (ACTION_EXPORT, 'ייצוא'),
+    ]
+
+    original = models.ForeignKey(
+        SignedOriginal, on_delete=models.PROTECT, related_name='accesses', verbose_name="הקובץ החתום",
+    )
+    user = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+', verbose_name="משתמש",
+    )
+    action = models.CharField(max_length=10, choices=ACTION_CHOICES, verbose_name="פעולה")
+    at = models.DateTimeField(auto_now_add=True, verbose_name="מתי")
+    ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="כתובת IP")
+
+    class Meta:
+        db_table = 'signed_file_access'
+        verbose_name = "גישה לקובץ חתום"
+        verbose_name_plural = "גישות לקבצים חתומים"
+        ordering = ['-at']
+
+    def __str__(self) -> str:
+        return f'{self.original_id} {self.action} {self.at:%Y-%m-%d %H:%M}'

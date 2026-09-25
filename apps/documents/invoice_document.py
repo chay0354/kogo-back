@@ -7,6 +7,7 @@ they say.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -15,7 +16,10 @@ from django.utils import timezone
 
 from apps.documents.invoice_layout import Field, Note
 from apps.documents.issuer import (
+    ARCHIVE_MARK,
     COMPUTERIZED_MARK,
+    COPY_MARK,
+    ORIGINAL_MARK,
     SIGNED_MARK,
     ISSUER_ADDRESS,
     ISSUER_COMPANY_NUMBER,
@@ -144,6 +148,54 @@ def computerized_note() -> Note:
 def signature_note() -> Note:
     """The signed original's line: it is signed, and how. Never on a copy — a copy is not signed."""
     return Note('חתימה אלקטרונית:', f'{SIGNED_MARK}.')
+
+
+def archive_note(on: date | None = None) -> Note:
+    """
+    The archive copy's line: when it was drawn again, and that it is not what the customer got.
+
+    A document issued before signing existed is drawn again from its record to
+    be signed and kept (apps/documents/signing/archive.py). The page must say
+    so in words — an accountant or an assessor reading it later should not have
+    to know the signature's date to tell it from the original.
+    """
+    day = on or timezone.localdate()
+    return Note(
+        f'{ARCHIVE_MARK}:',
+        f'הופק מחדש מנתוני המסמך ביום {date_stamp(day)} ונחתם לשמירה בארכיון. אינו המקור שנמסר ללקוח.',
+    )
+
+
+@dataclass(frozen=True)
+class Edition:
+    """Which print of a document is being drawn: what its head says, its closing lines, and its seal."""
+    copy_mark: str
+    closing_notes: tuple[Note, ...] = ()
+    seal: bool = False
+    seal_centre_text: str = ''
+
+
+def edition(*, copy: bool = False, signed: bool = False, archive: bool = False) -> Edition:
+    """
+    The one print the three generators draw for (copy, signed, archive) — never two at once.
+
+    - ``archive``: the signed copy of a document issued before signing existed,
+      kept for the business's own archive. It wins over the other two: its
+      customer already holds the "מקור", and the software must not produce one
+      twice (תקנה 9א(א)(2), הוראה 18(ב)(2)) — so "העתק לארכיון", the signature
+      line, the archive note, and the seal with "העתק לארכיון" in its centre.
+    - ``signed`` and not ``copy``: the original signed at issue — "מקור", the
+      signature line and the seal.
+    - otherwise: "העתק" for an office copy, "מקור" for an unsigned original
+      (signing off, as before) — neither signed, so no line and no seal.
+    """
+    if archive:
+        return Edition(ARCHIVE_MARK, (signature_note(), archive_note()), True, ARCHIVE_MARK)
+    if copy:
+        return Edition(COPY_MARK)
+    if signed:
+        return Edition(ORIGINAL_MARK, (signature_note(),), True)
+    return Edition(ORIGINAL_MARK)
 
 
 def late_note(issued_at, received_at) -> Note | None:

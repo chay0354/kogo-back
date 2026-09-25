@@ -17,6 +17,11 @@ ORIGINAL_MARK = 'מקור'
 # נספח ה'(א)(4) and הוראה 18(ב)(2): every further print of an issued document is
 # marked "העתק" — the software must not produce "מקור" twice.
 COPY_MARK = 'העתק'
+# The signed copy kept for the business's own archive of a document issued
+# before signing existed (apps/documents/signing/archive.py). The customer's
+# "מקור" left when the document was issued, so this one is a copy — and says
+# whose, so no one takes it for a copy handed to the customer.
+ARCHIVE_MARK = 'העתק לארכיון'
 
 # סעיף 18ב(א): a document sent by computer carries these words "בצורה בולטת לעין".
 COMPUTERIZED_MARK = 'מסמך ממוחשב'

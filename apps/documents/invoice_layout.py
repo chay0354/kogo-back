@@ -272,8 +272,11 @@ class InvoiceLayout:
     notes: list[Note] = dataclass_field(default_factory=list)
     footer: str = ''
     watermark: str = ''
-    # The round seal beside the small print — on the signed original only.
+    # The round seal beside the small print — on a signed, stored file only.
     signed_seal: bool = False
+    # What the seal says in its centre; '' is "מסמך ממוחשב". The archive copy of
+    # a document issued before signing says "העתק לארכיון" there.
+    seal_centre_text: str = ''
     pdf_title: str = ''
     pdf_author: str = ''
 
@@ -700,7 +703,7 @@ def _note_paragraph(note: Note, style: ParagraphStyle, width: float) -> Paragrap
     return Paragraph('<br/>'.join(out), style)
 
 
-def _signature_seal() -> SignatureSeal:
+def _signature_seal(centre_text: str = '') -> SignatureSeal:
     return SignatureSeal(
         SEAL_DIAMETER,
         bold_font=FONT_BOLD,
@@ -710,6 +713,7 @@ def _signature_seal() -> SignatureSeal:
         fill=CARD_BG,
         bottom_text=ISSUER_NAME,
         company_number=ISSUER_COMPANY_NUMBER,
+        centre_text=centre_text,
     )
 
 
@@ -729,7 +733,7 @@ def _notes_block(layout: InvoiceLayout, styles: dict) -> list:
     ]
     block.setStyle(TableStyle(no_padding))
     if layout.signed_seal:
-        block = Table([[_signature_seal(), block]], colWidths=[SEAL_COLUMN, width])
+        block = Table([[_signature_seal(layout.seal_centre_text), block]], colWidths=[SEAL_COLUMN, width])
         block.setStyle(TableStyle(no_padding + [('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
     return [
         _Rule(RULE_GREY, 0.8), Spacer(1, 11),

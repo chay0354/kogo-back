@@ -24,6 +24,10 @@ Money never waits on any of this: the row is a savepoint insert, and signing
 and sending run after the commit, each in its own try — the pattern of
 apps/customers/recurring_billing.py (the receipt follows the charge, and its
 failure is logged, not raised).
+
+An archive copy (purpose 'archive', apps/documents/signing/archive.py) shares
+the table and takes part in none of this: it is never drawn as an original,
+never mailed, never on the paper list, and never printed as "מקור".
 """
 from __future__ import annotations
 
@@ -126,6 +130,10 @@ def _ensure_row(source: Source, *, channel: str = '', email_to: str = '', custom
         return row
     if (row.kind, row.source_id) != (source.kind, source.source_id):
         raise NumberClash(f'{source.number} is already the original of {row.kind}:{row.source_id}')
+    if row.is_archive_copy:
+        # Issued before signing existed and kept as an archive copy: nothing a
+        # caller knows about mailing it applies — it is never mailed.
+        return row
     # A later caller may know what the first did not: that the document is mailed, and to whom.
     changed = []
     if channel and not row.channel:
@@ -183,6 +191,10 @@ def _sign_locked(row: SignedOriginal, source: Source) -> SignedOriginal:
     from apps.documents.signing.certificate import fingerprint_sha256
     from apps.documents.signing.signer import sign_pdf
 
+    if row.is_archive_copy:
+        # Never an original drawn on an archive copy's row — that would be a
+        # second "מקור". An archive copy is signed as it is created (archive.py).
+        return row
     row.sign_attempts = min(row.sign_attempts + 1, 32767)
     try:
         with transaction.atomic():
@@ -218,7 +230,9 @@ def sign_original(kind: str, obj, *, channel: str = '', email_to: str = '', cust
 
     Idempotent: the row is locked and looked at again, and a signed row is
     returned as it is — an original is never signed twice. None when signing
-    is off or the document is not issued (a draft, a sale not yet paid).
+    is off, the document is not issued (a draft, a sale not yet paid), or it
+    was issued before signing existed and its row is an archive copy: its
+    original left unsigned, and a second "מקור" is never drawn.
     A failure to sign is recorded on the row (held), never raised.
     """
     if not enabled():
@@ -228,6 +242,8 @@ def sign_original(kind: str, obj, *, channel: str = '', email_to: str = '', cust
         return None
     with transaction.atomic():
         row = _ensure_row(source, channel=channel, email_to=email_to, customer_name=customer_name)
+    if row.is_archive_copy:
+        return None
     if row.is_signed:
         return row
     with transaction.atomic():
@@ -388,7 +404,9 @@ def sign_pending(*, limit: int = 25) -> dict:
     limit = max(1, min(int(limit or 25), 200))
     summary = {'signed': 0, 'still_unsigned': 0, 'sent': 0, 'not_sent': 0, 'errors': 0}
 
-    for row in SignedOriginal.objects.filter(signed_at__isnull=True).order_by('updated_at')[:limit]:
+    # An archive copy is never here: it is signed as it is created, and never mailed.
+    originals = SignedOriginal.objects.exclude(purpose=SignedOriginal.PURPOSE_ARCHIVE)
+    for row in originals.filter(signed_at__isnull=True).order_by('updated_at')[:limit]:
         try:
             source = load_source(row.kind, row.source_id)
             with transaction.atomic():
@@ -407,7 +425,7 @@ def sign_pending(*, limit: int = 25) -> dict:
             _touch(row, exc)
 
     due = (
-        SignedOriginal.objects
+        originals
         .filter(
             signed_at__isnull=False, sent_at__isnull=True, paper_original_printed_at__isnull=True,
             delivery__in=(HELD, EMAIL), send_attempts__lt=MAX_SEND_ATTEMPTS,
@@ -449,6 +467,10 @@ ALREADY_PRINTED = 'המקור כבר הודפס — כל הדפסה נוספת �
 ALREADY_MAILED = 'המקור נשלח ללקוח במייל — כל הדפסה נוספת היא העתק'
 NOT_SIGNED_YET = 'המקור טרם נחתם — הוא ייחתם בדקות הקרובות; נסו שוב'
 STORED_FILE_BROKEN = 'קובץ המקור השמור אינו תקין ולכן לא הודפס. יש לפנות לתמיכה'
+ARCHIVE_NOT_ORIGINAL = (
+    'זהו העתק לארכיון ולא המקור — המקור נמסר ללקוח כשהמסמך הופק. '
+    'את ההעתק אפשר להוריד מהארכיון'
+)
 
 
 def print_original(row_id, user) -> SignedOriginal:
@@ -457,9 +479,12 @@ def print_original(row_id, user) -> SignedOriginal:
 
     Under the row lock: an original already printed, or already mailed, is
     refused — every further print is a copy. Once printed it is never mailed.
+    An archive copy is refused outright: it is not an original at all.
     """
     with transaction.atomic():
         row = SignedOriginal.objects.select_for_update().get(pk=row_id)
+        if row.is_archive_copy:
+            raise PrintRefused(ARCHIVE_NOT_ORIGINAL)
         if not row.is_signed:
             raise PrintRefused(NOT_SIGNED_YET)
         if row.paper_original_printed_at:

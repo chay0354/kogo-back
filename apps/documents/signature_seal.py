@@ -1,9 +1,11 @@
 """The round seal on a signed original.
 
 A picture of what the file already proves: the document is signed with a
-secured electronic signature (apps/documents/signing). It is drawn only on the
-one original that is signed and stored — never on a copy, which is not signed —
-and it proves nothing by itself; the signature in the file does.
+secured electronic signature (apps/documents/signing). It is drawn only on a
+file that is signed and stored — the one original, and the archive copy of a
+document issued before signing existed, whose centre then says "העתק לארכיון"
+instead of "מסמך ממוחשב" — never on an office copy, which is not signed. It
+proves nothing by itself; the signature in the file does.
 
 Every letter is drawn as its outline, read from the TrueType font reportlab has
 already loaded, and not as text. Text set glyph by glyph around a circle lands
@@ -23,6 +25,11 @@ from reportlab.platypus import Flowable
 
 TOP_TEXT = 'חתימה אלקטרונית מאובטחת'
 CENTRE_TEXT = 'מסמך ממוחשב'
+# The centre line sits inside the inner ring (radius 31 on the 92pt grid), a
+# little below the middle; wider than this and a longer text would touch it.
+CENTRE_MAX_WIDTH = 50.0
+CENTRE_SIZE = 6.6
+CENTRE_TRACKING = 0.2
 
 
 class _Outlines:
@@ -240,8 +247,10 @@ class SignatureSeal(Flowable):
     """
 
     def __init__(self, diameter: float, *, bold_font: str, regular_font: str,
-                 ink, accent, fill, bottom_text: str, company_number: str):
+                 ink, accent, fill, bottom_text: str, company_number: str,
+                 centre_text: str = CENTRE_TEXT):
         super().__init__()
+        self.centre_text = centre_text or CENTRE_TEXT
         self.diameter = diameter
         self.bold_font = bold_font
         self.regular_font = regular_font
@@ -291,8 +300,16 @@ class SignatureSeal(Flowable):
 
         self._draw_tick(canvas)
         canvas.setFillColor(self.ink)
-        draw_line(canvas, bold, CENTRE_TEXT, 6.6, 0, -11.5, tracking=0.2)
+        draw_line(canvas, bold, self.centre_text, self._centre_size(bold), 0, -11.5, tracking=CENTRE_TRACKING)
         draw_line(canvas, regular, f'ח.פ. {self.company_number}', 5.4, 0, -19.6, tracking=0.15)
+
+    def _centre_size(self, outlines: _Outlines) -> float:
+        """The centre line's size: 6.6, or smaller when a longer text would not fit inside the ring."""
+        text = get_display(self.centre_text)
+        width = sum(outlines.advance(char, CENTRE_SIZE) for char in text) + CENTRE_TRACKING * (len(text) - 1)
+        if width <= CENTRE_MAX_WIDTH:
+            return CENTRE_SIZE
+        return CENTRE_SIZE * CENTRE_MAX_WIDTH / width
 
     def _draw_tick(self, canvas) -> None:
         canvas.setStrokeColor(self.ink)

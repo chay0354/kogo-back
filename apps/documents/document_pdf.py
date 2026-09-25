@@ -16,14 +16,14 @@ from apps.documents.invoice_document import (
     computerized_note,
     credit_reference_note,
     date_stamp,
+    edition,
     footer_line,
     issue_stamp,
-    signature_note,
 )
 from apps.documents.invoice_layout import (
     Field, InvoiceLayout, LineItem, Note, money, render_invoice_pdf,
 )
-from apps.documents.issuer import COPY_MARK, ISSUER_NAME, ORIGINAL_MARK
+from apps.documents.issuer import ISSUER_NAME
 from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
 
 TYPE_LABELS = dict(DOCUMENT_TYPE_CHOICES)
@@ -232,7 +232,9 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
     return fields
 
 
-def _notes(doc: FormalDocument, *, signed: bool = False) -> list[Note]:
+def _notes(doc: FormalDocument, *, signed: bool = False, closing: tuple[Note, ...] | None = None) -> list[Note]:
+    if closing is None:
+        closing = edition(signed=signed).closing_notes
     notes: list[Note] = []
     if doc.document_type == 'credit_invoice':
         linked = doc.linked_document.document_number if doc.linked_document_id else doc.linked_document_number
@@ -256,26 +258,31 @@ def _notes(doc: FormalDocument, *, signed: bool = False) -> list[Note]:
         notes.append(Note('חשבון עסקה:', 'אינו חשבונית מס. חשבונית מס תופק עם התשלום.'))
     if doc.document_type != 'draft':
         notes.append(computerized_note())
-        if signed:
-            notes.append(signature_note())
+        # The signature line, and on an archive copy the archive note (invoice_document.edition).
+        notes.extend(closing)
     return notes
 
 
-def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bool = False) -> InvoiceLayout:
+def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bool = False,
+                          archive: bool = False) -> InvoiceLayout:
     """
     The design's data for one hand-issued document. Separated out so tests can read it.
 
     `copy` prints "העתק" (נספח ה'(א)(4)) — every print after the original;
     `signed` adds the signature line of the one original that is signed and
-    stored (apps/documents/signing). A draft is marked a draft either way.
+    stored (apps/documents/signing); `archive` draws the signed copy kept for
+    the archive of a document issued before signing existed — "העתק לארכיון",
+    never "מקור" (invoice_document.edition). A draft is marked a draft whatever
+    the three say, and is never signed.
     """
     label = TYPE_LABELS.get(doc.document_type, doc.document_type)
     is_draft = doc.document_type == 'draft'
     is_credit = doc.document_type == 'credit_invoice'
     price_word = 'כולל מע"מ' if doc.prices_include_vat else 'לפני מע"מ'
+    print_as = edition(copy=copy, signed=signed, archive=archive)
     return InvoiceLayout(
         title=f'{label} - {doc.document_number}',
-        copy_mark='טיוטה — אינו מסמך מס' if is_draft else (COPY_MARK if copy else ORIGINAL_MARK),
+        copy_mark='טיוטה — אינו מסמך מס' if is_draft else print_as.copy_mark,
         document_fields=_document_fields(doc),
         business_fields=business_fields(),
         items=_items(doc),
@@ -285,17 +292,19 @@ def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bo
         totals=_totals(doc),
         grand_label='סה"כ זיכוי' if is_credit else 'סה"כ לתשלום',
         grand_value=money(doc.total_amount),
-        notes=_notes(doc, signed=signed and not copy),
+        notes=_notes(doc, closing=print_as.closing_notes),
         footer=footer_line(),
         watermark='טיוטה' if is_draft else '',
-        signed_seal=signed and not copy and not is_draft,
+        signed_seal=print_as.seal and not is_draft,
+        seal_centre_text='' if is_draft else print_as.seal_centre_text,
         pdf_title=f'{label} {doc.document_number}',
         pdf_author=ISSUER_NAME,
     )
 
 
-def generate_document_pdf(doc: FormalDocument, *, copy: bool = False, signed: bool = False) -> bytes:
-    return render_invoice_pdf(build_document_layout(doc, copy=copy, signed=signed))
+def generate_document_pdf(doc: FormalDocument, *, copy: bool = False, signed: bool = False,
+                          archive: bool = False) -> bytes:
+    return render_invoice_pdf(build_document_layout(doc, copy=copy, signed=signed, archive=archive))
 
 
 __all__ = [
