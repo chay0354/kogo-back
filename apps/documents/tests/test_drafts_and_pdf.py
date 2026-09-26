@@ -90,13 +90,15 @@ class DraftDocumentTests(APITestCase):
         res = self.client.post(CREATE, body, format='json')
         self.assertEqual(res.status_code, status.HTTP_201_CREATED, res.data)
 
-    def test_a_transaction_invoice_carries_no_vat_however_it_was_issued(self):
+    def test_a_transaction_invoice_carries_the_vat_it_will_charge_however_it_was_issued(self):
+        # A demand for payment asks for the whole sum: ₪360 + 18% (WS-2, item M).
+        # It used to be forced VAT-free, and printed "פטור" on a taxable sale.
         direct = self.client.post(CREATE, self.payload('transaction_invoice'), format='json')
         self.assertEqual(direct.status_code, status.HTTP_201_CREATED, direct.data)
         issued = FormalDocument.objects.get(pk=direct.data['id'])
-        self.assertTrue(issued.vat_exempt)
-        self.assertEqual(issued.vat_amount, Decimal('0.00'))
-        self.assertEqual(issued.total_amount, Decimal('360.00'))
+        self.assertFalse(issued.vat_exempt)
+        self.assertEqual(issued.vat_amount, Decimal('64.80'))
+        self.assertEqual(issued.total_amount, Decimal('424.80'))
 
         drafted = self.client.post(
             CREATE, self.payload('draft', draft_target_type='transaction_invoice'), format='json',

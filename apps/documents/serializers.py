@@ -102,8 +102,14 @@ class FormalDocumentListSerializer(serializers.ModelSerializer):
 class LineItemInputSerializer(serializers.Serializer):
     sku = serializers.CharField(required=False, allow_blank=True, default='')
     description = serializers.CharField(required=False, allow_blank=True, default='')
-    quantity = serializers.DecimalField(max_digits=10, decimal_places=2, default=1)
-    price = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    quantity = serializers.DecimalField(
+        max_digits=10, decimal_places=2, default=1, min_value=Decimal('0.01'),
+        error_messages={'min_value': 'כמות חייבת להיות גדולה מאפס'},
+    )
+    price = serializers.DecimalField(
+        max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'),
+        error_messages={'min_value': 'מחיר לא יכול להיות שלילי — הנחה נרשמת בשדה ההנחה, החזר בחשבונית זיכוי'},
+    )
 
 
 # How a payment is named: the dialog's Hebrew labels, or the stored keys.
@@ -145,12 +151,25 @@ class InvoiceDetailsInputSerializer(serializers.Serializer):
     document_date = serializers.DateField()
     due_date = serializers.DateField(required=False, allow_null=True)
     description = serializers.CharField(required=False, allow_blank=True, default='')
-    currency = serializers.ChoiceField(choices=['ILS', 'USD', 'EUR'], default='ILS')
+    # Shekels only (owner decision D6): no rate is kept for a foreign-currency
+    # document, and the uniform file records shekels.
+    currency = serializers.ChoiceField(
+        choices=['ILS'], default='ILS',
+        error_messages={'invalid_choice': 'מסמכים מופקים בשקלים בלבד'},
+    )
     prices_include_vat = serializers.BooleanField(default=False)
     line_items = LineItemInputSerializer(many=True)
-    discount_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
-    discount_percent = serializers.DecimalField(max_digits=5, decimal_places=2, default=0)
+    discount_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'),
+        error_messages={'min_value': 'הנחה לא יכולה להיות שלילית'},
+    )
+    discount_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, default=0, min_value=Decimal('0'), max_value=Decimal('100'),
+        error_messages={'min_value': 'אחוז הנחה בין 0 ל־100', 'max_value': 'אחוז הנחה בין 0 ל־100'},
+    )
     vat_exempt = serializers.BooleanField(default=False)
+    # "עגל סכום" is gone (D6): a total rounded to the shekel no longer matched
+    # its net and VAT. Still accepted from an older screen, and ignored.
     round_total = serializers.BooleanField(default=False)
     payment_terms = serializers.CharField(required=False, allow_blank=True, default='')
     customer_notes = serializers.CharField(required=False, allow_blank=True, default='')
@@ -184,20 +203,20 @@ class InvoiceDetailsInputSerializer(serializers.Serializer):
 class ReceiptDetailsInputSerializer(serializers.Serializer):
     payment_method = serializers.CharField()
     linked_invoice_id = serializers.CharField(required=False, allow_blank=True, default='')
-    cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'))
     cash_notes = serializers.CharField(required=False, allow_blank=True, default='')
     checks = serializers.ListField(child=serializers.DictField(), required=False, default=list)
-    withholding = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    withholding = serializers.DecimalField(max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'))
     check_notes = serializers.CharField(required=False, allow_blank=True, default='')
     card_last_four = serializers.CharField(required=False, allow_blank=True, default='')
     card_expiry = serializers.CharField(required=False, allow_blank=True, default='')
-    card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    card_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'))
     card_brand = serializers.CharField(required=False, allow_blank=True, default='', max_length=30)
     card_installments = serializers.IntegerField(default=1)
     card_notes = serializers.CharField(required=False, allow_blank=True, default='')
     bank_date = serializers.DateField(required=False, allow_null=True)
     bank_reference = serializers.CharField(required=False, allow_blank=True, default='')
-    bank_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    bank_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'))
     bank_notes = serializers.CharField(required=False, allow_blank=True, default='')
 
 
@@ -279,6 +298,12 @@ class CreateDocumentSerializer(serializers.Serializer):
         }
         if missing:
             raise serializers.ValidationError(missing)
+        # Every document names its customer — a tax invoice the buyer (תקנה
+        # 9א), a receipt the payer (הוראה 5(א)(4)), a credit note whom it credits.
+        if attrs.get('client_type') == 'existing' and not attrs.get('child_id'):
+            raise serializers.ValidationError({'child_id': ['יש לבחור את הלקוח שהמסמך מופק לו']})
+        if attrs.get('client_type') == 'business' and not attrs.get('business_customer_id'):
+            raise serializers.ValidationError({'business_customer_id': ['יש לבחור את הלקוח העסקי שהמסמך מופק לו']})
         details = attrs.get('invoice_details') or {}
         if details.get('allocation_number') and attrs.get('document_type') not in ('tax_invoice', 'combined'):
             raise serializers.ValidationError({'invoice_details': {'allocation_number': [

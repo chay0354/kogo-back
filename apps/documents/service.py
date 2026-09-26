@@ -123,9 +123,24 @@ def _sign_at_issue(doc: FormalDocument, **delivery) -> None:
 
 
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,
-                    vat_exempt: bool, round_total: bool, prices_include_vat: bool = False) -> dict:
-    subtotal = sum(Decimal(str(i['quantity'])) * Decimal(str(i['price'])) for i in line_items)
-    effective_discount = discount_amount if discount_amount > 0 else (subtotal * discount_percent / 100)
+                    vat_exempt: bool, prices_include_vat: bool = False) -> dict:
+    """
+    Subtotal, discount, VAT and total — each to the agora, half up, as printed
+    and stored (the dialog works them out the same way, utils.computeInvoiceTotals).
+
+    There is no rounding of the total to the shekel any more ("עגל סכום",
+    D6): it moved the total off its net plus VAT.
+    """
+    subtotal = sum(
+        (Decimal(str(i['quantity'])) * Decimal(str(i['price'])) for i in line_items), Decimal('0'),
+    ).quantize(AGORA, rounding=ROUND_HALF_UP)
+    if discount_amount < 0 or discount_percent < 0 or discount_percent > 100:
+        raise ValueError('הנחה בין 0 ל־100 אחוז, ובסכום שאינו שלילי')
+    effective_discount = (
+        discount_amount if discount_amount > 0 else subtotal * discount_percent / 100
+    ).quantize(AGORA, rounding=ROUND_HALF_UP)
+    if effective_discount > subtotal:
+        raise ValueError('ההנחה גדולה מסכום השורות')
     base = subtotal - effective_discount
     if prices_include_vat and not vat_exempt:
         # The prices are gross: the total is what was paid, VAT is taken out of it.
@@ -136,8 +151,6 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
     else:
         vat = Decimal('0') if vat_exempt else (base * VAT_RATE).quantize(AGORA, rounding=ROUND_HALF_UP)
         total = base + vat
-    if round_total:
-        total = total.quantize(Decimal('1'), rounding=ROUND_HALF_UP)
     return {
         'subtotal': subtotal,
         'discount_amount': effective_discount,
@@ -155,15 +168,16 @@ def create_invoice(data: dict, document_type: str, *, issued_by=None,
     `skip_date_rules=True` only from the check and cash plans (see _number_and_date).
     """
     invoice_data = data['invoice_details']
-    # A חשבונית עסקה is not a tax document and carries no VAT — the same rule
-    # the draft path applies, so approving a draft and issuing directly agree.
-    vat_exempt = invoice_data.get('vat_exempt', False) or document_type == 'transaction_invoice'
+    # A חשבונית עסקה is a demand for payment: it shows the VAT the tax invoice
+    # issued with the payment will charge, so the customer is asked for the
+    # whole sum. It is VAT-free only when the sale is (Eilat, abroad) — it
+    # used to be forced exempt, and printed "פטור" on a taxable sale.
+    vat_exempt = invoice_data.get('vat_exempt', False)
     totals = _compute_totals(
         invoice_data['line_items'],
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
         vat_exempt,
-        invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
 
@@ -214,13 +228,12 @@ def create_draft(data: dict) -> FormalDocument:
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'לא ניתן לשמור טיוטה לסוג {target}')
     invoice_data = data['invoice_details']
-    vat_exempt = invoice_data.get('vat_exempt', False) or target == 'transaction_invoice'
+    vat_exempt = invoice_data.get('vat_exempt', False)
     totals = _compute_totals(
         invoice_data['line_items'],
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
         vat_exempt,
-        invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
     doc = FormalDocument.objects.create(
@@ -299,7 +312,6 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
         invoice_data.get('vat_exempt', False),
-        invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
 
@@ -374,6 +386,8 @@ def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
         total_amount=amount,
         linked_document_number=receipt.get('linked_invoice_id', ''),
         customer_notes=receipt.get('check_notes', '') or receipt.get('cash_notes', '') or receipt.get('bank_notes', '') or receipt.get('card_notes', ''),
+        # ניכוי במקור the customer withheld — it was read and dropped before.
+        withholding_amount=_withholding(receipt.get('withholding')),
         **_issued(issued_by),
     )
 
@@ -415,6 +429,7 @@ def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
             payment_method='bank_transfer',
             amount=Decimal(str(receipt.get('bank_amount', 0))),
             reference=receipt.get('bank_reference', ''),
+            paid_on=receipt.get('bank_date') or None,
             notes=receipt.get('bank_notes', ''),
         )
     else:
