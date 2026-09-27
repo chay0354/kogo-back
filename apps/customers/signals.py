@@ -26,8 +26,16 @@ def track_status_change(sender, instance, **kwargs):
 @receiver(post_save, sender=Child)
 def create_status_history(sender, instance, created, **kwargs):
     """
-    Create ChildStatusHistory record when status changes FROM 'active' TO any other status
-    Only tracks when children leave active status (quit/churn tracking)
+    Create a ChildStatusHistory record when a child leaves 'active' for any
+    other status, or arrives at 'inactive' from any status.
+
+    The dashboard's dropout figure counts children who moved to 'inactive'.
+    Recording only moves out of 'active' missed a real way to leave: a card
+    fails (active → payment_problem) and the child then goes
+    (payment_problem → inactive). Only the morning status fix, which writes a
+    row of its own, ever recorded that second step; the office doing it by
+    hand left no trace. The dashboard counts each child once, so the morning
+    fix's row beside this one is not a double count.
     """
     # Import here to avoid circular import
     from apps.customers.status_history_models import ChildStatusHistory
@@ -39,8 +47,7 @@ def create_status_history(sender, instance, created, **kwargs):
     # Check if status actually changed
     previous_status = getattr(instance, '_previous_status', None)
     if previous_status and previous_status != instance.status:
-        # Only save history when changing FROM 'active' TO any other status
-        if previous_status == 'active' and instance.status != 'active':
+        if previous_status == 'active' or instance.status == 'inactive':
             ChildStatusHistory.objects.create(
                 child=instance,
                 previous_status=previous_status,

@@ -31,9 +31,19 @@ from apps.core.models import (
 )
 from apps.instructors.models import Instructor
 from apps.courses.models import Course, Lesson, CourseType
-from apps.customers.child_status import CHILD_STATUS_LABELS, STATUS_PAYMENT_PROBLEM, canonical_status
+from apps.customers.child_status import (
+    CHILD_STATUS_LABELS,
+    LEGACY_STATUS_MAP,
+    STATUS_INACTIVE,
+    STATUS_PAYMENT_PROBLEM,
+    canonical_status,
+)
 from apps.customers.models import Child, Family
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
+from apps.enrollments.enrollment_counts import (
+    ACTIVE_STUDENT_CHILD_STATUSES,
+    active_student_enrollments,
+)
 from apps.external_students.roster import external_counts_by_branch, external_counts_by_course
 
 # The manual "refresh this month" works in slices (see refresh_current_month):
@@ -107,7 +117,37 @@ class DashboardViewSet(viewsets.ViewSet):
                 return True, [], [], []
             return True, partner_course_ids(user), branch_ids, partner_instructor_ids(user)
         return False, None, None, None
-    
+
+    @staticmethod
+    def _students_in_branches(branch_ids=None, branch_id=None, city_id=None):
+        """
+        The enrolments behind a count of students in branches: a paying seat,
+        and the child is פעיל or בעיה באשראי (active_student_enrollments), by
+        the branch of the lesson. None means no limit.
+        """
+        qs = active_student_enrollments().filter(child__isnull=False)
+        if branch_ids is not None:
+            qs = qs.filter(lesson__course__branch_id__in=branch_ids)
+        if branch_id:
+            qs = qs.filter(lesson__course__branch_id=branch_id)
+        if city_id:
+            qs = qs.filter(lesson__course__branch__city_id=city_id)
+        return qs
+
+    @classmethod
+    def _students_by_branch(cls, branch_ids) -> dict:
+        """
+        {branch id: its students} — the figure the branch page header shows
+        (GET core/branches/<id>/statistics/ → active_students). A child in two
+        branches is a student of each.
+        """
+        rows = (
+            cls._students_in_branches(branch_ids)
+            .values('lesson__course__branch_id')
+            .annotate(count=Count('child_id', distinct=True))
+        )
+        return {str(row['lesson__course__branch_id']): row['count'] for row in rows}
+
     @action(detail=False, methods=['get'], url_path='financial')
     def financial_data(self, request):
         """
@@ -435,6 +475,8 @@ class DashboardViewSet(viewsets.ViewSet):
 
         # KPIs: branch/course filters use currently active enrollments only
         children = base_children
+        # The lessons the active-students figure is limited to; None = no limit.
+        student_enrollments = None
         if course_id != 'all' or branch_id != 'all' or city_id != 'all':
             filtered_enrollments = LessonEnrollment.objects.filter(status='active')
             if scoped:
@@ -451,6 +493,11 @@ class DashboardViewSet(viewsets.ViewSet):
                 )
             filtered_child_ids = filtered_enrollments.values_list('child_id', flat=True).distinct()
             children = children.filter(id__in=filtered_child_ids)
+            student_enrollments = filtered_enrollments
+        elif scoped:
+            student_enrollments = LessonEnrollment.objects.filter(
+                lesson__course_id__in=scoped_course_ids
+            )
 
         # Churn scope: any enrollment in branch/course (includes kids who already quit)
         quit_scope_child_ids = None
@@ -474,8 +521,23 @@ class DashboardViewSet(viewsets.ViewSet):
         elif scoped:
             quit_scope_child_ids = base_children.values_list('id', flat=True)
         
-        # KPI 1: Active Students
-        active_students = children.filter(status='active').count()
+        # KPI 1: Active Students — the owner's rule (24.9.2026): a student is a
+        # child who is פעיל or בעיה באשראי ("מי שהאשראי שלו לא עבר הוא גם פעיל").
+        # This used to count status 'active' alone, so every child whose card
+        # had just failed dropped out of the figure until it was replaced. The
+        # card failures are still shown on their own in credit_problems.
+        #
+        # Limited to a branch, course or city (or to a partner's courses), a
+        # child counts there only with a paying seat in one of those lessons —
+        # the rule the branch page header uses (active_student_enrollments). A
+        # student of one branch who is only on a trial in another is not a
+        # student of the second.
+        active_student_children = children.filter(status__in=ACTIVE_STUDENT_CHILD_STATUSES)
+        if student_enrollments is not None:
+            active_student_children = active_student_children.filter(
+                id__in=active_student_enrollments(student_enrollments).values('child_id')
+            )
+        active_students = active_student_children.count()
         
         # KPI 2: Credit Problems. 'not_paid' was folded into payment_problem —
         # it was never written by any code, only counted here beside it.
@@ -530,58 +592,77 @@ class DashboardViewSet(viewsets.ViewSet):
             except Branch.DoesNotExist:
                 pass
         
-        # Quit Percentage - Children who changed from 'active' to other statuses
-        # Apply branch/course filters to quit percentage data
-        quit_data = []
-        status_changes = ChildStatusHistory.objects.filter(
-            previous_status='active',
+        # Dropout (נשירה): the children who left — moved to לא פעיל inside the
+        # window, from whatever status they were in, each child once.
+        #
+        # This used to count ChildStatusHistory rows leaving 'active' for any
+        # status. Most of those were card failures (active → payment_problem:
+        # 17 of 22 in production on 27.9.2026, 15 of them פעיל again), while a
+        # real departure by way of payment_problem → inactive was never counted
+        # because it does not start from 'active'. It also counted rows, not
+        # children: the morning status fix writes a row of its own beside the
+        # save signal's for the same change, so one departure could count twice.
+        #
+        # A failed card is not leaving. The open ones are credit_problems; one
+        # that did end in leaving is here, under the status it left from.
+        departure_names = [STATUS_INACTIVE] + [
+            legacy for legacy, current in LEGACY_STATUS_MAP.items() if current == STATUS_INACTIVE
+        ]
+        departures = ChildStatusHistory.objects.filter(
+            new_status__in=departure_names,
             changed_at__date__gte=quit_date_from,
-            changed_at__date__lte=quit_date_to
-        ).exclude(new_status='active')
-        
+            changed_at__date__lte=quit_date_to,
+        )
         if quit_scope_child_ids is not None:
-            status_changes = status_changes.filter(child_id__in=quit_scope_child_ids)
-        
-        # Group by target status
-        quit_by_status = status_changes.values('new_status').annotate(
-            count=Count('id')
-        ).order_by('-count')
-        
+            departures = departures.filter(child_id__in=quit_scope_child_ids)
+
+        # One departure per child — the latest in the window. A child who left,
+        # came back and left again inside it is one child who left.
+        departure_by_child = {}
+        for change in departures.select_related('child').order_by('child_id', '-changed_at'):
+            departure_by_child.setdefault(change.child_id, change)
+        departure_rows = sorted(
+            departure_by_child.values(), key=lambda change: change.changed_at, reverse=True,
+        )
+        total_quit = len(departure_rows)
+
         # The labels come from the one list. This map used to carry its own
         # spellings ("בעיית תשלום", "ממתין") plus three statuses that never
         # existed anywhere else — non_active, paused, sign_in.
         status_labels = dict(CHILD_STATUS_LABELS)
-        
-        total_quit = status_changes.count()
-        status_change_rows = list(status_changes.select_related('child'))
-        changes_by_status = {}
-        for change in status_change_rows:
-            changes_by_status.setdefault(change.new_status, []).append(change)
 
-        for item in quit_by_status:
-            percentage = (item['count'] / total_quit * 100) if total_quit > 0 else 0
-            status_key = item['new_status']
-            child_details = [
-                {
-                    'id': str(change.child.id),
-                    'full_name': change.child.full_name,
-                    'id_number': change.child.id_number or '',
-                    'changed_at': change.changed_at.isoformat(),
-                }
-                for change in changes_by_status.get(status_key, [])
-            ]
+        def _group_departures(status_of):
+            groups: dict = {}
+            for change in departure_rows:
+                raw = status_of(change) or ''
+                # History rows keep whatever name was current when they were
+                # written, so a row from before the list was settled still
+                # gets a readable label.
+                key = canonical_status(raw) or raw
+                groups.setdefault(key, []).append(change)
+            rows = []
+            for key, changes in sorted(groups.items(), key=lambda item: len(item[1]), reverse=True):
+                rows.append({
+                    'status': status_labels.get(key, key),
+                    'status_key': key,
+                    'count': len(changes),
+                    'percentage': round(len(changes) / total_quit * 100, 1) if total_quit else 0,
+                    'children': [
+                        {
+                            'id': str(change.child.id),
+                            'full_name': change.child.full_name,
+                            'id_number': change.child.id_number or '',
+                            'changed_at': change.changed_at.isoformat(),
+                        }
+                        for change in changes
+                    ],
+                })
+            return rows
 
-            # History rows keep whatever name was current when they were
-            # written, so a churn row from before the list was settled still
-            # gets a readable label.
-            label_key = canonical_status(status_key) or status_key
-            quit_data.append({
-                'status': status_labels.get(label_key, status_key),
-                'status_key': status_key,
-                'count': item['count'],
-                'percentage': round(percentage, 1),
-                'children': child_details,
-            })
+        # `by_status` keeps its shape and meaning — where they went — which is
+        # now always לא פעיל. `by_previous_status` is where they left from.
+        quit_data = _group_departures(lambda change: change.new_status)
+        quit_by_previous_status = _group_departures(lambda change: change.previous_status)
 
         # Quit breakdown by course type or course (bar chart only)
         quit_by_course_type = []
@@ -591,9 +672,7 @@ class DashboardViewSet(viewsets.ViewSet):
             if total_quit <= 0:
                 return []
 
-            child_ids_in_quit = list(
-                status_changes.values_list('child_id', flat=True).distinct()
-            )
+            child_ids_in_quit = list(departure_by_child)
             if not child_ids_in_quit:
                 return []
 
@@ -656,7 +735,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
             agg: dict = {}
             unknown_count = 0
-            for change in status_change_rows:
+            for change in departure_rows:
                 groups = child_groups.get(change.child_id)
                 if not groups:
                     unknown_count += 1
@@ -735,6 +814,7 @@ class DashboardViewSet(viewsets.ViewSet):
             'quit_percentage': {
                 'total_quit': total_quit,
                 'by_status': quit_data,
+                'by_previous_status': quit_by_previous_status,
                 'by_course_type': quit_by_course_type,
                 'by_course': quit_by_course,
             },
@@ -1113,25 +1193,19 @@ class DashboardViewSet(viewsets.ViewSet):
                 )
         
         # KPIs - Only total_students and total_profit (removed active_branches and avg_room_utilization)
-        # A walk-in was never a registration, and a child who left is not a
-        # current student. 'non_active' and 'sign_in' are not statuses this
-        # model has ever defined, so neither exclusion matched anything and
-        # everyone who had left was being counted.
-        children_query = Child.objects.exclude(
-            status__in=['ghost', 'inactive']
-        )
-        if scoped:
-            children_query = children_query.filter(family__branch_id__in=scoped_branch_ids)
-        
-        # Apply branch filter
-        if branch_id and branch_id != 'all':
-            children_query = children_query.filter(family__branch_id=branch_id)
-        
-        # Apply city filter
-        if city_id and city_id != 'all':
-            children_query = children_query.filter(family__branch__city_id=city_id)
-        
-        total_students = children_query.count()
+        # A student is a child who is פעיל or בעיה באשראי with a paying seat,
+        # and belongs to the branch of the lesson they attend — the owner's
+        # rule (24.9.2026) and the same count as the branch page header. This
+        # used to count every child not ghost/inactive by the family's branch,
+        # so every trial, every unpaid sign-up and every child of a family
+        # registered elsewhere went in: 1,199 in production on 27.9.2026, when
+        # 632 children were פעיל or בעיה באשראי. The total counts each child
+        # once, even one who attends lessons in two branches.
+        total_students = self._students_in_branches(
+            scoped_branch_ids if scoped else None,
+            branch_id if branch_id and branch_id != 'all' else None,
+            city_id if city_id and city_id != 'all' else None,
+        ).values('child_id').distinct().count()
         
         # Total profit is sum across all months in the period
         total_profit_agg = snapshots.aggregate(Sum('profit'))
@@ -1150,14 +1224,10 @@ class DashboardViewSet(viewsets.ViewSet):
         total_profit = total_profit + rental_dec
         
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Total Students (from Child model): %s", total_students)
+            logger.debug("Total Students (by lesson branch): %s", total_students)
             logger.debug("Total Profit aggregation result: %s", total_profit_agg)
             logger.debug("Total Profit (sum of snapshots.profit): %s", total_profit)
         
-        # Same two names that never matched anything, so the per-branch counts
-        # carried departed children too.
-        excluded_child_statuses = ['ghost', 'inactive']
-
         branch_rows = snapshots.values(
             'branch_id',
             'branch__name',
@@ -1169,13 +1239,7 @@ class DashboardViewSet(viewsets.ViewSet):
         )
 
         branch_ids_in_snapshots = [row['branch_id'] for row in branch_rows]
-        student_counts = {
-            str(row['family__branch_id']): row['count']
-            for row in Child.objects.filter(family__branch_id__in=branch_ids_in_snapshots).exclude(
-                status__in=excluded_child_statuses
-            ).values('family__branch_id').annotate(count=Count('id'))
-            if row['family__branch_id']
-        }
+        student_counts = self._students_by_branch(branch_ids_in_snapshots)
 
         # Municipality children per branch, and which branches are external.
         # Kept beside `students` rather than added to it: that figure counts
@@ -1214,16 +1278,9 @@ class DashboardViewSet(viewsets.ViewSet):
             str(b.id): b
             for b in Branch.objects.filter(pk__in=missing_rental_ids).select_related('city')
         }
-        if missing_rental_ids:
-            rental_student_counts = {
-                str(row['family__branch_id']): row['count']
-                for row in Child.objects.filter(family__branch_id__in=missing_rental_ids).exclude(
-                    status__in=excluded_child_statuses
-                ).values('family__branch_id').annotate(count=Count('id'))
-                if row['family__branch_id']
-            }
-        else:
-            rental_student_counts = {}
+        rental_student_counts = (
+            self._students_by_branch(missing_rental_ids) if missing_rental_ids else {}
+        )
 
         for bid_str in missing_rental_ids:
             b = extra_branches.get(bid_str)

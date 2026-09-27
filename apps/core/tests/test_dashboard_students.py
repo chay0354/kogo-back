@@ -57,6 +57,7 @@ class DashboardStudentsDataTests(BaseAPITestCase):
         self.assertEqual(quit['total_quit'], 1)
         self.assertEqual(len(quit['by_status']), 1)
         self.assertEqual(quit['by_status'][0]['status_key'], 'inactive')
+        self.assertEqual(quit['by_previous_status'][0]['status_key'], 'active')
         self.assertEqual(len(quit['by_course_type']), 1)
         self.assertEqual(quit['by_course_type'][0]['course_type_name'], 'אקרובטיקה')
         self.assertEqual(len(quit['by_course']), 1)
@@ -94,11 +95,13 @@ class DashboardStudentsDataTests(BaseAPITestCase):
 
     def test_quit_includes_child_with_inactive_enrollment_when_branch_filtered(self):
         """Branch filter must not exclude quitters who no longer have active enrollments."""
+        # Left for לא פעיל — the one move that is a dropout. This used to be
+        # active → ghost, which is not leaving (a ghost is a walk-in).
         child = TestDataFactory.create_child(
             family=self.family,
             first_name='יעל',
             last_name='עזבה',
-            status='ghost',
+            status='inactive',
         )
         LessonEnrollment.objects.create(
             lesson=self.lesson,
@@ -108,7 +111,7 @@ class DashboardStudentsDataTests(BaseAPITestCase):
         ChildStatusHistory.objects.create(
             child=child,
             previous_status='active',
-            new_status='ghost',
+            new_status='inactive',
             changed_at=timezone.now(),
         )
 
