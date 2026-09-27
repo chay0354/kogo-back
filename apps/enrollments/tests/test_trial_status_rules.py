@@ -202,6 +202,20 @@ class CancelledTrialReminderTest(_Studio):
         send.assert_not_called()
 
     @override_settings(TIME_ZONE='Asia/Jerusalem')
+    def test_a_student_of_another_course_trying_this_one_is_reminded_too(self):
+        """
+        They stay פעיל now instead of being turned into נרשם לניסיון, and are
+        still coming to the trial — the trial row is what the messages follow.
+        """
+        child = self.make_child('active')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson_b, child=child, status='active', trial_lesson_date=self.TRIAL_DATE,
+        )
+        summary, send = self.run_at_ten_thirty()
+        self.assertEqual(summary['ten_am_sent'], 1)
+        self.assertEqual(send.call_count, 1)
+
+    @override_settings(TIME_ZONE='Asia/Jerusalem')
     def test_a_trial_still_booked_is(self):
         child = self.make_child('trial_signed')
         LessonEnrollment.objects.create(

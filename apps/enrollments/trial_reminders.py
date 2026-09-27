@@ -623,6 +623,10 @@ def _send_trial_whatsapp(svc, kind: str, ctx: dict, *, dry_run: bool, enrollment
 # with "your trial is today".
 TRIAL_REMINDER_STALE_AFTER = timedelta(hours=24)
 
+# Whose trial rows get the trial-day messages: a child booked for a first trial,
+# and a student of another course trying this one.
+TRIAL_REMINDER_CHILD_STATUSES = ('trial_signed', 'active', 'payment_problem')
+
 
 def _reminder_is_fresh(now, due) -> bool:
     return due <= now <= due + TRIAL_REMINDER_STALE_AFTER
@@ -642,7 +646,10 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
         # A cancelled trial keeps its date on an inactive row; only a live row
         # is a trial someone is still coming to.
         .filter(trial_lesson_date__isnull=False, status='active')
-        .filter(child__status='trial_signed')
+        # The trial row is what makes a trial, not the child's status: a child
+        # who already pays for a course and books a trial in another now stays
+        # פעיל / בעיה באשראי (27.9.2026) and is still coming to that trial.
+        .filter(child__status__in=TRIAL_REMINDER_CHILD_STATUSES)
     )
 
     svc = ManyChatService()

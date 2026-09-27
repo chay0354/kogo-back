@@ -168,3 +168,30 @@ class LessonCapacityTests(HeadcountTestBase):
         # And the headcount drawn against it is the paying one, not the roster.
         self.assertEqual(row['enrollment_count'], 14)
         self.assertEqual(row['trial_student_count'], 6)
+
+
+class TrialOfAStudentTests(HeadcountTestBase):
+    """
+    A student of another course trying this one (27.9.2026).
+
+    A trial booking no longer turns them into נרשם לניסיון — they pay for their
+    own course and stay פעיל — so the row booked for the date is what makes the
+    trial, on the register and in the day's counts.
+    """
+
+    def test_on_the_trial_day_they_are_a_trial_on_the_register_and_in_the_count(self):
+        wednesday = date.today() + timedelta(days=(2 - date.today().weekday()) % 7 or 7)
+        self.enroll('ותיקה', child_status='active', trial_on=wednesday)
+
+        res = self.client.get(f'/api/v1/scheduling/lessons/{self.lesson.id}/', {'date': wednesday.isoformat()})
+        self.assertEqual(res.status_code, 200, res.data)
+        row = next(e for e in res.data['enrollments'] if e['child_name'].startswith('ותיקה'))
+        self.assertTrue(row['is_trial'])
+
+        res = self.client.get(
+            '/api/v1/scheduling/lessons/',
+            {'start_date': wednesday.isoformat(), 'end_date': wednesday.isoformat()},
+        )
+        day = next(item for item in res.data if item['id'] == str(self.lesson.id))
+        self.assertEqual(day['trial_student_count'], 1)
+        self.assertEqual(day['active_student_count'], 0)

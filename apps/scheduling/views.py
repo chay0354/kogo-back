@@ -18,7 +18,6 @@ from collections import defaultdict
 
 from apps.enrollments.duplicate_students import collapse_duplicate_people
 from apps.enrollments.enrollment_counts import (
-    TRIAL_CHILD_STATUSES,
     counts_toward_capacity,
     paying_enrollment_q,
 )
@@ -256,11 +255,13 @@ class LessonViewSet(viewsets.ModelViewSet):
             if not enrollment_visible_on_date(e, occ_date):
                 continue
 
+            # A trial is the row booked for this date, whatever else the child
+            # is: a student of another course trying this one stays פעיל now
+            # (27.9.2026) and is still a trial here.
             is_trial = bool(
                 e.trial_lesson_date
                 and occ_date
                 and e.trial_lesson_date == occ_date
-                and e.child.status in ('trial_signed', 'trial_completed')
             )
             visible_enrollments.append({
                 'id': str(e.id),
@@ -421,10 +422,9 @@ class LessonViewSet(viewsets.ModelViewSet):
                     if not enrollment_visible_on_date(enr, occurrence_date):
                         continue
                     roster += 1
-                    if (
-                        enr.trial_lesson_date == occurrence_date
-                        and enr.child.status in TRIAL_CHILD_STATUSES
-                    ):
+                    # By the row, like the register's own tag: a student of
+                    # another course on a trial here is a trial here.
+                    if enr.trial_lesson_date == occurrence_date:
                         trials += 1
                     else:
                         actives += 1
