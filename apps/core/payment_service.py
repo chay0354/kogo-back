@@ -2841,6 +2841,12 @@ class PaymentService:
         if claim is None:
             return {'success': False, 'error': REFUND_ALREADY_CLAIMED}
 
+        # A charge that paid for several payments (a course checkout's cart)
+        # is refunded one payment at a time, as a credit: a cancel would void
+        # every child's part of it.
+        shared = Payment.objects.filter(
+            tranzila_transaction_id=payment.tranzila_transaction_id,
+        ).exclude(id=payment.id).exists()
         result = refund_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
@@ -2849,8 +2855,9 @@ class PaymentService:
             card_expire_month=card_expire_month,
             card_expire_year=card_expire_year,
             token=token,
-            prefer_cancel=same_day,
+            prefer_cancel=same_day and not shared,
             terminal_name=refund_terminal,
+            allow_cancel=not shared,
         )
 
         if result.get('uncertain'):

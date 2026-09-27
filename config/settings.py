@@ -268,6 +268,10 @@ REST_FRAMEWORK = {
         'rental_card_charge': '5/min',
         'card_replace_view': '30/min',
         'card_replace': '5/min',
+        # Course signup on Tranzila's page (apps/customers/course_checkout.py):
+        # opening a page, and the widget's poll while the parent pays.
+        'course_checkout_start': '20/min',
+        'course_checkout_status': '120/min',
     },
 }
 
@@ -322,6 +326,16 @@ TRANZILA_WALLETS = [
     for wallet in config('TRANZILA_WALLETS', default='').split(',')
     if wallet.strip()
 ]
+
+# Course signups on Tranzila's hosted page (stage 4 of the cogolive plan,
+# apps/customers/course_checkout.py). The page only checks the card and saves
+# it (tranmode NK); the server then charges the whole cart once from that token
+# and opens the standing orders on it. Off: the widget keeps its own card form
+# (/customers/widget/charge/), exactly as before.
+COURSE_HOSTED_PAGE_ENABLED = config('COURSE_HOSTED_PAGE_ENABLED', default=False, cast=bool)
+# The terminal that charges the saved card — the token terminal of the hosted
+# page's pair unless the 1 ₪ probe (apps/core/token_probe.py) says otherwise.
+COURSE_TOKEN_TERMINAL = (config('COURSE_TOKEN_TERMINAL', default='') or '').strip()
 
 # Who runs the monthly הוראות קבע charge.
 #   False (default) — apps.customers.recurring_billing charges the saved token via cron,

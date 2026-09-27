@@ -502,6 +502,52 @@ def check_unresolved_refunds(today: date) -> BriefItem:
     return item
 
 
+def check_course_checkouts(today: date) -> BriefItem:
+    """
+    Course signups paid on Tranzila's page that stopped short of done.
+
+    'uncertain' — the charge got no answer: the card may be charged. The claim
+    blocks another charge until someone checks the terminal. 'review' — money
+    moved on the page itself, a setup problem, a report that disagreed, or a
+    charge whose record failed. A checkout still 'charging' after ten minutes
+    was cut off mid-way. None of them charges again by itself.
+    """
+    from apps.customers.models import CourseCheckout
+
+    stuck = list(
+        CourseCheckout.objects
+        .filter(created_at__gte=timezone.now() - timedelta(days=30))
+        .filter(
+            Q(status__in=[CourseCheckout.STATUS_UNCERTAIN, CourseCheckout.STATUS_REVIEW])
+            | Q(status=CourseCheckout.STATUS_CHARGING, updated_at__lt=timezone.now() - timedelta(minutes=10))
+        )
+        .select_related('family')
+        .order_by('-created_at')
+    )
+    item = BriefItem(
+        key='course_checkouts',
+        title='הרשמות לחוגים שנתקעו בתשלום',
+        severity=RED if stuck else GREEN,
+        count=len(stuck),
+        action='לבדוק בטרנזילה אם הכרטיס חויב, ולהשלים או לבטל את ההרשמה. המערכת לא תחייב שוב לבד.',
+    )
+    if not stuck:
+        item.summary = 'כל ההרשמות דרך עמוד טרנזילה הושלמו או נסגרו.'
+        return item
+    item.summary = f'{len(stuck)} הרשמות לחוגים נעצרו באמצע התשלום.'
+    labels = dict(CourseCheckout.STATUS_CHOICES)
+    for checkout in stuck[:MAX_ROWS]:
+        reason = checkout.review_reason or checkout.failure_reason
+        item.rows.append(_row(
+            checkout.family.name if checkout.family else str(checkout.id),
+            f'{_money(checkout.amount)} · {labels.get(checkout.status, checkout.status)}'
+            + (f' · {reason[:80]}' if reason else '')
+            + f' · {timezone.localtime(checkout.created_at):%d/%m %H:%M}',
+            '/customers',
+        ))
+    return item
+
+
 def check_failed_payments(today: date) -> BriefItem:
     """Charges the gateway refused in the last week."""
     from apps.customers.models import Payment
@@ -1440,6 +1486,7 @@ CHECKS = (
     check_charges_in_processing,
     check_saved_card_setup,
     check_unresolved_refunds,
+    check_course_checkouts,
     check_recurring_without_lesson,
     check_failed_payments,
     check_registration_only_payments,
@@ -1486,6 +1533,7 @@ def check_catalogue() -> list[dict]:
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
         'charges_in_processing': 'חיובים שנתקעו בבדיקה',
+        'course_checkouts': 'הרשמות לחוגים שנתקעו בתשלום',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
         'unresolved_refunds': 'זיכויים שלא התקבלה עליהם תשובה',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',

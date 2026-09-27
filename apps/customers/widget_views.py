@@ -138,8 +138,14 @@ def _ensure_recurring_payment_for_widget_charge(
     expiry_year,
     enrollment_date,
     next_billing_date,
+    tranzila_terminal: str = '',
 ) -> bool:
-    """Create the CRM standing order after a successful widget charge, if missing."""
+    """
+    Create the CRM standing order after a successful widget charge, if missing.
+
+    `tranzila_terminal` is where the card was saved ('' — the michal pair,
+    production()); the monthly run charges it there.
+    """
     from apps.core.payment_service import payment_full_monthly_amount, should_create_recurring_for_payment
     from apps.customers.models import RecurringPayment
 
@@ -165,6 +171,7 @@ def _ensure_recurring_payment_for_widget_charge(
         child=child,
         initial_payment=payment,
         tranzila_token=token,
+        tranzila_terminal=(tranzila_terminal or '').strip(),
         card_expire_month=month,
         card_expire_year=year,
         status='active',
@@ -1113,6 +1120,221 @@ class WidgetTrialRegisterView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+def precheck_widget_capacity(payment_ids, *, single_lessons: bool = False):
+    """
+    Hebrew error when these payments cannot be charged as a whole, else None.
+
+    Capacity is re-checked before money moves because registration and payment
+    are separate requests, and a seat can be taken in between. Bundles are
+    always checked; `single_lessons` also checks a one-lesson registration (the
+    hosted-page checkout does, right before its charge). A trial never fills
+    the class and is not checked.
+    """
+    from apps.core.payment_service import validate_bundle_capacity
+    from apps.customers.models import Payment
+
+    payments = list(
+        Payment.objects.select_related('bundle', 'lesson__course', 'lesson__room').filter(id__in=payment_ids)
+    )
+    if len(payments) != len(set(payment_ids)):
+        return 'אחד התשלומים אינו זמין לחיוב. אנא התחילו את ההרשמה מחדש.'
+
+    # A retry after timeout may find some rows already completed/processing.
+    chargeable = [p for p in payments if p.status in ('pending', 'failed', 'processing')]
+    bundles = {p.bundle for p in chargeable if p.bundle_id}
+    for bundle in bundles:
+        try:
+            validate_bundle_capacity(bundle)
+        except ValueError as exc:
+            return str(exc) or 'אין מקום פנוי באחד השיעורים במסלול'
+    if single_lessons:
+        from apps.enrollments.change_course import _lesson_has_room
+
+        for payment in chargeable:
+            if payment.bundle_id or payment.lesson_id is None or payment.trial_lesson_date:
+                continue
+            room_error = _lesson_has_room(payment.lesson, payment.child_id)
+            if room_error:
+                return room_error
+    return None
+
+
+def widget_charge_items(payment) -> list:
+    """The Tranzila lines for one widget payment: a trial's one line, or the subscription's."""
+    from decimal import Decimal
+
+    from apps.core.payment_service import payment_prorated_lesson_amount, subscription_tranzila_items
+
+    child = payment.child
+    lesson = payment.lesson
+    is_trial_payment = payment.trial_lesson_date is not None
+    item_label = (
+        f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"
+        if is_trial_payment and lesson
+        else (f"{lesson.course.name} - {child.full_name}" if lesson else child.full_name)
+    )
+    if is_trial_payment:
+        return [{
+            'name': item_label,
+            'type': 'I',
+            'unit_price': float(payment.final_amount),
+            'units_number': 1,
+            'unit_type': 1,
+            'price_type': 'G',
+            'currency_code': 'ILS',
+        }]
+    registration_fee = payment.registration_fee or Decimal('0')
+    prorated_lesson = payment_prorated_lesson_amount(payment)
+    trial_credit = payment.trial_credit_amount or Decimal('0')
+    return subscription_tranzila_items(
+        label=item_label,
+        prorated_lesson=prorated_lesson,
+        registration_fee=registration_fee,
+        prorated=prorated_lesson > 0,
+        trial_credit=trial_credit,
+    )
+
+
+def activate_paid_widget_payment(
+    payment,
+    *,
+    tranzila_txn,
+    token,
+    expiry_month,
+    expiry_year,
+    today_il=None,
+    sto_start=None,
+    deferred_start=None,
+    tranzila_terminal: str = '',
+):
+    """
+    The money for `payment` is taken: record it and activate what it paid for.
+
+    Runs inside the caller's transaction, with `payment` locked and not yet
+    completed. A trial books its lesson; a registration opens the standing
+    order on `token` (saved on `tranzila_terminal`, '' — the michal pair),
+    activates the child and enrols them. Returns the trial enrolment to
+    notify, or None.
+
+    Shared by the typed-card widget charge (_charge_one) and the hosted-page
+    course checkout (apps/customers/course_checkout.py), so a child is
+    activated one way whichever way the parent paid.
+    """
+    import logging
+    from datetime import timedelta
+
+    from apps.core.payment_service import (
+        JERUSALEM_TZ,
+        _compute_prorate,
+        deferred_first_charge_date,
+        enroll_child_in_paid_lessons,
+        payment_is_fee_only,
+        standing_order_next_billing_date,
+    )
+    from apps.enrollments.models import LessonEnrollment
+
+    logger = logging.getLogger(__name__)
+    child = payment.child
+    lesson = payment.lesson
+    is_trial_payment = payment.trial_lesson_date is not None
+    if today_il is None:
+        today_il = timezone.now().astimezone(JERUSALEM_TZ).date()
+        deferred_start = None if is_trial_payment else deferred_first_charge_date(today_il)
+        sto_start = (
+            None
+            if is_trial_payment or lesson is None
+            else standing_order_next_billing_date(today=today_il, lesson=lesson)
+        )
+
+    payment.status = 'completed'
+    payment.payment_date = timezone.now()
+    payment.failure_reason = ''
+    payment.failure_code = ''
+    payment.save()
+
+    payment.tranzila_transaction = tranzila_txn
+    payment.save(update_fields=['tranzila_transaction'])
+
+    enrollment_id_for_whatsapp = None
+    if is_trial_payment:
+        trial_date = payment.trial_lesson_date
+        enrollment, created = LessonEnrollment.objects.get_or_create(
+            child=child,
+            lesson=lesson,
+            defaults={
+                'start_date': trial_date,
+                'status': 'active',
+                'trial_lesson_date': trial_date,
+            },
+        )
+        if not created:
+            enrollment.start_date = trial_date
+            enrollment.trial_lesson_date = trial_date
+            enrollment.trial_outcome = ''
+            enrollment.status = 'active'
+            enrollment.end_date = None
+            enrollment.save(update_fields=[
+                'start_date', 'trial_lesson_date', 'trial_outcome', 'status', 'end_date', 'updated_at',
+            ])
+        enrollment_id_for_whatsapp = str(enrollment.id)
+
+        Child.objects.filter(pk=child.pk).update(status='trial_signed')
+        mark_child_groups_stale(child.pk)
+    else:
+        token = token or _token_from_stored_transaction(payment)
+        if not token:
+            # The charge went through but no saved card came back, so the
+            # monthly subscription cannot be billed automatically.
+            logger.error(
+                "Tranzila returned no card token for payment %s (child=%s) — "
+                "monthly billing will not run until a token is stored",
+                payment.id, child.full_name if child else '',
+            )
+        enrollment_date = today_il
+        lesson_dow = lesson.day_of_week if lesson else 1
+        _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
+        next_billing_date = sto_start or next_billing_date
+        _ensure_recurring_payment_for_widget_charge(
+            payment=payment,
+            child=child,
+            lesson=lesson,
+            token=token,
+            expiry_month=expiry_month,
+            expiry_year=expiry_year,
+            enrollment_date=enrollment_date,
+            next_billing_date=next_billing_date,
+            tranzila_terminal=tranzila_terminal,
+        )
+
+        # A card that was only verified has nothing to invoice here;
+        # the checkout helper emits one receipt after the card request.
+
+        child.status = 'active'
+        if sto_start and payment_is_fee_only(payment):
+            # No month is paid for yet — the charge on that date fills
+            # paid_until_date in.
+            child.subscription_start_date = sto_start
+            child.paid_until_date = None
+        elif deferred_start:
+            child.subscription_start_date = deferred_start
+            child.paid_until_date = None
+        else:
+            # Israeli calendar day, like the proration that priced this
+            # charge — the server clock is UTC.
+            child.subscription_start_date = today_il
+            _, _, _, next_bill = _compute_prorate(today_il, lesson.day_of_week)
+            child.paid_until_date = next_bill - timedelta(days=1)
+        child.save()
+
+        if lesson:
+            enroll_child_in_paid_lessons(
+                child=child,
+                lesson=lesson,
+                bundle=payment.bundle,
+            )
+    return enrollment_id_for_whatsapp
+
+
 class WidgetChargeView(APIView):
     """
     Charge an existing pending Payment directly with card details (no iframe/webhook).
@@ -1265,24 +1487,7 @@ class WidgetChargeView(APIView):
         Capacity is re-checked here because registration and payment are separate
         requests, and a seat can be taken in between.
         """
-        from apps.core.payment_service import validate_bundle_capacity
-        from apps.customers.models import Payment
-
-        payments = list(
-            Payment.objects.select_related('bundle').filter(id__in=payment_ids)
-        )
-        if len(payments) != len(set(payment_ids)):
-            return 'אחד התשלומים אינו זמין לחיוב. אנא התחילו את ההרשמה מחדש.'
-
-        # A retry after timeout may find some rows already completed/processing.
-        chargeable = [p for p in payments if p.status in ('pending', 'failed', 'processing')]
-        bundles = {p.bundle for p in chargeable if p.bundle_id}
-        for bundle in bundles:
-            try:
-                validate_bundle_capacity(bundle)
-            except ValueError as exc:
-                return str(exc) or 'אין מקום פנוי באחד השיעורים במסלול'
-        return None
+        return precheck_widget_capacity(payment_ids)
 
     def _charge_one(
         self,
@@ -1294,19 +1499,13 @@ class WidgetChargeView(APIView):
     ):
         from apps.core.payment_service import (
             JERUSALEM_TZ,
-            _compute_prorate,
             deferred_first_charge_date,
-            enroll_child_in_paid_lessons,
             payment_full_monthly_amount,
-            payment_is_fee_only,
-            payment_prorated_lesson_amount,
             saved_card_token_for_child,
             standing_order_next_billing_date,
-            subscription_tranzila_items,
         )
         from apps.customers.models import Payment, TranzilaTransaction, RecurringPayment
         from apps.core.tranzila_service import TranzilaService
-        from apps.enrollments.models import LessonEnrollment
         from django.utils import timezone
         from datetime import date, timedelta
         from decimal import Decimal
@@ -1410,32 +1609,7 @@ class WidgetChargeView(APIView):
             if is_trial_payment or lesson is None
             else standing_order_next_billing_date(today=today_il, lesson=lesson)
         )
-        item_label = (
-            f"שיעור ניסיון - {lesson.course.name} - {child.full_name}"
-            if is_trial_payment and lesson
-            else (f"{lesson.course.name} - {child.full_name}" if lesson else child.full_name)
-        )
-        if is_trial_payment:
-            items = [{
-                'name': item_label,
-                'type': 'I',
-                'unit_price': float(payment.final_amount),
-                'units_number': 1,
-                'unit_type': 1,
-                'price_type': 'G',
-                'currency_code': 'ILS',
-            }]
-        else:
-            registration_fee = payment.registration_fee or Decimal('0')
-            prorated_lesson = payment_prorated_lesson_amount(payment)
-            trial_credit = payment.trial_credit_amount or Decimal('0')
-            items = subscription_tranzila_items(
-                label=item_label,
-                prorated_lesson=prorated_lesson,
-                registration_fee=registration_fee,
-                prorated=prorated_lesson > 0,
-                trial_credit=trial_credit,
-            )
+        items = widget_charge_items(payment)
 
         charge_description = payment.description or (
             f"שיעור ניסיון - {child.full_name}" if is_trial_payment else f"מנוי - {child.full_name}"
@@ -1509,12 +1683,6 @@ class WidgetChargeView(APIView):
                 if payment.status == 'completed':
                     return completed_payload(payment)
 
-                payment.status = 'completed'
-                payment.payment_date = timezone.now()
-                payment.failure_reason = ''
-                payment.failure_code = ''
-                payment.save()
-
                 tranzila_txn, _created_txn = TranzilaTransaction.objects.get_or_create(
                     idempotency_key=f"widget_{payment.id}",
                     defaults={
@@ -1529,84 +1697,16 @@ class WidgetChargeView(APIView):
                         'response_timestamp': timezone.now(),
                     },
                 )
-                payment.tranzila_transaction = tranzila_txn
-                payment.save(update_fields=['tranzila_transaction'])
-
-                if is_trial_payment:
-                    trial_date = payment.trial_lesson_date
-                    enrollment, created = LessonEnrollment.objects.get_or_create(
-                        child=child,
-                        lesson=lesson,
-                        defaults={
-                            'start_date': trial_date,
-                            'status': 'active',
-                            'trial_lesson_date': trial_date,
-                        },
-                    )
-                    if not created:
-                        enrollment.start_date = trial_date
-                        enrollment.trial_lesson_date = trial_date
-                        enrollment.trial_outcome = ''
-                        enrollment.status = 'active'
-                        enrollment.end_date = None
-                        enrollment.save(update_fields=[
-                            'start_date', 'trial_lesson_date', 'trial_outcome', 'status', 'end_date', 'updated_at',
-                        ])
-                    enrollment_id_for_whatsapp = str(enrollment.id)
-
-                    Child.objects.filter(pk=child.pk).update(status='trial_signed')
-                    mark_child_groups_stale(child.pk)
-                else:
-                    token = _charge_result_token(result) or _token_from_stored_transaction(payment)
-                    if not token:
-                        # The charge went through but no saved card came back, so the
-                        # monthly subscription cannot be billed automatically.
-                        logger.error(
-                            "Tranzila returned no card token for payment %s (child=%s) — "
-                            "monthly billing will not run until a token is stored",
-                            payment.id, child.full_name if child else '',
-                        )
-                    enrollment_date = today_il
-                    lesson_dow = lesson.day_of_week if lesson else 1
-                    _, _, _, next_billing_date = _compute_prorate(enrollment_date, lesson_dow)
-                    next_billing_date = sto_start or next_billing_date
-                    _ensure_recurring_payment_for_widget_charge(
-                        payment=payment,
-                        child=child,
-                        lesson=lesson,
-                        token=token,
-                        expiry_month=expiry_month,
-                        expiry_year=expiry_year,
-                        enrollment_date=enrollment_date,
-                        next_billing_date=next_billing_date,
-                    )
-
-                    # A card that was only verified has nothing to invoice here;
-                    # the checkout helper emits one receipt after the card request.
-
-                    child.status = 'active'
-                    if sto_start and payment_is_fee_only(payment):
-                        # No month is paid for yet — the charge on that date fills
-                        # paid_until_date in.
-                        child.subscription_start_date = sto_start
-                        child.paid_until_date = None
-                    elif deferred_start:
-                        child.subscription_start_date = deferred_start
-                        child.paid_until_date = None
-                    else:
-                        # Israeli calendar day, like the proration that priced this
-                        # charge — the server clock is UTC.
-                        child.subscription_start_date = today_il
-                        _, _, _, next_bill = _compute_prorate(today_il, lesson.day_of_week)
-                        child.paid_until_date = next_bill - timedelta(days=1)
-                    child.save()
-
-                    if lesson:
-                        enroll_child_in_paid_lessons(
-                            child=child,
-                            lesson=lesson,
-                            bundle=payment.bundle,
-                        )
+                enrollment_id_for_whatsapp = activate_paid_widget_payment(
+                    payment,
+                    tranzila_txn=tranzila_txn,
+                    token=_charge_result_token(result),
+                    expiry_month=expiry_month,
+                    expiry_year=expiry_year,
+                    today_il=today_il,
+                    sto_start=sto_start,
+                    deferred_start=deferred_start,
+                )
 
             if create_invoice and payment.final_amount > 0:
                 try:
