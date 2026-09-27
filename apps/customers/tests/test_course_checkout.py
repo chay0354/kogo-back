@@ -281,6 +281,8 @@ class CourseCheckoutTest(TestCase):
         self.assertEqual(sent, [])
         self.assertEqual(checkout.status, 'failed')
         self.assertEqual({p.status for p in Payment.objects.filter(id__in=ids)}, {'failed'})
+        status = self.client.get(f'/api/v1/customers/widget/checkout/{checkout.id}/').json()
+        self.assertEqual(status['message'], 'השיעור מלא')
 
     def test_the_poll_can_finish_a_page_whose_notify_never_came(self, *_):
         ids = self._register_cart()

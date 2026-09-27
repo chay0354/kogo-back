@@ -620,7 +620,14 @@ def checkout_status(checkout_id, *, index: str = '', confirmation_code: str = ''
     return {
         'checkout_id': str(checkout.id),
         'status': checkout.status,
-        'message': MESSAGES.get(checkout.status, ''),
+        # A refusal before any charge says why (the class filled up, the price
+        # changed); the other reasons are for the office, not the parent.
+        'message': (
+            checkout.failure_reason
+            if checkout.status == CourseCheckout.STATUS_FAILED and checkout.failure_reason
+            and checkout.failure_reason != 'page_failed'
+            else MESSAGES.get(checkout.status, '')
+        ),
         'amount': str(checkout.amount),
         'payments': [
             {'payment_id': str(p.id), 'status': p.status}
