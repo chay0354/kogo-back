@@ -133,6 +133,15 @@ class CourseCheckoutTest(TestCase):
         self.assertEqual(response.json(), {'use_card_form': True})
         self.assertFalse(CourseCheckout.objects.exists())
 
+    def test_a_listed_test_course_uses_the_page_while_the_switch_is_off(self, *_):
+        ids = self._register_cart()
+        with override_settings(COURSE_HOSTED_PAGE_ENABLED=False, COURSE_HOSTED_PAGE_COURSE_IDS=[str(self.course.id)]):
+            listed = self._start(ids)
+        self.assertIn('url', listed.json())
+        with override_settings(COURSE_HOSTED_PAGE_ENABLED=False, COURSE_HOSTED_PAGE_COURSE_IDS=['another-course']):
+            other = self._start(ids)
+        self.assertEqual(other.json(), {'use_card_form': True})
+
     # -- the page ------------------------------------------------------------
 
     def test_the_page_checks_and_saves_the_card_on_cogolive_for_the_cart_sum(self, *_):

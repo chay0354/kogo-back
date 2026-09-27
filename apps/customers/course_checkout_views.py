@@ -36,13 +36,13 @@ class CourseCheckoutStartView(_Public):
     throttle_scope = 'course_checkout_start'
 
     def post(self, request):
-        if not course_checkout.hosted_checkout_enabled():
-            return Response({'use_card_form': True})
         payment_ids = request.data.get('payment_ids') or []
         if request.data.get('payment_id'):
             payment_ids = [request.data.get('payment_id')]
         if not isinstance(payment_ids, list):
             return Response({'error': 'payment_ids חייב להיות רשימה'}, status=status.HTTP_400_BAD_REQUEST)
+        if not course_checkout.hosted_checkout_enabled(payment_ids):
+            return Response({'use_card_form': True})
         try:
             checkout, url = course_checkout.start_checkout(payment_ids)
         except course_checkout.CheckoutError as exc:

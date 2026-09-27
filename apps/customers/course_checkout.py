@@ -87,10 +87,28 @@ class CheckoutError(ValueError):
         self.status_code = status_code
 
 
-def hosted_checkout_enabled() -> bool:
-    return bool(getattr(settings, 'COURSE_HOSTED_PAGE_ENABLED', False)) and bool(
-        getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False)
-    )
+def hosted_checkout_enabled(payment_ids=None) -> bool:
+    """
+    Whether this cart pays on the hosted page: for everyone once
+    COURSE_HOSTED_PAGE_ENABLED is on, or — while it is off — when every
+    payment is for a course listed in COURSE_HOSTED_PAGE_COURSE_IDS (the
+    hidden test course of the real 1 ₪ signup).
+    """
+    if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
+        return False
+    if getattr(settings, 'COURSE_HOSTED_PAGE_ENABLED', False):
+        return True
+    test_courses = {str(c) for c in getattr(settings, 'COURSE_HOSTED_PAGE_COURSE_IDS', []) or []}
+    if not test_courses or not payment_ids:
+        return False
+    ids = [pid for pid in (_uuid_or_none(p) for p in payment_ids) if pid]
+    course_ids = set()
+    for payment in Payment.objects.filter(id__in=ids).select_related('lesson', 'bundle'):
+        course_id = payment.lesson.course_id if payment.lesson_id else (
+            payment.bundle.course_id if payment.bundle_id else None
+        )
+        course_ids.add(str(course_id) if course_id else '')
+    return bool(course_ids) and course_ids <= test_courses
 
 
 def course_token_terminal() -> str:
@@ -292,7 +310,7 @@ def _apply_verdict(checkout: CourseCheckout, verdict: str, row: Optional[dict]) 
     checkout.save()
 
 
-def _checkout_id(value) -> Optional[str]:
+def _uuid_or_none(value) -> Optional[str]:
     try:
         return str(uuid.UUID(str(value)))
     except (TypeError, ValueError, AttributeError):
@@ -303,7 +321,7 @@ def handle_notify(data) -> dict:
     """Tranzila's notify for a course checkout page. Always answers; never trusts the POST alone."""
     tranzila = TranzilaService.iframe()
     parsed = tranzila.parse_webhook_response(data)
-    checkout_id = _checkout_id(invoice_id_from_pdesc(str(data.get('pdesc') or '')))
+    checkout_id = _uuid_or_none(invoice_id_from_pdesc(str(data.get('pdesc') or '')))
     index = str(data.get('index') or '').strip()[:40]
     confirmation = str(parsed.get('confirmation_code') or '').strip()[:40]
     if checkout_id is None:
@@ -587,7 +605,7 @@ def _declined(checkout: CourseCheckout, claim, payments, result: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def checkout_status(checkout_id, *, index: str = '', confirmation_code: str = '') -> Optional[dict]:
-    checkout_id = _checkout_id(checkout_id)
+    checkout_id = _uuid_or_none(checkout_id)
     if checkout_id is None:
         return None
     checkout = CourseCheckout.objects.filter(id=checkout_id).first()

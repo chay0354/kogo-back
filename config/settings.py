@@ -333,6 +333,14 @@ TRANZILA_WALLETS = [
 # and opens the standing orders on it. Off: the widget keeps its own card form
 # (/customers/widget/charge/), exactly as before.
 COURSE_HOSTED_PAGE_ENABLED = config('COURSE_HOSTED_PAGE_ENABLED', default=False, cast=bool)
+# Courses that pay on the hosted page while the switch above is still off — a
+# hidden test course for the real 1 ₪ signup, with every other parent on the
+# card form. Comma-separated course ids.
+COURSE_HOSTED_PAGE_COURSE_IDS = [
+    course_id.strip()
+    for course_id in config('COURSE_HOSTED_PAGE_COURSE_IDS', default='').split(',')
+    if course_id.strip()
+]
 # The terminal that charges the saved card — the token terminal of the hosted
 # page's pair unless the 1 ₪ probe (apps/core/token_probe.py) says otherwise.
 COURSE_TOKEN_TERMINAL = (config('COURSE_TOKEN_TERMINAL', default='') or '').strip()
