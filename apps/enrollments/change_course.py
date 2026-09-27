@@ -13,7 +13,7 @@ from django.db.models import Q
 
 from apps.courses.models import Lesson, LessonBundle
 from apps.customers.models import Payment, RecurringPayment
-from apps.enrollments.enrollment_counts import count_capacity_enrollments
+from apps.enrollments.enrollment_counts import TRIAL_CHILD_STATUSES, count_capacity_enrollments
 from apps.enrollments.models import Enrollment, LessonEnrollment
 
 
@@ -352,7 +352,15 @@ def drop_course_unit(*, enrollment: LessonEnrollment, cancellation_reason: str =
         # is no "לא פעיל" any more. What the child is now comes from what is
         # recorded about them: money in, a trial ahead, a trial behind, or
         # nothing yet.
-        if not still_active and child.status != STATUS_GHOST:
+        #
+        # A cancelled trial is worked out again even when other rows remain:
+        # a child on נרשם לניסיון whose trial was the thing just cancelled is
+        # not on one any more, and leaving the status alone kept seven of them
+        # there. Only a trial status is re-read that way — the drop is about
+        # the trial, and it must not reopen a student's פעיל.
+        dropped_trial = any(row.trial_lesson_date for row in rows)
+        recheck = not still_active or (dropped_trial and child.status in TRIAL_CHILD_STATUSES)
+        if recheck and child.status != STATUS_GHOST:
             resolved = resolve_child_status(child)
             if resolved != child.status:
                 child.status = resolved

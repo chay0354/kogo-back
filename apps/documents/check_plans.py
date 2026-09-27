@@ -8,6 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.core.payment_service import JERUSALEM_TZ
+from apps.customers.child_status import refresh_child_status
 from apps.customers.models import Child
 from apps.documents.models import CheckItem, CheckPlan
 from apps.documents.service import create_invoice, create_receipt
@@ -101,6 +102,10 @@ def register_check_plan(
         )
 
     issue_due_check_invoices(today=_today(), plan=plan)
+    # Cheques never write paid_until_date, so nothing else would tell the
+    # child's status that the money is in: two cheque-paying children sat on
+    # בתהליך רישום in production.
+    refresh_child_status(child, reason="נרשם תשלום בצ'קים")
     return plan
 
 

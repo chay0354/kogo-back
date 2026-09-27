@@ -236,3 +236,25 @@ class CheckPlanCronHookTests(TestCase):
         summary = process_due_recurring_charges(dry_run=False, limit=40)
         self.assertEqual(summary['check_invoices']['issued'], 1)
         self.assertEqual(FormalDocument.objects.filter(document_type='tax_invoice').count(), 1)
+
+
+class CheckPlanStatusTests(TestCase):
+    """
+    Cheques never write paid_until_date: two cheque-paying children sat on
+    בתהליך רישום in production. Registering the plan now says the money is in.
+    """
+
+    def test_registering_cheques_makes_a_child_in_registration_active_and_says_why(self):
+        from apps.customers.status_history_models import ChildStatusHistory
+
+        child = TestDataFactory.create_child(family=TestDataFactory.create_family())
+        future = (date.today() + timedelta(days=40)).isoformat()
+        register_check_plan(
+            child_id=str(child.id), lesson_id=str(TestDataFactory.create_lesson().id),
+            checks=[{'date': future, 'amount': '260', 'check_number': '7001'}],
+        )
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'active')
+        history = ChildStatusHistory.objects.get(child=child)
+        self.assertEqual((history.previous_status, history.new_status), ('pending', 'active'))
+        self.assertIn("צ'קים", history.reason)

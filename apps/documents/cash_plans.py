@@ -20,6 +20,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.core.payment_service import JERUSALEM_TZ
+from apps.customers.child_status import refresh_child_status
 from apps.customers.models import Child
 from apps.documents.models import CashPlan, CashPlanMonth
 from apps.documents.service import create_invoice, create_receipt
@@ -180,6 +181,9 @@ def register_cash_plan(
     # pending somewhere behind it.
     issue_due_cash_documents(today=_today(), plan_id=plan.id)
     plan.refresh_from_db()
+    # Cash never writes paid_until_date, so nothing else would tell the child's
+    # status that the money is in: a registration left on בתהליך רישום.
+    refresh_child_status(child, reason='נרשם תשלום במזומן', changed_by=actor)
     return plan
 
 

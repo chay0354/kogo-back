@@ -494,7 +494,15 @@ def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
                 skipped += 1
                 outcomes[outcome] -= 1
                 continue
-            Child.objects.filter(pk=enrollment.child_id, status='trial_signed').update(status='trial_completed')
+            # A child with another trial still booked is still נרשם לניסיון:
+            # two trials booked together used to leave the child ביצע ניסיון the
+            # morning after the first, and the reminders for the second — which
+            # read trial_signed — never went out.
+            another_ahead = LessonEnrollment.objects.filter(
+                child_id=enrollment.child_id, status='active', trial_lesson_date__gte=today,
+            ).exists()
+            if not another_ahead:
+                Child.objects.filter(pk=enrollment.child_id, status='trial_signed').update(status='trial_completed')
             if outcome == 'attended':
                 Child.objects.filter(pk=enrollment.child_id).update(
                     trial_classes_attended=F('trial_classes_attended') + 1,
@@ -631,7 +639,9 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
             'child', 'child__family',
         )
         .prefetch_related('child__family__parents')
-        .filter(trial_lesson_date__isnull=False)
+        # A cancelled trial keeps its date on an inactive row; only a live row
+        # is a trial someone is still coming to.
+        .filter(trial_lesson_date__isnull=False, status='active')
         .filter(child__status='trial_signed')
     )
 

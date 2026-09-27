@@ -84,6 +84,20 @@ LEGACY_STATUS_MAP = {
 # 'payments_problem' is a billing flag, not a cancellation — the child is there.
 LIVE_ENROLLMENT_STATUSES = ('active', 'payments_problem')
 
+# The statuses a trial booking may turn into נרשם לניסיון (owner, 27.9.2026).
+# A child on פעיל or בעיה באשראי is already a student: a trial in another course
+# says nothing about the course they pay for, and writing trial_signed over them
+# took five paying children off their own course's register (a trial_signed
+# child's regular row is hidden there) until the office put them back. A ghost
+# is merged into a real child, never promoted by a booking. A child created by
+# the booking itself starts as pending, so a first booking is covered.
+STATUSES_A_TRIAL_MAY_MARK = (
+    STATUS_PENDING,
+    STATUS_INACTIVE,
+    STATUS_TRIAL_COMPLETED,
+    STATUS_TRIAL_SIGNED,
+)
+
 
 def canonical_status(status: str) -> str | None:
     """
@@ -105,9 +119,10 @@ def _has_money_in(child) -> bool:
     """
     Is this child's money in the system?
 
-    Paid up to a date that has not passed, or — for a registration that has
-    just gone through and has no such date recorded yet — a completed payment
-    for that registration. A paid trial is not one.
+    Paid up to a date that has not passed; a cash or cheque plan the office
+    registered and that is still running; or — for a registration that has just
+    gone through and has no such date recorded yet — a completed payment for a
+    course. A paid trial is not one.
 
     Two readings are deliberately excluded. An enrolment is not money: that was
     the old frontend's rule, and it showed children as פעיל who had never paid
@@ -116,21 +131,90 @@ def _has_money_in(child) -> bool:
     which is exactly what makes the word worth reading.
     """
     today = date.today()
+    if child.paid_until_date and child.paid_until_date >= today:
+        return True
+    # Cash and cheques never touch paid_until_date: the office takes the money
+    # up front and the documents follow month by month. A plan still running
+    # is money in — without this, two children paying by cheque sat on
+    # בתהליך רישום in production. Asked after the date, so the card-paying
+    # majority costs no extra query.
+    if child.cash_plans.filter(status='active').exists() or child.check_plans.filter(status='active').exists():
+        return True
     if child.paid_until_date:
-        return child.paid_until_date >= today
-    # Only a registration counts. A paid trial is money too, but it buys a
-    # trial — the parent booked one lesson to see — and a child on it is
-    # נרשם לניסיון, not פעיל. Payment.trial_lesson_date is what marks one: it is
-    # set on the trial's payment and nowhere else. In production that was 50 of
-    # the 55 children this rule was about to promote.
-    return child.payments.filter(status='completed', trial_lesson_date__isnull=True).exists()
+        return False
+    return _registration_paid(child)
+
+
+def _registration_paid(child) -> bool:
+    """
+    A registration whose paid-until date is not recorded yet: is it paid for?
+
+    Only money for a course counts (owner, 27.9.2026). A registration fee on
+    its own bought no month: four children read פעיל on their דמי רישום while
+    the September charge that was to follow was never collected. So:
+
+      * course money — a payment for a lesson that is more than its fee — counts;
+      * a fee-only payment counts only while a standing order with a card is
+        still alive to bill the first month (a sign-up whose billing starts
+        later is a student from the day they sign);
+      * a one-time payment with no lesson never counts.
+
+    Only a registration counts at all. A paid trial is money too, but it buys a
+    trial — the parent booked one lesson to see — and a child on it is
+    נרשם לניסיון, not פעיל. Payment.trial_lesson_date is what marks one: it is
+    set on the trial's payment and nowhere else. In production that was 50 of
+    the 55 children this rule was about to promote.
+    """
+    from django.db.models import F
+
+    registrations = child.payments.filter(
+        status='completed', trial_lesson_date__isnull=True, lesson__isnull=False,
+    )
+    # The same line payment_is_fee_only draws: a paid-trial credit lowered what
+    # the card was charged, not the month bought, so it is added back.
+    if registrations.filter(final_amount__gt=F('registration_fee') - F('trial_credit_amount')).exists():
+        return True
+    if not registrations.exists():
+        return False
+    return child.recurring_payments.filter(status='active').exclude(tranzila_token='').exists()
+
+
+def _card_failed_on_a_course(child) -> bool:
+    """
+    A standing order whose charge was declined, on a child still in a course.
+
+    The owner's rule (24.9 and 27.9.2026): a card that failed is still a
+    student, labelled בעיה באשראי — not a sign-up that never finished. Only a
+    regular place counts; a trial row is not a course they are paying for.
+    """
+    if not child.recurring_payments.filter(status='failed').exists():
+        return False
+    return child.lesson_enrollments.filter(
+        status__in=LIVE_ENROLLMENT_STATUSES, trial_lesson_date__isnull=True,
+    ).exists()
 
 
 def _trial_dates(child):
     """(has a trial still ahead, has had a trial already)."""
+    from django.db.models import F, Q
+
     today = date.today()
-    ahead = child.lesson_enrollments.filter(trial_lesson_date__gte=today).exists()
-    held = child.lesson_enrollments.filter(trial_held_on__lt=today).exists()
+    # Only a live row is a trial booked. Cancelling a trial marks its row
+    # inactive and leaves the date on it; reading the date alone kept seven
+    # children on נרשם לניסיון after the office had cancelled their trial.
+    ahead = child.lesson_enrollments.filter(status='active', trial_lesson_date__gte=today).exists()
+    # A trial dropped before its date never took place — the same reading
+    # repeat_trial uses. The cancel path ends the row on the day it is dropped
+    # and writes no outcome; the cron that retires a trial that did happen
+    # ends it on the trial's own date and records what became of it.
+    held = (
+        child.lesson_enrollments.filter(trial_held_on__lt=today)
+        .exclude(
+            Q(status='inactive') & Q(trial_outcome='')
+            & Q(end_date__isnull=False) & Q(end_date__lt=F('trial_held_on'))
+        )
+        .exists()
+    )
     return ahead, held
 
 
@@ -167,6 +251,12 @@ def resolve_child_status(child) -> str:
     if child.status == STATUS_PAYMENT_PROBLEM:
         return STATUS_PAYMENT_PROBLEM
 
+    # The same fact read off the standing order, for a child whose status says
+    # otherwise — typically a registration fee that was taken and a first
+    # monthly charge that was then declined.
+    if _card_failed_on_a_course(child):
+        return STATUS_PAYMENT_PROBLEM
+
     trial_ahead, trial_held = _trial_dates(child)
     if trial_ahead:
         # A trial booked ahead means they are back, whatever they were before.
@@ -194,3 +284,79 @@ def resolve_child_status(child) -> str:
         return STATUS_INACTIVE
 
     return STATUS_PENDING
+
+
+def still_charged_child_ids() -> set:
+    """
+    Children someone is still collecting money from: a live standing order with
+    a card behind it, or a cash or cheque plan the office is still running.
+
+    Anything that moves children in bulk must never move one of these to
+    לא פעיל or בעיה באשראי. paid_until_date lags billing — it moves only when a
+    charge lands — so on the first days of a month a perfectly good subscriber
+    reads as if their money ran out.
+    """
+    from apps.customers.models import RecurringPayment
+    from apps.documents.models import CashPlan, CheckPlan
+
+    ids = set(
+        RecurringPayment.objects.filter(status='active').exclude(tranzila_token='')
+        .values_list('child_id', flat=True)
+    )
+    ids |= set(CashPlan.objects.filter(status='active').values_list('child_id', flat=True))
+    ids |= set(CheckPlan.objects.filter(status='active').values_list('child_id', flat=True))
+    return ids
+
+
+def mark_trial_signed(child_id) -> bool:
+    """
+    A trial was just booked: mark the child נרשם לניסיון, unless they are more than that.
+
+    Only from STATUSES_A_TRIAL_MAY_MARK — a student who books a trial in another
+    course stays פעיל / בעיה באשראי. One conditional UPDATE, so a payment landing
+    at the same moment cannot be overwritten by a read taken before it.
+    Around the model, like the writes it replaced: no signal fires, and the
+    caller marks the child's groups for a recount. True when it wrote.
+    """
+    from apps.customers.models import Child
+
+    return bool(
+        Child.objects.filter(pk=child_id, status__in=STATUSES_A_TRIAL_MAY_MARK)
+        .update(status=STATUS_TRIAL_SIGNED)
+    )
+
+
+def refresh_child_status(child, *, reason: str, changed_by=None) -> str:
+    """
+    Work the child's status out again, and save it with a history line if it moved.
+
+    The same steps the morning fix takes for each child it moves — the row
+    locked and re-read, the rule applied, the change written to
+    ChildStatusHistory with why — for a moment that has just changed the
+    record, like the office registering a cash or cheque plan. Returns the
+    status the child holds afterwards.
+
+    Its callers add money, so the move is up to פעיל. A move off פעיל would
+    also get the post_save signal's own history line (fix_child_statuses has
+    the same two).
+    """
+    from django.db import transaction
+
+    from apps.customers.models import Child
+    from apps.customers.status_history_models import ChildStatusHistory
+
+    with transaction.atomic():
+        locked = Child.objects.select_for_update().get(pk=child.pk)
+        was = locked.status
+        target = resolve_child_status(locked)
+        if not target or target == was:
+            return was
+        locked.status = target
+        locked.save(update_fields=['status', 'updated_at'])
+        ChildStatusHistory.objects.create(
+            child=locked, previous_status=was, new_status=target,
+            reason=f'{reason}: {status_label(was)} ← {status_label(target)}',
+            changed_by=changed_by if getattr(changed_by, 'is_authenticated', False) else None,
+        )
+    child.status = target
+    return target

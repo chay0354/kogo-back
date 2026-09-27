@@ -38,6 +38,20 @@ AUTO_TRANSITIONS = {
     ('pending', 'active'),
     ('active', 'inactive'),
     ('payment_problem', 'inactive'),
+    # The trial statuses follow the trial rows (27.9.2026). None of these
+    # touches a student — the rule puts money first, so a child with money in
+    # resolves to active and never lands here — and each is read off a row the
+    # office or the trial cron already wrote:
+    #
+    # the trial was cancelled and a sign-up is still open, unpaid;
+    ('trial_signed', 'pending'),
+    # the trial was cancelled and nothing is left (never someone still being
+    # charged — the check below holds for every move to inactive);
+    ('trial_signed', 'inactive'),
+    # a repeat trial was cancelled, and the first trial did take place;
+    ('trial_signed', 'trial_completed'),
+    # a new trial is booked ahead, and the day's reminders read trial_signed.
+    ('trial_completed', 'trial_signed'),
 }
 
 FIX_REASON = 'תוקן אוטומטית בשגרת הבוקר'
@@ -54,17 +68,16 @@ def status_fix_candidates(*, after_id=None, budget_seconds=None, progress: dict 
     stops when the time is up; `progress` is then filled with `last_id` (carry
     on after this child) and `finished`.
     """
-    from apps.customers.child_status import CHILD_STATUSES, canonical_status, resolve_child_status
-    from apps.customers.models import Child, RecurringPayment
-    from apps.documents.models import CashPlan, CheckPlan
+    from apps.customers.child_status import (
+        CHILD_STATUSES,
+        canonical_status,
+        resolve_child_status,
+        still_charged_child_ids,
+    )
+    from apps.customers.models import Child
 
     # A child someone is still charging is never moved to inactive.
-    still_paying = set(
-        RecurringPayment.objects.filter(status='active').exclude(tranzila_token='')
-        .values_list('child_id', flat=True)
-    )
-    still_paying |= set(CashPlan.objects.filter(status='active').values_list('child_id', flat=True))
-    still_paying |= set(CheckPlan.objects.filter(status='active').values_list('child_id', flat=True))
+    still_paying = still_charged_child_ids()
 
     children = (
         Child.objects.exclude(status='ghost')

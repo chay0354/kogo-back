@@ -221,3 +221,38 @@ class CronTests(TestCase):
         summary = process_due_recurring_charges(dry_run=True, limit=40)
         self.assertTrue(summary['cash_documents']['dry_run'])
         self.assertEqual(FormalDocument.objects.count(), before)
+
+
+class CashPlanStatusTests(TestCase):
+    """
+    Cash never writes paid_until_date, so registering the plan is the moment
+    the child's status learns the money is in (27.9.2026).
+    """
+
+    def setUp(self):
+        self.child = _child()
+        self.lesson = TestDataFactory.create_lesson()
+
+    def test_registering_cash_makes_a_child_in_registration_active_and_says_why(self):
+        from apps.customers.status_history_models import ChildStatusHistory
+
+        register_cash_plan(
+            child_id=str(self.child.id), total_amount='2400', monthly_amount='240',
+            lesson_id=str(self.lesson.id), start_month=date.today().replace(day=1),
+        )
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'active')
+        history = ChildStatusHistory.objects.get(child=self.child)
+        self.assertEqual((history.previous_status, history.new_status), ('pending', 'active'))
+        self.assertIn('מזומן', history.reason)
+
+    def test_a_student_already_active_gets_no_history_line(self):
+        from apps.customers.status_history_models import ChildStatusHistory
+
+        self.child.status = 'active'
+        self.child.save(update_fields=['status'])
+        register_cash_plan(
+            child_id=str(self.child.id), total_amount='2400', monthly_amount='240',
+            lesson_id=str(self.lesson.id), start_month=date.today().replace(day=1),
+        )
+        self.assertFalse(ChildStatusHistory.objects.filter(child=self.child).exists())
