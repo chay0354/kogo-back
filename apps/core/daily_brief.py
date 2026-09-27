@@ -404,6 +404,61 @@ def check_saved_card_setup(today: date) -> BriefItem:
     return item
 
 
+def check_unresolved_refunds(today: date) -> BriefItem:
+    """
+    Refunds sent to Tranzila that never got an answer.
+
+    The refund may have been made. Its claim row stays unsettled on purpose
+    and stops every retry — the office must look at the terminal first, or a
+    customer is paid back twice. A claim younger than a few minutes is a
+    refund still running.
+    """
+    from apps.customers.models import Payment, TranzilaTransaction
+    from apps.store.models import StoreInvoice
+
+    claims = list(
+        TranzilaTransaction.objects
+        .filter(
+            is_successful=False,
+            idempotency_key__startswith='refund_claim_',
+            request_timestamp__lt=timezone.now() - timedelta(minutes=5),
+        )
+        .order_by('request_timestamp')
+    )
+    item = BriefItem(
+        key='unresolved_refunds',
+        title='זיכויים שלא התקבלה עליהם תשובה',
+        severity=RED if claims else GREEN,
+        count=len(claims),
+        action='לבדוק בטרנזילה אם הזיכוי בוצע. עד שזה מוסדר, המערכת לא תאפשר זיכוי נוסף לאותו תשלום.',
+    )
+    if not claims:
+        item.summary = 'אין זיכוי שנשאר בלי תשובה מטרנזילה.'
+        return item
+    item.summary = f'{len(claims)} זיכויים נשלחו לטרנזילה ולא התקבלה תשובה. ייתכן שהכסף כבר הוחזר.'
+    for claim in claims[:MAX_ROWS]:
+        key = claim.idempotency_key
+        label, href = key, ''
+        if key.startswith('refund_claim_payment_'):
+            payment = Payment.objects.select_related('child').filter(id=key.rsplit('_', 1)[-1]).first()
+            if payment is not None and payment.child_id:
+                label, href = payment.child.full_name, _child_href(payment.child_id)
+        elif key.startswith('refund_claim_store_'):
+            invoice = StoreInvoice.objects.filter(id=key.rsplit('_', 1)[-1]).first()
+            if invoice is not None:
+                label = f'חשבונית {invoice.invoice_number}'
+        amount = (claim.request_data or {}).get('amount')
+        item.rows.append(_row(
+            label,
+            f'נשלח {timezone.localtime(claim.request_timestamp):%d/%m %H:%M}'
+            + (f' · {_money(amount)}' if amount else '')
+            + (f" · עסקה מקורית {(claim.request_data or {}).get('original_transaction_id')}"
+               if (claim.request_data or {}).get('original_transaction_id') else ''),
+            href,
+        ))
+    return item
+
+
 def check_failed_payments(today: date) -> BriefItem:
     """Charges the gateway refused in the last week."""
     from apps.customers.models import Payment
@@ -812,17 +867,54 @@ def check_duplicate_charges(today: date) -> BriefItem:
         .order_by('-created_at__date')
     )
     rows = list(groups)
+
+    # An order paid twice through Tranzila's page: a store invoice (recorded by
+    # the notify as store_second_…) or a payment link (review_reason second_charge).
+    from apps.customers.models import TranzilaTransaction
+    from apps.payment_links.models import PaymentLinkPayment
+    from apps.store.models import StoreInvoice
+
+    store_seconds = list(
+        TranzilaTransaction.objects
+        .filter(idempotency_key__startswith='store_second_', request_timestamp__gte=since)
+        .order_by('-request_timestamp')
+    )
+    link_seconds = list(
+        PaymentLinkPayment.objects
+        .filter(review_reason__startswith='second_charge', updated_at__gte=since)
+        .order_by('-updated_at')
+    )
+    total = len(rows) + len(store_seconds) + len(link_seconds)
     item = BriefItem(
         key='duplicate_charges',
         title='חיובים כפולים',
-        severity=RED if rows else GREEN,
-        count=len(rows),
+        severity=RED if total else GREEN,
+        count=total,
         action='לבדוק אם ההורה חויב פעמיים, ולהחזיר לו את ההפרש.',
     )
-    if not rows:
+    if not total:
         item.summary = 'לא נמצא חיוב כפול בשבועיים האחרונים.'
         return item
-    item.summary = f'{len(rows)} מקרים של אותו ילד שחויב פעמיים באותו יום, על אותו שיעור ובאותו סכום.'
+    item.summary = f'{total} מקרים של תשלום כפול בשבועיים האחרונים.'
+    numbers = {
+        str(inv.id): inv.invoice_number
+        for inv in StoreInvoice.objects.filter(
+            id__in=[(t.request_data or {}).get('invoice_id') for t in store_seconds if (t.request_data or {}).get('invoice_id')]
+        )
+    }
+    for txn in store_seconds[:MAX_ROWS]:
+        invoice_id = (txn.request_data or {}).get('invoice_id')
+        item.rows.append(_row(
+            f"חשבונית {numbers.get(str(invoice_id), (txn.request_data or {}).get('invoice_number', ''))}",
+            f'שולמה פעמיים · עסקה נוספת {txn.transaction_id} · לזכות',
+            '/store',
+        ))
+    for link in link_seconds[:MAX_ROWS]:
+        item.rows.append(_row(
+            link.payer_name or 'קישור תשלום',
+            f"{_money(link.amount)} · שולם פעמיים · עסקה נוספת {link.review_reason.split(':', 1)[-1]} · לזכות",
+            '/payment-links',
+        ))
     from apps.customers.models import Child
 
     names = {
@@ -1303,6 +1395,7 @@ CHECKS = (
     check_overdue_recurring,
     check_unresolved_charges,
     check_saved_card_setup,
+    check_unresolved_refunds,
     check_recurring_without_lesson,
     check_failed_payments,
     check_registration_only_payments,
@@ -1349,6 +1442,7 @@ def check_catalogue() -> list[dict]:
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
+        'unresolved_refunds': 'זיכויים שלא התקבלה עליהם תשובה',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',
         'failed_payments': 'תשלומים שנכשלו',
         'registration_only_payments': 'דמי רישום בלי תשלום על החוג',

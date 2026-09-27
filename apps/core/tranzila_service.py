@@ -1126,7 +1126,16 @@ class TranzilaService:
         Refunds must hit the same terminal that took the original charge.
         Widget registration fees sit on the iframe terminal; monthly token
         charges sit on the token terminal.
+
+        An answer that says nothing certain comes back with uncertain=True and
+        nothing is tried behind it: a cancel that timed out may have gone
+        through, and a credit after it would pay the customer back twice.
         """
+        credential_error = self.credential_error()
+        if credential_error:
+            logger.error("Cannot refund: %s", credential_error)
+            return {**self._build_error_response(credential_error), 'never_sent': True}
+
         if not transaction_id:
             logger.error("Cannot refund: No transaction ID provided")
             return self._build_error_response('No transaction ID available')
@@ -1172,7 +1181,7 @@ class TranzilaService:
                 reason=reason,
                 terminal_name=refund_terminal,
             )
-            if cancel_result.get('success'):
+            if cancel_result.get('success') or cancel_result.get('uncertain'):
                 return cancel_result
 
         credit_result = self._refund_via_txn_type(
@@ -1188,7 +1197,7 @@ class TranzilaService:
             reason=reason,
             terminal_name=refund_terminal,
         )
-        if credit_result.get('success'):
+        if credit_result.get('success') or credit_result.get('uncertain'):
             return credit_result
 
         if not prefer_cancel and _credit_blocked_until_cancel(credit_result.get('error')):
@@ -1246,6 +1255,17 @@ class TranzilaService:
                 params=payload,
                 endpoint='/v1/transaction/credit_card/create',
             )
+            if not isinstance(response, dict) or 'error_code' not in response:
+                # No answer of Tranzila's own — a timeout, a dropped connection,
+                # an HTTP error page. The refund may have been made.
+                out = dict(response) if isinstance(response, dict) else self._build_error_response(
+                    'Invalid gateway response',
+                )
+                out['success'] = False
+                out['uncertain'] = True
+                logger.error("Refund %s got no answer for txn_id=%s: %s",
+                             txn_type, reference_txn_id, out.get('error'))
+                return out
             if is_tranzila_rest_ok(response.get('error_code')):
                 transaction_result = response.get('transaction_result') or {}
                 logger.info("Refund %s succeeded for txn_id=%s", txn_type, reference_txn_id)
@@ -1267,7 +1287,9 @@ class TranzilaService:
             )
         except Exception as e:
             logger.error("Exception during refund %s: %s", txn_type, e, exc_info=True)
-            return self._build_error_response(str(e), message='Refund failed - exception')
+            out = self._build_error_response(str(e), message='Refund failed - exception')
+            out['uncertain'] = True
+            return out
     
     def cancel_recurring_payment(
         self,

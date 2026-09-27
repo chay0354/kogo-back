@@ -38,7 +38,8 @@ FLOWS = [
     {
         'id': 'recurring',
         'title': 'הוראת קבע חודשית',
-        'detail': 'הקרון מחייב את הטוקן השמור בכל חודש. זה רוב הכסף.',
+        'detail': 'הקרון מחייב את הטוקן השמור בכל חודש. זה רוב הכסף. כל כרטיס נגבה במסוף שבו נשמר '
+                  '(tranzila_terminal על הוראת הקבע); כרטיסים שנשמרו לפני 25.9.2026 — כאן.',
         'setting': 'TRANZILA_PROD_TOKEN_TERMINAL',
         'method': 'charge_with_token',
         'code': 'apps/customers/recurring_billing.py',
@@ -80,7 +81,8 @@ FLOWS = [
     {
         'id': 'store_till_saved_card',
         'title': 'קופה — ילד עם כרטיס שמור',
-        'detail': 'חיוב הכרטיס של הוראת הקבע של הילד. הוראת הקבע עצמה לא משתנה.',
+        'detail': 'חיוב הכרטיס של הוראת הקבע של הילד, במסוף שבו הכרטיס נשמר. הוראת הקבע עצמה לא משתנה. '
+                  'קנייה שלא קיבלה תשובה עוצרת קנייה נוספת בכרטיס השמור של אותו ילד עד בדיקה.',
         'setting': 'TRANZILA_PROD_TOKEN_TERMINAL',
         'method': 'charge_with_token',
         'code': 'apps/core/payment_service.py, apps/store/views.py',
@@ -97,7 +99,7 @@ FLOWS = [
     {
         'id': 'sto_cancel',
         'title': 'ביטול הוראת קבע',
-        'detail': 'ביטול הוראת קבע שטרנזילה מנהלת, כשמבטלים מנוי.',
+        'detail': 'ביטול הוראת קבע שטרנזילה מנהלת, כשמבטלים מנוי — במסוף שבו הכרטיס נשמר.',
         'setting': 'TRANZILA_PROD_TOKEN_TERMINAL',
         'method': 'cancel_recurring_payment',
         'code': 'apps/core/payment_service.py (cancel_subscription)',

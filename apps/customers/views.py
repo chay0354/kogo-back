@@ -1619,7 +1619,8 @@ class PaymentViewSet(viewsets.ModelViewSet):
             })
         else:
             return Response({
-                'error': result.get('error', 'שגיאה בזיכוי התשלום')
+                'error': result.get('error', 'שגיאה בזיכוי התשלום'),
+                'uncertain': bool(result.get('uncertain')),
             }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['get'], url_path='invoice')

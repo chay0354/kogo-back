@@ -17,7 +17,7 @@ from typing import Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F, Q
 from django.db.utils import OperationalError
 from django.utils import timezone
@@ -32,7 +32,15 @@ from apps.customers.financial_models import Invoice, InvoiceChild, Discount
 from apps.customers.discount_service import DiscountService
 from apps.customers.trial_credit import credit_for_lesson, describe as describe_trial_credit
 from apps.core.card_validation import validate_card_details
-from apps.core.tranzila_service import TranzilaService, invoice_id_from_pdesc, is_tranzila_uncertain_gateway_error
+from apps.core.tranzila_service import (
+    TOKEN_CHARGED,
+    TOKEN_DECLINED,
+    TOKEN_SETUP_PROBLEM,
+    TranzilaService,
+    invoice_id_from_pdesc,
+    is_tranzila_uncertain_gateway_error,
+    token_charge_outcome,
+)
 from apps.courses.models import Lesson, LessonBundle, LessonPriceOption
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.enrollment_counts import count_capacity_enrollments, paying_enrollments
@@ -748,16 +756,18 @@ def terminal_for_payment_refund(payment):
     return name or None
 
 
-def card_details_for_payment_refund(payment):
+def card_details_for_payment_refund(payment, terminal: str = ''):
     """Card token + expiry to refund this Payment via Tranzila.
 
     Signup charges sit on RecurringPayment.initial_payment. Monthly cron
     charges do not — match the standing order for the same child + lesson.
     Cancelled standing orders still hold the card; fall back to the charge payload.
+    Only a standing order whose card is on the charge's terminal ('' — the
+    michal pair) can hold the card that paid.
     """
     month = year = token = None
     if getattr(payment, 'child_id', None):
-        qs = payment.child.recurring_payments.all()
+        qs = payment.child.recurring_payments.filter(tranzila_terminal=(terminal or '').strip())
         recurring = qs.filter(initial_payment_id=payment.id).first()
         if not recurring and payment.lesson_id:
             recurring = (
@@ -782,6 +792,75 @@ def card_details_for_payment_refund(payment):
         year or payload_year,
         token or payload_token,
     )
+
+
+# A till charge Tranzila did not answer. Kept on the invoice so the office can
+# find it, and so a repeat of the same checkout charges nothing.
+TILL_CHARGE_UNCERTAIN_MARK = 'לא ודאי'
+TILL_CHARGE_UNCERTAIN_MESSAGE = 'לא ידוע אם החיוב עבר. בדקו בטרנזילה לפני שמנסים שוב.'
+TILL_TOKEN_CHARGE_BUSY_MESSAGE = (
+    'לילד הזה יש קנייה בכרטיס השמור שעוד לא נסגרה (חשבונית {number}). '
+    'בדקו בטרנזילה אם היא נגבתה לפני קנייה נוספת בכרטיס השמור.'
+)
+
+REFUND_ALREADY_CLAIMED = (
+    'זיכוי קודם לתשלום הזה עדיין רץ, או שלא התקבלה עליו תשובה מטרנזילה. '
+    'יש לבדוק בטרנזילה אם הזיכוי בוצע לפני ניסיון נוסף.'
+)
+REFUND_UNCERTAIN = (
+    'לא התקבלה תשובה מטרנזילה, וייתכן שהזיכוי בוצע. אל תנסו שוב: '
+    'יש לבדוק בטרנזילה. עד אז המערכת לא תאפשר זיכוי נוסף לתשלום הזה.'
+)
+
+
+def _claim_refund(key: str, *, terminal: str, request_data: dict):
+    """
+    The row that holds a refund while it runs, or None when another holds it.
+
+    The key is unique: a second attempt loses the insert. An unanswered
+    refund leaves the row unsettled (is_successful False), which keeps every
+    later attempt away until someone has looked at the terminal.
+    """
+    from apps.customers.models import TranzilaTransaction
+
+    try:
+        with transaction.atomic():
+            return TranzilaTransaction.objects.create(
+                transaction_id='',
+                confirmation_code='',
+                transaction_type='refund',
+                response_code='',
+                response_message='',
+                request_data=request_data,
+                response_data={},
+                idempotency_key=key,
+                is_successful=False,
+                tranzila_terminal=(terminal or '')[:40],
+            )
+    except IntegrityError:
+        return None
+
+
+def _settle_refund_claim(claim, result: dict):
+    claim.transaction_id = str(result.get('transaction_id', '') or '')[:100]
+    claim.confirmation_code = str(result.get('confirmation_code', '') or '')[:100]
+    claim.response_code = str(result.get('response_code', '000') or '000')[:10]
+    claim.response_message = str(result.get('message', '') or '')
+    claim.response_data = result.get('raw_response', {}) or {}
+    claim.is_successful = True
+    claim.response_timestamp = timezone.now()
+    claim.save(update_fields=[
+        'transaction_id', 'confirmation_code', 'response_code', 'response_message',
+        'response_data', 'is_successful', 'response_timestamp',
+    ])
+    return claim
+
+
+def _drop_refund_claim(claim) -> None:
+    """Tranzila answered no: nothing was refunded, so the next attempt may run."""
+    from apps.customers.models import TranzilaTransaction
+
+    TranzilaTransaction.objects.filter(pk=claim.pk, is_successful=False).delete()
 
 
 class PaymentService:
@@ -1908,12 +1987,16 @@ class PaymentService:
             try:
                 child = Child.objects.get(id=child_id)
                 
-                # Look for active recurring payment with token
-                recurring = RecurringPayment.objects.filter(
-                    child=child,
-                    status='active',
-                    tranzila_token__isnull=False
-                ).exclude(tranzila_token='').first()
+                # A saved card the server can charge: on a terminal it has keys for.
+                recurring = None
+                for candidate in (
+                    RecurringPayment.objects
+                    .filter(child=child, status='active', tranzila_token__isnull=False)
+                    .exclude(tranzila_token='')
+                ):
+                    if TranzilaService.for_saved_card(candidate.tranzila_terminal) is not None:
+                        recurring = candidate
+                        break
                 
                 if recurring and recurring.tranzila_token:
                     # SYNCHRONOUS TOKEN CHARGE
@@ -1923,14 +2006,42 @@ class PaymentService:
                     # an id string (or 'delivery' / nothing), never a Branch instance.
                     first_item = product_items[0] if product_items else None
                     first_product = StoreProduct.objects.get(id=first_item['product_id']) if first_item else None
-                    invoice = StoreInvoice.objects.create(
-                        child=child,
-                        total_amount=total_amount,
-                        payment_method='credit_card',
-                        payment_status='pending',
-                        charged_with_token=True,
-                        branch_id=_store_line_item_branch_id(first_item, first_product) if first_item else None,
-                    )
+                    # One saved-card purchase per child at a time. The till sends
+                    # no key of its own on this path, and a failure used to read
+                    # "failed" even when Tranzila never answered — the seller
+                    # pressed again and the card was charged twice. The child row
+                    # is locked while the invoice is opened, so two presses at
+                    # once meet here one after the other.
+                    with transaction.atomic():
+                        Child.objects.select_for_update().filter(id=child.id).first()
+                        busy = (
+                            StoreInvoice.objects
+                            .filter(
+                                child=child,
+                                charged_with_token=True,
+                                payment_status='pending',
+                                created_at__gte=timezone.now() - timedelta(days=1),
+                            )
+                            .order_by('-created_at')
+                            .first()
+                        )
+                        if busy is not None:
+                            logger.error('Till token charge refused for child %s: invoice %s still open',
+                                         child.id, busy.invoice_number)
+                            return {
+                                'requires_iframe': False,
+                                'success': False,
+                                'uncertain': True,
+                                'error': TILL_TOKEN_CHARGE_BUSY_MESSAGE.format(number=busy.invoice_number),
+                            }
+                        invoice = StoreInvoice.objects.create(
+                            child=child,
+                            total_amount=total_amount,
+                            payment_method='credit_card',
+                            payment_status='pending',
+                            charged_with_token=True,
+                            branch_id=_store_line_item_branch_id(first_item, first_product) if first_item else None,
+                        )
                     
                     # Charge token and complete purchase
                     result = self.charge_store_with_token(
@@ -1948,6 +2059,7 @@ class PaymentService:
                         'requires_iframe': False,
                         'invoice': invoice_data,
                         'success': result['success'],
+                        'uncertain': bool(result.get('uncertain')),
                         'error': result.get('error')
                     }
             except Child.DoesNotExist:
@@ -2060,17 +2172,37 @@ class PaymentService:
                 }
             tranzila_items.extend(tranzila_items_for_cart_line(product, item))
         
-        # Charge the token using new REST API
-        result = self.tranzila_service.charge_with_token(
+        # The card is charged on the terminal it was saved on, with its keys.
+        client = TranzilaService.for_saved_card(recurring_payment.tranzila_terminal if recurring_payment else '')
+        if client is None:
+            invoice.payment_status = 'failed'
+            invoice.notes = 'Payment not sent: the saved card\'s terminal has no keys here'
+            invoice.save()
+            return {'success': False, 'error': 'למסוף של הכרטיס השמור אין מפתחות בשרת. לא נשלח חיוב.'}
+
+        result = client.charge_with_token(
             token=token,
             amount=invoice.total_amount,
             description=f"Store purchase - Invoice {invoice.invoice_number}",
             transaction_id=str(invoice.id),
             items=tranzila_items,
             expire_month=recurring_payment.card_expire_month if recurring_payment else None,
-            expire_year=recurring_payment.card_expire_year if recurring_payment else None
+            expire_year=recurring_payment.card_expire_year if recurring_payment else None,
+            duplicate_guard_key=f'store-{invoice.id}',
         )
-        
+        outcome = token_charge_outcome(result)
+
+        if outcome not in (TOKEN_CHARGED, TOKEN_DECLINED, TOKEN_SETUP_PROBLEM):
+            # No answer, or one that says nothing certain: the card may be
+            # charged. Not a failure — the invoice stays pending and marked,
+            # which also keeps the next saved-card purchase for this child away.
+            invoice.tranzila_confirmation_code = TILL_CHARGE_UNCERTAIN_MARK
+            invoice.tranzila_terminal = client.token_terminal  # where to look for it
+            invoice.notes = f"Payment uncertain — check Tranzila before retrying: {result.get('error')}"
+            invoice.save(update_fields=['tranzila_confirmation_code', 'tranzila_terminal', 'notes'])
+            logger.error('Till token charge uncertain for invoice %s: %s', invoice.invoice_number, result.get('error'))
+            return {'success': False, 'uncertain': True, 'error': TILL_CHARGE_UNCERTAIN_MESSAGE}
+
         if result['success']:
             # Create TranzilaTransaction record for audit trail
             tranzila_transaction = TranzilaTransaction.objects.create(
@@ -2087,7 +2219,8 @@ class PaymentService:
                 response_data=result.get('raw_response', {}),
                 idempotency_key=f"store_token_{invoice.id}_{result.get('transaction_id', '')}",
                 is_successful=True,
-                response_timestamp=timezone.now()
+                response_timestamp=timezone.now(),
+                tranzila_terminal=(recurring_payment.tranzila_terminal if recurring_payment else '') or '',
             )
             
             # Update invoice
@@ -2096,7 +2229,7 @@ class PaymentService:
             invoice.tranzila_transaction_id = result.get('transaction_id', '')
             invoice.tranzila_confirmation_code = result.get('confirmation_code', '')
             # charge_with_token bills the token terminal.
-            invoice.tranzila_terminal = self.tranzila_service.token_terminal
+            invoice.tranzila_terminal = client.token_terminal
             invoice.save()
             
             # Create sales records and update stock atomically
@@ -2104,17 +2237,16 @@ class PaymentService:
                 for item in product_items:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
                     
-                    # Validate stock
+                    # The card is charged: the sale is recorded whatever the
+                    # shelf says now. Marking it failed hid a charge that
+                    # happened; a unit sold twice is a stock count to fix.
                     if _available_stock_for_item(product, item) < int(item['quantity']):
-                        logger.error(f"Insufficient stock for product {product.name}")
-                        # Refund if this fails mid-transaction
-                        invoice.payment_status = 'failed'
-                        invoice.notes = f"Insufficient stock for {product.name}"
-                        invoice.save()
-                        return {
-                            'success': False,
-                            'error': f'אין מספיק מלאי עבור {product.name}'
-                        }
+                        logger.error(
+                            "Stock for %s ran out between the check and the charge (invoice %s) — sale kept",
+                            product.name, invoice.invoice_number,
+                        )
+                        invoice.notes = f"נמכר מעבר למלאי: {product.name} — לבדוק את המלאי"[:1000]
+                        invoice.save(update_fields=['notes'])
                     
                     # Create sale record
                     unit, total = sale_unit_and_total(product, item)
@@ -2189,6 +2321,10 @@ class PaymentService:
             # Never sold again and never downgraded, whatever a repeated or
             # late notify says: Tranzila retries, and a second call used to
             # create the sales, take the stock and issue the document again.
+            # A *different* approved transaction is another matter: the same
+            # order paid twice (two tabs, a page opened twice). It is recorded
+            # and flagged for a refund, never swallowed.
+            self._record_second_store_charge(invoice, tranzila_response)
             logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
             return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
         
@@ -2201,6 +2337,7 @@ class PaymentService:
                 # together cannot both sell the cart.
                 invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
                 if invoice.payment_status == 'completed':
+                    self._record_second_store_charge(invoice, tranzila_response)
                     logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
                     return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
 
@@ -2308,9 +2445,19 @@ class PaymentService:
 
             return {'success': True, 'invoice_id': str(invoice.id)}
         else:
-            # Keep cart JSON in notes so the customer can retry the same order.
-            invoice.payment_status = 'failed'
-            invoice.save(update_fields=['payment_status'])
+            # Locked and read again: a decline from one tab that arrives while
+            # (or after) another tab's payment completes must not turn a paid
+            # order into a failed one.
+            with transaction.atomic():
+                invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
+                if invoice.payment_status == 'completed':
+                    logger.info(
+                        "Store webhook decline for invoice %s ignored — already paid", invoice.invoice_number,
+                    )
+                    return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+                # Keep cart JSON in notes so the customer can retry the same order.
+                invoice.payment_status = 'failed'
+                invoice.save(update_fields=['payment_status'])
             logger.warning(
                 "Store iframe payment failed invoice=%s code=%s error=%s",
                 invoice.invoice_number,
@@ -2333,6 +2480,57 @@ class PaymentService:
                 'error': tranzila_response.get('error_message', 'Payment failed')
             }
     
+    def _record_second_store_charge(self, invoice, tranzila_response: Dict) -> None:
+        """
+        A paid invoice reported paid again under another transaction number.
+
+        Checked against the terminal's report like any notify (it is public).
+        A real one is kept as its own transaction row and shown in the morning
+        brief under "חיובים כפולים", so the office refunds it; a forged one is
+        only logged.
+        """
+        from types import SimpleNamespace
+
+        from apps.payment_links.public_views import verify_transaction_with_tranzila
+
+        txn_index = str(tranzila_response.get('transaction_id') or '').strip()
+        if not tranzila_response.get('is_successful') or not txn_index:
+            return
+        if txn_index == str(invoice.tranzila_transaction_id or '').strip():
+            return  # the same transaction reported again
+        key = f'store_second_{invoice.id}_{txn_index}'[:255]
+        if TranzilaTransaction.objects.filter(idempotency_key=key).exists():
+            return
+        verdict, _txn_row = verify_transaction_with_tranzila(
+            SimpleNamespace(id=invoice.id, amount=invoice.total_amount, created_at=invoice.created_at),
+            txn_index,
+            confirmation_code=tranzila_response.get('confirmation_code'),
+        )
+        if verdict != 'verified':
+            logger.error(
+                'Store invoice %s: another transaction %s reported, not confirmed by Tranzila (%s)',
+                invoice.invoice_number, txn_index, verdict,
+            )
+            return
+        TranzilaTransaction.objects.get_or_create(
+            idempotency_key=key,
+            defaults={
+                'transaction_id': txn_index[:100],
+                'confirmation_code': str(tranzila_response.get('confirmation_code') or '')[:100],
+                'transaction_type': 'charge',
+                'response_code': str(tranzila_response.get('response_code') or '')[:10],
+                'response_message': 'second charge on a paid invoice',
+                'request_data': {'invoice_id': str(invoice.id), 'invoice_number': invoice.invoice_number},
+                'response_data': {},
+                'is_successful': True,
+                'response_timestamp': timezone.now(),
+                'tranzila_terminal': (self.iframe_tranzila_service.terminal or '')[:40],
+            },
+        )
+        # Not written into invoice.notes: a hosted-page invoice keeps its cart
+        # there as JSON.
+        logger.error('Store invoice %s paid twice: second transaction %s recorded', invoice.invoice_number, txn_index)
+
     def create_cash_invoice(
         self,
         product_items: list,
@@ -2560,10 +2758,26 @@ class PaymentService:
                 'error': 'לא נמצא קוד אישור לעסקה'
             }
         
+        # The refund goes back to the terminal that took the charge, with that
+        # terminal's keys. A charge recorded before 25.9.2026 carries no
+        # terminal and keeps the old route.
+        terminal = (payment.tranzila_transaction.tranzila_terminal or '').strip()
+        refund_service = self.tranzila_service
+        refund_terminal = terminal_for_payment_refund(payment)
+        if terminal:
+            refund_service = TranzilaService.for_saved_card(terminal)
+            refund_terminal = terminal
+            if refund_service is None:
+                logger.error("Payment %s was charged on %s, which is not configured", payment_id, terminal)
+                return {
+                    'success': False,
+                    'error': f'התשלום נגבה במסוף {terminal}, שאינו מוגדר במערכת. יש לזכות ידנית בטרנזילה.',
+                }
+
         # Prefer the saved card from THIS payment's subscription. A child with two
         # lessons can have two tokens; .first() on the child would refund the wrong one.
         # Monthly cron charges are not the initial_payment — match by lesson too.
-        card_expire_month, card_expire_year, token = card_details_for_payment_refund(payment)
+        card_expire_month, card_expire_year, token = card_details_for_payment_refund(payment, terminal)
         
         # Use full amount if not specified
         refund_amount = amount if amount else payment.final_amount
@@ -2596,7 +2810,25 @@ class PaymentService:
                 == timezone.now().astimezone(JERUSALEM_TZ).date()
             )
 
-        result = self.tranzila_service.refund_transaction(
+        # One refund at a time per payment: a double click, or a second office
+        # user, loses the insert and is sent away before the gateway is touched.
+        # An answered refusal drops the claim again; an unanswered refund keeps
+        # it, so nobody refunds a second time before Tranzila has been checked.
+        claim = _claim_refund(
+            f'refund_claim_payment_{payment.id}',
+            terminal=terminal,
+            request_data={
+                'original_transaction_id': transaction_id,
+                'authorization_number': authorization_number,
+                'amount': str(refund_amount),
+                'reason': reason,
+                'token': token[:10] + '...' if token and len(token) > 10 else token
+            },
+        )
+        if claim is None:
+            return {'success': False, 'error': REFUND_ALREADY_CLAIMED}
+
+        result = refund_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
             reason=reason,
@@ -2605,34 +2837,19 @@ class PaymentService:
             card_expire_year=card_expire_year,
             token=token,
             prefer_cancel=same_day,
-            terminal_name=terminal_for_payment_refund(payment),
+            terminal_name=refund_terminal,
         )
-        
+
+        if result.get('uncertain'):
+            logger.error("Refund of payment %s got no answer — claim kept: %s", payment_id, result.get('error'))
+            return {'success': False, 'uncertain': True, 'error': REFUND_UNCERTAIN}
+
         if result['success']:
-            # Create TranzilaTransaction record for audit trail
-            from apps.customers.models import TranzilaTransaction
-            tranzila_transaction = TranzilaTransaction.objects.create(
-                transaction_id=result.get('transaction_id', ''),
-                confirmation_code=result.get('confirmation_code', ''),
-                transaction_type='refund',
-                response_code=result.get('response_code', '000'),
-                response_message=result.get('message', ''),
-                request_data={
-                    'original_transaction_id': transaction_id,
-                    'authorization_number': authorization_number,
-                    'amount': str(refund_amount),
-                    'reason': reason,
-                    'token': token[:10] + '...' if token and len(token) > 10 else token
-                },
-                response_data=result.get('raw_response', {}),
-                idempotency_key=f"refund_payment_{payment_id}_{result.get('transaction_id', '')}",
-                is_successful=True,
-                response_timestamp=timezone.now()
-            )
-            
-            # Update payment status
-            payment.status = 'refunded'
-            payment.save()
+            # The claim becomes the refund's record, together with the status.
+            with transaction.atomic():
+                _settle_refund_claim(claim, result)
+                payment.status = 'refunded'
+                payment.save()
             
             log_payment_operation(
                 "REFUND_PAYMENT_SUCCESS",
@@ -2656,6 +2873,7 @@ class PaymentService:
                 'refund_amount': float(refund_amount)
             }
         else:
+            _drop_refund_claim(claim)
             error_msg = result.get('error', 'שגיאה בזיכוי התשלום')
             logger.error(f"Refund failed for payment {payment_id}: {error_msg}")
             return {
@@ -2816,6 +3034,22 @@ class PaymentService:
             issued_date = issued.date() if hasattr(issued, 'date') else issued
             same_day = issued_date == timezone.now().astimezone(JERUSALEM_TZ).date()
 
+        # One refund at a time per invoice — see refund_payment.
+        claim = _claim_refund(
+            f'refund_claim_store_{invoice.id}',
+            terminal=terminal,
+            request_data={
+                'original_transaction_id': transaction_id,
+                'authorization_number': authorization_number,
+                'amount': str(refund_amount),
+                'reason': reason,
+                'items': items,
+                'token': token[:10] + '...' if token and len(token) > 10 else token
+            },
+        )
+        if claim is None:
+            return {'success': False, 'error': REFUND_ALREADY_CLAIMED}
+
         result = refund_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
@@ -2828,32 +3062,20 @@ class PaymentService:
             prefer_cancel=same_day,
             terminal_name=terminal or None,
         )
-        
+
+        if result.get('uncertain'):
+            # Not 'refund_failed': that status offers the retry button, and the
+            # refund may already have been made. The claim holds every retry.
+            logger.error("Refund of invoice %s got no answer — claim kept: %s", invoice_id, result.get('error'))
+            invoice.notes = f"זיכוי ללא תשובה מטרנזילה — לבדוק בטרנזילה: {result.get('error') or ''} - {reason}"[:1000]
+            invoice.save(update_fields=['notes'])
+            return {'success': False, 'uncertain': True, 'error': REFUND_UNCERTAIN}
+
         if result['success']:
-            # Create TranzilaTransaction record for audit trail
-            from apps.customers.models import TranzilaTransaction
-            tranzila_transaction = TranzilaTransaction.objects.create(
-                transaction_id=result.get('transaction_id', ''),
-                confirmation_code=result.get('confirmation_code', ''),
-                transaction_type='refund',
-                response_code=result.get('response_code', '000'),
-                response_message=result.get('message', ''),
-                request_data={
-                    'original_transaction_id': transaction_id,
-                    'authorization_number': authorization_number,
-                    'amount': str(refund_amount),
-                    'reason': reason,
-                    'items': items,
-                    'token': token[:10] + '...' if token and len(token) > 10 else token
-                },
-                response_data=result.get('raw_response', {}),
-                idempotency_key=f"refund_store_{invoice_id}_{result.get('transaction_id', '')}",
-                is_successful=True,
-                response_timestamp=timezone.now()
-            )
-            
             # Update invoice status to refunded and restore stock
             with transaction.atomic():
+                _settle_refund_claim(claim, result)
+
                 # Restore stock for refunded products (per-size aware)
                 from apps.store.models import StoreSale
                 sales = StoreSale.objects.filter(invoice=invoice).select_related('product')
@@ -2898,6 +3120,8 @@ class PaymentService:
                 'original_transaction_id': transaction_id
             }
         else:
+            # Tranzila answered no: nothing was refunded, retry is safe.
+            _drop_refund_claim(claim)
             # Update invoice status to refund_failed (keep button for retry)
             error_msg = result.get('error', 'שגיאה בזיכוי החשבונית')
             invoice.payment_status = 'refund_failed'
