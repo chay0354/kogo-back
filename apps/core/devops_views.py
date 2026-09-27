@@ -143,3 +143,42 @@ class TranzilaTransactionCheckView(APIView):
             request.user.pk, result['terminal'], result['index'],
         )
         return JsonResponse(result)
+
+
+class TranzilaTokenProbeView(APIView):
+    """
+    USAGE: POST /api/v1/core/tranzila/token-probe/ {"step": "page", "tranmode": "NK"}
+    USAGE: POST /api/v1/core/tranzila/token-probe/ {"step": "find", "since": "2026-09-27T10:00:00+03:00"}
+    USAGE: POST /api/v1/core/tranzila/token-probe/ {"step": "charge", "index": "12", "terminal": "cogolivetok"}
+    USAGE: POST /api/v1/core/tranzila/token-probe/ {"step": "refund", "index": "12", "terminal": "cogolivetok"}
+    USAGE: The 1 ₪ test of a card saved on the hosted page (apps/core/token_probe.py).
+
+    Managers only. "charge" and "refund" move real money (1 ₪, once each per
+    row and terminal); nothing returns the card, the token or its expiry.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'tranzila_check'
+
+    def post(self, request):
+        from django.utils.dateparse import parse_datetime
+
+        from apps.core import token_probe
+
+        step = str(request.data.get('step') or '').strip()
+        try:
+            if step == 'page':
+                result = token_probe.open_page(tranmode=str(request.data.get('tranmode') or 'NK'))
+            elif step == 'find':
+                since = parse_datetime(str(request.data.get('since') or '')) if request.data.get('since') else None
+                result = token_probe.find_rows(since=since)
+            elif step == 'charge':
+                result = token_probe.charge(index=request.data.get('index'), terminal=request.data.get('terminal'))
+            elif step == 'refund':
+                result = token_probe.refund(index=request.data.get('index'), terminal=request.data.get('terminal'))
+            else:
+                return JsonResponse({'error': 'step חייב להיות page, find, charge או refund'}, status=400)
+        except token_probe.ProbeError as exc:
+            return JsonResponse({'error': str(exc)}, status=400)
+        logger.info('Tranzila token probe by %s: %s', request.user.pk, step)
+        return JsonResponse(result)
