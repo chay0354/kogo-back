@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from django.apps import apps as django_apps
-from django.db import transaction
+from django.db import connection, transaction
 from django.urls import URLPattern, URLResolver, get_resolver
 from django.utils import timezone
 
@@ -46,7 +46,26 @@ NEVER_CALL = (
     'cron', 'webhook', 'callback', 'backup', 'devops', 'export', 'download',
     'pdf', 'print', 'zip', 'csv', 'xlsx', 'send', 'email', 'sync', 'whatsapp',
     'tranzila', 'daily-brief', 'system-audit', 'env-info', 'handshake',
+    # Every read of a standing order first writes the monthly amounts that
+    # have come due (RecurringPaymentViewSet.get_queryset), and the list loads
+    # all of them: on 27.9.2026 it held every morning slice past the
+    # platform's 300 seconds, and the morning brief with it.
+    'recurring-payments',
+    # A customer's own page, reached by the link we sent them. Opening one may
+    # start a payment page or mark the link seen; the office never opens it.
+    '{token}', '/public/',
 )
+
+# One route may take this long inside the sweep. The request it runs in has 300
+# seconds for everything the morning does, and a route that hung took them all.
+ROUTE_STATEMENT_TIMEOUT_MS = 20_000
+ROUTE_LOCK_TIMEOUT_MS = 5_000
+
+# Written against a route just before it is called, and replaced by what it
+# answered. Found still there, it means the request was cut while that route
+# ran: it is reported and never called again that day.
+IN_FLIGHT_MARK = 'בבדיקה כעת'
+CUT_OFF_ERROR = 'הבקשה נחתכה בזמן שהמסך הזה נבדק (יותר מ-300 שניות) — דולג'
 
 
 @dataclass(frozen=True)
@@ -236,6 +255,19 @@ def _request(path: str, user):
     return match, request
 
 
+def _bound_this_transaction() -> None:
+    """
+    Postgres gives up on a query of this transaction after a few seconds instead
+    of letting one route hold the whole request. SET LOCAL ends with the
+    transaction, so nothing else on the connection is touched.
+    """
+    if connection.vendor != 'postgresql':
+        return
+    with connection.cursor() as cursor:
+        cursor.execute(f"SET LOCAL statement_timeout = {int(ROUTE_STATEMENT_TIMEOUT_MS)}")
+        cursor.execute(f"SET LOCAL lock_timeout = {int(ROUTE_LOCK_TIMEOUT_MS)}")
+
+
 def _call(path: str, user) -> Outcome:
     """GET a route as a manager, inside a transaction that is always rolled back."""
     outcome = Outcome(path=path)
@@ -243,6 +275,7 @@ def _call(path: str, user) -> Outcome:
     try:
         match, request = _request(path, user)
         with transaction.atomic():
+            _bound_this_transaction()
             response = match.func(request, *match.args, **match.kwargs)
             if hasattr(response, 'render') and not getattr(response, 'is_rendered', True):
                 response.render()
@@ -260,6 +293,7 @@ def _pk_from_list(list_path: str, user) -> str | None:
     try:
         match, request = _request(list_path, user)
         with transaction.atomic():
+            _bound_this_transaction()
             response = match.func(request, *match.args, **match.kwargs)
             data = getattr(response, 'data', None)
             transaction.set_rollback(True)
@@ -294,11 +328,16 @@ class SliceResult:
     finished: bool = False
 
 
-def sweep_slice(area_key: str, start_index: int, *, budget_seconds: float) -> SliceResult:
+def sweep_slice(
+    area_key: str, start_index: int, *, budget_seconds: float, before_call=None, after_route=None,
+) -> SliceResult:
     """
     Call the area's read routes from `start_index` until the time runs out.
 
     Returns where to start next time; `finished` once the last route is done.
+    `before_call(path, next_index)` runs just before a route is called and
+    `after_route(outcome, next_index)` after each route, called or skipped — so
+    the caller can keep its place route by route.
     """
     routes = [r for r in all_routes() if r.area == area_key and r.callable_get]
     result = SliceResult(next_index=start_index)
@@ -314,13 +353,18 @@ def sweep_slice(area_key: str, start_index: int, *, budget_seconds: float) -> Sl
         route = routes[index]
         index += 1
         if route.never_call:
-            result.outcomes.append(Outcome(path=route.template, skipped='פונה לשירות חיצוני או מפעיל פעולה — נבדק בבדיקות האזור'))
-            continue
-        path, reason = concrete_path(route, user)
-        if path is None:
-            result.outcomes.append(Outcome(path=route.template, skipped=reason))
-            continue
-        result.outcomes.append(_call(path, user))
+            outcome = Outcome(path=route.template, skipped='פונה לשירות חיצוני או מפעיל פעולה — נבדק בבדיקות האזור')
+        else:
+            path, reason = concrete_path(route, user)
+            if path is None:
+                outcome = Outcome(path=route.template, skipped=reason)
+            else:
+                if before_call is not None:
+                    before_call(path, index)
+                outcome = _call(path, user)
+        result.outcomes.append(outcome)
+        if after_route is not None:
+            after_route(outcome, index)
     result.next_index = index
     result.finished = index >= len(routes)
     return result
@@ -624,12 +668,28 @@ def advance_audit(*, budget_seconds: float = 25, today: date | None = None):
 
     started = time.monotonic()
     try:
-        if run.next_index < run.total_routes:
-            result = sweep_slice(run.area, run.next_index, budget_seconds=budget_seconds)
-            for outcome in result.outcomes:
-                if outcome.skipped:
-                    run.skipped = [*run.skipped, {'path': outcome.path, 'reason': outcome.skipped}]
-                    continue
+        # A route found still marked in flight took the last request down with
+        # it. It was already stepped past (next_index moves before each call),
+        # so it only has to be reported.
+        if any(f.get('error') == IN_FLIGHT_MARK for f in run.failures):
+            run.failures = [
+                {**f, 'error': CUT_OFF_ERROR} if f.get('error') == IN_FLIGHT_MARK else f
+                for f in run.failures
+            ]
+            run.save(update_fields=['failures', 'updated_at'])
+
+        def before_call(path, next_index):
+            # Stepped past before it is called, and marked: a route that hangs
+            # past the platform's limit is not called again, and says so.
+            SystemAuditRun.objects.filter(pk=run.pk).update(
+                next_index=next_index,
+                failures=[*run.failures, {'path': path, 'status': None, 'error': IN_FLIGHT_MARK}],
+            )
+
+        def after_route(outcome, next_index):
+            if outcome.skipped:
+                run.skipped = [*run.skipped, {'path': outcome.path, 'reason': outcome.skipped}]
+            else:
                 run.called += 1
                 if outcome.error or (outcome.status and outcome.status >= 500):
                     run.failures = [*run.failures, {
@@ -637,6 +697,15 @@ def advance_audit(*, budget_seconds: float = 25, today: date | None = None):
                     }]
                 elif outcome.ms > SLOW_MS:
                     run.slow = [*run.slow, {'path': outcome.path, 'ms': outcome.ms}]
+            # Kept route by route, so a request cut later loses nothing before it.
+            run.next_index = next_index
+            run.save(update_fields=['skipped', 'called', 'failures', 'slow', 'next_index', 'updated_at'])
+
+        if run.next_index < run.total_routes:
+            result = sweep_slice(
+                run.area, run.next_index, budget_seconds=budget_seconds,
+                before_call=before_call, after_route=after_route,
+            )
             run.next_index = result.next_index
             run.save()
 

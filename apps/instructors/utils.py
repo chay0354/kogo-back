@@ -1233,7 +1233,8 @@ def refresh_month_snapshots(month: str, *, budget_seconds: Optional[float] = Non
     year, m = _parse_month_str(month)
     month_start, month_end = _month_start_end(year, m)
 
-    _drop_cancelled_lesson_snapshots(month)
+    skipped: list[str] = []
+    _bounded_write(lambda: _drop_cancelled_lesson_snapshots(month), 'cancelled groups', skipped)
 
     lessons = (
         Lesson.objects.exclude(status='cancelled')
@@ -1259,8 +1260,11 @@ def refresh_month_snapshots(month: str, *, budget_seconds: Optional[float] = Non
         for lesson in pending_lessons:
             if out_of_time():
                 break
-            _store_lesson_snapshot(lesson, month, cancellations_dict, should_finalize=False)
-            fresh_lessons.add(lesson.id)
+            if _bounded_write(
+                lambda: _store_lesson_snapshot(lesson, month, cancellations_dict, should_finalize=False),
+                f'lesson {lesson.id}', skipped,
+            ):
+                fresh_lessons.add(lesson.id)
 
     lessons_done = sum(1 for lesson in lesson_list if lesson.id in fresh_lessons)
 
@@ -1275,8 +1279,11 @@ def refresh_month_snapshots(month: str, *, budget_seconds: Optional[float] = Non
                 continue
             if out_of_time():
                 break
-            _store_instructor_snapshot(instructor, month, should_finalize=False)
-            fresh_instructors.add(instructor.id)
+            if _bounded_write(
+                lambda: _store_instructor_snapshot(instructor, month, should_finalize=False),
+                f'instructor {instructor.id}', skipped,
+            ):
+                fresh_instructors.add(instructor.id)
     instructors_done = sum(1 for instructor in instructors if instructor.id in fresh_instructors)
 
     finished = lessons_done == len(lesson_list) and instructors_done == len(instructors)
@@ -1291,7 +1298,36 @@ def refresh_month_snapshots(month: str, *, budget_seconds: Optional[float] = Non
         'lessons_total': len(lesson_list),
         'instructors_done': instructors_done,
         'instructors_total': len(instructors),
+        'skipped': skipped,
     }
+
+
+# One group's (or instructor's) row may wait this long for a lock or a query.
+# The morning's request has 300 seconds in all; on 27.9.2026 every slice after
+# the first was cut at 300 with the recount stuck on the same group, so a row
+# that cannot be written now is left for the next slice instead.
+RECOUNT_STATEMENT_TIMEOUT_MS = 30_000
+RECOUNT_LOCK_TIMEOUT_MS = 10_000
+
+
+def _bounded_write(write, label: str, skipped: list) -> bool:
+    """Run one recount write under Postgres time limits. False, and noted, when it gave up."""
+    import logging
+
+    from django.db import DatabaseError, connection
+
+    try:
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cursor:
+                    cursor.execute(f"SET LOCAL statement_timeout = {int(RECOUNT_STATEMENT_TIMEOUT_MS)}")
+                    cursor.execute(f"SET LOCAL lock_timeout = {int(RECOUNT_LOCK_TIMEOUT_MS)}")
+            write()
+        return True
+    except DatabaseError as exc:
+        logging.getLogger(__name__).warning('recount skipped %s: %s', label, exc)
+        skipped.append(label)
+        return False
 
 
 def instructor_current_lessons(instructor):

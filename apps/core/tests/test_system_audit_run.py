@@ -276,3 +276,69 @@ class CutShortCheckTests(TestCase):
         self.assertEqual(ordinary - items, set())
         # No "started and never finished" line to stop the next call from retrying it.
         self.assertFalse(items & set(RESUMABLE_CHECKS))
+
+
+class StuckRouteTests(TestCase):
+    """
+    27.9.2026: the billing day's sweep reached the standing-orders list — a read
+    that writes due amounts and loads every order — and each morning slice was
+    cut at the platform's 300 seconds on it, the brief's recount with it.
+    """
+
+    def setUp(self):
+        _manager()
+
+    def test_reads_that_write_and_customers_own_pages_are_not_called(self):
+        routes = {r.template: r for r in system_audit.all_routes()}
+        for template, route in routes.items():
+            if 'recurring-payments' in template or '{token}' in template or '/public/' in template:
+                self.assertTrue(route.never_call, template)
+
+    def test_a_route_that_takes_too_long_is_cancelled_and_reported(self):
+        from django.db import connection
+
+        if connection.vendor != 'postgresql':
+            self.skipTest('statement_timeout is a Postgres setting')
+
+        class _Slow:
+            args, kwargs = (), {}
+
+            @staticmethod
+            def func(request):
+                with connection.cursor() as cursor:
+                    cursor.execute('SELECT pg_sleep(2)')
+
+        with patch.object(system_audit, 'ROUTE_STATEMENT_TIMEOUT_MS', 200), \
+                patch.object(system_audit, '_request', return_value=(_Slow, None)):
+            outcome = system_audit._call('api/v1/slow/', None)
+        self.assertIn('timeout', outcome.error.lower())
+        self.assertLess(outcome.ms, 1500)
+
+    def test_a_route_that_took_the_request_down_is_skipped_and_named_next_time(self):
+        class Killed(BaseException):
+            """Stands in for the platform ending the request."""
+
+        calls = []
+        real_call = system_audit._call
+
+        def dying_call(path, user):
+            calls.append(path)
+            if len(calls) == 2:
+                raise Killed()
+            return real_call(path, user)
+
+        with patch.object(system_audit, '_call', side_effect=dying_call):
+            with self.assertRaises(Killed):
+                advance_audit(budget_seconds=600, today=TUESDAY)
+        doomed = calls[1]
+        SystemAuditRun.objects.filter(day=TUESDAY).update(lease_until=None)
+
+        calls.clear()
+        with patch.object(system_audit, '_call', side_effect=lambda p, u: calls.append(p) or real_call(p, u)):
+            run = advance_audit(budget_seconds=600, today=TUESDAY)
+
+        self.assertNotIn(doomed, calls, 'the route that killed the request was called again')
+        cut = [f for f in run.failures if f.get('path') == doomed]
+        self.assertEqual(len(cut), 1)
+        self.assertEqual(cut[0]['error'], system_audit.CUT_OFF_ERROR)
+        self.assertIsNotNone(run.finished_at)

@@ -179,6 +179,9 @@ def check_refresh_dashboard(today: date) -> BriefItem:
             f"{result['instructors_done']} מתוך {result['instructors_total']} מדריכים. "
             'ממשיך בסבב הבא של שגרת הבוקר.'
         )
+        if result.get('skipped'):
+            item.summary += f" {len(result['skipped'])} נחסמו כרגע ויעודכנו בסבב הבא."
+            item.progress['skipped'] = len(result['skipped'])
     return item
 
 
