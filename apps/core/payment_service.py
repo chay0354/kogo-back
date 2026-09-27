@@ -35,6 +35,7 @@ from apps.core.card_validation import validate_card_details
 from apps.core.tranzila_service import (
     TOKEN_CHARGED,
     TOKEN_DECLINED,
+    TOKEN_REQUEST_REJECTED,
     TOKEN_SETUP_PROBLEM,
     TranzilaService,
     invoice_id_from_pdesc,
@@ -1430,6 +1431,11 @@ class PaymentService:
         base_price, used_lesson_tier, course_index, bundle, price_option = resolve_billing_price(
             child, lesson, bundle_id, price_option_id
         )
+        # Locked before the checks below, not after them. A second click on
+        # "charge" waited for the first request to finish — the charge and the
+        # registration included — and then went on with checks it had made
+        # before that registration existed, charging the card again.
+        Child.objects.select_for_update().get(id=child.id)
         if child_already_registered_for_lessons(
             child,
             lessons_covered_by_selection(lesson=lesson, bundle=bundle),
@@ -1469,7 +1475,6 @@ class PaymentService:
         # Pro-rate the first payment to the remaining lessons of the current month.
         prorate_factor_c, _, _, next_billing_date_c = _compute_prorate(payment_date, lesson.day_of_week)
         full_monthly_amount_c = discount_calculation.final_price
-        Child.objects.select_for_update().get(id=child.id)
         charge_fee_c = resolve_include_registration_fee(child, lesson, include_registration_fee)
         registration_fee_c = (
             registration_fee_amount(lesson.course) if charge_fee_c else Decimal('0.00')
@@ -1716,9 +1721,17 @@ class PaymentService:
         else:
             payment.status = 'failed'
             payment.failure_reason = result.get('error', 'Unknown error')
+            payment.failure_code = str(result.get('response_code', ''))[:50]
             payment.save()
-            child.status = 'payment_problem'
-            child.save()
+            # A first charge that failed booked nothing — no enrolment, no
+            # standing order — so there is nothing to bill and no card problem
+            # to chase. It used to set בעיה באשראי on every child, including one
+            # who already pays for another course (27.9.2026). A new child is
+            # בתהליך רישום; anyone else keeps the status they had.
+            if child.status in ('pending', 'inactive'):
+                if child.status != 'pending':
+                    child.status = 'pending'
+                    child.save(update_fields=['status', 'updated_at'])
             return {'success': False, 'error': result.get('error', 'התשלום נכשל')}
 
     @staticmethod
@@ -2192,7 +2205,7 @@ class PaymentService:
         )
         outcome = token_charge_outcome(result)
 
-        if outcome not in (TOKEN_CHARGED, TOKEN_DECLINED, TOKEN_SETUP_PROBLEM):
+        if outcome not in (TOKEN_CHARGED, TOKEN_DECLINED, TOKEN_SETUP_PROBLEM, TOKEN_REQUEST_REJECTED):
             # No answer, or one that says nothing certain: the card may be
             # charged. Not a failure — the invoice stays pending and marked,
             # which also keeps the next saved-card purchase for this child away.

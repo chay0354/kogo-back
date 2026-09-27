@@ -828,3 +828,36 @@ class ReadinessWordingTests(TestCase):
         ])
         self.assertEqual(item.severity, RED)
         self.assertIn('בלעדיו אין גבייה חודשית', item.rows[0]['label'])
+
+
+class ChargesInProcessingTests(TestCase):
+    """
+    A charge from the form or the office stuck in "processing" is never charged
+    again by the system (27.9.2026), so the brief is where a person hears of it.
+    """
+
+    def _payment(self, minutes_ago):
+        from apps.customers.models import Payment
+
+        child = _child('תקוע')
+        payment = Payment.objects.create(
+            child=child, family=child.family, payment_type='recurring_subscription', status='processing',
+            base_amount=Decimal('250'), final_amount=Decimal('250'), description='מנוי',
+        )
+        Payment.objects.filter(pk=payment.pk).update(updated_at=timezone.now() - timedelta(minutes=minutes_ago))
+        return payment
+
+    def test_one_stuck_for_an_hour_is_red_with_the_child(self):
+        from apps.core.daily_brief import check_charges_in_processing
+
+        self._payment(60)
+        item = check_charges_in_processing(TODAY)
+        self.assertEqual(item.severity, RED)
+        self.assertEqual(item.count, 1)
+        self.assertIn('תקוע', item.rows[0]['label'])
+
+    def test_one_still_in_flight_is_not_reported(self):
+        from apps.core.daily_brief import check_charges_in_processing
+
+        self._payment(2)
+        self.assertEqual(check_charges_in_processing(TODAY).count, 0)

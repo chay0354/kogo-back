@@ -136,6 +136,42 @@ def is_tranzila_uncertain_gateway_error(response: Optional[Dict]) -> bool:
 # pair's terminal answer 20002 "Authorization failed" (23.9.2026).
 TRANZILA_AUTH_REFUSED_CODES = frozenset({'20002'})
 
+# Tranzila refusing the request itself — bad or missing credentials (20000) or a
+# body it cannot read (20001, 20003, 20004 "Json does not match validation
+# schema") — before anything reaches a card. Our fault, not the card's: on
+# 1.9.2026 eight monthly charges came back 20004 and each customer was flagged
+# as having a card problem and sent an "update your card" message.
+# docs/tranzila-api.md, "HTTP error codes".
+TRANZILA_REQUEST_REJECTED_CODES = frozenset({'20000', '20001', '20003', '20004'})
+
+# The card company's (Shva) answer when it refuses a card. Tranzila's own reply
+# still says error_code 0, "Success" — the request was fine — and the refusal is
+# only in transaction_result.processor_response_code. We used to store that
+# outer "Success" as the reason, so 37 declines read "Success", the real code was
+# lost, and parents were shown "Success" as the error (27.9.2026).
+SHVA_DECLINE_MESSAGES = {
+    '001': 'הכרטיס חסום',
+    '002': 'הכרטיס דווח כגנוב',
+    '003': 'יש לפנות לחברת האשראי',
+    '004': 'חברת האשראי סירבה לעסקה',
+    '006': 'מספר תעודת הזהות או ה-CVV שגויים',
+    '033': 'הכרטיס אינו תקין',
+    '036': 'תוקף הכרטיס פג',
+}
+
+
+def bank_decline_message(processor_code) -> str:
+    """What to tell a payer (and the office) when the card company refused the card."""
+    code = str(processor_code or '').strip()
+    reason = SHVA_DECLINE_MESSAGES.get(code, 'חברת האשראי סירבה לעסקה')
+    return f'{reason} (קוד {code}). לא בוצע חיוב — אפשר לנסות כרטיס אחר.'
+
+
+def request_rejected_message(error_code, tranzila_message: str = '') -> str:
+    """What to tell a payer (and the office) when Tranzila refused our request."""
+    detail = f' — {tranzila_message}' if tranzila_message else ''
+    return f'תקלה טכנית בחיבור לסליקה (קוד {error_code}{detail}). הכרטיס לא חויב.'
+
 # Codes that never stand for a decline: the ones a locally built failure
 # carries, and '000' — the processor's approval (see rental_billing.billing).
 TRANZILA_NOT_A_DECLINE_CODES = frozenset({'', '999', 'N/A', 'NONE', '000'})
@@ -143,6 +179,7 @@ TRANZILA_NOT_A_DECLINE_CODES = frozenset({'', '999', 'N/A', 'NONE', '000'})
 TOKEN_CHARGED = 'charged'
 TOKEN_DECLINED = 'declined'
 TOKEN_SETUP_PROBLEM = 'setup'
+TOKEN_REQUEST_REJECTED = 'rejected'
 TOKEN_UNKNOWN = 'unknown'
 
 
@@ -154,6 +191,10 @@ def token_charge_outcome(result: Optional[Dict]) -> str:
     'setup'    — nothing reached the card: the client refused before sending
                  (no keys, no expiry) or Tranzila refused our key. Neither the
                  card nor the payer is at fault.
+    'rejected' — Tranzila refused this request as malformed (20004 and the
+                 like): nothing reached the card, and the card is not at fault,
+                 but unlike 'setup' it is about this one request, not every
+                 card on the terminal.
     'declined' — Tranzila said, with a code of its own, that the card was not
                  charged.
     'unknown'  — no answer, or one that says nothing certain (a timeout, an
@@ -168,6 +209,8 @@ def token_charge_outcome(result: Optional[Dict]) -> str:
     code = str(result.get('response_code') or '').strip().upper()
     if code in TRANZILA_AUTH_REFUSED_CODES:
         return TOKEN_SETUP_PROBLEM
+    if result.get('request_rejected') or code in TRANZILA_REQUEST_REJECTED_CODES:
+        return TOKEN_REQUEST_REJECTED
     if 'uncertain' in result or is_tranzila_uncertain_gateway_error(result):
         return TOKEN_UNKNOWN
     if code in TRANZILA_NOT_A_DECLINE_CODES:
@@ -868,16 +911,30 @@ class TranzilaService:
                 duplicate=duplicate,
             )
 
-        error_msg = response.get('message') or response.get('error') or 'Unknown error'
+        tranzila_msg = response.get('message') or response.get('error') or 'Unknown error'
         logger.error(
             "Card charge declined: error_code=%s processor=%s message=%s last4=%s duplicate=%s",
-            error_code, processor_code, error_msg, last4, duplicate,
+            error_code, processor_code, tranzila_msg, last4, duplicate,
         )
-        return self._build_error_response(
-            error_msg,
-            str(error_code if error_code is not None else (processor_code or 'N/A')),
-            f'Charge failed: {error_msg}',
-        )
+
+        # 'Charge failed: …' stays the message's prefix in every branch: other
+        # readers (rental billing's _parsed_as_decline) know a decline by it.
+        if is_tranzila_rest_ok(error_code) and processor_code:
+            # The request was fine; the card company refused the card. Its code
+            # is the reason — Tranzila's own message here is just "Success".
+            error_msg = bank_decline_message(processor_code)
+            out = self._build_error_response(error_msg, str(processor_code), f'Charge failed: {error_msg}')
+            out['declined_by_bank'] = True
+            return out
+
+        code = str(error_code if error_code is not None else (processor_code or 'N/A')).strip()
+        if code in TRANZILA_REQUEST_REJECTED_CODES:
+            error_msg = request_rejected_message(code, tranzila_msg)
+            out = self._build_error_response(error_msg, code, f'Charge failed: {error_msg}')
+            out['request_rejected'] = True
+            return out
+
+        return self._build_error_response(tranzila_msg, code, f'Charge failed: {tranzila_msg}')
 
     def charge_with_token(
         self,

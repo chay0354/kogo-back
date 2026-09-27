@@ -208,7 +208,12 @@ class WidgetChargeIdempotencyTest(TestCase):
 
     @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
     @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
-    def test_stale_processing_retries_and_completes(self, mock_charge, _whatsapp):
+    def test_a_stale_processing_charge_is_never_charged_again(self, mock_charge, _whatsapp):
+        """
+        It lost its answer or its record, and the card may carry it. It used to be
+        charged again after 90 seconds with only Tranzila's duplicate block — off
+        in production — in the way (27.9.2026). The office settles it instead.
+        """
         from datetime import timedelta
 
         payment = _payment_for(self.child, self.lesson, status='processing')
@@ -219,10 +224,55 @@ class WidgetChargeIdempotencyTest(TestCase):
             format='json',
         )
         self.assertEqual(res.status_code, 200, res.content)
-        self.assertTrue(res.json()['success'])
-        mock_charge.assert_called_once()
+        body = res.json()
+        self.assertFalse(body['success'])
+        self.assertTrue(body['processing'])
+        self.assertIn('אל תשלמו שוב', body['error'])
+        mock_charge.assert_not_called()
         payment.refresh_from_db()
-        self.assertEqual(payment.status, 'completed')
+        self.assertEqual(payment.status, 'processing')
+
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
+    def test_a_second_submission_of_the_same_registration_is_not_charged(self, mock_charge, _whatsapp):
+        """Pressing "pay" twice made two rows, and each was charged: a fee three times on one child."""
+        first = _payment_for(self.child, self.lesson)
+        second = _payment_for(self.child, self.lesson)
+        for payment in (first, second):
+            self.client.post(
+                '/api/v1/customers/widget/charge/',
+                {'payment_id': str(payment.id), 'card_details': CARD},
+                format='json',
+            )
+        mock_charge.assert_called_once()
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, 'completed')
+        self.assertEqual(second.status, 'cancelled')
+        self.assertIn('כפילות', second.failure_reason)
+
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card')
+    def test_a_declined_attempt_does_not_block_trying_again_with_another_card(self, mock_charge, _whatsapp):
+        mock_charge.side_effect = [
+            {'success': False, 'error': 'חברת האשראי סירבה לעסקה (קוד 004)', 'response_code': '004'},
+            TRANZILA_OK,
+        ]
+        first = _payment_for(self.child, self.lesson)
+        self.client.post('/api/v1/customers/widget/charge/', {'payment_id': str(first.id), 'card_details': CARD}, format='json')
+        second = _payment_for(self.child, self.lesson)
+        res = self.client.post('/api/v1/customers/widget/charge/', {'payment_id': str(second.id), 'card_details': CARD}, format='json')
+        self.assertTrue(res.json()['success'], res.content)
+        self.assertEqual(mock_charge.call_count, 2)
+
+    @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_OK)
+    def test_another_child_in_the_family_is_not_a_duplicate(self, mock_charge, _whatsapp):
+        sibling = TestDataFactory.create_child(family=self.family, first_name='אח')
+        for child in (self.child, sibling):
+            payment = _payment_for(child, self.lesson)
+            self.client.post('/api/v1/customers/widget/charge/', {'payment_id': str(payment.id), 'card_details': CARD}, format='json')
+        self.assertEqual(mock_charge.call_count, 2)
 
     @patch('apps.core.payment_service.PaymentService._send_registration_whatsapp')
     @patch('apps.core.tranzila_service.TranzilaService.verify_card')
