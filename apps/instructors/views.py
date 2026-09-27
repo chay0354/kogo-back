@@ -1213,8 +1213,10 @@ class MyDashboardView(APIView):
     GET /api/v1/instructors/my-dashboard/?date_from=&date_to=&branch_id=
 
     Everything here is counted from real rows — there is no estimate and no
-    placeholder. "Student" means an active enrolment of an active child, so
-    walk-ins, trial signups and children who left are all out.
+    placeholder. "Student" follows the owner's rule (24.9): a paying enrolment
+    of a child whose own status is פעיל or בעיית תשלום, so walk-ins, trial
+    signups, a sign-up nobody has paid for yet and children who left are all
+    out. External-branch children on a municipality list count as well.
 
     Instructors see only their own lessons; managers looking at the same screen
     see the whole scope they already have.
@@ -1232,7 +1234,7 @@ class MyDashboardView(APIView):
             instructor_login_q,
             resolve_viewable_user,
         )
-        from apps.enrollments.enrollment_counts import paying_enrollments
+        from apps.enrollments.enrollment_counts import ACTIVE_STUDENT_CHILD_STATUSES, paying_enrollments
         from apps.enrollments.models import LessonAttendance
 
         # A head instructor may hold links to colleagues' accounts. The id is
@@ -1283,8 +1285,17 @@ class MyDashboardView(APIView):
         # everywhere else — and made this screen disagree with the courses page.
         enrollments = list(
             paying_enrollments(LessonEnrollment.objects.filter(lesson_id__in=lesson_ids))
-            .values('lesson_id', 'child_id', 'start_date', 'end_date')
+            .values('lesson_id', 'child_id', 'child__status', 'start_date', 'end_date')
         )
+        # The students among them (owner, 24.9): the child is פעיל or בעיית
+        # תשלום. A paying row alone also holds a sign-up nobody has paid for
+        # (בתהליך רישום) and a child who left while the row stayed active, and
+        # counting those put them into "תלמידים בכל קבוצה": pending children
+        # were behind six of the seven per-group disagreements found in
+        # production on 27.9.
+        # The attendance check below still reads every paying row: a child who
+        # sits in the room unpaid is exactly one whose register matters.
+        students = [e for e in enrollments if e['child__status'] in ACTIVE_STUDENT_CHILD_STATUSES]
 
         # --- trend: distinct children taught in each month of the range ---
         # A child in two of this instructor's groups is one student, not two.
@@ -1297,7 +1308,7 @@ class MyDashboardView(APIView):
             else:
                 month_end = date(cursor.year, cursor.month + 1, 1) - timedelta(days=1)
             children = {
-                e['child_id'] for e in enrollments
+                e['child_id'] for e in students
                 if (e['start_date'] is None or e['start_date'] <= month_end)
                 and (e['end_date'] is None or e['end_date'] >= cursor)
             }
@@ -1311,13 +1322,18 @@ class MyDashboardView(APIView):
         # Identity pairs, not bare ids: a municipality student and a child are
         # different tables and must never satisfy each other in the marked-set
         # comparison further down.
+        # `current` is the register (every paying row), `current_students` the
+        # headcount (students only).
         current = {}
+        current_students = {}
         for e in enrollments:
             if e['start_date'] and e['start_date'] > today:
                 continue
             if e['end_date'] and e['end_date'] < today:
                 continue
             current.setdefault(e['lesson_id'], set()).add(('c', e['child_id']))
+            if e['child__status'] in ACTIVE_STUDENT_CHILD_STATUSES:
+                current_students.setdefault(e['lesson_id'], set()).add(('c', e['child_id']))
 
         # External-branch children. They pay us nothing, but the question this
         # screen answers — is this class too small to run — is about how many
@@ -1326,10 +1342,11 @@ class MyDashboardView(APIView):
         for student in ExternalStudent.objects.filter(lesson_id__in=lesson_ids, is_active=True):
             if external_visible_on_date(student, today):
                 current.setdefault(student.lesson_id, set()).add(('e', student.id))
+                current_students.setdefault(student.lesson_id, set()).add(('e', student.id))
 
         groups = []
         for lesson in lessons:
-            count = len(current.get(lesson.id, ()))
+            count = len(current_students.get(lesson.id, ()))
             # An external branch's roster only exists once someone types up the
             # municipality's sheet. Until then a zero there means "we have not
             # been told", not "this class is empty", and flagging it would put
@@ -1352,7 +1369,7 @@ class MyDashboardView(APIView):
             })
         groups.sort(key=lambda g: (g['active_students'], g['course_name']))
 
-        total_active = len({key for keys in current.values() for key in keys})
+        total_active = len({key for keys in current_students.values() for key in keys})
 
         # --- occurrences still waiting for attendance ---
         # Only dates that have already happened: a lesson later today is not

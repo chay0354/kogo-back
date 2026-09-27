@@ -25,7 +25,7 @@ from apps.core.models import LessonMonthlySnapshot
 from apps.enrollments.models import LessonEnrollment
 from apps.external_students.models import ExternalStudent
 from apps.external_students.roster import external_counts_by_course, external_counts_by_lesson
-from apps.enrollments.enrollment_counts import paying_enrollments
+from apps.enrollments.enrollment_counts import active_student_enrollments, paying_enrollments
 from apps.core.permissions import IsManager, IsManagerOrPartner, StaffAccessMixin
 from apps.core.scoping import (
     scope_courses,
@@ -154,13 +154,16 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
         course_type = self.get_object()
         course_ids = [c.id for c in course_type.courses.all()]
 
-        # Paying children, not active rows. A trial signup is an active
-        # enrollment too, so counting on status alone put every child booked for
-        # a test lesson into the course's headcount — and this number is shown
-        # next to the capacity, where six trials on one Wednesday turned a class
-        # of fourteen into "20/20, full".
+        # Students, not active rows. A trial signup is an active enrollment too,
+        # so counting on status alone put every child booked for a test lesson
+        # into the course's headcount — six trials on one Wednesday turned a
+        # class of fourteen into "20/20, full". And a paying row is not a
+        # student either while the child is still בתהליך רישום or has left: the
+        # owner's rule (24.9) is a child whose own status is פעיל or בעיית
+        # תשלום. The courses page shows this number in the header only when a
+        # course has no scheduled lesson to list per day.
         course_enrollment_counts = dict(
-            paying_enrollments(
+            active_student_enrollments(
                 LessonEnrollment.objects.filter(lesson__course_id__in=course_ids)
             )
             .values_list('lesson__course_id')
@@ -174,12 +177,15 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
             .values_list('course_id', 'c')
         )
 
-        # Per-lesson active (paying) headcount for the course card header:
-        # "שני 14 · חמישי 16". A distinct-children total is misleading next to
-        # a per-lesson capacity, so the header lists each day on its own. Two
-        # batched queries for the whole type, no per-course work.
-        paying_by_lesson = dict(
-            paying_enrollments()
+        # Per-lesson student headcount for the course card header ("פעילים לפי
+        # שיעור": "שני 14 · חמישי 16"). A distinct-children total is misleading
+        # next to a per-lesson capacity, so the header lists each day on its
+        # own. Students by the owner's rule (24.9) — the child is פעיל or בעיית
+        # תשלום — not every paying row: a sign-up still waiting to pay holds a
+        # seat (capacity keeps `paying_enrollments`) but is not a student yet.
+        # Two batched queries for the whole type, no per-course work.
+        students_by_lesson = dict(
+            active_student_enrollments()
             .filter(lesson__course_id__in=course_ids)
             .values_list('lesson_id')
             .annotate(c=Count('id'))
@@ -195,7 +201,7 @@ class CourseTypeViewSet(viewsets.ModelViewSet):
                 'lesson_id': str(row['id']),
                 'day_of_week': row['day_of_week'],
                 'start_time': row['start_time'].strftime('%H:%M'),
-                'count': paying_by_lesson.get(row['id'], 0),
+                'count': students_by_lesson.get(row['id'], 0),
             })
 
         current_month = timezone.now().strftime('%Y-%m')
@@ -314,7 +320,9 @@ class CourseViewSet(viewsets.ModelViewSet):
         course = self.get_object()
         lessons = course.lessons.select_related('room', 'instructor').prefetch_related(
             'instructor__salary_tiers',
-            Prefetch('enrollments', queryset=LessonEnrollment.objects.filter(status='active')),
+            # With the child: both counts read the child's status, one query per
+            # row otherwise.
+            Prefetch('enrollments', queryset=LessonEnrollment.objects.filter(status='active').select_related('child')),
         )
         serializer = LessonWithEnrollmentsSerializer(lessons, many=True, context=self.get_serializer_context())
         return Response(serializer.data)
