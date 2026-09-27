@@ -326,6 +326,49 @@ def check_unresolved_charges(today: date) -> BriefItem:
     return item
 
 
+# A charge from the registration form or the office still "processing" after
+# this long has lost its answer (a timeout) or its record (a failure after the
+# card was charged). Neither is charged again by the system (27.9.2026), so a
+# person has to settle it against Tranzila.
+PROCESSING_STUCK_MINUTES = 30
+
+
+def check_charges_in_processing(today: date) -> BriefItem:
+    """Charges from the form or the office that never got a clear answer."""
+    from apps.customers.models import Payment
+
+    cutoff = timezone.now() - timedelta(minutes=PROCESSING_STUCK_MINUTES)
+    rows = list(
+        Payment.objects.filter(status='processing', updated_at__lt=cutoff)
+        .select_related('child')
+        .order_by('updated_at')
+    )
+    item = BriefItem(
+        key='charges_in_processing',
+        title='חיובים שנתקעו בבדיקה',
+        severity=RED if rows else GREEN,
+        count=len(rows),
+        action=(
+            'לבדוק בטרנזילה אם הכסף ירד. ירד — להשלים את ההרשמה; לא ירד — לסמן את התשלום כנכשל '
+            'כדי שההורה יוכל לשלם שוב. עד אז המערכת לא תחייב את התשלום הזה שוב.'
+        ),
+    )
+    if not rows:
+        item.summary = 'אין חיוב מהטופס או מהמשרד שתקוע בבדיקה.'
+        return item
+    item.summary = (
+        f'{len(rows)} חיובים שלא קיבלו תשובה ברורה מהסליקה או שלא נרשמו עד הסוף — ייתכן שהכסף ירד.'
+    )
+    for payment in rows[:MAX_ROWS]:
+        when = timezone.localtime(payment.updated_at).strftime('%d/%m %H:%M')
+        item.rows.append(_row(
+            payment.child.full_name,
+            f'{_money(payment.final_amount)} · {when} · {(payment.failure_reason or payment.description or "")[:60]}',
+            _child_href(payment.child_id),
+        ))
+    return item
+
+
 def check_saved_card_setup(today: date) -> BriefItem:
     """
     Standing orders the billing run did not charge because of us, not the card.
@@ -1394,6 +1437,7 @@ CHECKS = (
     check_refresh_dashboard,
     check_overdue_recurring,
     check_unresolved_charges,
+    check_charges_in_processing,
     check_saved_card_setup,
     check_unresolved_refunds,
     check_recurring_without_lesson,
@@ -1441,6 +1485,7 @@ def check_catalogue() -> list[dict]:
         'monthly_finalization': 'סגירת החודש הקודם',
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
+        'charges_in_processing': 'חיובים שנתקעו בבדיקה',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
         'unresolved_refunds': 'זיכויים שלא התקבלה עליהם תשובה',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',

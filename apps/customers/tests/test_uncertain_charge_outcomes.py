@@ -226,3 +226,25 @@ class CrmChargeUncertainTest(TestCase):
         self.assertEqual(Payment.objects.get(child=child, lesson=lesson).status, 'failed')
         self.assertFalse(self._charge(service, child, lesson)['success'])
         self.assertEqual(charge.call_count, 2)
+
+    @patch('apps.core.payment_service.DiscountService.evaluate_discounts_for_payment', side_effect=_passthrough_discount)
+    @patch('apps.core.payment_service.TranzilaService.charge_with_card',
+           return_value={'success': False, 'error': 'הכרטיס נדחה', 'response_code': '004'})
+    def test_a_declined_new_course_does_not_flag_a_child_who_already_pays(self, charge, _discount):
+        """
+        A first charge that failed booked nothing — so no בעיה באשראי. It used to
+        be set on every child, including one who pays for another course
+        (27.9.2026).
+        """
+        paying = TestDataFactory.create_child(status='active')
+        new = TestDataFactory.create_child(status='pending')
+        service = PaymentService()
+        for child in (paying, new):
+            self._charge(service, child, TestDataFactory.create_lesson())
+            payment = Payment.objects.get(child=child)
+            self.assertEqual(payment.status, 'failed')
+            self.assertEqual(payment.failure_code, '004')
+        paying.refresh_from_db()
+        new.refresh_from_db()
+        self.assertEqual(paying.status, 'active')
+        self.assertEqual(new.status, 'pending')

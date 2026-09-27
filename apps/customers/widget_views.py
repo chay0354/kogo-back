@@ -41,6 +41,43 @@ from apps.instructors.group_freshness import mark_child_groups_stale
 
 WIDGET_STALE_PROCESSING_SECONDS = 90
 
+# A registration charged once is not charged again for this long, whichever
+# payment row the second submission carries: a parent who pressed "pay" twice
+# made two rows, and each was charged (a registration fee three times on one
+# child, twice on another — 27.9.2026). Tranzila's own duplicate block is off.
+WIDGET_DUPLICATE_WINDOW = timedelta(hours=24)
+
+STALE_PROCESSING_MESSAGE = (
+    'התשלום נבדק מול חברת האשראי. אל תשלמו שוב — המשרד יבדוק ויחזור אליכם.'
+)
+DUPLICATE_PAYMENT_MESSAGE = 'ההרשמה הזו כבר שולמה או נמצאת בתשלום — אין צורך לשלם שוב.'
+
+
+def _twin_payment(payment):
+    """
+    Another row for the same child, lesson and kind of charge that already took,
+    or may have taken, the money: completed within WIDGET_DUPLICATE_WINDOW, or
+    still processing.
+    """
+    if not payment.lesson_id:
+        return None
+    return (
+        Payment.objects
+        .filter(
+            child_id=payment.child_id,
+            lesson_id=payment.lesson_id,
+            payment_type=payment.payment_type,
+            trial_lesson_date=payment.trial_lesson_date,
+        )
+        .exclude(pk=payment.pk)
+        .filter(
+            Q(status='processing')
+            | Q(status='completed', created_at__gte=timezone.now() - WIDGET_DUPLICATE_WINDOW)
+        )
+        .order_by('-created_at')
+        .first()
+    )
+
 
 def _widget_catalog_courses():
     """Courses parents can see and register for in the public widget."""
@@ -1316,14 +1353,39 @@ class WidgetChargeView(APIView):
                 )
                 if payment.status == 'completed':
                     return completed_payload(payment)
-                if payment.status == 'processing' and not is_stale_processing(payment):
-                    return processing_payload(payment)
-                if payment.status not in ('pending', 'failed', 'processing'):
+                if payment.status == 'processing':
+                    # Never charged again from here, however old. A row left
+                    # processing either has a request still out, or lost its
+                    # answer (a timeout) or its record (a failure after the
+                    # card was charged) — in both of the last two the money may
+                    # be taken. It used to be charged again after 90 seconds,
+                    # with nothing but Tranzila's duplicate block — which is
+                    # off — between the parent and a second charge.
+                    return processing_payload(
+                        payment, STALE_PROCESSING_MESSAGE if is_stale_processing(payment) else None,
+                    )
+                if payment.status not in ('pending', 'failed'):
                     return {
                         'success': False,
                         'payment_id': payment_id,
                         'error': 'התשלום כבר עובד. אנא רעננו את הדף או פנו למשרד.',
                         'payment_status': payment.status,
+                    }
+                # The child's row is the lock two submissions of the same
+                # registration meet on: the second waits here until the first
+                # has marked its row processing, then finds it below.
+                Child.objects.select_for_update().get(pk=payment.child_id)
+                twin = _twin_payment(payment)
+                if twin is not None:
+                    payment.status = 'cancelled'
+                    payment.failure_reason = f'כפילות של תשלום {twin.id} — לא חויב'
+                    payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
+                    return {
+                        'success': False,
+                        'duplicate': True,
+                        'already_completed': twin.status == 'completed',
+                        'payment_id': payment_id,
+                        'error': DUPLICATE_PAYMENT_MESSAGE,
                     }
                 payment.status = 'processing'
                 payment.save(update_fields=['status', 'updated_at'])
@@ -1618,21 +1680,23 @@ class WidgetChargeView(APIView):
 
 def _status_after_failed_charge(child, is_trial_payment):
     """
-    What a declined widget charge leaves the child as. It depends on the path.
+    What a declined widget charge leaves the child as.
 
-    A trial that did not go through was never booked. The parent reached the
-    card and it stopped there, which is בתהליך רישום — not a billing problem,
-    because there is nothing to bill: no enrolment was created. The widget
+    A charge that did not go through — a trial or a registration — booked
+    nothing: no enrolment was created and there is nothing to bill. The parent
+    reached the card and it stopped there, which is בתהליך רישום, and the widget
     tells them to try again.
 
-    A registration whose card was declined is a customer with a billing
-    problem, בעיה באשראי.
+    It is never בעיה באשראי. That status belongs to a standing order whose
+    monthly charge failed — a customer we bill. A declined registration used to
+    set it: a paying child who tried to add a second course was flagged as a
+    card problem for the course they already pay for, and a brand-new sign-up
+    stayed on the card-problem list with nothing to bill (27.9.2026: two such
+    children, one for 26 days).
 
-    A failed trial never pulls down a child who already holds something
-    better — a paying child adding a trial for another course, say.
+    So a failed charge never pulls down a child who already holds something
+    better — a paying child adding a course or a trial, say.
     """
-    if not is_trial_payment:
-        return STATUS_PAYMENT_PROBLEM
     if child.status in (STATUS_PENDING, STATUS_INACTIVE):
         return STATUS_PENDING
     return child.status

@@ -13,6 +13,7 @@ from apps.core.payment_service import JERUSALEM_TZ, subscription_tranzila_items
 from apps.core.tranzila_service import (
     TOKEN_CHARGED,
     TOKEN_DECLINED,
+    TOKEN_REQUEST_REJECTED,
     TOKEN_SETUP_PROBLEM,
     TranzilaService,
     token_charge_outcome,
@@ -25,6 +26,12 @@ logger = logging.getLogger(__name__)
 # Said to the office for a standing order the run did not charge because
 # something on our side is wrong — never to the parent, whose card is fine.
 SETUP_PROBLEM = 'תקלת הגדרות, לא נשלח חיוב ולא נשלחה הודעה להורה'
+
+# Said to the office for a standing order whose request Tranzila refused as
+# malformed (20004 and the like). Nothing reached the card and the card is not
+# at fault. Also the mark that keeps later runs the same day from sending the
+# same broken request again.
+REQUEST_REJECTED = 'הסליקה דחתה את הבקשה בגלל תקלה אצלנו, לא חויב ולא נשלחה הודעה להורה'
 
 
 def _next_month_first(from_day: date) -> date:
@@ -176,6 +183,14 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
         if not recurring.card_expire_month or not recurring.card_expire_year:
             setup_problem(recurring, 'חסר תוקף כרטיס')
             continue
+        # Tranzila already refused this standing order's request today: the same
+        # request would be refused again every hour. Tomorrow's run tries again.
+        if Payment.objects.filter(
+            child=child, lesson=lesson, payment_type='recurring_subscription', status='cancelled',
+            failure_reason__startswith=REQUEST_REJECTED, created_at__date=today,
+        ).exists():
+            summary['skipped'] += 1
+            continue
 
         if dry_run:
             summary['charged'] += 1
@@ -266,6 +281,21 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             # so what is left is the terminal's keys: every card on it would
             # meet the same refusal.
             broken_terminals[terminal] = reason
+            setup_problem(recurring, reason)
+            continue
+
+        if outcome == TOKEN_REQUEST_REJECTED:
+            # Tranzila refused the request itself — 1.9.2026 brought eight of
+            # these (20004), and each was treated as a decline: the standing
+            # order failed, the child was flagged, the parent was asked to
+            # update a card that was fine. Nothing reached the card. Unlike a
+            # setup problem it says nothing about the other cards on the
+            # terminal, so they are still charged.
+            reason = str(result.get('error') or result.get('message') or '')[:300]
+            TranzilaTransaction.objects.filter(pk=claim.pk, is_successful=False).delete()
+            payment.status = 'cancelled'
+            payment.failure_reason = f'{REQUEST_REJECTED}: {reason}'
+            payment.save(update_fields=['status', 'failure_reason', 'updated_at'])
             setup_problem(recurring, reason)
             continue
 

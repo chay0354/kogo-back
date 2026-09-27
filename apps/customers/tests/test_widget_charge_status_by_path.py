@@ -3,7 +3,12 @@ What a widget charge leaves the child as, by the path the parent took.
 
                       went through        declined
   trial               נרשם לניסיון         בתהליך רישום — never booked; try again
-  registration        פעיל                בעיה באשראי
+  registration        פעיל                בתהליך רישום — never booked; try again
+
+A declined charge never pulls a child down: בעיה באשראי belongs to a standing
+order whose monthly charge failed, not to a sign-up that did not go through
+(27.9.2026 — a paying child adding a course was flagged, and new sign-ups sat on
+the card-problem list with nothing to bill).
 
 And a declined second lesson in a bundle must say so, not raise.
 """
@@ -76,11 +81,32 @@ class WidgetChargeStatusByPathTest(TestCase):
         self.assertFalse(self.child.lesson_enrollments.exists())
 
     @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_DECLINED)
-    def test_a_declined_registration_is_a_card_problem(self, _charge):
+    def test_a_declined_registration_booked_nothing_and_is_not_a_card_problem(self, _charge):
         payment = _payment_for(self.child, self.lesson)
         res = self.charge(payment)
 
         self.assertFalse(res.json()['success'])
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'pending')
+        self.assertFalse(self.child.lesson_enrollments.exists())
+
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_DECLINED)
+    def test_a_declined_second_course_does_not_pull_down_a_paying_child(self, _charge):
+        """They pay for the course they have; the one they tried to add simply did not happen."""
+        self.child.status = 'active'
+        self.child.save(update_fields=['status'])
+        self.charge(_payment_for(self.child, self.lesson))
+
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'active')
+
+    @patch('apps.core.tranzila_service.TranzilaService.charge_with_card', return_value=TRANZILA_DECLINED)
+    def test_a_child_already_on_the_card_problem_list_stays_there(self, _charge):
+        """Their standing order is still owed; a failed new sign-up does not clear that."""
+        self.child.status = 'payment_problem'
+        self.child.save(update_fields=['status'])
+        self.charge(_payment_for(self.child, self.lesson))
+
         self.child.refresh_from_db()
         self.assertEqual(self.child.status, 'payment_problem')
 

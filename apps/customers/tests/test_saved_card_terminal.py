@@ -21,13 +21,14 @@ from django.test import TestCase, override_settings
 from apps.core.tranzila_service import (
     TOKEN_CHARGED,
     TOKEN_DECLINED,
+    TOKEN_REQUEST_REJECTED,
     TOKEN_SETUP_PROBLEM,
     TOKEN_UNKNOWN,
     TranzilaService,
     token_charge_outcome,
 )
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
-from apps.customers.recurring_billing import SETUP_PROBLEM, process_due_recurring_charges
+from apps.customers.recurring_billing import REQUEST_REJECTED, SETUP_PROBLEM, process_due_recurring_charges
 from apps.customers.tests.test_charge_survives_receipt_failure import _due_standing_order
 
 KEYS = dict(
@@ -61,6 +62,15 @@ DECLINED = {
     'transaction_result': {'processor_response_code': '004', 'transaction_id': '4412'},
 }
 KEY_REFUSED = {'error_code': 20002, 'message': 'Authorization failed'}
+# What eight monthly charges got back on 1.9.2026, with HTTP 400.
+SCHEMA_REJECTED = {'error_code': 20004, 'message': 'Json does not match validation schema'}
+# What a bank decline really looks like: the request was fine ("Success"), the
+# card company's code is the refusal.
+BANK_DECLINED = {
+    'error_code': 0,
+    'message': 'Success',
+    'transaction_result': {'processor_response_code': '036', 'transaction_id': '4413'},
+}
 
 
 class _Answer:
@@ -127,6 +137,8 @@ class OutcomeTests(TestCase):
             ({'success': False, 'error': 'Declined', 'response_code': '0',
               'message': 'Charge failed: Declined'}, TOKEN_DECLINED),
             ({'success': False, 'error': 'הכרטיס נדחה', 'response_code': '004'}, TOKEN_DECLINED),
+            ({'success': False, 'error': 'x', 'response_code': '20004'}, TOKEN_REQUEST_REJECTED),
+            ({'success': False, 'error': 'x', 'response_code': '20001', 'request_rejected': True}, TOKEN_REQUEST_REJECTED),
             ({'success': False, 'error': 'Request timed out', 'response_code': '999', 'uncertain': True}, TOKEN_UNKNOWN),
             ({'success': False, 'error': 'HTTP 502', 'response_code': '999', 'uncertain': False}, TOKEN_UNKNOWN),
             ({'success': False, 'error': 'Unexpected error', 'response_code': '999'}, TOKEN_UNKNOWN),
@@ -186,7 +198,11 @@ class MonthlyRunRoutingTests(TestCase):
         self.assertEqual(recurring.child.status, 'payment_problem')
         whatsapp.assert_called_once()
         self.assertEqual(summary['setup_problems'], 0)
-        self.assertEqual(Payment.objects.get(payment_type='recurring_subscription', status='failed').failure_reason, 'Declined')
+        # The card company's code is the reason — not Tranzila's outer message,
+        # which on a decline is just the request's own status.
+        reason = Payment.objects.get(payment_type='recurring_subscription', status='failed').failure_reason
+        self.assertIn('004', reason)
+        self.assertIn('חברת האשראי', reason)
 
 
 @override_settings(**KEYS)
@@ -335,3 +351,126 @@ class MorningBriefTests(TestCase):
         CronHeartbeat.objects.update(invoked_at=timezone.now() - timedelta(days=2))
         CronHeartbeat.objects.create(dry_run=True, summary={'setup_problems': 1, 'errors': []})
         self.assertEqual(self._check().severity, 'green')
+
+
+@override_settings(**KEYS)
+class DeclineReasonTests(TestCase):
+    """
+    What a refused charge is recorded as (27.9.2026).
+
+    Tranzila's reply to a bank decline still says error_code 0, "Success": the
+    request was fine. We stored that "Success" as the reason — 37 declines read
+    "Success", the card company's code was lost, and parents were shown
+    "Success" as the error.
+    """
+
+    def _charge(self, status_code, body):
+        with patch('apps.core.tranzila_service.requests.post', side_effect=_Gateway(status_code, body)):
+            return TranzilaService.for_saved_card('').charge_with_token(
+                token='card_token_1', amount=Decimal('250.00'), expire_month=12, expire_year=2030,
+            )
+
+    def test_a_bank_decline_keeps_the_card_companys_code_and_says_what_happened(self):
+        result = self._charge(200, BANK_DECLINED)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['response_code'], '036')
+        self.assertIn('תוקף הכרטיס פג', result['error'])
+        self.assertIn('לא בוצע חיוב', result['error'])
+        self.assertNotIn('Success', result['error'])
+        self.assertEqual(token_charge_outcome(result), TOKEN_DECLINED)
+
+    def test_an_unlisted_code_is_still_a_decline_with_its_code(self):
+        body = {**BANK_DECLINED, 'transaction_result': {'processor_response_code': '051'}}
+        result = self._charge(200, body)
+        self.assertIn('051', result['error'])
+        self.assertEqual(token_charge_outcome(result), TOKEN_DECLINED)
+
+    def test_a_request_tranzila_could_not_read_is_ours_not_the_cards(self):
+        result = self._charge(400, SCHEMA_REJECTED)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['response_code'], '20004')
+        self.assertIn('לא חויב', result['error'])
+        self.assertEqual(token_charge_outcome(result), TOKEN_REQUEST_REJECTED)
+
+    def test_our_key_refused_is_still_a_setup_problem(self):
+        self.assertEqual(token_charge_outcome(self._charge(401, KEY_REFUSED)), TOKEN_SETUP_PROBLEM)
+
+    def test_an_approval_is_unchanged(self):
+        self.assertEqual(token_charge_outcome(self._charge(200, APPROVED)), TOKEN_CHARGED)
+
+
+class _Sequence(_Gateway):
+    """Answers each charge with the next body in turn."""
+
+    def __init__(self, *answers):
+        super().__init__()
+        self.answers = list(answers)
+
+    def __call__(self, url, json=None, headers=None, timeout=None):
+        if url.endswith(CHARGE_URL):
+            status_code, body = self.answers.pop(0)
+            self.charges.append({'payload': json})
+            return _Answer(status_code, body)
+        return _Answer(404, None)
+
+
+@override_settings(**KEYS)
+class RejectedRequestTests(TestCase):
+    """
+    A monthly charge Tranzila refused as malformed is not a decline.
+
+    1.9.2026: eight standing orders came back 20004. Each was treated as a
+    declined card — the order failed, the child was flagged בעיה באשראי, the
+    parent was asked to update a card that was fine.
+    """
+
+    def test_nothing_is_marked_on_the_customer_and_no_message_goes_out(self):
+        recurring = _due_standing_order()
+        before = recurring.child.status
+        summary, whatsapp = _run(_Gateway(400, SCHEMA_REJECTED))
+
+        recurring.refresh_from_db()
+        recurring.child.refresh_from_db()
+        self.assertEqual(recurring.status, 'active')
+        self.assertEqual(recurring.child.status, before)
+        whatsapp.assert_not_called()
+        payment = Payment.objects.get(payment_type='recurring_subscription', status='cancelled')
+        self.assertTrue(payment.failure_reason.startswith(REQUEST_REJECTED))
+        self.assertIn('20004', payment.failure_reason)
+        self.assertFalse(
+            TranzilaTransaction.objects.filter(idempotency_key__startswith=f'recurring_{recurring.id}_').exists(),
+            'a claim left behind would stop every later month',
+        )
+        self.assertEqual(summary['setup_problems'], 1)
+
+    def test_it_does_not_stop_the_other_cards_on_the_terminal(self):
+        """Unlike a refused key, it is about this one request."""
+        first, second = _due_standing_order(), _due_standing_order()
+        gateway = _Sequence((400, SCHEMA_REJECTED), (200, APPROVED))
+        _run(gateway)
+
+        self.assertEqual(len(gateway.charges), 2)
+        statuses = sorted(Payment.objects.filter(payment_type='recurring_subscription', status__in=['cancelled', 'completed'])
+                          .exclude(description='מנוי').values_list('status', flat=True))
+        self.assertEqual(statuses, ['cancelled', 'completed'])
+
+    def test_the_same_request_is_not_sent_again_later_the_same_day(self):
+        _due_standing_order()
+        gateway = _Gateway(400, SCHEMA_REJECTED)
+        _run(gateway)
+        _run(gateway)
+        self.assertEqual(len(gateway.charges), 1)
+
+    def test_a_real_bank_decline_still_asks_for_a_new_card(self):
+        recurring = _due_standing_order()
+        _summary, whatsapp = _run(_Gateway(200, BANK_DECLINED))
+
+        recurring.refresh_from_db()
+        recurring.child.refresh_from_db()
+        self.assertEqual(recurring.status, 'failed')
+        self.assertEqual(recurring.child.status, 'payment_problem')
+        whatsapp.assert_called_once()
+        reason = Payment.objects.get(payment_type='recurring_subscription', status='failed').failure_reason
+        self.assertIn('036', reason)
+        self.assertNotIn('Success', reason)
+
