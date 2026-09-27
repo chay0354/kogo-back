@@ -81,6 +81,9 @@ def _report_row(checkout, **overrides):
 @patch('apps.customers.checkout_invoice.issue_widget_checkout_invoice')
 class CourseCheckoutTest(TestCase):
     def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()  # the start throttle counts across tests otherwise
         self.client = APIClient()
         self.course = TestDataFactory.create_course(price=Decimal('300.00'))
         self.lesson_a = TestDataFactory.create_lesson(course=self.course, day_of_week=0)
@@ -242,7 +245,7 @@ class CourseCheckoutTest(TestCase):
         checkout.refresh_from_db()
         self.assertEqual(checkout.status, 'declined')
 
-    def test_a_declined_charge_fails_the_payments_and_flags_the_child(self, invoice, whatsapp, *_):
+    def test_a_declined_charge_fails_the_payments_and_leaves_a_new_child_in_registration(self, invoice, whatsapp, *_):
         ids = self._register_cart()
         checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
         declined = {'success': False, 'error': 'Declined', 'response_code': '0', 'message': 'Charge failed: Declined'}
@@ -251,7 +254,9 @@ class CourseCheckoutTest(TestCase):
         self.assertEqual({p.status for p in Payment.objects.filter(id__in=ids)}, {'failed'})
         child = Payment.objects.get(id=ids[0]).child
         child.refresh_from_db()
-        self.assertEqual(child.status, 'payment_problem')
+        # A first charge that failed registered nothing: a new child stays in
+        # registration (_status_after_failed_charge, #151), as on the card form.
+        self.assertEqual(child.status, 'pending')
         self.assertFalse(RecurringPayment.objects.filter(initial_payment_id__in=ids).exists())
         self.assertFalse(TranzilaTransaction.objects.filter(idempotency_key=f'course_checkout_{checkout.id}').exists())
         invoice.assert_not_called()
@@ -271,6 +276,26 @@ class CourseCheckoutTest(TestCase):
 
         from apps.core.daily_brief import check_course_checkouts
         self.assertEqual(check_course_checkouts(timezone.localdate()).severity, 'red')
+
+    def test_a_request_tranzila_rejects_is_not_charged_and_goes_to_the_office(self, *_):
+        from apps.core.models import OfficeAlert
+
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        rejected = {'success': False, 'error': 'Json does not match validation schema', 'response_code': '20004',
+                    'message': 'Charge failed: Json does not match validation schema'}
+        with self.captureOnCommitCallbacks(execute=True):
+            response, sent = self._paid(checkout, charge=rejected)
+        self.assertEqual(response.json()['status'], 'review')
+        checkout.refresh_from_db()
+        self.assertEqual(checkout.review_reason, 'request_rejected')
+        self.assertEqual({p.status for p in Payment.objects.filter(id__in=ids)}, {'pending'})
+        child = Payment.objects.get(id=ids[0]).child
+        child.refresh_from_db()
+        self.assertNotEqual(child.status, 'payment_problem')
+        self.assertFalse(TranzilaTransaction.objects.filter(idempotency_key=f'course_checkout_{checkout.id}').exists())
+        alert = OfficeAlert.objects.get(kind='course_checkout_rejected')
+        self.assertIn('20004', alert.why)
 
     def test_a_seat_taken_meanwhile_stops_the_charge(self, *_):
         ids = self._register_cart()

@@ -39,6 +39,7 @@ from django.utils import timezone
 from apps.core.tranzila_service import (
     TOKEN_CHARGED,
     TOKEN_DECLINED,
+    TOKEN_REQUEST_REJECTED,
     TOKEN_SETUP_PROBLEM,
     TranzilaService,
     invoice_id_from_pdesc,
@@ -577,25 +578,33 @@ def settle_checkout(checkout_id) -> None:
     if outcome == TOKEN_DECLINED:
         _declined(checkout, claim, payments, result)
         return
-    if outcome == TOKEN_SETUP_PROBLEM:
+    if outcome in (TOKEN_SETUP_PROBLEM, TOKEN_REQUEST_REJECTED):
+        # Nothing reached the card: our keys (setup) or a request Tranzila
+        # refused as malformed (20004 and the like). Not a decline and not
+        # uncertain — the office looks, the payments wait.
+        rejected = outcome == TOKEN_REQUEST_REJECTED
         TranzilaTransaction.objects.filter(pk=claim.pk, is_successful=False).delete()
         Payment.objects.filter(id__in=[p.id for p in payments], status='processing').update(
             status='pending', updated_at=timezone.now(),
         )
         CourseCheckout.objects.filter(id=checkout.id).update(
             status=CourseCheckout.STATUS_REVIEW,
-            review_reason='setup',
+            review_reason='request_rejected' if rejected else 'setup',
             failure_reason=str(result.get('error') or '')[:500],
             updated_at=timezone.now(),
         )
-        logger.error('Course checkout %s not charged — setup problem: %s', checkout.id, result.get('error'))
+        logger.error('Course checkout %s not charged — %s: %s', checkout.id, outcome, result.get('error'))
         _alert(
-            kind='course_checkout_setup_charge', key=f'course_checkout_review:{checkout.id}',
-            title='תקלת הגדרות — הרשמה לא חויבה',
+            kind='course_checkout_rejected' if rejected else 'course_checkout_setup_charge',
+            key=f'course_checkout_review:{checkout.id}',
+            title='טרנזילה דחתה את בקשת החיוב שלנו — הרשמה לא חויבה' if rejected else 'תקלת הגדרות — הרשמה לא חויבה',
             step=f'החיוב מהכרטיס השמור (מסוף {checkout.token_terminal})',
-            what=f'הכרטיס של ההורה אושר, אבל החיוב של ₪{checkout.amount} לא נשלח בגלל תקלה אצלנו. לא ירד כסף.',
-            why=str(result.get('error') or '')[:300],
-            action='לתקן את מפתחות המסוף ב-Vercel ולחזור להורה להשלמת ההרשמה.',
+            what=(f'הכרטיס של ההורה אושר, אבל החיוב של ₪{checkout.amount} לא בוצע: '
+                  + ('טרנזילה דחתה את הבקשה עצמה כפגומה (לא את הכרטיס).' if rejected else 'תקלה בהגדרות אצלנו.')
+                  + ' לא ירד כסף. ההורה רואה "התשלום בבדיקה במשרד".'),
+            why=f"{result.get('response_code') or ''} {result.get('error') or ''}".strip()[:300],
+            action=('להעביר לבדיקה טכנית (הבקשה לטרנזילה) ולחזור להורה להשלמת ההרשמה.' if rejected
+                    else 'לתקן את מפתחות המסוף ב-Vercel ולחזור להורה להשלמת ההרשמה.'),
             checkout=checkout,
         )
         return

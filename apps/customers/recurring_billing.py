@@ -410,7 +410,7 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             reasons = sorted({str(e).split('—', 1)[-1].strip() for e in summary['errors'] if SETUP_PROBLEM in str(e)})
             raise_office_alert(
                 kind='recurring_setup', dedup_key=f'recurring_setup:{today.isoformat()}',
-                title='החיוב החודשי נעצר בגלל תקלת הגדרות',
+                title='חלק מהחיובים החודשיים לא נשלחו — תקלה אצלנו, לא בכרטיסים',
                 where='חיוב חודשי אוטומטי (הוראות קבע)',
                 what=(f"{summary['setup_problems']} הוראות קבע לא חויבו בריצה של היום. "
                       'לא נשלחה הודעה להורים ולא שונה אף סטטוס; החיוב ינסה שוב בכל ריצה.'),
