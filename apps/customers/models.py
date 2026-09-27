@@ -1064,3 +1064,79 @@ class CardReplacement(models.Model):
 
     def __str__(self):
         return f"החלפת כרטיס {self.family.name} - {self.created_at:%d/%m/%Y}"
+
+
+class CourseCheckout(models.Model):
+    """
+    One course signup paid on Tranzila's hosted page (COURSE_HOSTED_PAGE_ENABLED).
+
+    The page only checks the card and saves it (tranmode NK). The server then
+    charges the whole cart once from that token on COURSE_TOKEN_TERMINAL, and
+    opens the standing orders on the same card. The payments are the pending
+    rows /widget/register/ wrote, with the amounts frozen there.
+
+    Statuses:
+      page_open  — the page was handed out; nothing has happened yet.
+      verified   — Tranzila's report confirmed the card check and gave the token.
+      charging   — the charge is being sent (the claim row course_checkout_<id> holds it).
+      completed  — charged and every payment activated.
+      declined   — the card check or the charge was refused; nothing was taken.
+      uncertain  — the charge got no answer; the card may be charged. Office checks.
+      review     — something a person must look at (charged on the page itself,
+                   a setup problem, a report that disagrees). Nothing is charged by us.
+      replaced   — the parent opened a new page; this one never charges.
+      failed     — refused before any money (no room left, amounts changed).
+    """
+    STATUS_PAGE_OPEN = 'page_open'
+    STATUS_VERIFIED = 'verified'
+    STATUS_CHARGING = 'charging'
+    STATUS_COMPLETED = 'completed'
+    STATUS_DECLINED = 'declined'
+    STATUS_UNCERTAIN = 'uncertain'
+    STATUS_REVIEW = 'review'
+    STATUS_REPLACED = 'replaced'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PAGE_OPEN, 'עמוד תשלום פתוח'),
+        (STATUS_VERIFIED, 'הכרטיס נבדק'),
+        (STATUS_CHARGING, 'בחיוב'),
+        (STATUS_COMPLETED, 'הושלם'),
+        (STATUS_DECLINED, 'נדחה'),
+        (STATUS_UNCERTAIN, 'לא ודאי'),
+        (STATUS_REVIEW, 'לבדיקה'),
+        (STATUS_REPLACED, 'הוחלף'),
+        (STATUS_FAILED, 'נכשל'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    family = models.ForeignKey(Family, on_delete=models.SET_NULL, null=True, blank=True, related_name='course_checkouts')
+    payments = models.ManyToManyField(Payment, related_name='course_checkouts')
+    amount = models.DecimalField(max_digits=10, decimal_places=2, verbose_name='סכום העגלה')
+    page_sum = models.DecimalField(max_digits=10, decimal_places=2, verbose_name='סכום בדיקת הכרטיס')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PAGE_OPEN, db_index=True)
+
+    page_terminal = models.CharField(max_length=40, verbose_name='מסוף העמוד')
+    token_terminal = models.CharField(max_length=40, verbose_name='מסוף החיוב')
+    page_index = models.CharField(max_length=40, blank=True, db_index=True, verbose_name='מספר עסקת הבדיקה')
+    page_confirmation_code = models.CharField(max_length=40, blank=True)
+    page_tranmode = models.CharField(max_length=10, blank=True)
+    card_token = models.CharField(max_length=100, blank=True)
+    card_expire_month = models.IntegerField(null=True, blank=True)
+    card_expire_year = models.IntegerField(null=True, blank=True)
+    card_last4 = models.CharField(max_length=4, blank=True)
+
+    charge_transaction = models.ForeignKey(
+        'TranzilaTransaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='course_checkouts',
+    )
+    failure_reason = models.CharField(max_length=500, blank=True)
+    review_reason = models.CharField(max_length=200, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'course_checkouts'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'CourseCheckout {self.id} ({self.status}, ₪{self.amount})'

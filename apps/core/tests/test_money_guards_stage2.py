@@ -330,3 +330,38 @@ class UnresolvedRefundBriefTests(TestCase):
 
         self._claim(_paid_course_payment(), minutes_ago=1)
         self.assertEqual(check_unresolved_refunds(timezone.localdate()).severity, 'green')
+
+
+@override_settings(**KEYS)
+class OfficeHearsTest(TestCase):
+    """The till and a refund left without an answer reach the office at once."""
+
+    @patch('apps.core.payment_service._sign_store_sale')
+    def test_a_till_charge_without_an_answer(self, _sign):
+        from apps.core.models import OfficeAlert
+
+        recurring = _due_standing_order()
+        product = StoreProduct.objects.create(
+            name='חולצה', category='clothing', size='', cost_price=Decimal('20'), sale_price=Decimal('50'),
+            stock_quantity=10,
+        )
+        gateway, post = _gateway(TIMEOUT)
+        with post, self.captureOnCommitCallbacks(execute=True):
+            PaymentService().initiate_store_purchase(
+                product_items=[{'product_id': str(product.id), 'quantity': 1}], child_id=str(recurring.child_id),
+            )
+        alert = OfficeAlert.objects.get(kind='till_uncertain')
+        self.assertIn('קופה', alert.where)
+        self.assertIn(recurring.child.full_name, alert.customer)
+
+    @patch('apps.core.payment_service.PaymentService._issue_payment_credit_note')
+    def test_a_refund_without_an_answer(self, _note):
+        from apps.core.models import OfficeAlert
+
+        payment = _paid_course_payment()
+        gateway, post = _gateway(NO_BODY)
+        with post, self.captureOnCommitCallbacks(execute=True):
+            PaymentService().refund_payment(str(payment.id), reason='ביטול')
+        alert = OfficeAlert.objects.get(kind='refund_uncertain')
+        self.assertIn('4411', alert.what)
+        self.assertIn(payment.child.full_name, alert.customer)

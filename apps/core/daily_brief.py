@@ -502,6 +502,90 @@ def check_unresolved_refunds(today: date) -> BriefItem:
     return item
 
 
+def check_course_checkouts(today: date) -> BriefItem:
+    """
+    Course signups paid on Tranzila's page that stopped short of done.
+
+    'uncertain' — the charge got no answer: the card may be charged. The claim
+    blocks another charge until someone checks the terminal. 'review' — money
+    moved on the page itself, a setup problem, a report that disagreed, or a
+    charge whose record failed. A checkout still 'charging' after ten minutes
+    was cut off mid-way. None of them charges again by itself.
+    """
+    from apps.customers.models import CourseCheckout
+
+    stuck = list(
+        CourseCheckout.objects
+        .filter(created_at__gte=timezone.now() - timedelta(days=30))
+        .filter(
+            Q(status__in=[CourseCheckout.STATUS_UNCERTAIN, CourseCheckout.STATUS_REVIEW])
+            | Q(status=CourseCheckout.STATUS_CHARGING, updated_at__lt=timezone.now() - timedelta(minutes=10))
+        )
+        .select_related('family')
+        .order_by('-created_at')
+    )
+    item = BriefItem(
+        key='course_checkouts',
+        title='הרשמות לחוגים שנתקעו בתשלום',
+        severity=RED if stuck else GREEN,
+        count=len(stuck),
+        action='לבדוק בטרנזילה אם הכרטיס חויב, ולהשלים או לבטל את ההרשמה. המערכת לא תחייב שוב לבד.',
+    )
+    if not stuck:
+        item.summary = 'כל ההרשמות דרך עמוד טרנזילה הושלמו או נסגרו.'
+        return item
+    item.summary = f'{len(stuck)} הרשמות לחוגים נעצרו באמצע התשלום.'
+    labels = dict(CourseCheckout.STATUS_CHOICES)
+    for checkout in stuck[:MAX_ROWS]:
+        reason = checkout.review_reason or checkout.failure_reason
+        item.rows.append(_row(
+            checkout.family.name if checkout.family else str(checkout.id),
+            f'{_money(checkout.amount)} · {labels.get(checkout.status, checkout.status)}'
+            + (f' · {reason[:80]}' if reason else '')
+            + f' · {timezone.localtime(checkout.created_at):%d/%m %H:%M}',
+            '/customers',
+        ))
+    return item
+
+
+def check_office_alerts(today: date) -> BriefItem:
+    """
+    The last day's alerts to the office (apps/core/office_alerts.py), and
+    whether each one reached the office's WhatsApp. An alert that could not be
+    sent — the template not set up yet, or ManyChat refused — is only here.
+    """
+    from django.conf import settings
+
+    from apps.core.models import OfficeAlert
+
+    crm_base = (getattr(settings, 'CRM_FRONTEND_URL', '') or '').rstrip('/')
+    alerts = list(OfficeAlert.objects.filter(created_at__gte=timezone.now() - timedelta(days=1)).order_by('-created_at'))
+    unsent = [a for a in alerts if a.status != OfficeAlert.STATUS_SENT]
+    item = BriefItem(
+        key='office_alerts',
+        title='התראות למשרד מהיממה האחרונה',
+        severity=RED if unsent else (YELLOW if alerts else GREEN),
+        count=len(alerts),
+        action='לטפל בכל התראה לפי מה שכתוב בה. התראה שלא נשלחה בווטסאפ מופיעה רק כאן.',
+    )
+    if not alerts:
+        item.summary = 'לא הייתה תקלה בתשלום או בהרשמה ביממה האחרונה.'
+        return item
+    item.summary = f'{len(alerts)} התראות ביממה האחרונה' + (f', {len(unsent)} מהן לא נשלחו בווטסאפ.' if unsent else '.')
+    for alert in alerts[:MAX_ROWS]:
+        item.rows.append(_row(
+            alert.title,
+            ' · '.join(part for part in (
+                alert.where, alert.customer, alert.action,
+                f'{timezone.localtime(alert.created_at):%d/%m %H:%M}',
+                '' if alert.status == OfficeAlert.STATUS_SENT else alert.get_status_display(),
+            ) if part)[:400],
+            # The brief's links are the CRM's own paths.
+            alert.link[len(crm_base):] if crm_base and alert.link.startswith(crm_base) else alert.link,
+        ))
+    return item
+
+
 def check_failed_payments(today: date) -> BriefItem:
     """Charges the gateway refused in the last week."""
     from apps.customers.models import Payment
@@ -1437,9 +1521,11 @@ CHECKS = (
     check_refresh_dashboard,
     check_overdue_recurring,
     check_unresolved_charges,
+    check_office_alerts,
     check_charges_in_processing,
     check_saved_card_setup,
     check_unresolved_refunds,
+    check_course_checkouts,
     check_recurring_without_lesson,
     check_failed_payments,
     check_registration_only_payments,
@@ -1485,7 +1571,9 @@ def check_catalogue() -> list[dict]:
         'monthly_finalization': 'סגירת החודש הקודם',
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
+        'office_alerts': 'התראות למשרד מהיממה האחרונה',
         'charges_in_processing': 'חיובים שנתקעו בבדיקה',
+        'course_checkouts': 'הרשמות לחוגים שנתקעו בתשלום',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
         'unresolved_refunds': 'זיכויים שלא התקבלה עליהם תשובה',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',

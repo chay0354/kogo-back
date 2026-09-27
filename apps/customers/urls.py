@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from . import views
 from .card_update_views import CardUpdateChargeView, CardUpdatePreviewView
 from .child_documents import InvoicePdfView
+from .course_checkout_views import CourseCheckoutNotifyView, CourseCheckoutStartView, CourseCheckoutStatusView
 from .card_link_views import (
     CardLinkActionView,
     CardLinkChargeView,
@@ -50,6 +51,9 @@ urlpatterns = [
     path('widget/trial-register/', WidgetTrialRegisterView.as_view(), name='widget-trial-register'),
     path('widget/charge/', WidgetChargeView.as_view(), name='widget-charge'),
     path('widget/payment-status/', WidgetPaymentStatusView.as_view(), name='widget-payment-status'),
+    path('widget/checkout/start/', CourseCheckoutStartView.as_view(), name='widget-checkout-start'),
+    path('widget/checkout/notify/', CourseCheckoutNotifyView.as_view(), name='widget-checkout-notify'),
+    path('widget/checkout/<str:checkout_id>/', CourseCheckoutStatusView.as_view(), name='widget-checkout-status'),
     path('widget/courses/', WidgetCoursesView.as_view(), name='widget-courses'),
     path('widget/course-types/', WidgetCourseTypesView.as_view(), name='widget-course-types'),
     path('widget/cities/', WidgetCitiesView.as_view(), name='widget-cities'),

@@ -857,6 +857,25 @@ def _settle_refund_claim(claim, result: dict):
     return claim
 
 
+def _alert_refund_uncertain(*, key, what, why, family, child, amount, terminal) -> None:
+    """Tell the office at once: a refund with no answer blocks every retry until someone checks."""
+    try:
+        from apps.core.office_alerts import crm_child_link, describe_family, raise_office_alert
+
+        raise_office_alert(
+            kind='refund_uncertain', dedup_key=key,
+            title='לא ידוע אם הזיכוי בוצע',
+            where='זיכוי תשלום מהמערכת',
+            what=what + ' המערכת לא תאפשר זיכוי נוסף עד בדיקה.',
+            why=str(why)[:300],
+            customer=describe_family(family, children=[child] if child else [], amount=amount),
+            action=f'לבדוק בטרנזילה (מסוף {terminal}) אם הזיכוי בוצע, ולסגור את שורת הזיכוי.',
+            link=crm_child_link(child.id if child else None),
+        )
+    except Exception:
+        logger.exception('Refund alert failed (non-fatal)')
+
+
 def _drop_refund_claim(claim) -> None:
     """Tranzila answered no: nothing was refunded, so the next attempt may run."""
     from apps.customers.models import TranzilaTransaction
@@ -2214,6 +2233,26 @@ class PaymentService:
             invoice.notes = f"Payment uncertain — check Tranzila before retrying: {result.get('error')}"
             invoice.save(update_fields=['tranzila_confirmation_code', 'tranzila_terminal', 'notes'])
             logger.error('Till token charge uncertain for invoice %s: %s', invoice.invoice_number, result.get('error'))
+            try:
+                from apps.core.office_alerts import crm_child_link, describe_family, raise_office_alert
+
+                raise_office_alert(
+                    kind='till_uncertain', dedup_key=f'till_uncertain:{invoice.id}',
+                    title='לא ידוע אם הלקוח חויב בקופה',
+                    where='קופה — קנייה בכרטיס השמור של הילד',
+                    what=(f'נשלח חיוב של ₪{invoice.total_amount} (חשבונית {invoice.invoice_number}) ולא התקבלה תשובה. '
+                          'החשבונית ממתינה, וקנייה נוספת בכרטיס השמור של הילד חסומה עד בדיקה.'),
+                    why=str(result.get('error') or 'אין תשובה')[:300],
+                    customer=describe_family(
+                        invoice.child.family if invoice.child_id else None,
+                        children=[invoice.child] if invoice.child_id else [],
+                        amount=invoice.total_amount,
+                    ),
+                    action=f'לבדוק בטרנזילה (מסוף {client.token_terminal}) אם ירד הסכום, ולעדכן את החשבונית.',
+                    link=crm_child_link(invoice.child_id),
+                )
+            except Exception:
+                logger.exception('Till uncertain alert failed (non-fatal)')
             return {'success': False, 'uncertain': True, 'error': TILL_CHARGE_UNCERTAIN_MESSAGE}
 
         if result['success']:
@@ -2841,6 +2880,12 @@ class PaymentService:
         if claim is None:
             return {'success': False, 'error': REFUND_ALREADY_CLAIMED}
 
+        # A charge that paid for several payments (a course checkout's cart)
+        # is refunded one payment at a time, as a credit: a cancel would void
+        # every child's part of it.
+        shared = Payment.objects.filter(
+            tranzila_transaction_id=payment.tranzila_transaction_id,
+        ).exclude(id=payment.id).exists()
         result = refund_service.refund_transaction(
             transaction_id=transaction_id,
             amount=refund_amount,
@@ -2849,12 +2894,20 @@ class PaymentService:
             card_expire_month=card_expire_month,
             card_expire_year=card_expire_year,
             token=token,
-            prefer_cancel=same_day,
+            prefer_cancel=same_day and not shared,
             terminal_name=refund_terminal,
+            allow_cancel=not shared,
         )
 
         if result.get('uncertain'):
             logger.error("Refund of payment %s got no answer — claim kept: %s", payment_id, result.get('error'))
+            _alert_refund_uncertain(
+                key=f'refund_uncertain:payment:{payment.id}',
+                what=f'נשלח זיכוי של ₪{refund_amount} לתשלום מקורי {transaction_id} ולא התקבלה תשובה.',
+                why=str(result.get('error') or 'אין תשובה'),
+                family=payment.family, child=payment.child, amount=refund_amount,
+                terminal=refund_terminal or refund_service.token_terminal,
+            )
             return {'success': False, 'uncertain': True, 'error': REFUND_UNCERTAIN}
 
         if result['success']:
@@ -3082,6 +3135,15 @@ class PaymentService:
             logger.error("Refund of invoice %s got no answer — claim kept: %s", invoice_id, result.get('error'))
             invoice.notes = f"זיכוי ללא תשובה מטרנזילה — לבדוק בטרנזילה: {result.get('error') or ''} - {reason}"[:1000]
             invoice.save(update_fields=['notes'])
+            _alert_refund_uncertain(
+                key=f'refund_uncertain:store:{invoice.id}',
+                what=f'נשלח זיכוי של ₪{refund_amount} לחשבונית {invoice.invoice_number} ולא התקבלה תשובה.',
+                why=str(result.get('error') or 'אין תשובה'),
+                family=invoice.child.family if invoice.child_id else None,
+                child=invoice.child if invoice.child_id else None,
+                amount=refund_amount,
+                terminal=terminal or refund_service.token_terminal,
+            )
             return {'success': False, 'uncertain': True, 'error': REFUND_UNCERTAIN}
 
         if result['success']:

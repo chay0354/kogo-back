@@ -1177,8 +1177,13 @@ class TranzilaService:
         items: list = None,
         prefer_cancel: bool = False,
         terminal_name: Optional[str] = None,
+        allow_cancel: bool = True,
     ) -> Dict:
         """Refund via REST. Same-day charges must be cancelled, not credited.
+
+        `allow_cancel=False` credits only, never cancels: a charge that paid for
+        several things (a course checkout's cart) is refunded one part at a
+        time, and a cancel would void all of it.
 
         Refunds must hit the same terminal that took the original charge.
         Widget registration fees sit on the iframe terminal; monthly token
@@ -1224,7 +1229,7 @@ class TranzilaService:
 
         refund_terminal = (terminal_name or '').strip() or self.token_terminal
 
-        if prefer_cancel:
+        if prefer_cancel and allow_cancel:
             cancel_result = self._refund_via_txn_type(
                 txn_type='cancel',
                 reference_txn_id=reference_txn_id,
@@ -1257,7 +1262,7 @@ class TranzilaService:
         if credit_result.get('success') or credit_result.get('uncertain'):
             return credit_result
 
-        if not prefer_cancel and _credit_blocked_until_cancel(credit_result.get('error')):
+        if allow_cancel and not prefer_cancel and _credit_blocked_until_cancel(credit_result.get('error')):
             return self._refund_via_txn_type(
                 txn_type='cancel',
                 reference_txn_id=reference_txn_id,
