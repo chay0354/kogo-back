@@ -401,6 +401,25 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
             logger.exception('Receipt not issued for recurring charge %s (the charge is recorded)', recurring.id)
             summary['errors'].append(f'{recurring.id}: receipt not issued — {exc}')
 
+    if summary.get('setup_problems') and not dry_run:
+        # The office hears the same day, not only in tomorrow's brief. One
+        # alert a day: each hourly run meets the same standing orders again.
+        try:
+            from apps.core.office_alerts import raise_office_alert
+
+            reasons = sorted({str(e).split('—', 1)[-1].strip() for e in summary['errors'] if SETUP_PROBLEM in str(e)})
+            raise_office_alert(
+                kind='recurring_setup', dedup_key=f'recurring_setup:{today.isoformat()}',
+                title='החיוב החודשי נעצר בגלל תקלת הגדרות',
+                where='חיוב חודשי אוטומטי (הוראות קבע)',
+                what=(f"{summary['setup_problems']} הוראות קבע לא חויבו בריצה של היום. "
+                      'לא נשלחה הודעה להורים ולא שונה אף סטטוס; החיוב ינסה שוב בכל ריצה.'),
+                why='; '.join(reasons)[:300],
+                action='לתקן את מפתחות המסוף ב-Vercel. הפירוט המלא בבריף הבוקר תחת "חיובים שלא נשלחו בגלל הגדרות".',
+            )
+        except Exception:
+            logger.exception('Recurring setup alert failed (non-fatal)')
+
     try:
         from apps.documents.check_plans import issue_due_check_invoices
         from apps.documents.models import CheckItem

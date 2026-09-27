@@ -87,6 +87,34 @@ class CheckoutError(ValueError):
         self.status_code = status_code
 
 
+WHERE = 'הרשמה לחוג באתר'
+
+
+def _alert_payments(checkout: Optional[CourseCheckout] = None, payment_ids=None):
+    if checkout is not None:
+        qs = checkout.payments.all()
+    else:
+        qs = Payment.objects.filter(id__in=[pid for pid in (_uuid_or_none(p) for p in (payment_ids or [])) if pid])
+    return list(qs.select_related('family', 'child', 'lesson__course', 'bundle').prefetch_related('bundle__lessons__course'))
+
+
+def _alert(*, kind: str, key: str, title: str, step: str, what: str, why: str = '', action: str = '',
+           checkout: Optional[CourseCheckout] = None, payment_ids=None) -> None:
+    """Tell the office now, with the family and what they were buying (apps/core/office_alerts.py)."""
+    from apps.core.office_alerts import describe_payments, raise_office_alert
+
+    try:
+        customer, link = describe_payments(_alert_payments(checkout, payment_ids))
+    except Exception:
+        logger.exception('Course checkout alert %s: customer not described', key)
+        customer, link = '', ''
+    raise_office_alert(
+        kind=kind, dedup_key=key, title=title, where=f'{WHERE} — {step}', what=what, why=why,
+        customer=customer, action=action, link=link,
+        details={'checkout_id': str(checkout.id) if checkout else '', 'payment_ids': [str(p) for p in (payment_ids or [])]},
+    )
+
+
 def hosted_checkout_enabled(payment_ids=None) -> bool:
     """
     Whether this cart pays on the hosted page: for everyone once
@@ -142,16 +170,36 @@ def start_checkout(payment_ids: list[str]) -> tuple[CourseCheckout, str]:
     if not ids:
         raise CheckoutError('לא נמצאו תשלומים להשלמה')
     api_base, front_base = _public_bases()
-    if not api_base or not front_base:
-        logger.error('Course checkout refused: CRM_API_BASE_URL / CRM_FRONTEND_URL missing')
-        raise CheckoutError('הסליקה אינה זמינה כרגע. אנא פנו למשרד.', status_code=503)
     token_terminal = course_token_terminal()
-    if TranzilaService.for_terminal(token_terminal) is None:
-        logger.error('Course checkout refused: token terminal %r has no keys', token_terminal)
+    setup_problem = ''
+    if not api_base or not front_base:
+        setup_problem = 'חסרה בשרת הכתובת של המערכת (CRM_API_BASE_URL / CRM_FRONTEND_URL)'
+    elif TranzilaService.for_terminal(token_terminal) is None:
+        setup_problem = f'למסוף החיוב {token_terminal or "(לא מוגדר)"} אין מפתחות בשרת'
+    if setup_problem:
+        logger.error('Course checkout refused: %s', setup_problem)
+        _alert(
+            kind='course_checkout_setup', key=f'course_checkout_setup:{timezone.localdate().isoformat()}',
+            title='עמוד התשלום לחוגים לא נפתח — תקלת הגדרות',
+            step='פתיחת עמוד התשלום',
+            what='הורים שמגיעים לתשלום לא מקבלים את עמוד טרנזילה, ומקבלים במקומו את טופס הכרטיס הישן.',
+            why=setup_problem,
+            action='לתקן את ההגדרה ב-Vercel. עד אז ההרשמות ממשיכות בטופס הכרטיס הישן.',
+            payment_ids=ids,
+        )
         raise CheckoutError('הסליקה אינה זמינה כרגע. אנא פנו למשרד.', status_code=503)
 
     capacity_error = precheck_widget_capacity(ids, single_lessons=True)
     if capacity_error:
+        _alert(
+            kind='course_checkout_full', key=f"course_checkout_full:{','.join(sorted(ids))}",
+            title='הורה לא הצליח לשלם — השיעור מלא',
+            step='פתיחת עמוד התשלום',
+            what='ההורה מילא את הפרטים והגיע לתשלום, אבל השיעור התמלא בינתיים. לא נפתח עמוד תשלום ולא ירד כסף.',
+            why=capacity_error,
+            action='לחזור להורה ולהציע שיעור אחר או רשימת המתנה.',
+            payment_ids=ids,
+        )
         raise CheckoutError(capacity_error)
 
     with transaction.atomic():
@@ -207,6 +255,15 @@ def start_checkout(payment_ids: list[str]) -> tuple[CourseCheckout, str]:
         logger.error('Course checkout %s: the page could not be opened: %s', checkout.id, exc)
         CourseCheckout.objects.filter(id=checkout.id).update(
             status=CourseCheckout.STATUS_FAILED, failure_reason='page_failed', updated_at=timezone.now(),
+        )
+        _alert(
+            kind='course_checkout_page_failed', key=f'course_checkout_page_failed:{timezone.localdate().isoformat()}',
+            title='עמוד התשלום של טרנזילה לא נפתח',
+            step='פתיחת עמוד התשלום (handshake מול טרנזילה)',
+            what='ההורה הגיע לתשלום ועמוד טרנזילה לא נפתח. ההורה קיבל במקומו את טופס הכרטיס הישן.',
+            why=str(exc)[:300],
+            action=f'לבדוק את מסוף {checkout.page_terminal} ואת המפתחות שלו. אם זה חוזר — לפנות לטרנזילה.',
+            checkout=checkout,
         )
         raise CheckoutError('הסליקה אינה זמינה כרגע. נסו שוב בעוד כמה דקות.', status_code=503)
     logger.info('Course checkout %s opened: %s payments, ₪%s', checkout.id, len(payments), checkout.amount)
@@ -304,9 +361,28 @@ def _apply_verdict(checkout: CourseCheckout, verdict: str, row: Optional[dict]) 
         checkout.page_tranmode = str(row.get('tranmode') or '')[:10]
         checkout.status = CourseCheckout.STATUS_REVIEW
         checkout.review_reason = 'charged_at_page'
+        _alert(
+            kind='course_checkout_charged_at_page', key=f'course_checkout_review:{checkout.id}',
+            title='הורה חויב בעמוד עצמו — ההרשמה לבדיקה',
+            step='עמוד טרנזילה (בדיקת הכרטיס)',
+            what=(f'בעמוד טרנזילה בוצע חיוב (tranmode {checkout.page_tranmode}) במקום בדיקת כרטיס בלבד. '
+                  'לא חייבנו שוב, וההרשמה עדיין לא הושלמה. ההורה רואה "התשלום בבדיקה במשרד".'),
+            why='כנראה שונה סוג העסקה בכתובת העמוד.',
+            action=f'לבדוק את עסקה {checkout.page_index} במסוף {checkout.page_terminal}, ולהשלים את ההרשמה ידנית או לזכות.',
+            checkout=checkout,
+        )
     else:
         checkout.status = CourseCheckout.STATUS_REVIEW
         checkout.review_reason = 'unverified_page'
+        _alert(
+            kind='course_checkout_unverified', key=f'course_checkout_review:{checkout.id}',
+            title='אישור כרטיס שלא תאם לטרנזילה — ההרשמה לבדיקה',
+            step='עמוד טרנזילה (בדיקת הכרטיס)',
+            what='הגיעה הודעה שהכרטיס אושר, אבל העסקה לא נמצאה או לא תאמה בדוח של טרנזילה. לא בוצע חיוב.',
+            why='הסכום, מספר האישור או סוג העסקה בדוח שונים ממה שנשלח, או שהמספר כבר שייך להרשמה אחרת.',
+            action=f'לבדוק את עסקה {checkout.page_index or "(ללא מספר)"} במסוף {checkout.page_terminal} ולחזור להורה.',
+            checkout=checkout,
+        )
     checkout.save()
 
 
@@ -389,6 +465,15 @@ def _refuse_before_charge(checkout: CourseCheckout, claim, payments, reason: str
             status='failed', failure_reason=reason[:500], updated_at=timezone.now(),
         )
     logger.error('Course checkout %s refused before charging: %s', checkout.id, reason)
+    _alert(
+        kind='course_checkout_refused', key=f'course_checkout_refused:{checkout.id}',
+        title='ההרשמה נעצרה לפני החיוב',
+        step='רגע לפני החיוב (אחרי שהכרטיס אושר בעמוד)',
+        what='הכרטיס של ההורה אושר ונשמר, אבל ההרשמה לא הושלמה ולא ירד כסף. ההורה ראה את הסיבה על המסך.',
+        why=reason,
+        action='לחזור להורה ולהציע פתרון (שיעור אחר / הרשמה מחדש).',
+        checkout=checkout,
+    )
 
 
 def settle_checkout(checkout_id) -> None:
@@ -478,6 +563,16 @@ def settle_checkout(checkout_id) -> None:
                 status=CourseCheckout.STATUS_REVIEW, review_reason='charged_not_recorded',
                 failure_reason=str(exc)[:500], charge_transaction=claim, updated_at=timezone.now(),
             )
+            _alert(
+                kind='course_checkout_not_recorded', key=f'course_checkout_review:{checkout.id}',
+                title='ההורה חויב אבל ההרשמה לא נרשמה',
+                step='רישום ההרשמה אחרי החיוב',
+                what=(f'הכרטיס חויב ב-₪{checkout.amount} (עסקה {result.get("transaction_id") or "?"}) '
+                      'אבל רישום ההרשמה במערכת נכשל. ההורה רואה "התשלום בבדיקה במשרד".'),
+                why=str(exc)[:300],
+                action='להשלים את ההרשמה ידנית במערכת. לא לחייב שוב.',
+                checkout=checkout,
+            )
         return
     if outcome == TOKEN_DECLINED:
         _declined(checkout, claim, payments, result)
@@ -494,6 +589,15 @@ def settle_checkout(checkout_id) -> None:
             updated_at=timezone.now(),
         )
         logger.error('Course checkout %s not charged — setup problem: %s', checkout.id, result.get('error'))
+        _alert(
+            kind='course_checkout_setup_charge', key=f'course_checkout_review:{checkout.id}',
+            title='תקלת הגדרות — הרשמה לא חויבה',
+            step=f'החיוב מהכרטיס השמור (מסוף {checkout.token_terminal})',
+            what=f'הכרטיס של ההורה אושר, אבל החיוב של ₪{checkout.amount} לא נשלח בגלל תקלה אצלנו. לא ירד כסף.',
+            why=str(result.get('error') or '')[:300],
+            action='לתקן את מפתחות המסוף ב-Vercel ולחזור להורה להשלמת ההרשמה.',
+            checkout=checkout,
+        )
         return
     # No answer, or one that says nothing certain: the card may be charged.
     # The claim stays; the payments stay processing; the office checks.
@@ -504,6 +608,16 @@ def settle_checkout(checkout_id) -> None:
         charge_transaction=claim, updated_at=timezone.now(),
     )
     logger.error('Course checkout %s charge uncertain: %s', checkout.id, result.get('error'))
+    _alert(
+        kind='course_checkout_uncertain', key=f'course_checkout_uncertain:{checkout.id}',
+        title='לא ידוע אם ההורה חויב',
+        step=f'החיוב מהכרטיס השמור (מסוף {checkout.token_terminal})',
+        what=(f'נשלח חיוב של ₪{checkout.amount} ולא התקבלה תשובה מחברת האשראי. '
+              'ההורה רואה "בודקים את התשלום" ולא יתבקש לשלם שוב. המערכת לא תחייב שוב לבד.'),
+        why=str(result.get('error') or 'אין תשובה')[:300],
+        action=f'לבדוק בטרנזילה (מסוף {checkout.token_terminal}) אם ירד ₪{checkout.amount}, ואז להשלים או לבטל את ההרשמה.',
+        checkout=checkout,
+    )
 
 
 def _complete(checkout: CourseCheckout, claim, payments, result: dict) -> None:

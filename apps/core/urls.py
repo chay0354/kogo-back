@@ -10,6 +10,7 @@ from .credit_card_charge_views import CreditCardChargeView
 from .devops_views import (
     DatabaseBackupView,
     EnvInfoView,
+    OfficeAlertTestView,
     TranzilaTerminalMapView,
     TranzilaTokenProbeView,
     TranzilaTransactionCheckView,
@@ -39,6 +40,7 @@ urlpatterns = [
     path('tranzila/terminals/', TranzilaTerminalMapView.as_view(), name='tranzila-terminal-map'),
     path('tranzila/transaction-check/', TranzilaTransactionCheckView.as_view(), name='tranzila-transaction-check'),
     path('tranzila/token-probe/', TranzilaTokenProbeView.as_view(), name='tranzila-token-probe'),
+    path('office-alerts/test/', OfficeAlertTestView.as_view(), name='office-alert-test'),
     path('daily-brief/', DailyBriefView.as_view(), name='daily-brief'),
     path('daily-brief/check/', DailyBriefCheckView.as_view(), name='daily-brief-check'),
     path('system-audit/', SystemAuditView.as_view(), name='system-audit'),

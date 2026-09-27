@@ -457,6 +457,12 @@ MANYCHAT_REGISTER_MORNING_FLOW_NS = config('MANYCHAT_REGISTER_MORNING_FLOW_NS', 
 # inside the 24-hour window.
 MANYCHAT_RENTAL_CONTRACT_FLOW_NS = config('MANYCHAT_RENTAL_CONTRACT_FLOW_NS', default='')
 MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS = config('MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS', default='')
+# Alerts to the office on WhatsApp (apps/core/office_alerts.py): the flow that
+# sends the office template (its fields: kogo_alert_title / _where / _what /
+# _why / _customer / _action / _link), and the office phones, comma separated.
+# Either empty: alerts are kept and shown in the morning brief, not sent.
+MANYCHAT_OFFICE_ALERT_FLOW_NS = config('MANYCHAT_OFFICE_ALERT_FLOW_NS', default='')
+OFFICE_ALERT_PHONES = config('OFFICE_ALERT_PHONES', default='')
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))
 # Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
 TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))

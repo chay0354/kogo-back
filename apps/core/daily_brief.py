@@ -548,6 +548,44 @@ def check_course_checkouts(today: date) -> BriefItem:
     return item
 
 
+def check_office_alerts(today: date) -> BriefItem:
+    """
+    The last day's alerts to the office (apps/core/office_alerts.py), and
+    whether each one reached the office's WhatsApp. An alert that could not be
+    sent — the template not set up yet, or ManyChat refused — is only here.
+    """
+    from django.conf import settings
+
+    from apps.core.models import OfficeAlert
+
+    crm_base = (getattr(settings, 'CRM_FRONTEND_URL', '') or '').rstrip('/')
+    alerts = list(OfficeAlert.objects.filter(created_at__gte=timezone.now() - timedelta(days=1)).order_by('-created_at'))
+    unsent = [a for a in alerts if a.status != OfficeAlert.STATUS_SENT]
+    item = BriefItem(
+        key='office_alerts',
+        title='התראות למשרד מהיממה האחרונה',
+        severity=RED if unsent else (YELLOW if alerts else GREEN),
+        count=len(alerts),
+        action='לטפל בכל התראה לפי מה שכתוב בה. התראה שלא נשלחה בווטסאפ מופיעה רק כאן.',
+    )
+    if not alerts:
+        item.summary = 'לא הייתה תקלה בתשלום או בהרשמה ביממה האחרונה.'
+        return item
+    item.summary = f'{len(alerts)} התראות ביממה האחרונה' + (f', {len(unsent)} מהן לא נשלחו בווטסאפ.' if unsent else '.')
+    for alert in alerts[:MAX_ROWS]:
+        item.rows.append(_row(
+            alert.title,
+            ' · '.join(part for part in (
+                alert.where, alert.customer, alert.action,
+                f'{timezone.localtime(alert.created_at):%d/%m %H:%M}',
+                '' if alert.status == OfficeAlert.STATUS_SENT else alert.get_status_display(),
+            ) if part)[:400],
+            # The brief's links are the CRM's own paths.
+            alert.link[len(crm_base):] if crm_base and alert.link.startswith(crm_base) else alert.link,
+        ))
+    return item
+
+
 def check_failed_payments(today: date) -> BriefItem:
     """Charges the gateway refused in the last week."""
     from apps.customers.models import Payment
@@ -1483,6 +1521,7 @@ CHECKS = (
     check_refresh_dashboard,
     check_overdue_recurring,
     check_unresolved_charges,
+    check_office_alerts,
     check_charges_in_processing,
     check_saved_card_setup,
     check_unresolved_refunds,
@@ -1532,6 +1571,7 @@ def check_catalogue() -> list[dict]:
         'monthly_finalization': 'סגירת החודש הקודם',
         'overdue_recurring': 'הוראות קבע שלא ירדו',
         'unresolved_charges': 'הוראות קבע שהחיוב שלהן נעצר',
+        'office_alerts': 'התראות למשרד מהיממה האחרונה',
         'charges_in_processing': 'חיובים שנתקעו בבדיקה',
         'course_checkouts': 'הרשמות לחוגים שנתקעו בתשלום',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',

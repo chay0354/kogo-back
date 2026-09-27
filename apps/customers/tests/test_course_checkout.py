@@ -302,6 +302,48 @@ class CourseCheckoutTest(TestCase):
     def test_the_status_of_an_unknown_checkout_is_404(self, *_):
         self.assertEqual(self.client.get('/api/v1/customers/widget/checkout/not-a-uuid/').status_code, 404)
 
+    # -- the office hears of it at once ---------------------------------------
+
+    def test_no_answer_alerts_the_office_with_the_family_and_what_to_do(self, *_):
+        from apps.core.models import OfficeAlert
+
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        timeout = {'success': False, 'uncertain': True, 'error': 'Request timed out', 'response_code': '999'}
+        with self.captureOnCommitCallbacks(execute=True):
+            self._paid(checkout, charge=timeout)
+        alert = OfficeAlert.objects.get(kind='course_checkout_uncertain')
+        self.assertEqual(alert.title, 'לא ידוע אם ההורה חויב')
+        self.assertIn('הרשמה לחוג באתר', alert.where)
+        self.assertIn('cogolivetok', alert.where)
+        self.assertIn('Request timed out', alert.why)
+        for part in ('Dana Levi', '0501234567', 'Noa Levi', self.course.name, str(checkout.amount)):
+            self.assertIn(part, alert.customer)
+        child_id = Payment.objects.get(id=ids[0]).child_id
+        self.assertEqual(alert.link, f'https://crm.example.test/customers?child={child_id}')
+        self.assertIn('לבדוק בטרנזילה', alert.action)
+
+    def test_a_full_class_at_the_start_alerts_the_office(self, *_):
+        from apps.core.models import OfficeAlert
+
+        ids = self._register_cart()
+        with patch('apps.customers.widget_views.precheck_widget_capacity', return_value='השיעור מלא — קיבולת מקסימלית: 20 תלמידים'), \
+                self.captureOnCommitCallbacks(execute=True):
+            response = self._start(ids)
+        self.assertEqual(response.status_code, 400)
+        alert = OfficeAlert.objects.get(kind='course_checkout_full')
+        self.assertIn('השיעור מלא', alert.why)
+        self.assertIn('Noa Levi', alert.customer)
+
+    def test_a_paid_signup_alerts_nobody(self, *_):
+        from apps.core.models import OfficeAlert
+
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        with self.captureOnCommitCallbacks(execute=True):
+            self._paid(checkout)
+        self.assertFalse(OfficeAlert.objects.exists())
+
     # -- afterwards ----------------------------------------------------------
 
     def test_refunding_one_lesson_of_a_shared_charge_is_a_credit_never_a_cancel(self, *_):

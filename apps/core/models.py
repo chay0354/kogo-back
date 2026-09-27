@@ -618,3 +618,54 @@ class LoginSession(models.Model):
 
         cls.objects.filter(user=user).delete()
         Token.objects.filter(user=user).delete()
+
+
+class OfficeAlert(models.Model):
+    """
+    A problem the office hears about at once, before the customer calls.
+
+    Raised where it happens (apps/core/office_alerts.py): a course payment with
+    no answer from the card company, a class that filled up mid-payment, a
+    payment page that would not open, a till or refund left uncertain, the
+    monthly run held back by a setup problem. Each alert says what happened,
+    where (which part of the system, which step), why, who the customer is and
+    what to do — the same sections the office WhatsApp template shows.
+
+    Kept whether or not it could be sent: until the WhatsApp template is set up
+    (MANYCHAT_OFFICE_ALERT_FLOW_NS, OFFICE_ALERT_PHONES) it waits here as
+    'not_configured' and the morning brief lists it.
+    """
+    STATUS_PENDING = 'pending'
+    STATUS_SENT = 'sent'
+    STATUS_FAILED = 'failed'
+    STATUS_NOT_CONFIGURED = 'not_configured'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'ממתינה לשליחה'),
+        (STATUS_SENT, 'נשלחה'),
+        (STATUS_FAILED, 'השליחה נכשלה'),
+        (STATUS_NOT_CONFIGURED, 'ווטסאפ למשרד לא הוגדר'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    kind = models.CharField(max_length=60, db_index=True, verbose_name='סוג')
+    # One alert per event: a retry, a repeated notify or a second poll finds it.
+    dedup_key = models.CharField(max_length=255, unique=True)
+    title = models.CharField(max_length=200, verbose_name='מה קרה')
+    where = models.CharField(max_length=300, verbose_name='איפה')
+    what = models.CharField(max_length=500, verbose_name='פירוט')
+    why = models.CharField(max_length=500, blank=True, verbose_name='למה')
+    customer = models.CharField(max_length=500, blank=True, verbose_name='הלקוח')
+    action = models.CharField(max_length=300, blank=True, verbose_name='מה לעשות')
+    link = models.CharField(max_length=300, blank=True, verbose_name='קישור')
+    details = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    error = models.CharField(max_length=500, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'office_alerts'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.title} ({self.get_status_display()})'

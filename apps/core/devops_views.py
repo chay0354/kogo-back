@@ -182,3 +182,35 @@ class TranzilaTokenProbeView(APIView):
             return JsonResponse({'error': str(exc)}, status=400)
         logger.info('Tranzila token probe by %s: %s', request.user.pk, step)
         return JsonResponse(result)
+
+
+class OfficeAlertTestView(APIView):
+    """
+    USAGE: POST /api/v1/core/office-alerts/test/ — send a test alert to the office's WhatsApp.
+    USAGE: GET  /api/v1/core/office-alerts/test/ — whether the office alerts are set up, and the last alerts.
+
+    Managers only. For checking the template after it is set up in ManyChat.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'tranzila_check'
+
+    def get(self, request):
+        from apps.core.models import OfficeAlert
+        from apps.core.office_alerts import office_alert_flow_ns, office_alert_phones
+
+        return JsonResponse({
+            'configured': bool(office_alert_flow_ns() and office_alert_phones()),
+            'phones': len(office_alert_phones()),
+            'recent': [
+                {'title': a.title, 'where': a.where, 'status': a.status, 'error': a.error,
+                 'created_at': a.created_at.isoformat()}
+                for a in OfficeAlert.objects.order_by('-created_at')[:10]
+            ],
+        })
+
+    def post(self, request):
+        from apps.core.office_alerts import send_test_alert
+
+        send_test_alert(requested_by=getattr(request.user, 'email', '') or str(request.user.pk))
+        return JsonResponse({'sent': True})
