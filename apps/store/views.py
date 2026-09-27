@@ -26,7 +26,11 @@ from apps.store.serializers import (
     StoreSaleSerializer, StoreAnalyticsSerializer,
     PaymentInitiationResponseSerializer, InventoryAdjustmentSerializer
 )
-from apps.core.payment_service import PaymentService
+from apps.core.payment_service import (
+    TILL_CHARGE_UNCERTAIN_MARK,
+    TILL_CHARGE_UNCERTAIN_MESSAGE,
+    PaymentService,
+)
 from apps.core.scoping import scope_store_products, is_scoped_partner, partner_branch_ids
 
 logger = logging.getLogger(__name__)
@@ -421,7 +425,8 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
             })
         else:
             return Response({
-                'error': result.get('error', 'שגיאה בזיכוי החשבונית')
+                'error': result.get('error', 'שגיאה בזיכוי החשבונית'),
+                'uncertain': bool(result.get('uncertain')),
             }, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['get'], url_path='download')
@@ -705,12 +710,6 @@ def initiate_payment(request):
             {'error': str(e)},
             status=status.HTTP_400_BAD_REQUEST
         )
-
-
-# A till charge Tranzila did not answer. Kept on the invoice so the office can
-# find it, and so a repeat of the same checkout charges nothing.
-TILL_CHARGE_UNCERTAIN_MARK = 'לא ודאי'
-TILL_CHARGE_UNCERTAIN_MESSAGE = 'לא ידוע אם החיוב עבר. בדקו בטרנזילה לפני שמנסים שוב.'
 
 
 @api_view(['POST'])

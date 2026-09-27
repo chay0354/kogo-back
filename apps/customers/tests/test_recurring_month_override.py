@@ -103,7 +103,7 @@ class RecurringMonthOverrideTests(TestCase):
 
     @patch('apps.customers.recurring_billing.TranzilaService')
     def test_cron_charges_the_override_and_spends_it(self, tranzila_cls):
-        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        tranzila_cls.for_saved_card.return_value.charge_with_token.return_value = _ok()
         set_month_override(
             self.recurring,
             billing_month=self.this_month,
@@ -115,7 +115,7 @@ class RecurringMonthOverrideTests(TestCase):
         summary = process_due_recurring_charges()
 
         self.assertEqual(summary['charged'], 1)
-        charged = tranzila_cls.production.return_value.charge_with_token.call_args
+        charged = tranzila_cls.for_saved_card.return_value.charge_with_token.call_args
         self.assertEqual(charged.kwargs['amount'], Decimal('150.00'))
 
         override = RecurringChargeOverride.objects.get(recurring_payment=self.recurring)
@@ -127,12 +127,12 @@ class RecurringMonthOverrideTests(TestCase):
     @patch('apps.customers.recurring_billing.TranzilaService')
     def test_a_customer_with_no_override_is_charged_exactly_as_before(self, tranzila_cls):
         """The regression guard for everyone already on a standing order."""
-        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        tranzila_cls.for_saved_card.return_value.charge_with_token.return_value = _ok()
 
         summary = process_due_recurring_charges()
 
         self.assertEqual(summary['charged'], 1)
-        call = tranzila_cls.production.return_value.charge_with_token.call_args
+        call = tranzila_cls.for_saved_card.return_value.charge_with_token.call_args
         self.assertEqual(call.kwargs['amount'], Decimal('275.00'))
         # The line item Tranzila is shown must carry the same figure as the charge.
         self.assertEqual(call.kwargs['items'][0]['unit_price'], 275.0)
@@ -148,7 +148,7 @@ class RecurringMonthOverrideTests(TestCase):
 
     @patch('apps.customers.recurring_billing.TranzilaService')
     def test_a_spent_override_is_not_taken_twice(self, tranzila_cls):
-        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        tranzila_cls.for_saved_card.return_value.charge_with_token.return_value = _ok()
         set_month_override(
             self.recurring,
             billing_month=self.this_month,
@@ -170,8 +170,9 @@ class RecurringMonthOverrideTests(TestCase):
 
     @patch('apps.customers.recurring_billing.TranzilaService')
     def test_a_declined_charge_leaves_the_override_for_the_next_run(self, tranzila_cls):
-        tranzila_cls.production.return_value.charge_with_token.return_value = {
-            'success': False, 'error': 'declined', 'raw_response': {},
+        tranzila_cls.for_saved_card.return_value.charge_with_token.return_value = {
+            'success': False, 'error': 'declined', 'response_code': '004',
+            'message': 'Charge failed: declined',
         }
         set_month_override(
             self.recurring,
@@ -332,7 +333,7 @@ class RecurringMonthOverrideTests(TestCase):
 
     @patch('apps.customers.recurring_billing.TranzilaService')
     def test_a_till_purchase_is_charged_as_two_lines(self, tranzila_cls):
-        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        tranzila_cls.for_saved_card.return_value.charge_with_token.return_value = _ok()
         add_to_month_override(
             self.recurring,
             extra=Decimal('120.00'),
@@ -342,7 +343,7 @@ class RecurringMonthOverrideTests(TestCase):
 
         process_due_recurring_charges()
 
-        call = tranzila_cls.production.return_value.charge_with_token.call_args
+        call = tranzila_cls.for_saved_card.return_value.charge_with_token.call_args
         self.assertEqual(call.kwargs['amount'], Decimal('395.00'))
         items = call.kwargs['items']
         self.assertEqual(len(items), 2)
@@ -354,7 +355,7 @@ class RecurringMonthOverrideTests(TestCase):
 
     @patch('apps.customers.recurring_billing.TranzilaService')
     def test_a_manual_change_is_not_itemised_to_the_payer(self, tranzila_cls):
-        tranzila_cls.production.return_value.charge_with_token.return_value = _ok()
+        tranzila_cls.for_saved_card.return_value.charge_with_token.return_value = _ok()
         set_month_override(
             self.recurring,
             billing_month=self.this_month,
@@ -364,7 +365,7 @@ class RecurringMonthOverrideTests(TestCase):
 
         process_due_recurring_charges()
 
-        call = tranzila_cls.production.return_value.charge_with_token.call_args
+        call = tranzila_cls.for_saved_card.return_value.charge_with_token.call_args
         self.assertEqual(len(call.kwargs['items']), 1)
         payment = Payment.objects.filter(payment_type='recurring_subscription').latest('created_at')
         self.assertNotIn('סיבה פנימית', payment.description)

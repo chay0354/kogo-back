@@ -132,6 +132,49 @@ def is_tranzila_uncertain_gateway_error(response: Optional[Dict]) -> bool:
     return any(token in error for token in ('timeout', 'timed out', 'connection error', 'cannot connect'))
 
 
+# Tranzila refusing our key, not the card: a terminal's keys sent to another
+# pair's terminal answer 20002 "Authorization failed" (23.9.2026).
+TRANZILA_AUTH_REFUSED_CODES = frozenset({'20002'})
+
+# Codes that never stand for a decline: the ones a locally built failure
+# carries, and '000' — the processor's approval (see rental_billing.billing).
+TRANZILA_NOT_A_DECLINE_CODES = frozenset({'', '999', 'N/A', 'NONE', '000'})
+
+TOKEN_CHARGED = 'charged'
+TOKEN_DECLINED = 'declined'
+TOKEN_SETUP_PROBLEM = 'setup'
+TOKEN_UNKNOWN = 'unknown'
+
+
+def token_charge_outcome(result: Optional[Dict]) -> str:
+    """
+    What a charge_with_token answer means for the card behind it.
+
+    'charged'  — approved.
+    'setup'    — nothing reached the card: the client refused before sending
+                 (no keys, no expiry) or Tranzila refused our key. Neither the
+                 card nor the payer is at fault.
+    'declined' — Tranzila said, with a code of its own, that the card was not
+                 charged.
+    'unknown'  — no answer, or one that says nothing certain (a timeout, an
+                 HTTP error page, a broken body): the card may be charged.
+    """
+    if not isinstance(result, dict):
+        return TOKEN_UNKNOWN
+    if result.get('success'):
+        return TOKEN_CHARGED
+    if result.get('never_sent'):
+        return TOKEN_SETUP_PROBLEM
+    code = str(result.get('response_code') or '').strip().upper()
+    if code in TRANZILA_AUTH_REFUSED_CODES:
+        return TOKEN_SETUP_PROBLEM
+    if 'uncertain' in result or is_tranzila_uncertain_gateway_error(result):
+        return TOKEN_UNKNOWN
+    if code in TRANZILA_NOT_A_DECLINE_CODES:
+        return TOKEN_UNKNOWN
+    return TOKEN_DECLINED
+
+
 # The report tranmodes that moved money to us: a charge, and a charge that
 # also made a token. An allow-list, not a block-list: the handshake locks only
 # the sum, so a payer can change tranmode in the page URL — to N (J2), a card
@@ -376,6 +419,22 @@ class TranzilaService:
         client.terminal = name
         client.token_terminal = name
         return client
+
+    @classmethod
+    def for_saved_card(cls, terminal: str) -> Optional['TranzilaService']:
+        """
+        The client that charges, refunds or cancels a saved card made on `terminal`.
+
+        Empty is every card saved before 25.9.2026 — the michal pair — and gets
+        exactly the client those cards always had: production(). Any other name
+        gets that terminal with its own keys (for_terminal), or None when no
+        configured key set owns it. Never a guess: a token sent to the wrong
+        terminal is declined, and a decline stops the standing order.
+        """
+        name = (terminal or '').strip()
+        if not name:
+            return cls.production()
+        return cls.for_terminal(name)
 
     # ============================================================================
     # Logging Utilities
@@ -831,15 +890,20 @@ class TranzilaService:
         expire_year: int = None,
         duplicate_guard_key: str = ''
     ) -> Dict:
-        """Charge a stored token using REST API v1."""
+        """
+        Charge a stored token using REST API v1.
+
+        A refusal made here, before anything is sent, carries never_sent=True:
+        no card was touched, and the card is not what is wrong.
+        """
         if not token:
             logger.error("Cannot charge: No token provided")
-            return self._build_error_response('No Tranzila token available')
+            return {**self._build_error_response('No Tranzila token available'), 'never_sent': True}
         
         credential_error = self.credential_error()
         if credential_error:
             logger.error("Cannot charge token: %s", credential_error)
-            return self._build_error_response(credential_error)
+            return {**self._build_error_response(credential_error), 'never_sent': True}
         
         if not items:
             items = [{
@@ -851,7 +915,7 @@ class TranzilaService:
 
         expire_year = self._normalize_card_year(expire_year)
         if not expire_month or not expire_year:
-            return self._build_error_response('חסר תוקף כרטיס לחיוב הוראת קבע')
+            return {**self._build_error_response('חסר תוקף כרטיס לחיוב הוראת קבע'), 'never_sent': True}
                 
         payload = {
             'terminal_name': self.token_terminal,
@@ -1062,7 +1126,16 @@ class TranzilaService:
         Refunds must hit the same terminal that took the original charge.
         Widget registration fees sit on the iframe terminal; monthly token
         charges sit on the token terminal.
+
+        An answer that says nothing certain comes back with uncertain=True and
+        nothing is tried behind it: a cancel that timed out may have gone
+        through, and a credit after it would pay the customer back twice.
         """
+        credential_error = self.credential_error()
+        if credential_error:
+            logger.error("Cannot refund: %s", credential_error)
+            return {**self._build_error_response(credential_error), 'never_sent': True}
+
         if not transaction_id:
             logger.error("Cannot refund: No transaction ID provided")
             return self._build_error_response('No transaction ID available')
@@ -1108,7 +1181,7 @@ class TranzilaService:
                 reason=reason,
                 terminal_name=refund_terminal,
             )
-            if cancel_result.get('success'):
+            if cancel_result.get('success') or cancel_result.get('uncertain'):
                 return cancel_result
 
         credit_result = self._refund_via_txn_type(
@@ -1124,7 +1197,7 @@ class TranzilaService:
             reason=reason,
             terminal_name=refund_terminal,
         )
-        if credit_result.get('success'):
+        if credit_result.get('success') or credit_result.get('uncertain'):
             return credit_result
 
         if not prefer_cancel and _credit_blocked_until_cancel(credit_result.get('error')):
@@ -1182,6 +1255,17 @@ class TranzilaService:
                 params=payload,
                 endpoint='/v1/transaction/credit_card/create',
             )
+            if not isinstance(response, dict) or 'error_code' not in response:
+                # No answer of Tranzila's own — a timeout, a dropped connection,
+                # an HTTP error page. The refund may have been made.
+                out = dict(response) if isinstance(response, dict) else self._build_error_response(
+                    'Invalid gateway response',
+                )
+                out['success'] = False
+                out['uncertain'] = True
+                logger.error("Refund %s got no answer for txn_id=%s: %s",
+                             txn_type, reference_txn_id, out.get('error'))
+                return out
             if is_tranzila_rest_ok(response.get('error_code')):
                 transaction_result = response.get('transaction_result') or {}
                 logger.info("Refund %s succeeded for txn_id=%s", txn_type, reference_txn_id)
@@ -1203,7 +1287,9 @@ class TranzilaService:
             )
         except Exception as e:
             logger.error("Exception during refund %s: %s", txn_type, e, exc_info=True)
-            return self._build_error_response(str(e), message='Refund failed - exception')
+            out = self._build_error_response(str(e), message='Refund failed - exception')
+            out['uncertain'] = True
+            return out
     
     def cancel_recurring_payment(
         self,

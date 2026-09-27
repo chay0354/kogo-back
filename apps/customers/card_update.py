@@ -967,12 +967,16 @@ def apply_new_card(
             .get(id=recurring.id)
         )
         locked.tranzila_token = token
+        # The new card was made by production() — the michal pair, stored as ''.
+        # A card saved elsewhere before is replaced, and so is its terminal.
+        locked.tranzila_terminal = ''
         locked.card_expire_month = card['expiry_month']
         locked.card_expire_year = card['expiry_year']
         locked.status = 'active'
         locked.cancellation_reason = ''
         update_fields = [
             'tranzila_token',
+            'tranzila_terminal',
             'card_expire_month',
             'card_expire_year',
             'status',

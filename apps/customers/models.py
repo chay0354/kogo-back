@@ -463,6 +463,16 @@ class RecurringPayment(models.Model):
         verbose_name="טוקן טרנזילה",
         help_text="Token for recurring charges"
     )
+    # The token terminal this saved card lives on — a token is charged only on
+    # the terminal pair that made it, with that pair's keys. Empty on every
+    # card saved before 25.9.2026: those are the michal pair (the production
+    # settings, TranzilaService.production()).
+    tranzila_terminal = models.CharField(
+        max_length=40,
+        blank=True,
+        default='',
+        verbose_name="מסוף הכרטיס השמור",
+    )
     tranzila_recurring_index = models.CharField(
         max_length=100, 
         blank=True,
@@ -762,6 +772,16 @@ class TranzilaTransaction(models.Model):
         verbose_name="הודעת תגובה"
     )
     
+    # The terminal that took this charge or refund — a refund, a lookup in the
+    # report and a reconciliation all need it. Empty on rows written before
+    # 25.9.2026 (the michal pair, or read from response_data.original_request).
+    tranzila_terminal = models.CharField(
+        max_length=40,
+        blank=True,
+        default='',
+        verbose_name="מסוף",
+    )
+
     # Raw data storage
     request_data = models.JSONField(
         default=dict,

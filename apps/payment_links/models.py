@@ -132,6 +132,9 @@ class PaymentLinkPayment(models.Model):
     )
     gateway_transaction_id = models.CharField(max_length=100, blank=True)
     gateway_confirmation_code = models.CharField(max_length=100, blank=True)
+    # The hosted-page terminal that took the payment (TRANZILA_TERMINAL at the
+    # time). Empty on rows from before 25.9.2026.
+    tranzila_terminal = models.CharField(max_length=40, blank=True, default='')
     card_last4 = models.CharField(max_length=4, blank=True)
     card_type = models.CharField(max_length=30, blank=True)
     # What Tranzila said it charged — kept when it disagrees with `amount`.
