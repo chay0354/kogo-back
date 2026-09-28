@@ -6,7 +6,13 @@ from django.db import transaction
 from django.db.models import Count, Q
 from apps.courses.models import CourseType, Course, Lesson, LessonBundle, LessonPriceOption
 from apps.enrollments.models import LessonEnrollment
-from apps.enrollments.enrollment_counts import count_distinct_paying_children, count_paying_enrollments, is_paying_enrollment
+from apps.enrollments.enrollment_counts import (
+    active_student_enrollments,
+    count_distinct_paying_children,
+    count_paying_enrollments,
+    is_active_student,
+    is_paying_enrollment,
+)
 from apps.core.models import Branch, Room, UserProfile
 from apps.core.scoping import scope_courses
 from apps.instructors.models import Instructor
@@ -187,12 +193,14 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
     instructor = InstructorMinimalSerializer(read_only=True)
     enrolled_count = serializers.SerializerMethodField()
     total_students_count = serializers.SerializerMethodField()
+    active_students_count = serializers.SerializerMethodField()
     day_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Lesson
         fields = ['id', 'day_of_week', 'day_name', 'start_time', 'end_time',
                   'room', 'instructor', 'enrolled_count', 'total_students_count',
+                  'active_students_count',
                   'price', 'lesson_price_override', 'additional_course_prices',
                   'instructor_salary_override', 'status', 'is_recurring', 'notes']
 
@@ -224,7 +232,25 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
         if counts is not None:
             return counts.get(obj.id, 0)
         return self.get_enrolled_count(obj)
-    
+
+    def get_active_students_count(self, obj):
+        """
+        Students of this lesson by the owner's rule (24.9): a paying row, and
+        the child is פעיל or בעיית תשלום.
+
+        Not the same question as the two fields above. Those count paying rows,
+        which is what a seat and the salary tier are about: a sign-up waiting
+        for its payment holds its place. The courses page shows this one under
+        "נרשמים" beside the per-day student counts of the course header, for a
+        lesson the header does not list.
+        """
+        if hasattr(obj, '_prefetched_objects_cache') and 'enrollments' in obj._prefetched_objects_cache:
+            return sum(
+                1 for e in obj.enrollments.all()
+                if is_paying_enrollment(e) and is_active_student(e.child)
+            )
+        return active_student_enrollments().filter(lesson=obj).count()
+
     def get_day_name(self, obj):
         """Convert day number to Hebrew name"""
         days = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
@@ -266,11 +292,11 @@ class CourseWithLessonsSerializer(serializers.ModelSerializer):
         return self.context.get('lessons_counts', {}).get(obj.id, 0)
 
     def get_course_enrollment_count(self, obj):
-        """Distinct active students in this course (paying + trial), across all lessons."""
+        """Distinct students in this course across all its lessons (פעיל or בעיית תשלום, trials out)."""
         return self.context.get('course_enrollment_counts', {}).get(obj.id, 0)
 
     def get_lesson_headcounts(self, obj):
-        """Scheduled lessons in day/time order with each one's active paying headcount."""
+        """Scheduled lessons in day/time order with each one's student headcount (פעיל or בעיית תשלום)."""
         return self.context.get('lesson_headcounts', {}).get(obj.id, [])
 
     def _financials(self, obj):
