@@ -70,8 +70,19 @@ class Command(BaseCommand):
             enrollments = list(child.lesson_enrollments.all())
             live = [e for e in enrollments if e.status in LIVE_ENROLLMENT_STATUSES]
             cancelled = [e for e in enrollments if e.status not in LIVE_ENROLLMENT_STATUSES]
-            trial_ahead = [e for e in enrollments if e.trial_lesson_date and e.trial_lesson_date >= today]
-            trial_held = [e for e in enrollments if e.trial_held_on and e.trial_held_on < today]
+            # The same reading as the rule (_trial_dates): a trial is ahead only
+            # on a live row, and one dropped before its date was never held.
+            trial_ahead = [
+                e for e in enrollments
+                if e.status == 'active' and e.trial_lesson_date and e.trial_lesson_date >= today
+            ]
+            trial_held = [
+                e for e in enrollments
+                if e.trial_held_on and e.trial_held_on < today and not (
+                    e.status == 'inactive' and not e.trial_outcome
+                    and e.end_date and e.end_date < e.trial_held_on
+                )
+            ]
             paid_payments = [p for p in child.payments.all() if p.status == 'completed']
 
             current = child.status

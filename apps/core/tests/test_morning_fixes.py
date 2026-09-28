@@ -28,6 +28,9 @@ def _child(name, status, **kwargs):
 
 
 def _paid(child, **kwargs):
+    # Money for a course: since 27.9.2026 a completed payment with no lesson is
+    # not a registration paid for, and these tests are about one that is.
+    kwargs.setdefault('lesson', TestDataFactory.create_lesson())
     return Payment.objects.create(
         child=child, family=child.family, base_amount=Decimal('225'),
         final_amount=Decimal('225'), status='completed', **kwargs,
@@ -48,8 +51,16 @@ class StatusFixTests(TestCase):
 
     def test_a_paid_trial_is_not_a_registration(self):
         """A parent who paid for one trial lesson has not joined the course."""
+        from apps.enrollments.models import LessonEnrollment
+
         child = _child('ניסיון בתשלום', 'trial_signed')
-        _paid(child, trial_lesson_date=TODAY)
+        payment = _paid(child, trial_lesson_date=TODAY)
+        # A paid trial that went through always has its booked row (the widget
+        # writes it with the charge). Without it the child has no trial at all,
+        # which since 27.9.2026 the morning reads as בתהליך רישום.
+        LessonEnrollment.objects.create(
+            lesson=payment.lesson, child=child, status='active', start_date=TODAY, trial_lesson_date=TODAY,
+        )
         fix_child_statuses()
         child.refresh_from_db()
         self.assertEqual(child.status, 'trial_signed')
@@ -113,6 +124,87 @@ class StatusFixTests(TestCase):
         fix_child_statuses()
         child.refresh_from_db()
         self.assertEqual(child.status, 'ghost')
+
+
+class TrialStatusFixTests(TestCase):
+    """
+    The trial statuses follow the trial rows (27.9.2026): a cancelled trial is
+    not one ahead, and a new one booked ahead brings a child back to
+    נרשם לניסיון, which is what the day's reminders read.
+    """
+
+    def trial(self, child, *, days_ahead, status='active', **kwargs):
+        from apps.enrollments.models import LessonEnrollment
+
+        when = TODAY + timedelta(days=days_ahead)
+        return LessonEnrollment.objects.create(
+            lesson=TestDataFactory.create_lesson(), child=child, status=status,
+            start_date=when, trial_lesson_date=when, **kwargs,
+        )
+
+    def test_a_child_whose_trial_was_cancelled_becomes_inactive_and_it_is_recorded(self):
+        child = _child('בוטל', 'trial_signed')
+        self.trial(child, days_ahead=4, status='inactive', end_date=TODAY)
+        fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'inactive')
+        history = ChildStatusHistory.objects.get(child=child)
+        self.assertEqual((history.previous_status, history.new_status), ('trial_signed', 'inactive'))
+
+    def test_a_cancelled_trial_beside_an_unpaid_sign_up_is_back_in_registration(self):
+        from apps.enrollments.models import LessonEnrollment
+
+        child = _child('נרשם ולא שילם', 'trial_signed')
+        self.trial(child, days_ahead=4, status='inactive', end_date=TODAY)
+        LessonEnrollment.objects.create(lesson=TestDataFactory.create_lesson(), child=child, status='active')
+        fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'pending')
+
+    def test_a_cancelled_repeat_trial_leaves_the_first_one_that_took_place(self):
+        child = _child('ניסיון שני', 'trial_signed')
+        self.trial(child, days_ahead=-7, status='inactive', trial_outcome='attended', end_date=TODAY - timedelta(days=7))
+        self.trial(child, days_ahead=3, status='inactive', end_date=TODAY)
+        fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'trial_completed')
+
+    def test_a_completed_trial_child_with_a_new_trial_ahead_is_signed_again(self):
+        child = _child('ניסיון נוסף', 'trial_completed')
+        self.trial(child, days_ahead=2)
+        fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'trial_signed')
+
+    def test_a_trial_child_someone_is_still_charging_is_never_made_inactive(self):
+        child = _child('בקבע בלי תשלום', 'trial_signed')
+        self.trial(child, days_ahead=4, status='inactive', end_date=TODAY)
+        RecurringPayment.objects.create(
+            child=child, amount=Decimal('225'), status='active', tranzila_token='tok',
+            start_date=TODAY, next_billing_date=TODAY + timedelta(days=5),
+        )
+        fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'trial_signed')
+
+    def test_a_declined_card_is_left_for_billing_to_flag(self):
+        """The rule reads בעיה באשראי, but the morning never moves anyone there."""
+        from apps.enrollments.models import LessonEnrollment
+
+        child = _child('כרטיס נדחה', 'active')
+        lesson = TestDataFactory.create_lesson()
+        LessonEnrollment.objects.create(lesson=lesson, child=child, status='active')
+        Payment.objects.create(
+            child=child, family=child.family, lesson=lesson, status='completed',
+            base_amount=Decimal('225'), final_amount=Decimal('120'), registration_fee=Decimal('120'),
+        )
+        RecurringPayment.objects.create(
+            child=child, amount=Decimal('225'), status='failed', tranzila_token='tok',
+            start_date=TODAY, next_billing_date=TODAY,
+        )
+        fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'active')
 
 
 class StatusFixInSlicesTests(TestCase):

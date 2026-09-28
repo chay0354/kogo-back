@@ -21,6 +21,7 @@ from apps.customers.child_status import (
     STATUS_INACTIVE,
     STATUS_PAYMENT_PROBLEM,
     STATUS_PENDING,
+    mark_trial_signed,
 )
 from apps.customers.models import Family, Parent, Child, Payment
 from apps.customers.child_identity import find_existing_child_on_family
@@ -1097,7 +1098,8 @@ class WidgetTrialRegisterView(APIView):
             logger.exception("Trial WhatsApp notification failed (non-fatal)")
             whatsapp_result = {'sent': False, 'reason': 'exception'}
 
-        Child.objects.filter(pk=child.pk).update(status='trial_signed')
+        # A student who books a trial elsewhere stays a student (see mark_trial_signed).
+        mark_trial_signed(child.pk)
         # Around the model, so no signal: the child's groups are recounted on the next look.
         mark_child_groups_stale(child.pk)
 
@@ -1278,7 +1280,8 @@ def activate_paid_widget_payment(
             ])
         enrollment_id_for_whatsapp = str(enrollment.id)
 
-        Child.objects.filter(pk=child.pk).update(status='trial_signed')
+        # A paid trial buys one lesson to try; it never demotes a student.
+        mark_trial_signed(child.pk)
         mark_child_groups_stale(child.pk)
     else:
         token = token or _token_from_stored_transaction(payment)

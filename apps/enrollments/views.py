@@ -35,7 +35,7 @@ from apps.enrollments.trial_reminders import (
 )
 from apps.core.permissions import IsManager, IsManagerOrPartner, ManagerWriteMixin
 from apps.courses.models import Lesson
-from apps.customers.models import Child
+from apps.customers.child_status import mark_trial_signed
 from apps.instructors.group_freshness import mark_child_groups_stale
 
 logger = logging.getLogger(__name__)
@@ -245,7 +245,8 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             logger.exception("Trial WhatsApp notification failed (non-fatal)")
             whatsapp_result = {'sent': False, 'reason': 'exception'}
 
-        Child.objects.filter(pk=child.pk).update(status='trial_signed')
+        # A student who books a trial elsewhere stays a student (see mark_trial_signed).
+        mark_trial_signed(child.pk)
         # Around the model, so no signal: the child's groups are recounted on the next look.
         mark_child_groups_stale(child.pk)
         enrollment.refresh_from_db(fields=['trial_lesson_date'])

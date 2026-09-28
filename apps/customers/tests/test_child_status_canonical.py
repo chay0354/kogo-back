@@ -70,10 +70,13 @@ class ResolveStatusTest(TestCase):
         child = self.make_child(paid_until_date=TODAY + timedelta(days=20))
         self.assertEqual(resolve_child_status(child), 'active')
 
-    def test_a_completed_payment_is_money_in(self):
+    def test_a_completed_payment_for_a_course_is_money_in(self):
+        # Until 27.9.2026 this was any completed payment — a one-time charge
+        # with no lesson included, which is how a store purchase or a stray
+        # charge read as פעיל. Only money for a course counts now.
         child = self.make_child()
         Payment.objects.create(
-            child=child, family=self.family, payment_type='one_time',
+            child=child, family=self.family, lesson=self.lesson, payment_type='recurring_subscription',
             status='completed', base_amount=Decimal('100'), final_amount=Decimal('100'),
         )
         self.assertEqual(resolve_child_status(child), 'active')
@@ -164,7 +167,7 @@ class ResolveStatusTest(TestCase):
     def test_a_fresh_payment_with_no_paid_until_yet_is_money_in(self):
         child = self.make_child()
         Payment.objects.create(
-            child=child, family=self.family, payment_type='recurring_subscription',
+            child=child, family=self.family, lesson=self.lesson, payment_type='recurring_subscription',
             status='completed', base_amount=Decimal('260'), final_amount=Decimal('260'),
         )
         self.assertEqual(resolve_child_status(child), 'active')
@@ -342,3 +345,249 @@ class GhostRulesTest(TestCase):
         }, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(Child.objects.filter(status='ghost').count(), 1)
+
+
+class StatusRulesOfSeptember27Test(TestCase):
+    """
+    The corrections the owner approved on 27.9.2026, each one checked against
+    production first:
+
+      * a trial is "ahead" only while its row is live — a cancelled trial left
+        seven children on נרשם לניסיון;
+      * a cash or cheque plan still running is money in — two cheque payers
+        sat on בתהליך רישום;
+      * a registration fee alone is not — four children read פעיל on their
+        דמי רישום while the September charge was never collected — unless a
+        standing order with a card is still there to bill the first month;
+      * a declined standing order on a child still in a course is בעיה באשראי.
+    """
+
+    def setUp(self):
+        self.branch = TestDataFactory.create_branch()
+        self.family = TestDataFactory.create_family(branch=self.branch)
+        self.lesson = TestDataFactory.create_lesson(course=TestDataFactory.create_course(branch=self.branch))
+
+    def make_child(self, **over):
+        fields = dict(
+            family=self.family, first_name='ילד', last_name='בדיקה',
+            birth_date=date(2015, 1, 1), gender='male', status='pending',
+        )
+        fields.update(over)
+        return Child.objects.create(**fields)
+
+    def registration_fee_paid(self, child, **over):
+        fields = dict(
+            child=child, family=self.family, lesson=self.lesson, payment_type='recurring_subscription',
+            status='completed', base_amount=Decimal('260'), final_amount=Decimal('120'),
+            registration_fee=Decimal('120'),
+        )
+        fields.update(over)
+        return Payment.objects.create(**fields)
+
+    def standing_order(self, child, **over):
+        from apps.customers.models import RecurringPayment
+
+        fields = dict(
+            child=child, amount=Decimal('260'), base_amount=Decimal('260'), status='active',
+            tranzila_token='tok', billing_day=1, start_date=TODAY, next_billing_date=TODAY + timedelta(days=5),
+        )
+        fields.update(over)
+        return RecurringPayment.objects.create(**fields)
+
+    def on_the_course(self, child):
+        return LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active', start_date=TODAY - timedelta(days=20),
+        )
+
+    # --- trials ---------------------------------------------------------------
+
+    def test_a_cancelled_trial_is_not_a_trial_ahead(self):
+        """The office cancelled it; the date is still on the row, the child is not coming."""
+        child = self.make_child(status='trial_signed')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive', end_date=TODAY,
+            start_date=TODAY + timedelta(days=4), trial_lesson_date=TODAY + timedelta(days=4),
+        )
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_trial_dropped_before_its_date_was_never_held(self):
+        """
+        Cancelled a week ahead, and the date has since gone by. Reading it as
+        ביצע ניסיון would also make the widget refuse the child a first trial.
+        """
+        child = self.make_child(status='trial_signed')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive',
+            start_date=TODAY - timedelta(days=3), trial_lesson_date=TODAY - timedelta(days=3),
+            end_date=TODAY - timedelta(days=10),
+        )
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_trial_the_cron_retired_was_held(self):
+        child = self.make_child(status='trial_signed')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive', trial_outcome='attended',
+            start_date=TODAY - timedelta(days=3), trial_lesson_date=TODAY - timedelta(days=3),
+            end_date=TODAY - timedelta(days=3),
+        )
+        self.assertEqual(resolve_child_status(child), 'trial_completed')
+
+    def test_a_live_trial_ahead_brings_a_completed_trial_child_back(self):
+        child = self.make_child(status='trial_completed')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active',
+            start_date=TODAY + timedelta(days=2), trial_lesson_date=TODAY + timedelta(days=2),
+        )
+        self.assertEqual(resolve_child_status(child), 'trial_signed')
+
+    # --- cash and cheques -----------------------------------------------------
+
+    def test_a_running_cash_plan_is_money_in(self):
+        from apps.documents.models import CashPlan
+
+        child = self.make_child()
+        self.on_the_course(child)
+        CashPlan.objects.create(
+            child=child, lesson=self.lesson, status='active',
+            total_amount=Decimal('2600'), monthly_amount=Decimal('260'),
+        )
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_running_cheque_plan_is_money_in_even_after_a_card_ran_out(self):
+        from apps.documents.models import CheckPlan
+
+        child = self.make_child(status='payment_problem', paid_until_date=TODAY - timedelta(days=40))
+        self.on_the_course(child)
+        CheckPlan.objects.create(child=child, lesson=self.lesson, status='active')
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_plan_that_finished_this_month_still_pays_for_this_month(self):
+        """
+        A plan turns 'completed' when its last month's document is issued — on
+        the 1st of that month. Owner, 28.9.2026: it counts until the month ends.
+        """
+        from apps.documents.models import CashPlan, CashPlanMonth
+
+        child = self.make_child()
+        self.on_the_course(child)
+        plan = CashPlan.objects.create(
+            child=child, lesson=self.lesson, status='completed',
+            total_amount=Decimal('520'), monthly_amount=Decimal('260'),
+        )
+        this_month = TODAY.replace(day=1)
+        last_month = (this_month - timedelta(days=1)).replace(day=1)
+        for due in (last_month, this_month):
+            CashPlanMonth.objects.create(plan=plan, due_date=due, amount=Decimal('260'), status='invoiced')
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_plan_that_finished_last_month_no_longer_does(self):
+        from apps.documents.models import CheckItem, CheckPlan
+
+        child = self.make_child()
+        self.on_the_course(child)
+        plan = CheckPlan.objects.create(child=child, lesson=self.lesson, status='completed')
+        last_month = (TODAY.replace(day=1) - timedelta(days=1)).replace(day=1)
+        CheckItem.objects.create(plan=plan, due_date=last_month, amount=Decimal('260'), status='invoiced')
+        self.assertEqual(resolve_child_status(child), 'pending')
+
+    def test_a_cancelled_plan_is_not_money_in(self):
+        from apps.documents.models import CheckPlan
+
+        child = self.make_child()
+        self.on_the_course(child)
+        CheckPlan.objects.create(child=child, lesson=self.lesson, status='cancelled')
+        self.assertEqual(resolve_child_status(child), 'pending')
+
+    # --- what counts as a registration paid for -------------------------------
+
+    def test_a_registration_fee_alone_is_not_money_in(self):
+        """The fee was taken, the first month never was, and nothing is left to bill it."""
+        child = self.make_child(status='active')
+        self.on_the_course(child)
+        self.registration_fee_paid(child)
+        self.standing_order(child, status='cancelled')
+        self.assertEqual(resolve_child_status(child), 'pending')
+
+    def test_a_fee_only_sign_up_with_a_card_on_a_live_standing_order_is_active(self):
+        """Billing starts on the 1st: a student from the day they signed."""
+        child = self.make_child(status='active', subscription_start_date=TODAY + timedelta(days=5))
+        self.on_the_course(child)
+        self.registration_fee_paid(child)
+        self.standing_order(child)
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_live_standing_order_without_a_card_does_not_carry_a_fee(self):
+        child = self.make_child(status='active')
+        self.on_the_course(child)
+        self.registration_fee_paid(child)
+        self.standing_order(child, tranzila_token='')
+        self.assertEqual(resolve_child_status(child), 'pending')
+
+    def test_a_trial_credit_does_not_turn_a_course_payment_into_a_fee(self):
+        """₪120 charged = ₪120 fee + ₪40 of the month − ₪40 credited trial: a month was bought."""
+        child = self.make_child()
+        self.on_the_course(child)
+        self.registration_fee_paid(child, trial_credit_amount=Decimal('40'))
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_one_time_payment_without_a_lesson_is_not_money_in(self):
+        child = self.make_child()
+        Payment.objects.create(
+            child=child, family=self.family, payment_type='one_time',
+            status='completed', base_amount=Decimal('100'), final_amount=Decimal('100'),
+        )
+        self.assertEqual(resolve_child_status(child), 'pending')
+
+    # --- a declined standing order --------------------------------------------
+
+    def test_a_declined_first_charge_on_a_live_course_is_a_card_problem(self):
+        """The owner: a card that failed is still a student, labelled בעיה באשראי."""
+        child = self.make_child(status='active')
+        self.on_the_course(child)
+        self.registration_fee_paid(child)
+        self.standing_order(child, status='failed')
+        self.assertEqual(resolve_child_status(child), 'payment_problem')
+
+    def test_a_declined_card_with_no_course_left_is_not_a_card_problem(self):
+        child = self.make_child(status='active')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive', start_date=TODAY - timedelta(days=60),
+        )
+        self.registration_fee_paid(child)
+        self.standing_order(child, status='failed')
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_declined_card_beside_only_a_trial_is_not_a_card_problem(self):
+        child = self.make_child(status='trial_signed')
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active',
+            start_date=TODAY + timedelta(days=3), trial_lesson_date=TODAY + timedelta(days=3),
+        )
+        self.standing_order(child, status='failed')
+        self.assertEqual(resolve_child_status(child), 'trial_signed')
+
+
+class MarkTrialSignedTest(TestCase):
+    """A trial booking marks נרשם לניסיון only over the statuses that are less than a student."""
+
+    def test_only_the_statuses_below_a_student_are_marked(self):
+        from apps.customers.child_status import mark_trial_signed
+
+        family = TestDataFactory.create_family()
+        expected = {
+            'pending': 'trial_signed',
+            'inactive': 'trial_signed',
+            'trial_completed': 'trial_signed',
+            'trial_signed': 'trial_signed',
+            'active': 'active',
+            'payment_problem': 'payment_problem',
+            'ghost': 'ghost',
+        }
+        for status, after in expected.items():
+            child = Child.objects.create(
+                family=family, first_name=status, last_name='בדיקה',
+                birth_date=date(2015, 1, 1), gender='male', status=status,
+            )
+            mark_trial_signed(child.pk)
+            child.refresh_from_db()
+            self.assertEqual(child.status, after, status)

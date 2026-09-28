@@ -494,7 +494,15 @@ def remove_expired_trial_enrollments(*, dry_run: bool = False) -> dict:
                 skipped += 1
                 outcomes[outcome] -= 1
                 continue
-            Child.objects.filter(pk=enrollment.child_id, status='trial_signed').update(status='trial_completed')
+            # A child with another trial still booked is still נרשם לניסיון:
+            # two trials booked together used to leave the child ביצע ניסיון the
+            # morning after the first, and the reminders for the second — which
+            # read trial_signed — never went out.
+            another_ahead = LessonEnrollment.objects.filter(
+                child_id=enrollment.child_id, status='active', trial_lesson_date__gte=today,
+            ).exists()
+            if not another_ahead:
+                Child.objects.filter(pk=enrollment.child_id, status='trial_signed').update(status='trial_completed')
             if outcome == 'attended':
                 Child.objects.filter(pk=enrollment.child_id).update(
                     trial_classes_attended=F('trial_classes_attended') + 1,
@@ -615,6 +623,10 @@ def _send_trial_whatsapp(svc, kind: str, ctx: dict, *, dry_run: bool, enrollment
 # with "your trial is today".
 TRIAL_REMINDER_STALE_AFTER = timedelta(hours=24)
 
+# Whose trial rows get the trial-day messages: a child booked for a first trial,
+# and a student of another course trying this one.
+TRIAL_REMINDER_CHILD_STATUSES = ('trial_signed', 'active', 'payment_problem')
+
 
 def _reminder_is_fresh(now, due) -> bool:
     return due <= now <= due + TRIAL_REMINDER_STALE_AFTER
@@ -631,8 +643,13 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
             'child', 'child__family',
         )
         .prefetch_related('child__family__parents')
-        .filter(trial_lesson_date__isnull=False)
-        .filter(child__status='trial_signed')
+        # A cancelled trial keeps its date on an inactive row; only a live row
+        # is a trial someone is still coming to.
+        .filter(trial_lesson_date__isnull=False, status='active')
+        # The trial row is what makes a trial, not the child's status: a child
+        # who already pays for a course and books a trial in another now stays
+        # פעיל / בעיה באשראי (27.9.2026) and is still coming to that trial.
+        .filter(child__status__in=TRIAL_REMINDER_CHILD_STATUSES)
     )
 
     svc = ManyChatService()

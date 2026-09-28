@@ -165,5 +165,9 @@ class WidgetChargeStatusByPathTest(TestCase):
         self.assertNotEqual(resolve_child_status(self.child), 'active')
 
     def test_a_completed_registration_payment_is(self):
-        Payment.objects.filter(pk=_payment_for(self.child, self.lesson).pk).update(status='completed')
+        # A month's money on top of the fee. The helper's default — ₪120 that is
+        # all דמי רישום — no longer counts on its own (27.9.2026): a fee buys no
+        # month unless a standing order with a card is there to bill the first.
+        payment = _payment_for(self.child, self.lesson, final_amount=Decimal('350.00'))
+        Payment.objects.filter(pk=payment.pk).update(status='completed')
         self.assertEqual(resolve_child_status(self.child), 'active')
