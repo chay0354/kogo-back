@@ -11,6 +11,7 @@ The recount itself now runs in slices that carry on from where the last one
 stopped (refresh_month_snapshots).
 """
 from datetime import date, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -188,3 +189,31 @@ class MonthRecountInSlicesTests(_Groups):
         self.assertFalse(LessonMonthlySnapshot.objects.filter(is_finalized=True).exists())
         self.assertFalse(InstructorMonthlySnapshot.objects.filter(is_finalized=True).exists())
         self.assertFalse(BranchMonthlySnapshot.objects.filter(is_finalized=True).exists())
+
+
+class RecountThatCannotWriteTests(_Groups):
+    """A group whose row cannot be written now is left for the next slice, not waited on."""
+
+    def test_a_blocked_group_is_skipped_and_the_rest_carry_on(self):
+        from django.db import OperationalError
+
+        from apps.instructors import utils
+
+        blocked = self._lesson(day_of_week=0)
+        other = self._lesson(day_of_week=1)
+        real_store = utils._store_lesson_snapshot
+
+        def store(lesson, *args, **kwargs):
+            if lesson.id == blocked.id:
+                raise OperationalError('canceling statement due to lock timeout')
+            return real_store(lesson, *args, **kwargs)
+
+        with patch.object(utils, '_store_lesson_snapshot', side_effect=store):
+            result = refresh_month_snapshots(MONTH)
+        self.assertFalse(result['finished'])
+        self.assertEqual(result['lessons_done'], 1)
+        self.assertEqual(len(result['skipped']), 1)
+        self.assertTrue(LessonMonthlySnapshot.objects.filter(lesson=other, month=MONTH).exists())
+
+        result = refresh_month_snapshots(MONTH)
+        self.assertTrue(result['finished'])
