@@ -288,7 +288,12 @@ class RescheduleBlockedTrialEnrollmentTest(TestCase):
         TIME_ZONE='Asia/Jerusalem',
     )
     def test_moves_13_sep_trial_to_next_sunday_of_same_course(self):
-        rows = reschedule_blocked_trial_enrollments()
+        # Seen from the week the dates were blocked. "Next Sunday" is counted
+        # from now, so run on the real clock this test stopped passing on 28.9,
+        # the day 27.9 fell behind it.
+        seen_on = datetime(2026, 9, 15, 10, 0, tzinfo=ZoneInfo('Asia/Jerusalem'))
+        with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=seen_on):
+            rows = reschedule_blocked_trial_enrollments()
         self.enrollment.refresh_from_db()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['parent_phone'], '0526180843')
