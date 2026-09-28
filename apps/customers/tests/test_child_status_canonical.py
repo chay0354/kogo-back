@@ -461,6 +461,35 @@ class StatusRulesOfSeptember27Test(TestCase):
         CheckPlan.objects.create(child=child, lesson=self.lesson, status='active')
         self.assertEqual(resolve_child_status(child), 'active')
 
+    def test_a_plan_that_finished_this_month_still_pays_for_this_month(self):
+        """
+        A plan turns 'completed' when its last month's document is issued — on
+        the 1st of that month. Owner, 28.9.2026: it counts until the month ends.
+        """
+        from apps.documents.models import CashPlan, CashPlanMonth
+
+        child = self.make_child()
+        self.on_the_course(child)
+        plan = CashPlan.objects.create(
+            child=child, lesson=self.lesson, status='completed',
+            total_amount=Decimal('520'), monthly_amount=Decimal('260'),
+        )
+        this_month = TODAY.replace(day=1)
+        last_month = (this_month - timedelta(days=1)).replace(day=1)
+        for due in (last_month, this_month):
+            CashPlanMonth.objects.create(plan=plan, due_date=due, amount=Decimal('260'), status='invoiced')
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_plan_that_finished_last_month_no_longer_does(self):
+        from apps.documents.models import CheckItem, CheckPlan
+
+        child = self.make_child()
+        self.on_the_course(child)
+        plan = CheckPlan.objects.create(child=child, lesson=self.lesson, status='completed')
+        last_month = (TODAY.replace(day=1) - timedelta(days=1)).replace(day=1)
+        CheckItem.objects.create(plan=plan, due_date=last_month, amount=Decimal('260'), status='invoiced')
+        self.assertEqual(resolve_child_status(child), 'pending')
+
     def test_a_cancelled_plan_is_not_money_in(self):
         from apps.documents.models import CheckPlan
 

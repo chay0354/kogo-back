@@ -140,9 +140,26 @@ def _has_money_in(child) -> bool:
     # majority costs no extra query.
     if child.cash_plans.filter(status='active').exists() or child.check_plans.filter(status='active').exists():
         return True
+    if _plan_covers_this_month(child, today):
+        return True
     if child.paid_until_date:
         return False
     return _registration_paid(child)
+
+
+def _plan_covers_this_month(child, today: date) -> bool:
+    """
+    A cash or cheque plan that finished but paid for the month we are in.
+
+    A plan turns 'completed' when the document for its last month is issued —
+    on the 1st of that month — while that month is still paid for. Owner,
+    28.9.2026: it counts until the month ends. A cancelled plan never does.
+    """
+    month_start = today.replace(day=1)
+    return (
+        child.cash_plans.filter(status='completed', months__due_date__gte=month_start).exists()
+        or child.check_plans.filter(status='completed', items__due_date__gte=month_start).exists()
+    )
 
 
 def _registration_paid(child) -> bool:
@@ -305,6 +322,16 @@ def still_charged_child_ids() -> set:
     )
     ids |= set(CashPlan.objects.filter(status='active').values_list('child_id', flat=True))
     ids |= set(CheckPlan.objects.filter(status='active').values_list('child_id', flat=True))
+    # A plan finished this month still paid for this month (_plan_covers_this_month).
+    month_start = date.today().replace(day=1)
+    ids |= set(
+        CashPlan.objects.filter(status='completed', months__due_date__gte=month_start)
+        .values_list('child_id', flat=True)
+    )
+    ids |= set(
+        CheckPlan.objects.filter(status='completed', items__due_date__gte=month_start)
+        .values_list('child_id', flat=True)
+    )
     return ids
 
 
