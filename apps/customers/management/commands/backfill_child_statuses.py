@@ -161,6 +161,9 @@ class Command(BaseCommand):
                 if locked.status != was:
                     continue
                 locked.status = target
+                # With --history the row below says why; the save signal's own
+                # row would be the same change a second time.
+                locked._status_history_written = write_history
                 locked.save(update_fields=['status', 'updated_at'])
                 written += 1
                 if write_history:

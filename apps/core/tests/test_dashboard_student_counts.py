@@ -282,7 +282,8 @@ class Dropout(_Students):
 
     def test_the_morning_fix_and_the_signal_count_one_child_once(self):
         # The paid period ended and nothing is left: the morning routine moves
-        # the child to לא פעיל and writes a row beside the signal's.
+        # the child to לא פעיל and writes its row, with the reason. The save
+        # signal no longer writes a second one for the same change.
         child = self.child('payment_problem', paid_until_date=TODAY - timedelta(days=20))
         self.enroll(child, status='inactive')
 
@@ -290,7 +291,7 @@ class Dropout(_Students):
 
         child.refresh_from_db()
         self.assertEqual(child.status, 'inactive')
-        self.assertEqual(ChildStatusHistory.objects.filter(child=child, new_status='inactive').count(), 2)
+        self.assertEqual(ChildStatusHistory.objects.filter(child=child, new_status='inactive').count(), 1)
         quit = self.quit()
         self.assertEqual(quit['total_quit'], 1)
         self.assertEqual(quit['by_status'][0]['count'], 1)

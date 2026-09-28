@@ -355,3 +355,20 @@ class BriefLinesTests(TestCase):
         item = check_monthly_finalization(TODAY)
         self.assertEqual(item.count, 1)
         self.assertFalse(InstructorMonthlySnapshot.objects.get(month=previous).is_finalized)
+
+
+class StatusHistoryOnceTests(TestCase):
+    """One change, one row in the child's history — the one that says why."""
+
+    def test_a_morning_fix_to_inactive_is_written_once_with_its_reason(self):
+        child = _child('סיים', 'active', paid_until_date=TODAY - timedelta(days=20))
+        fix_child_statuses()
+        rows = ChildStatusHistory.objects.filter(child=child)
+        self.assertEqual(rows.count(), 1)
+        self.assertIn('אוטומטית', rows.get().reason)
+
+    def test_the_office_leaving_a_child_by_hand_is_still_recorded(self):
+        child = _child('עזב', 'payment_problem')
+        child.status = 'inactive'
+        child.save(update_fields=['status', 'updated_at'])
+        self.assertEqual(ChildStatusHistory.objects.filter(child=child, new_status='inactive').count(), 1)

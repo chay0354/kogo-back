@@ -379,6 +379,7 @@ def refresh_child_status(child, *, reason: str, changed_by=None) -> str:
         if not target or target == was:
             return was
         locked.status = target
+        locked._status_history_written = True  # the row below, with its reason
         locked.save(update_fields=['status', 'updated_at'])
         ChildStatusHistory.objects.create(
             child=locked, previous_status=was, new_status=target,
