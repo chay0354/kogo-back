@@ -81,10 +81,14 @@ class ManyChatContactUnfindable(ManyChatError):
 
 
 # The old wording told the office to check the number was on WhatsApp. It is:
-# that is exactly why ManyChat already has it.
+# that is exactly why ManyChat already has it. The fix for every such contact
+# at once is the import file of apps/core/manychat_contact_index.py; the
+# manual link stays for the one contact in front of the office.
 CONTACT_UNFINDABLE_MESSAGE = (
-    'איש קשר עם המספר הזה כבר קיים ב-ManyChat, אבל ManyChat לא מאפשר לאתר אותו לפי מספר וואטסאפ. '
-    'צריך לקשר אותו ידנית פעם אחת (״קישור לאיש קשר״ בתוצאות התפוצה), ומאז ההודעות יגיעו אליו.'
+    'איש קשר עם המספר הזה כבר קיים ב-ManyChat, אבל חסר לו השדה שלפיו קוגו מוצאת אותו '
+    '(ManyChat לא מאפשר חיפוש לפי מספר וואטסאפ). '
+    'תיקון לכל אנשי הקשר בבת אחת: הגדרות › הודעות › ״אנשי קשר ש-ManyChat לא מוצא״. '
+    'למספר הזה בלבד: ״קישור לאיש קשר״.'
 )
 
 
@@ -1360,6 +1364,26 @@ class ManyChatService:
         info = dict(info)
         info.setdefault('id', sid)
         return {'subscriber_id': sid, 'subscriber': info, 'phone_verified': matches is True}
+
+    def find_existing(self, phone: str) -> dict | None:
+        """
+        The contact Kogo would reach at this phone now, or None — without
+        creating one or writing anything to ManyChat.
+
+        For checking, after the office imported the contact index file, that a
+        number which failed is now found. A contact found is remembered, as
+        ``lookup_or_create`` would.
+        """
+        from apps.core.models import ManyChatContact
+
+        remembered = self._remembered_subscriber(phone)
+        if remembered:
+            return remembered
+        sub = self._resolve_subscriber(phone)
+        if sub and sub.get('id'):
+            remember_contact(phone, sub.get('id'), ManyChatContact.SOURCE_FOUND)
+            return sub
+        return None
 
     def lookup_or_create(self, phone: str, name: str = '', lookup_names: list[str] | None = None) -> dict:
         """Find by phone or create a WhatsApp subscriber for any valid number."""

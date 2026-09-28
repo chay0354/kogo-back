@@ -1,10 +1,19 @@
 """ManyChat / WhatsApp test API (manager only)."""
 from django.db.models import Q
+from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.core.manychat_contact_index import (
+    INDEX_FIELD_NAME,
+    SCOPE_ALL,
+    SCOPE_CURRENT,
+    SCOPE_STATUSES,
+    contact_index_csv,
+    contact_index_phones,
+)
 from apps.core.manychat_service import ContactLinkError, ManyChatError, ManyChatService, manychat_error_detail
 from apps.core.permissions import IsManager
 from apps.customers.models import Family, Parent
@@ -195,6 +204,57 @@ class WhatsAppViewSet(viewsets.ViewSet):
             'subscriber_id': result['subscriber_id'],
             'display_name': _subscriber_display_name(sub),
             'phone_verified': result['phone_verified'],
+        })
+
+    @action(detail=False, methods=['get'], url_path='contact-index')
+    def contact_index(self, request):
+        """
+        How many phones each scope of the ManyChat import file carries.
+
+        Reads Kogo only — nothing is sent to ManyChat. See
+        apps/core/manychat_contact_index.py for why the file exists.
+        """
+        return Response({
+            'field_name': INDEX_FIELD_NAME,
+            'scopes': {scope: len(contact_index_phones(scope)) for scope in (SCOPE_CURRENT, SCOPE_ALL)},
+        })
+
+    @action(detail=False, methods=['get'], url_path='contact-index/export')
+    def contact_index_export(self, request):
+        """The CSV the office imports into ManyChat once, so it finds every parent."""
+        scope = (request.query_params.get('scope') or SCOPE_CURRENT).strip()
+        if scope not in SCOPE_STATUSES:
+            return Response({'error': 'scope לא מוכר'}, status=status.HTTP_400_BAD_REQUEST)
+        response = HttpResponse(contact_index_csv(contact_index_phones(scope)), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="manychat-contacts-{scope}.csv"'
+        return response
+
+    @action(detail=False, methods=['post'], url_path='contact-index/check')
+    def contact_index_check(self, request):
+        """
+        Whether Kogo finds the contact behind one phone now — after the import,
+        for the numbers a broadcast could not reach. Searches only: nothing is
+        created in ManyChat and nothing is sent. One phone per request, since a
+        full search is a dozen ManyChat calls.
+        """
+        phone = str(request.data.get('phone') or '').strip()
+        e164 = ManyChatService.normalize_phone_e164(phone)
+        if not e164:
+            return Response({'error': 'נדרש מספר טלפון'}, status=status.HTTP_400_BAD_REQUEST)
+        svc = ManyChatService()
+        if not svc.is_configured:
+            # The searches swallow their errors, so without a key every number
+            # would read "not found" — as if the import had not worked.
+            return Response({'error': 'ManyChat לא מוגדר בשרת (MANYCHAT_KEY)'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        try:
+            sub = svc.find_existing(phone)
+        except ManyChatError as exc:
+            return Response({'error': f'ManyChat: {manychat_error_detail(exc)}'}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response({
+            'phone': e164,
+            'found': bool(sub),
+            'subscriber_id': sub.get('id') if sub else None,
+            'display_name': _subscriber_display_name(sub) if sub else '',
         })
 
     @action(detail=False, methods=['get'], url_path='subscriber')
