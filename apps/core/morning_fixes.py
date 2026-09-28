@@ -136,6 +136,7 @@ def fix_child_statuses(*, after_id=None, budget_seconds=None, already_applied: i
             if locked.status != was:
                 continue
             locked.status = target
+            locked._status_history_written = True  # the row below, with its reason
             locked.save(update_fields=['status', 'updated_at'])
             ChildStatusHistory.objects.create(
                 child=locked, previous_status=was, new_status=target,

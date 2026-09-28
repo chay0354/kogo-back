@@ -44,6 +44,12 @@ def create_status_history(sender, instance, created, **kwargs):
     if created:
         return
     
+    # The code that made this change writes its own row, with the reason
+    # (the morning fix, refresh_child_status, the backfill command). A second
+    # row here showed the same change twice in the child's history.
+    if getattr(instance, '_status_history_written', False):
+        return
+
     # Check if status actually changed
     previous_status = getattr(instance, '_previous_status', None)
     if previous_status and previous_status != instance.status:
