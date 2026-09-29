@@ -2408,20 +2408,35 @@ class PaymentService:
                 if verdict != 'verified':
                     # Stays pending — nothing sold, no stock moved, no document —
                     # with what was reported kept so a person can check the terminal.
+                    # The number kept is what apps/store/payment_followup.py asks
+                    # the report about again (the site's status poll, the morning
+                    # sweep); the time is when the report was last asked.
+                    from apps.store.payment_followup import alert_if_stuck, alert_payment_unverified
+
                     invoice.tranzila_transaction_id = txn_index[:100]
                     invoice.tranzila_confirmation_code = str(tranzila_response.get('confirmation_code') or '')[:100]
                     invoice.tranzila_terminal = self.iframe_tranzila_service.terminal
+                    invoice.payment_followup_at = timezone.now()
                     invoice.save(update_fields=[
                         'tranzila_transaction_id', 'tranzila_confirmation_code', 'tranzila_terminal',
+                        'payment_followup_at',
                     ])
                     logger.error(
                         "Store webhook for invoice %s not confirmed by Tranzila (%s); left pending",
                         invoice.invoice_number, verdict,
                     )
+                    # The office hears at once when the report disagrees, and
+                    # after ten minutes when it could not be asked. Both go out
+                    # after this transaction commits, once per invoice.
+                    if verdict == 'unverified' and txn_index:
+                        alert_payment_unverified(invoice, _txn_row)
+                    else:
+                        alert_if_stuck(invoice, why='הדוח של טרנזילה לא ענה כשנבדק התשלום.')
                     return {
                         'success': False,
                         'error': 'התשלום לא אומת מול טרנזילה',
                         'status': invoice.payment_status,
+                        'verdict': verdict,
                     }
 
                 # Parse product items from invoice notes
@@ -2437,8 +2452,30 @@ class PaymentService:
                 invoice.save()
 
                 # Create sales and update stock
+                from apps.store.stock_utils import available_stock_for_item as _available_stock_for_item
+
+                oversold = []
                 for item in product_items:
                     product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
+
+                    # The shelf was checked when the page opened, not now: the
+                    # customer has paid, so the sale is recorded whatever the
+                    # shelf says (refusing it would hide money that came in).
+                    # A unit sold that was not there is a stock count and a
+                    # customer to call — marked on the line and told to the
+                    # office. A size row cannot go below zero (stock_utils
+                    # stops it at 0), so it is asked before the decrement.
+                    available = _available_stock_for_item(product, item)
+                    short = available < int(item['quantity'])
+                    if short:
+                        oversold.append({
+                            'name': product.name, 'size': item.get('size', ''),
+                            'quantity': int(item['quantity']), 'available': available,
+                        })
+                        logger.error(
+                            "Store invoice %s: %s sold beyond stock (%s ordered, %s on the shelf) — sale kept",
+                            invoice.invoice_number, product.name, item['quantity'], available,
+                        )
 
                     unit, total = sale_unit_and_total(product, item)
                     StoreSale.objects.create(
@@ -2451,27 +2488,29 @@ class PaymentService:
                         size=item.get('size', ''),
                         payment_method='credit_card',
                         branch_id=_store_line_item_branch_id(item, product),
-                        notes=''
+                        notes=f'נמכר מעבר למלאי (היו {available}) — לבדוק את המלאי' if short else ''
                     )
 
                     _decrement_product_stock(product, item)
+
+                if oversold:
+                    from apps.store.payment_followup import alert_oversold
+                    alert_oversold(invoice, oversold)
 
             logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
             _sign_store_sale(invoice)
 
             if invoice.website_order_number:
-                from apps.store.website_integration import (
-                    notify_website_order_status,
-                    push_products_batch_to_website,
-                )
+                from apps.store.payment_followup import tell_website_paid
+                from apps.store.website_integration import push_products_batch_to_website
                 from apps.store.invoice_email import send_store_invoice_email
-                notify_website_order_status(
-                    website_order_number=invoice.website_order_number,
-                    invoice_number=invoice.invoice_number,
-                    invoice_id=str(invoice.id),
-                    status='paid',
-                    provider_txn_id=tranzila_response.get('transaction_id', ''),
-                )
+                # One call now; when the site does not acknowledge it, the
+                # site's status poll and the morning sweep repeat it
+                # (apps/store/payment_followup.py) and the office is told.
+                try:
+                    tell_website_paid(invoice)
+                except Exception:
+                    logger.exception('Telling the site about %s failed (non-fatal)', invoice.invoice_number)
                 sold_products = list(
                     StoreProduct.objects.filter(
                         id__in=[item['product_id'] for item in product_items]

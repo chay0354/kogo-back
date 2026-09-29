@@ -9,9 +9,12 @@ takings are checked against Tranzila itself so "the system says it was charged"
 and "the money arrived" are two separate statements.
 
 Rules the checks follow:
-  * read-only — nothing here charges, sends or fixes, with one exception: the
+  * read-only — nothing here charges, sends or fixes, with two exceptions: the
     morning fixes at the top of the list (apps/core/morning_fixes.py), which the
     owner asked for and which touch only statuses and the dashboard's counts;
+    and the store's stuck payments (check_stuck_store_payments), which finish
+    what Tranzila's report now confirms — through the notify's own path,
+    charging nothing — and repeat the website's "paid" call;
   * one failing check never hides the rest: it comes back as its own red item;
   * a quiet morning must read as quiet, so a check that finds nothing says so
     instead of filling the screen.
@@ -548,6 +551,76 @@ def check_course_checkouts(today: date) -> BriefItem:
             + f' · {timezone.localtime(checkout.created_at):%d/%m %H:%M}',
             '/customers',
         ))
+    return item
+
+
+def check_stuck_store_payments(today: date) -> BriefItem:
+    """
+    Store payments on Tranzila's page (website and till) that did not end
+    cleanly, from the last three days — and the ones this very check settled.
+
+    The one check here that acts, and only on what is already decided: a
+    pending payment Tranzila reported is asked about again in the terminal's
+    report, and completed through the notify's own path when the report now
+    confirms it (the sale, the stock, the document, the customer's email —
+    what the notify would have done); a paid website order the site never
+    acknowledged is told again. Nothing is charged or refunded, and nothing
+    is marked failed. What is still open is listed for the office, which was
+    also told at the time (apps/store/payment_followup.py).
+    """
+    from apps.store.payment_followup import sweep_stuck_store_payments
+
+    result = sweep_stuck_store_payments()
+    open_items = len(result['still_pending']) + len(result['site_not_told']) + len(result['not_reached'])
+    done_items = len(result['settled']) + len(result['site_told'])
+    item = BriefItem(
+        key='stuck_store_payments',
+        title='תשלומים שנתקעו בחנות',
+        severity=RED if open_items else (YELLOW if done_items else GREEN),
+        count=open_items,
+        action=(
+            'לבדוק בטרנזילה, לפי מספר העסקה שבשורה, אם הכסף ירד. ירד — לא לבקש מהלקוח לשלם שוב '
+            'ולהעביר לבדיקה טכנית; לא ירד — לחזור ללקוח. הזמנה שהושלמה הבוקר שולמה: לטפל בה כרגיל. '
+            'המערכת לא מחייבת ולא מזכה כלום לבד.'
+        ),
+    )
+
+    def label(invoice) -> str:
+        who = invoice.customer_name or (invoice.child.full_name if invoice.child_id and invoice.child else '') or 'לקוח מזדמן'
+        return f'{invoice.website_order_number or invoice.invoice_number} · {who}'
+
+    def when(invoice) -> str:
+        return f'{timezone.localtime(invoice.created_at):%d/%m %H:%M}'
+
+    for invoice, reason in result['still_pending']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · ממתין · עסקה {invoice.tranzila_transaction_id} '
+            f'(מסוף {invoice.tranzila_terminal or "?"}) · {reason[:80]} · {when(invoice)}',
+            '/invoices',
+        ))
+    for invoice in result['site_not_told']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · שולם, והאתר לא אישר שקיבל את העדכון · {when(invoice)}',
+            '/invoices',
+        ))
+    for invoice in result['not_reached']:
+        item.rows.append(_row(label(invoice), f'{_money(invoice.total_amount)} · לא נבדק הבוקר (נגמר הזמן)', '/invoices'))
+    for invoice in result['settled']:
+        item.rows.append(_row(label(invoice), f'{_money(invoice.total_amount)} · הושלם הבוקר מול הדוח של טרנזילה', '/invoices'))
+    for invoice in result['site_told']:
+        item.rows.append(_row(label(invoice), 'האתר עודכן הבוקר שההזמנה שולמה', '/invoices'))
+    item.rows = item.rows[:MAX_ROWS]
+
+    parts = []
+    if open_items:
+        parts.append(f'{open_items} תשלומים בחנות עדיין לא הסתיימו')
+    if result['settled']:
+        parts.append(f'{len(result["settled"])} הושלמו הבוקר אחרי שהדוח של טרנזילה אישר אותם')
+    if result['site_told']:
+        parts.append(f'האתר עודכן על {len(result["site_told"])} הזמנות ששולמו')
+    item.summary = ('; '.join(parts) + '.') if parts else 'כל התשלומים בחנות משלושת הימים האחרונים הסתיימו.'
     return item
 
 
@@ -1547,13 +1620,14 @@ CHECKS = (
     check_document_numbering,
     check_monthly_finalization,
     check_weekly_audit,
+    check_stuck_store_payments,
     check_tranzila_health,
     check_manychat_health,
     check_tranzila_reconciliation,
 )
 
 # Checks that call an outside service, so a quick brief can leave them out.
-EXTERNAL_CHECKS = {'tranzila_health', 'manychat_health', 'tranzila_reconciliation'}
+EXTERNAL_CHECKS = {'stuck_store_payments', 'tranzila_health', 'manychat_health', 'tranzila_reconciliation'}
 
 
 def check_key(check) -> str:
@@ -1577,6 +1651,7 @@ def check_catalogue() -> list[dict]:
         'office_alerts': 'התראות למשרד מהיממה האחרונה',
         'charges_in_processing': 'חיובים שנתקעו בבדיקה',
         'course_checkouts': 'הרשמות לחוגים שנתקעו בתשלום',
+        'stuck_store_payments': 'תשלומים שנתקעו בחנות',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
         'unresolved_refunds': 'זיכויים שלא התקבלה עליהם תשובה',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',

@@ -272,6 +272,11 @@ REST_FRAMEWORK = {
         # opening a page, and the widget's poll while the parent pays.
         'course_checkout_start': '20/min',
         'course_checkout_status': '120/min',
+        # The website store's poll of an order's payment (apps/store/widget_views.py).
+        # Every poll comes from the site's own server — one caller for all of
+        # its customers at once — so this is the whole shop's rate. Tranzila is
+        # protected per order (apps/store/payment_followup.RECHECK_INTERVAL).
+        'store_payment_status': '300/min',
     },
 }
 

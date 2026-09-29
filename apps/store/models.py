@@ -441,7 +441,28 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="חשבונית נשלחה במייל",
     )
-    
+    # When the website answered "received" to our one "this order is paid"
+    # call (apps/store/payment_followup.py). Until it does, the order is paid
+    # here and still "awaiting payment" on the site, so the call is repeated
+    # from the site's status poll and the morning sweep, and the office is
+    # told if it keeps failing. Empty on till sales, on unpaid orders and on
+    # every order paid before 29.9.2026.
+    website_paid_notified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="האתר אישר שקיבל את התשלום",
+    )
+    # The last time the CRM followed this invoice's payment up by itself —
+    # asked Tranzila's report again about a pending hosted-page payment, or
+    # repeated the "paid" call to the website. Only a pace-keeper: the site
+    # polls every few seconds, and the report is asked at most once per
+    # RECHECK_INTERVAL for the same invoice, across every server instance.
+    payment_followup_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="בדיקת תשלום אחרונה",
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     
