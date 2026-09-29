@@ -25,6 +25,7 @@ from apps.core.manychat_contact_index import (
     SCOPE_CURRENT,
     contact_index_csv,
     contact_index_phones,
+    contact_index_rows,
 )
 from apps.core.manychat_service import (
     CONTACT_UNFINDABLE_MESSAGE,
@@ -117,16 +118,53 @@ class ContactIndexPhonesTests(NoNetworkMixin, TestCase):
         make_family(self.branch, parents=[('נייח', '03-5551234', True)])
         self.assertEqual(contact_index_phones(SCOPE_CURRENT), ['97235551234'])
 
+    def test_the_name_is_the_same_parent_the_number_came_from(self):
+        family = make_family(
+            self.branch, family_phone='0521111111',
+            parents=[('אבא', '0542222222', False), ('נעמה', '054-333-3333', True)],
+        )
+        Parent.objects.filter(family=family, first_name='נעמה').update(last_name='שלמה')
+        ctx = build_enrollment_whatsapp_context(child=family.children.first())
+        self.assertEqual(contact_index_rows(SCOPE_CURRENT), [('972543333333', 'נעמה', 'שלמה')])
+        self.assertEqual(ctx['parent_name'], 'נעמה שלמה')
+
+    def test_a_parent_without_a_phone_still_gives_their_name(self):
+        make_family(self.branch, family_phone='0526666666', parents=[('רות', '', True)])
+        self.assertEqual(contact_index_rows(SCOPE_CURRENT), [('972526666666', 'רות', 'x')])
+
+    def test_a_family_without_parents_is_named_after_the_family(self):
+        family = make_family(self.branch, family_phone='0527777777', parents=())
+        Family.objects.filter(pk=family.pk).update(name='משפחת לוי')
+        self.assertEqual(contact_index_rows(SCOPE_CURRENT), [('972527777777', 'משפחת לוי', '')])
+
+    def test_two_families_on_one_phone_give_one_row_with_the_fuller_name(self):
+        # Family ids are random UUIDs, so run both creation orders.
+        for order in ((('', '0548888888', True),), (('מיכל', '0548888888', True),)), \
+                     ((('מיכל', '0548888888', True),), (('', '0548888888', True),)):
+            with self.subTest(order=[p[0][0] for p in order]):
+                Family.objects.all().delete()
+                for parents in order:
+                    make_family(self.branch, parents=parents)
+                self.assertEqual(contact_index_rows(SCOPE_CURRENT), [('972548888888', 'מיכל', 'x')])
+
     def test_an_unknown_scope_is_refused(self):
         with self.assertRaises(ValueError):
             contact_index_phones('nobody')
 
 
 class ContactIndexCsvTests(TestCase):
-    def test_each_number_twice_under_the_fields_manychat_maps(self):
-        rows = list(csv.reader(io.StringIO(contact_index_csv(['972501234567', '972541111111']))))
-        self.assertEqual(rows[0], ['WhatsApp ID', INDEX_FIELD_NAME])
-        self.assertEqual(rows[1:], [['972501234567', '972501234567'], ['972541111111', '972541111111']])
+    def test_each_number_twice_and_the_name_under_the_fields_manychat_maps(self):
+        csv_text = contact_index_csv([('972501234567', 'נעמה', 'שלמה'), ('972541111111', 'Dana', '')])
+        rows = list(csv.reader(io.StringIO(csv_text)))
+        self.assertEqual(rows[0], ['WhatsApp ID', INDEX_FIELD_NAME, 'First Name', 'Last Name'])
+        self.assertEqual(rows[1:], [
+            ['972501234567', '972501234567', 'נעמה', 'שלמה'],
+            ['972541111111', '972541111111', 'Dana', ''],
+        ])
+
+    def test_a_name_with_a_comma_or_quote_stays_one_cell(self):
+        rows = list(csv.reader(io.StringIO(contact_index_csv([('972501234567', 'בן, "דוד"', 'כהן')]))))
+        self.assertEqual(rows[1], ['972501234567', '972501234567', 'בן, "דוד"', 'כהן'])
 
     def test_the_field_is_one_kogo_searches(self):
         self.assertIn(INDEX_FIELD_NAME, PHONE_LOOKUP_FIELD_NAMES)
@@ -170,7 +208,10 @@ class ContactIndexEndpointTests(NoNetworkMixin, TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res['Content-Type'].startswith('text/csv'))
         self.assertIn('manychat-contacts-current.csv', res['Content-Disposition'])
-        self.assertEqual(res.content.decode(), 'WhatsApp ID,kogo_whatsapp_phone\n972501000001,972501000001\n')
+        self.assertEqual(
+            res.content.decode('utf-8'),
+            'WhatsApp ID,kogo_whatsapp_phone,First Name,Last Name\n972501000001,972501000001,פעיל,x\n',
+        )
 
         everyone = client.get(self.export_url, {'scope': 'all'})
         self.assertEqual(everyone.content.decode().count('\n'), 3)
