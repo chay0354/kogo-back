@@ -546,7 +546,10 @@ def check_course_checkouts(today: date) -> BriefItem:
     blocks another charge until someone checks the terminal. 'review' — money
     moved on the page itself, a setup problem, a report that disagreed, or a
     charge whose record failed. A checkout still 'charging' after ten minutes
-    was cut off mid-way. None of them charges again by itself.
+    was cut off mid-way. A page that has a transaction number but is still
+    open after half an hour was left with no verdict (the parent closed the
+    window before the report or the notify came). None of them charges again
+    by itself.
     """
     from apps.customers.models import CourseCheckout
 
@@ -556,6 +559,10 @@ def check_course_checkouts(today: date) -> BriefItem:
         .filter(
             Q(status__in=[CourseCheckout.STATUS_UNCERTAIN, CourseCheckout.STATUS_REVIEW])
             | Q(status=CourseCheckout.STATUS_CHARGING, updated_at__lt=timezone.now() - timedelta(minutes=10))
+            | (
+                Q(status=CourseCheckout.STATUS_PAGE_OPEN, created_at__lt=timezone.now() - timedelta(minutes=30))
+                & ~Q(page_index='')
+            )
         )
         .select_related('family')
         .order_by('-created_at')

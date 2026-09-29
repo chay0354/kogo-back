@@ -6,6 +6,7 @@ the server charges the cart once from the token on cogolivetok and activates
 every payment the way a typed-card charge does. Tranzila's notify is public:
 only the terminal's report can lead to a charge, and nothing charges twice.
 """
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -74,6 +75,13 @@ def _report_row(checkout, **overrides):
     return {'success': True, 'transaction': row}
 
 
+def _check_row(checkout, **overrides):
+    """The NK page's row as cogolive's report really shows it (29.9.2026): N, J2, approval 0000000."""
+    fields = {'tranmode': 'N', 'txn_type': 'J2', 'authorization_number': '0000000'}
+    fields.update(overrides)
+    return _report_row(checkout, **fields)
+
+
 @override_settings(**SETTINGS)
 @patch('apps.core.payment_service.TranzilaService.create_recurring_payment_request', return_value='https://pay.test/x')
 @patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment', side_effect=_no_discount)
@@ -108,13 +116,13 @@ class CourseCheckoutTest(TestCase):
         with patch.object(TranzilaService, 'create_handshake_token', return_value='thtk-1'):
             return self.client.post(START, {'payment_ids': payment_ids}, format='json')
 
-    def _notify(self, checkout, *, response='000', index='5555', code='0012345'):
+    def _notify(self, checkout, *, response='000', index='5555', code='0012345', token='forged-token-in-the-post'):
         return self.client.post(NOTIFY, {
             'Response': response, 'index': index, 'ConfirmationCode': code, 'sum': str(checkout.page_sum),
-            'pdesc': str(checkout.id).replace('-', ''), 'ccno': '4580', 'TranzilaTK': 'forged-token-in-the-post',
+            'pdesc': str(checkout.id).replace('-', ''), 'ccno': '4580', 'TranzilaTK': token,
         })
 
-    def _paid(self, checkout, *, row=None, charge=None):
+    def _paid(self, checkout, *, row=None, charge=None, **notify):
         """Notify with the report and the charge faked; returns the charges sent."""
         sent = []
 
@@ -124,7 +132,7 @@ class CourseCheckoutTest(TestCase):
 
         with patch.object(TranzilaService, 'find_transaction', return_value=row or _report_row(checkout)), \
                 patch.object(TranzilaService, 'charge_with_token', autospec=True, side_effect=fake_charge):
-            response = self._notify(checkout)
+            response = self._notify(checkout, **notify)
         return response, sent
 
     # -- the switch ----------------------------------------------------------
@@ -235,6 +243,85 @@ class CourseCheckoutTest(TestCase):
         checkout.refresh_from_db()
         self.assertEqual(sent, [])
         self.assertEqual((checkout.status, checkout.review_reason), ('review', 'charged_at_page'))
+
+    # -- the card check as the report really shows it (29.9.2026) ---------------
+
+    def test_a_card_check_is_tied_to_its_notify_by_the_card_token_and_charged_once(self, *_):
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        response, sent = self._paid(checkout, row=_check_row(checkout), code='0000000', token=SAVED_TOKEN)
+        self.assertEqual(response.json()['status'], 'completed', response.content)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual((sent[0]['terminal'], sent[0]['token']), ('cogolivetok', SAVED_TOKEN))
+        checkout.refresh_from_db()
+        self.assertEqual((checkout.page_tranmode, checkout.card_token), ('N', SAVED_TOKEN))
+
+    def test_a_card_check_with_another_card_token_charges_nothing(self, *_):
+        # Anyone can post a notify quoting another parent's transaction number;
+        # only Tranzila and that parent have the token it saved.
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        _, sent = self._paid(checkout, row=_check_row(checkout), code='0000000', token='someone-elses-token')
+        checkout.refresh_from_db()
+        self.assertEqual(sent, [])
+        self.assertEqual((checkout.status, checkout.review_reason), ('review', 'unverified_page'))
+
+    def test_a_card_check_notify_without_a_token_charges_nothing(self, *_):
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        _, sent = self._paid(checkout, row=_check_row(checkout), code='0000000', token='')
+        checkout.refresh_from_db()
+        self.assertEqual(sent, [])
+        self.assertEqual(checkout.status, 'review')
+
+    def test_a_card_check_the_poll_finds_first_waits_for_the_notify(self, *_):
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        status_url = f'/api/v1/customers/widget/checkout/{checkout.id}/?index=5555&code=0000000'
+        with patch.object(TranzilaService, 'find_transaction', return_value=_check_row(checkout)), \
+                patch.object(TranzilaService, 'charge_with_token') as charge:
+            waiting = self.client.get(status_url).json()
+            again = self.client.get(status_url).json()
+        charge.assert_not_called()
+        self.assertEqual((waiting['status'], again['status']), ('page_open', 'page_open'))
+        checkout.refresh_from_db()
+        self.assertEqual((checkout.page_index, checkout.card_token), ('5555', ''))
+
+        response, sent = self._paid(checkout, row=_check_row(checkout), code='0000000', token=SAVED_TOKEN)
+        self.assertEqual(response.json()['status'], 'completed', response.content)
+        self.assertEqual(len(sent), 1)
+
+    def test_a_card_check_whose_notify_never_comes_goes_to_the_office(self, *_):
+        from apps.core.models import OfficeAlert
+
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        checked_at = (timezone.now() - timedelta(minutes=6)).astimezone(ZoneInfo('Asia/Jerusalem'))
+        row = _check_row(checkout, transaction_time=checked_at.strftime('%H:%M:%S'),
+                         transaction_date=checked_at.strftime('%Y-%m-%d'))
+        CourseCheckout.objects.filter(id=checkout.id).update(created_at=timezone.now() - timedelta(minutes=8))
+        with patch.object(TranzilaService, 'find_transaction', return_value=row), \
+                patch.object(TranzilaService, 'charge_with_token') as charge, \
+                self.captureOnCommitCallbacks(execute=True):
+            status = self.client.get(f'/api/v1/customers/widget/checkout/{checkout.id}/?index=5555&code=0000000').json()
+        charge.assert_not_called()
+        self.assertEqual(status['status'], 'review')
+        checkout.refresh_from_db()
+        self.assertEqual(checkout.review_reason, 'no_notify')
+        alert = OfficeAlert.objects.get(kind='course_checkout_no_notify')
+        self.assertIn('5555', alert.action)
+        self.assertIn('Noa Levi', alert.customer)
+
+    def test_a_page_left_open_with_a_number_is_in_the_morning_brief(self, *_):
+        from apps.core.daily_brief import check_course_checkouts
+
+        ids = self._register_cart()
+        checkout = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])
+        self.assertEqual(check_course_checkouts(timezone.localdate()).count, 0)
+        CourseCheckout.objects.filter(id=checkout.id).update(
+            page_index='5555', created_at=timezone.now() - timedelta(minutes=31),
+        )
+        self.assertEqual(check_course_checkouts(timezone.localdate()).count, 1)
 
     def test_a_declined_card_check_charges_nothing(self, *_):
         ids = self._register_cart()
