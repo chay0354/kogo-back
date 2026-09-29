@@ -56,6 +56,32 @@ def _active_lesson_for(child, *, lesson_id=None, day_of_week=None):
     return rows[0].lesson
 
 
+def _extra_recipients(child, phone_key: str) -> list:
+    """
+    The family's other parents with a phone of their own — the extra phones the
+    office added on the card, which get the group message too.
+
+    Every parent but the one the message already went to, the same split the
+    card shows (customer_details.extra_phones_of). A number equal to the
+    primary's is the same person and is left out quietly.
+    """
+    extras = []
+    for parent in child.family.parents.all():
+        key = ManyChatService.normalize_phone_e164(parent.phone or '')
+        if key and key != phone_key:
+            extras.append((parent, key))
+    return extras
+
+
+def _extra_lookup_names(parent, family) -> list[str]:
+    names: list[str] = []
+    for value in (f'{parent.first_name} {parent.last_name}', parent.first_name, parent.last_name, family.name):
+        value = (value or '').strip()
+        if value and value not in names:
+            names.append(value)
+    return names
+
+
 def broadcast_to_children(
     children: Iterable,
     *,
@@ -66,6 +92,7 @@ def broadcast_to_children(
     service: ManyChatService | None = None,
     lesson_id=None,
     day_of_week=None,
+    include_extra_phones: bool = False,
 ) -> dict:
     """
     Send (or preview) one automation to the parents of ``children``.
@@ -73,6 +100,12 @@ def broadcast_to_children(
     Returns per-child rows with status sent / failed / preview / skipped and
     the E.164 phones used, so the caller can hand them back as ``skip_phones``
     for the next chunk and siblings across chunks still get one message.
+
+    The row's own status is the primary parent's. With include_extra_phones
+    the family's extra phones go in the row's ``extra_phones``, each with its
+    own status, under the same rules: one message per phone across the whole
+    run, and none when the template has no lesson to fill in. Without it the
+    list stays empty and nothing reaches them.
     """
     svc = service or ManyChatService()
     seen_phones: set[str] = {ManyChatService.normalize_phone_e164(p) for p in skip_phones if p}
@@ -80,7 +113,58 @@ def broadcast_to_children(
 
     results: list[dict] = []
     counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0}
+    extra_counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0}
     phones_used: list[str] = []
+
+    def deliver(*, phone: str, parent_name: str, lookup_names, ctx: dict) -> dict:
+        try:
+            if automation_type == 'kind':
+                return svc.notify_registration(
+                    kind=automation_id,
+                    phone=phone,
+                    parent_name=parent_name,
+                    child_name=ctx['child_name'],
+                    course_name=ctx['course_name'],
+                    day_name=ctx['day_name'],
+                    start_time=ctx['start_time'],
+                    end_time=ctx['end_time'],
+                    branch_name=ctx['branch_name'],
+                    location=ctx.get('location', ''),
+                    lookup_names=lookup_names,
+                )
+            return svc.send_automation_to_contact(
+                automation_type='flow',
+                automation_id=automation_id,
+                phone=phone,
+                name=parent_name,
+                branch_name=ctx.get('branch_name') or None,
+            )
+        except ManyChatError as exc:
+            # str(exc) is ManyChat's headline and is often just "Validation
+            # error". What the office needs is the field it rejected, which
+            # lives in the payload.
+            outcome = {'sent': False, 'error': manychat_error_detail(exc)}
+            if isinstance(exc, ManyChatContactUnfindable):
+                outcome['reason'] = 'contact_unfindable'
+            return outcome
+
+    def settle(target: dict, key: str, outcome: dict, tally: dict) -> None:
+        """Record one real send on its row; only a message that went out uses up the phone."""
+        if outcome.get('sent'):
+            # Only a message that went out covers the sibling on the same phone;
+            # after a failure the sibling's row is still worth a try.
+            seen_phones.add(key)
+            phones_used.append(key)
+            target['status'] = 'sent'
+            target['method'] = outcome.get('method')
+            tally['sent'] += 1
+        else:
+            target['status'] = 'failed'
+            target['error'] = outcome.get('error') or outcome.get('reason') or 'unknown'
+            if outcome.get('reason') == 'contact_unfindable':
+                # The screen offers to link this contact by hand.
+                target['reason'] = 'contact_unfindable'
+            tally['failed'] += 1
 
     for child in children:
         row = {
@@ -92,13 +176,14 @@ def broadcast_to_children(
             'reason': None,
             'method': None,
             'error': None,
+            'extra_phones': [],
         }
+        results.append(row)
         lesson = _active_lesson_for(child, lesson_id=lesson_id, day_of_week=day_of_week)
         ctx = build_enrollment_whatsapp_context(child=child, lesson=lesson)
         if not ctx:
             row['reason'] = 'no_parent_phone'
             counts['skipped'] += 1
-            results.append(row)
             continue
 
         row['parent_name'] = ctx.get('parent_name') or ''
@@ -107,77 +192,66 @@ def broadcast_to_children(
         if not phone_key:
             row['reason'] = 'no_parent_phone'
             counts['skipped'] += 1
-            results.append(row)
             continue
+        if automation_type == 'kind' and lesson is None and phone_key not in seen_phones:
+            # The Kogo templates carry course/day/time; without a lesson the
+            # parent would get a message full of dashes — and so would the
+            # extra phones, which are skipped with it.
+            row['reason'] = 'no_active_lesson'
+            counts['skipped'] += 1
+            continue
+
         if phone_key in seen_phones:
             row['reason'] = 'duplicate_phone'
             counts['skipped'] += 1
-            results.append(row)
-            continue
-        if automation_type == 'kind' and lesson is None:
-            # The Kogo templates carry course/day/time; without a lesson the
-            # parent would get a message full of dashes.
-            row['reason'] = 'no_active_lesson'
-            counts['skipped'] += 1
-            results.append(row)
-            continue
-
-        if dry_run:
+        elif dry_run:
             seen_phones.add(phone_key)
             phones_used.append(phone_key)
             row['status'] = 'preview'
             counts['preview'] += 1
-            results.append(row)
-            continue
-
-        try:
-            if automation_type == 'kind':
-                outcome = svc.notify_registration(
-                    kind=automation_id,
-                    phone=ctx['phone'],
-                    parent_name=ctx['parent_name'],
-                    child_name=ctx['child_name'],
-                    course_name=ctx['course_name'],
-                    day_name=ctx['day_name'],
-                    start_time=ctx['start_time'],
-                    end_time=ctx['end_time'],
-                    branch_name=ctx['branch_name'],
-                    location=ctx.get('location', ''),
-                    lookup_names=ctx.get('lookup_names'),
-                )
-            else:
-                outcome = svc.send_automation_to_contact(
-                    automation_type='flow',
-                    automation_id=automation_id,
-                    phone=ctx['phone'],
-                    name=ctx['parent_name'],
-                    branch_name=ctx.get('branch_name') or None,
-                )
-        except ManyChatError as exc:
-            # str(exc) is ManyChat's headline and is often just "Validation
-            # error". What the office needs is the field it rejected, which
-            # lives in the payload.
-            outcome = {'sent': False, 'error': manychat_error_detail(exc)}
-            if isinstance(exc, ManyChatContactUnfindable):
-                outcome['reason'] = 'contact_unfindable'
-
-        if outcome.get('sent'):
-            # Only a message that went out covers the sibling on the same phone;
-            # after a failure the sibling's row is still worth a try.
-            seen_phones.add(phone_key)
-            phones_used.append(phone_key)
-            row['status'] = 'sent'
-            row['method'] = outcome.get('method')
-            counts['sent'] += 1
         else:
-            row['status'] = 'failed'
-            row['error'] = outcome.get('error') or outcome.get('reason') or 'unknown'
-            if outcome.get('reason') == 'contact_unfindable':
-                # The screen offers to link this contact by hand.
-                row['reason'] = 'contact_unfindable'
-            counts['failed'] += 1
-            logger.warning('Broadcast to child %s failed: %s', child.id, row['error'])
-        results.append(row)
+            outcome = deliver(
+                phone=ctx['phone'],
+                parent_name=ctx['parent_name'],
+                lookup_names=ctx.get('lookup_names'),
+                ctx=ctx,
+            )
+            settle(row, phone_key, outcome, counts)
+            if row['status'] == 'failed':
+                logger.warning('Broadcast to child %s failed: %s', child.id, row['error'])
+
+        if not include_extra_phones or (automation_type == 'kind' and lesson is None):
+            continue
+        for parent, key in _extra_recipients(child, phone_key):
+            name = f'{parent.first_name} {parent.last_name}'.strip() or row['parent_name']
+            extra = {
+                'parent_name': name,
+                'phone': key,
+                'status': 'skipped',
+                'reason': None,
+                'method': None,
+                'error': None,
+            }
+            row['extra_phones'].append(extra)
+            if key in seen_phones:
+                extra['reason'] = 'duplicate_phone'
+                extra_counts['skipped'] += 1
+                continue
+            if dry_run:
+                seen_phones.add(key)
+                phones_used.append(key)
+                extra['status'] = 'preview'
+                extra_counts['preview'] += 1
+                continue
+            outcome = deliver(
+                phone=parent.phone,
+                parent_name=name,
+                lookup_names=_extra_lookup_names(parent, child.family),
+                ctx=ctx,
+            )
+            settle(extra, key, outcome, extra_counts)
+            if extra['status'] == 'failed':
+                logger.warning('Broadcast to an extra phone of child %s failed: %s', child.id, extra['error'])
 
     return {
         'dry_run': dry_run,
@@ -188,6 +262,10 @@ def broadcast_to_children(
         'failed': counts['failed'],
         'skipped': counts['skipped'],
         'preview_count': counts['preview'],
+        'extra_sent': extra_counts['sent'],
+        'extra_failed': extra_counts['failed'],
+        'extra_skipped': extra_counts['skipped'],
+        'extra_preview_count': extra_counts['preview'],
         'phones': phones_used,
         'results': results,
     }
