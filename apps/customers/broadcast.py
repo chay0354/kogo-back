@@ -9,6 +9,7 @@ Nothing here sends unless ``dry_run`` is False; the default is a preview.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterable
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
@@ -56,20 +57,38 @@ def _active_lesson_for(child, *, lesson_id=None, day_of_week=None):
     return rows[0].lesson
 
 
+_MOBILE_E164 = re.compile(r'^9725\d{8}$')
+
+
 def _extra_recipients(child, phone_key: str) -> list:
     """
     The family's other parents with a phone of their own — the extra phones the
-    office added on the card, which get the group message too.
+    office added on the card, which get the group message too — each with the
+    reason it is skipped, or None.
 
     Every parent but the one the message already went to, the same split the
     card shows (customer_details.extra_phones_of). A number equal to the
-    primary's is the same person and is left out quietly.
+    primary's is the same person and is left out quietly. Two are listed but
+    skipped:
+
+    - a landline: the "add customer" form has always taken one as the extra
+      phone, and WhatsApp does not reach it;
+    - another family's own phone: that parent gets the message about their
+      own child, not this family's in its place.
     """
+    from apps.customers.customer_details import phone_is_another_familys
+
     extras = []
     for parent in child.family.parents.all():
         key = ManyChatService.normalize_phone_e164(parent.phone or '')
-        if key and key != phone_key:
-            extras.append((parent, key))
+        if not key or key == phone_key:
+            continue
+        if not _MOBILE_E164.match(key):
+            extras.append((parent, key, 'not_mobile'))
+        elif phone_is_another_familys(child.family, parent.phone):
+            extras.append((parent, key, 'other_family_phone'))
+        else:
+            extras.append((parent, key, None))
     return extras
 
 
@@ -222,7 +241,7 @@ def broadcast_to_children(
 
         if not include_extra_phones or (automation_type == 'kind' and lesson is None):
             continue
-        for parent, key in _extra_recipients(child, phone_key):
+        for parent, key, skip_reason in _extra_recipients(child, phone_key):
             name = f'{parent.first_name} {parent.last_name}'.strip() or row['parent_name']
             extra = {
                 'parent_name': name,
@@ -233,6 +252,10 @@ def broadcast_to_children(
                 'error': None,
             }
             row['extra_phones'].append(extra)
+            if skip_reason:
+                extra['reason'] = skip_reason
+                extra_counts['skipped'] += 1
+                continue
             if key in seen_phones:
                 extra['reason'] = 'duplicate_phone'
                 extra_counts['skipped'] += 1

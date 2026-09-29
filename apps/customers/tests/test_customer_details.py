@@ -314,3 +314,64 @@ class ScopeAndGuardsTests(_Card):
         self.assertEqual(self.patch({'child': 'x'}).status_code, 400)
         self.assertEqual(self.patch({'extra_phones': {'phone': '0521112233'}}).status_code, 400)
         self.assertEqual(self.patch({'extra_phones': ['0521112233']}).status_code, 400)
+
+
+class ReviewRoundTests(_Card):
+    """What the independent review of 29.9 found, pinned."""
+
+    def test_an_id_is_stored_as_typed_without_padding(self):
+        # The widget finds a returning parent by the exact string; up to nine digits.
+        res = self.patch({'parent': {'id_number': ID_C.lstrip('0')}, 'child': {'id_number': ID_C.lstrip('0')}})
+        self.assertEqual(res.status_code, 200, res.content)
+        self.reload()
+        self.assertEqual(self.family.parent_id_number, ID_C.lstrip('0'))
+        self.assertEqual(self.child.id_number, ID_C.lstrip('0'))
+        self.assertEqual(self.patch({'parent': {'id_number': '1234'}}).status_code, 400)
+
+    def test_the_parent_phone_cannot_take_an_extras_number(self):
+        Parent.objects.create(family=self.family, first_name='סבתא', last_name='', phone='0525556666')
+        res = self.patch({'parent': {'phone': '052-555-6666'}})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('parent.phone', res.data['errors'])
+
+    def test_a_list_built_on_a_stale_card_is_refused(self):
+        added = Parent.objects.create(family=self.family, first_name='דוד', last_name='', phone='0525556666')
+        res = self.patch({'extra_phones': [], 'extra_phone_ids_seen': []})
+        self.assertEqual(res.status_code, 400, res.content)
+        self.assertTrue(Parent.objects.filter(pk=added.pk).exists())
+        res = self.patch({'extra_phones': [], 'extra_phone_ids_seen': [str(added.id)]})
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertFalse(Parent.objects.filter(pk=added.pk).exists())
+
+    def test_names_of_an_extra(self):
+        extra = Parent.objects.create(family=self.family, first_name='סבתא', last_name='רחל', phone='0525556666')
+        row = {'id': str(extra.id), 'phone': '0525556666'}
+        # One word is the whole name — not topped up with the parent's surname.
+        self.assertEqual(self.patch({'extra_phones': [{**row, 'name': 'סבתא'}]}).status_code, 200)
+        extra.refresh_from_db()
+        self.assertEqual((extra.first_name, extra.last_name), ('סבתא', ''))
+        # Cleared: the parent's name, as for an extra added without one — and it says so.
+        res = self.patch({'extra_phones': [{**row, 'name': ''}]})
+        self.assertEqual([c['field'] for c in res.data['changes']], ['extra_phones'])
+        extra.refresh_from_db()
+        self.assertEqual((extra.first_name, extra.last_name), ('יעל', 'כהן'))
+        # The same again changes nothing.
+        self.assertEqual(self.patch({'extra_phones': [{**row, 'name': ''}]}).data['changes'], [])
+
+    def test_an_old_extra_that_fails_todays_rules_does_not_block_the_list(self):
+        landline = Parent.objects.create(family=self.family, first_name='בית', last_name='', phone='03-5551234')
+        empty = Parent.objects.create(family=self.family, first_name='ישן', last_name='', phone='')
+        res = self.patch({'extra_phones': [
+            {'id': str(landline.id), 'name': 'בית', 'phone': '03-5551234'},
+            {'id': str(empty.id), 'name': 'ישן', 'phone': ''},
+            {'name': 'דוד', 'phone': '0521112233'},
+        ]})
+        self.assertEqual(res.status_code, 200, res.content)
+        landline.refresh_from_db()
+        self.assertEqual(landline.phone, '03-5551234')
+        self.assertEqual(Parent.objects.filter(family=self.family).count(), 4)
+
+    def test_only_a_real_true_confirms_a_duplicate(self):
+        Family.objects.create(name='לוי', phone='0541234567', branch=self.branch)
+        res = self.patch({'parent': {'phone': '0541234567'}, 'confirm_duplicates': 'false'})
+        self.assertEqual(res.status_code, 409)

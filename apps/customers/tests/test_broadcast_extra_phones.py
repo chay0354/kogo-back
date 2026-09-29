@@ -116,3 +116,22 @@ class ExtraPhonesBroadcastTest(_Studio):
             self.assertEqual([c.kwargs['phone'] for c in send.call_args_list], ['0501111111'], flag)
             self.assertEqual(res.data['results'][0]['extra_phones'], [])
             self.assertEqual(res.data['phones'], ['972501111111'])
+
+    def test_a_landline_extra_is_listed_but_not_messaged(self):
+        Parent.objects.filter(pk=self.grandma.pk).update(phone='03-5551234')
+        with CONFIGURED, patch('apps.customers.broadcast.ManyChatService.notify_registration',
+                               return_value={'sent': True}) as send:
+            res = self._post(child_ids=[str(self.noa.id)], dry_run=False)
+        self.assertEqual([c.kwargs['phone'] for c in send.call_args_list], ['0501111111'])
+        extra = res.data['results'][0]['extra_phones'][0]
+        self.assertEqual((extra['status'], extra['reason']), ('skipped', 'not_mobile'))
+        self.assertNotIn('97235551234', res.data['phones'])
+
+    def test_another_familys_own_phone_is_not_used_up_as_an_extra(self):
+        # The grandmother is Levi's parent too: Tom's own message is hers, and
+        # Noa's family's copy must not take its place.
+        Parent.objects.filter(pk=self.grandma.pk).update(phone='0502222222')
+        res = self._post(child_ids=[str(self.noa.id), str(self.tom.id)])
+        by_name = {r['child_name']: r for r in res.data['results']}
+        self.assertEqual(by_name['Noa Cohen']['extra_phones'][0]['reason'], 'other_family_phone')
+        self.assertEqual(by_name['Tom Levi']['status'], 'preview')

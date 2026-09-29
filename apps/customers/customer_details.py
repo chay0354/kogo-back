@@ -151,8 +151,12 @@ def _digits_expr(field: str):
     return expr
 
 
-def _other_families_with_phone(family: Family, digits: str):
-    """Families other than this one holding the phone on the family or on any parent, however stored."""
+def _other_families_with_phone(family: Family, digits: str, *, primary_only: bool = False):
+    """
+    Families other than this one holding the phone, however stored: on the
+    family or on any of its parents — or, with primary_only, only as the phone
+    the family's own messages go to.
+    """
     # 050-123-4567, 0501234567 and +972 50 123 4567 are one phone.
     same = Q(_d=digits) | Q(_d='972' + digits[1:])
     by_family = (
@@ -161,14 +165,34 @@ def _other_families_with_phone(family: Family, digits: str):
         .filter(same)
         .values_list('pk', flat=True)
     )
+    parents = Parent.objects.exclude(family_id=family.pk)
+    if primary_only:
+        parents = parents.filter(is_primary=True)
     by_parent = (
-        Parent.objects.exclude(family_id=family.pk)
+        parents
         .annotate(_d=_digits_expr('phone'))
         .filter(same)
         .values_list('family_id', flat=True)
     )
     ids = set(by_family) | set(by_parent)
     return Family.objects.filter(pk__in=ids).exclude(name=SHARED_GHOST_FAMILY_NAME).order_by('name')
+
+
+def phone_is_another_familys(family: Family, phone: str) -> bool:
+    """True when the phone is what another family's own messages go to (see broadcast)."""
+    digits = normalise_phone(phone)
+    return bool(digits) and _other_families_with_phone(family, digits, primary_only=True).exists()
+
+
+def _id_error(digits: str) -> str | None:
+    """
+    An Israeli ID as the widget takes it: up to nine digits, the leading zeros
+    optional. Stored as typed — the widget finds a returning parent by the
+    exact string, so padding it here would lose them.
+    """
+    if not 5 <= len(digits) <= 9 or not israeli_id_valid(digits.zfill(9)):
+        return 'מספר ת.ז. לא תקין'
+    return None
 
 
 def _other_families_with_id(family: Family, digits: str):
@@ -217,11 +241,18 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
     extras_in = payload.get('extra_phones')
     if extras_in is not None and not isinstance(extras_in, list):
         raise CustomerDetailsError({'extra_phones': 'מבנה לא תקין'})
-    confirm = bool(payload.get('confirm_duplicates'))
+    confirm = payload.get('confirm_duplicates') is True
+    # The extra phones the card started from: the list replaces what is there,
+    # so a list built on a stale card must not delete what someone else added.
+    seen_extra_ids = payload.get('extra_phone_ids_seen')
 
     with transaction.atomic():
-        child = Child.objects.select_for_update().get(pk=child.pk)
+        # Family first, then the child — the order the registration widget
+        # locks in, so the two never wait on each other.
         family = Family.objects.select_for_update().get(pk=child.family_id)
+        child = Child.objects.select_for_update().get(pk=child.pk)
+        if child.family_id != family.pk:
+            raise CustomerDetailsError({'family': 'הכרטיס השתנה בינתיים — סגרו ופתחו אותו מחדש'})
         parents = list(
             Parent.objects.select_for_update()
             .filter(family=family)
@@ -279,8 +310,8 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
                 value = normalize_id_number(_text(raw))
                 if value == normalize_id_number(child.id_number or ''):
                     continue
-                if value and not israeli_id_valid(value):
-                    errors[path] = 'מספר ת.ז. לא תקין'
+                if value and (error := _id_error(value)):
+                    errors[path] = error
                 else:
                     child_updates[key] = value
             elif key == 'phone_number':
@@ -323,6 +354,11 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
                     errors[path] = 'טלפון ההורה הוא שדה חובה'
                 elif error := _phone_error(value):
                     errors[path] = error
+                elif extras_in is None and any(
+                    _same_phone(value, extra.phone or '')
+                    for extra in parents if primary is None or extra.pk != primary.pk
+                ):
+                    errors[path] = 'המספר רשום כטלפון נוסף של המשפחה — הסירו אותו משם קודם'
                 else:
                     new_phone = value
                     others = _other_families_with_phone(family, value)
@@ -353,8 +389,8 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
                     # The widget finds a returning parent by this number; without
                     # it the next registration would open a second family.
                     errors[path] = 'ת.ז. ההורה משמשת לזיהוי בהרשמה ואינה יכולה להימחק'
-                elif not israeli_id_valid(value):
-                    errors[path] = 'מספר ת.ז. לא תקין'
+                elif error := _id_error(value):
+                    errors[path] = error
                 else:
                     parent_updates['id_number'] = value
                     others = _other_families_with_id(family, value)
@@ -388,11 +424,20 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
         # ---- extra phones --------------------------------------------------
         extras_plan = None
         if extras_in is not None:
+            current_extra_ids = {str(p.pk) for p in parents if primary is None or p.pk != primary.pk}
+            if isinstance(seen_extra_ids, list) and set(map(str, seen_extra_ids)) != current_extra_ids:
+                raise CustomerDetailsError({
+                    'extra_phones': 'הטלפונים הנוספים שונו בינתיים על ידי משתמש אחר — סגרו ופתחו את הכרטיס מחדש',
+                })
             extras_plan = _plan_extras(
                 extras_in,
                 parents=parents,
                 primary=primary,
                 primary_phone=new_phone if new_phone is not None else current_phone,
+                # A nameless extra takes the parent's name, as the "add customer" form does.
+                fallback_first=(parent_updates.get('first_name') or (primary.first_name if primary else '')
+                                or family.name or ''),
+                fallback_last=parent_updates.get('last_name') or (primary.last_name if primary else '') or '',
                 errors=errors,
             )
 
@@ -477,13 +522,22 @@ def _display(value) -> str:
     return str(value)
 
 
-def _plan_extras(rows, *, parents, primary, primary_phone, errors) -> dict:
+def _split_name(name: str, *, fallback_first: str, fallback_last: str) -> tuple[str, str]:
+    """'סבתא רחל' -> ('סבתא', 'רחל'); 'סבתא' -> ('סבתא', ''); no name -> the fallback."""
+    if not name:
+        return fallback_first[:100], fallback_last[:100]
+    parts = name.split(None, 1)
+    return parts[0][:100], (parts[1] if len(parts) > 1 else '')[:100]
+
+
+def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallback_last, errors) -> dict:
     """
     Check the full list of extra phones the card sent and work out the writes.
 
     The list replaces what is there: a row with an id updates that parent, a
     row without one adds a parent, and an existing extra that is missing is
-    removed — unless a payment or an invoice names it.
+    removed — unless a payment or an invoice names it. A row the office did not
+    touch is kept as it is, even when an old record would not pass today.
     """
     existing = {str(p.pk): p for p in parents if primary is None or p.pk != primary.pk}
     if len(rows) > MAX_EXTRA_PHONES:
@@ -503,30 +557,36 @@ def _plan_extras(rows, *, parents, primary, primary_phone, errors) -> dict:
         if row_id and row_id not in existing:
             errors[path] = 'הטלפון הזה כבר לא קיים — רעננו את הכרטיס'
             continue
-        if not phone:
-            errors[f'{path}.phone'] = 'חסר מספר'
-            continue
-        target = existing.get(row_id)
-        unchanged_phone = target is not None and _same_phone(phone, target.phone or '')
-        if not unchanged_phone and (error := _phone_error(phone, mobile_only=True)):
-            errors[f'{path}.phone'] = error
-            continue
-        if phone in seen:
-            errors[f'{path}.phone'] = 'המספר כבר מופיע בכרטיס'
-            continue
-        seen.add(phone)
         if len(name) > 200:
             errors[f'{path}.name'] = 'ארוך מדי'
             continue
+        target = existing.get(row_id)
+        unchanged_phone = target is not None and _same_phone(phone, target.phone or '')
+        if not unchanged_phone:
+            if not phone:
+                errors[f'{path}.phone'] = 'חסר מספר'
+                continue
+            if error := _phone_error(phone, mobile_only=True):
+                errors[f'{path}.phone'] = error
+                continue
+            if phone in seen:
+                errors[f'{path}.phone'] = 'המספר כבר מופיע בכרטיס'
+                continue
+        if phone:
+            seen.add(phone)
         if target is None:
             creates.append({'name': name, 'phone': phone})
             continue
         kept.add(row_id)
-        name_changed = bool(name) and name != parent_display_name(target)
-        if not unchanged_phone or name_changed or target.is_primary:
+        new_name = None
+        if name != parent_display_name(target):
+            first_last = _split_name(name, fallback_first=fallback_first, fallback_last=fallback_last)
+            if first_last != (target.first_name, target.last_name):
+                new_name = first_last
+        if not unchanged_phone or new_name is not None or target.is_primary:
             updates.append({
                 'parent': target,
-                'name': name if name_changed else None,
+                'name': new_name,
                 'phone': None if unchanged_phone else phone,
             })
 
@@ -538,19 +598,14 @@ def _plan_extras(rows, *, parents, primary, primary_phone, errors) -> dict:
                 'יש תשלום או חשבונית על שמו'
             )
     changed = bool(creates or deletes or any(u['name'] is not None or u['phone'] for u in updates))
-    return {'updates': updates, 'creates': creates, 'deletes': deletes, 'changed': changed}
-
-
-def _split_name(name: str, *, fallback_first: str, fallback_last: str) -> tuple[str, str]:
-    if not name:
-        return fallback_first, fallback_last
-    parts = name.split(None, 1)
-    return parts[0][:100], (parts[1] if len(parts) > 1 else fallback_last)[:100]
+    return {
+        'updates': updates, 'creates': creates, 'deletes': deletes, 'changed': changed,
+        'fallback': (fallback_first, fallback_last),
+    }
 
 
 def _apply_extras(plan, *, family, primary) -> None:
-    fallback_first = (primary.first_name if primary else '') or family.name or ''
-    fallback_last = (primary.last_name if primary else '') or ''
+    fallback_first, fallback_last = plan['fallback']
     if primary is not None and primary.pk and not primary.is_primary:
         # The parent the card shows is the primary from now on, so every sender
         # (alerts, card links, broadcasts) agrees on who that is.
@@ -561,9 +616,7 @@ def _apply_extras(plan, *, family, primary) -> None:
     for item in plan['updates']:
         parent = item['parent']
         if item['name'] is not None:
-            parent.first_name, parent.last_name = _split_name(
-                item['name'], fallback_first=fallback_first, fallback_last=fallback_last,
-            )
+            parent.first_name, parent.last_name = item['name']
         if item['phone']:
             parent.phone = item['phone']
         # An extra is never the primary, whatever an old record said.
