@@ -655,12 +655,14 @@ class SignedOriginal(models.Model):
     CHANNEL_STORE = 'store'
     CHANNEL_CREDIT_NOTE = 'credit_note'
     CHANNEL_RENTAL = 'rental'
+    CHANNEL_MICHAL = 'michal'
     CHANNEL_CHOICES = [
         ('', 'לא נשלח על ידי המערכת'),
         (CHANNEL_IR, 'מייל קבלת חוג'),
         (CHANNEL_STORE, 'מייל חנות האתר'),
         (CHANNEL_CREDIT_NOTE, 'מייל הודעת זיכוי'),
         (CHANNEL_RENTAL, 'מייל קבלת שכירות'),
+        (CHANNEL_MICHAL, 'מייל חשבונית מיכל קגן'),
     ]
 
     # What the stored file is. An original is the one "מקור", signed at issue.

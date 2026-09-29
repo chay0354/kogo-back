@@ -387,6 +387,10 @@ def _send_by_channel(row: SignedOriginal) -> bool:
         from apps.rental_billing.receipt_email import send_rental_receipt_email
 
         return bool(send_rental_receipt_email(row.source_id))
+    if row.channel == SignedOriginal.CHANNEL_MICHAL:
+        from apps.documents.michal.email import send_michal_document_email
+
+        return bool(send_michal_document_email(row.source_id))
     return False
 
 
