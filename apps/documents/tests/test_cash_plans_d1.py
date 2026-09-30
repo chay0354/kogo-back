@@ -176,3 +176,29 @@ class ApiTests(Fixture, APITestCase):
         bad = self.client.post(f"{PLANS}{res.data['id']}/cancel/", {'refund_amount': '-5'}, format='json')
         self.assertEqual(bad.status_code, 400, bad.data)
         self.assertTrue(bad.data['error'])
+
+
+@override_settings(TRANZILA_BILLING_TERMINAL='')
+class OlderPlansReportTests(OldPlanFixture, TestCase):
+    def test_the_report_counts_the_cash_recorded_again_and_writes_nothing(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        plan = self.old_plan()
+        # An IRM a month, as the original design issued them.
+        month = plan.months.order_by('due_date').first()
+        irm = FormalDocument.objects.create(
+            document_number=f'IRM-{self.year}-000900', document_type='combined', client_type='existing',
+            child=self.kid, document_date=self.today, total_amount=Decimal('240.00'),
+        )
+        CashPlanMonth.objects.filter(pk=month.pk).update(status='invoiced', document=irm)
+        register_cash_plan(child_id=str(self.kid.id), total_amount='240', monthly_amount='240')  # upfront: not listed
+        before = FormalDocument.objects.count()
+
+        out = StringIO()
+        call_command('report_older_cash_plans', stdout=out)
+        text = out.getvalue()
+        self.assertIn(f'{plan.pk},active,{plan.receipt.document_number},720.00,1,240.00,0,2,480.00', text)
+        self.assertIn('Older cash plans: 1', text)
+        self.assertEqual(FormalDocument.objects.count(), before)
