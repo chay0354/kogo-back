@@ -128,6 +128,17 @@ class BusinessChargeTests(TestCase):
         self.assertEqual(document.document_type, 'combined')
         self.assertEqual(balance_of(invoice).open, Decimal('0.00'))
 
+    def test_the_invoice_is_named_once_in_the_title_and_on_the_document(self):
+        """The screen fills "תשלום עבור חשבונית עסקה TX-…" by itself; it read twice."""
+        invoice = self.invoice('transaction_invoice', 'TX-TEST-2')
+        link = self.create_link(
+            target_invoice_id=str(invoice.id), description='תשלום עבור חשבונית עסקה TX-TEST-2',
+        )
+        self.assertEqual(link.title, 'תשלום עבור חשבונית עסקה TX-TEST-2')
+        document = issue_business_charge_document(self.completed_payment(link).id)
+        line = document.line_items.get().description
+        self.assertEqual(line.count('TX-TEST-2'), 1, line)
+
     @override_settings(
         CRM_API_BASE_URL='https://api.example.test',
         TRANZILA_HOSTED_PAGE_ENABLED=True,

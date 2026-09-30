@@ -57,7 +57,8 @@ class PaymentLinkViewSet(viewsets.ModelViewSet):
         customer = data['business_customer']
         amount = money(data.pop('amount'))
         description = data.pop('description').strip()
-        title = f'תשלום עבור {description}'[:120]
+        # The screen already writes "תשלום עבור חשבונית …" for an open invoice.
+        title = (description if description.startswith('תשלום עבור') else f'תשלום עבור {description}')[:120]
         with transaction.atomic():
             link = PaymentLink.objects.create(
                 kind=PaymentLink.KIND_BUSINESS_CHARGE,

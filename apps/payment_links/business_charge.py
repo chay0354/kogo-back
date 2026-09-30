@@ -143,11 +143,13 @@ def issue_business_charge_document(payment_id) -> object | None:
         doc = document_service.create_receipt(data, issued_by=link.created_by)
         settle_on_issue(doc, data, user=link.created_by)
     else:
-        data = _combined_data(
-            payment,
-            f'תשלום עבור חשבונית עסקה {invoice.document_number} — {description}',
-            settlement=invoice,
+        # The line printed on the tax document: the screen's own description
+        # often names the invoice already, and it must not read twice.
+        line = (
+            description if invoice.document_number in description
+            else f'תשלום עבור חשבונית עסקה {invoice.document_number} — {description}'
         )
+        data = _combined_data(payment, line[:500], settlement=invoice)
         doc = document_service.create_combined(data, issued_by=link.created_by)
         settle_on_issue(doc, data, user=link.created_by)
 
