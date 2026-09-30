@@ -716,17 +716,22 @@ class TranzilaService:
         callback_url: str = '',
         transaction_id: str = '',
         offer_wallets: bool = False,
+        hosted_page_allowed: Optional[bool] = None,
         **extra_params
     ) -> str:
         """Create iframe payment URL for one-time payment.
 
         `offer_wallets` adds the TRANZILA_WALLETS buttons (Bit, Google Pay).
         Store purchases only: a wallet payment leaves no card to bill later.
+        `hosted_page_allowed` is for a flow with a switch of its own (the
+        business charge, BUSINESS_CHARGE_ENABLED); None reads the general one.
         """
         # The hosted page runs on TRANZILA_TERMINAL, a test terminal ('realtest'):
         # a customer who paid there was never charged. Refused here, once, for
         # every screen that could open it.
-        if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
+        if hosted_page_allowed is None:
+            hosted_page_allowed = getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False)
+        if not hosted_page_allowed:
             raise HostedPageDisabled(HOSTED_PAGE_DISABLED_MESSAGE)
         handshake_enabled = getattr(settings, 'TRANZILA_HANDSHAKE_ENABLED', True)
         if handshake_enabled and self.public_key and self.secret_key:

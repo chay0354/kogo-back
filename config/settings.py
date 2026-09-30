@@ -288,6 +288,10 @@ TRANZILA_SUPPLIER = config('TRANZILA_SUPPLIER', default='mock-supplier')
 # Dedicated hosted terminal for one-time business charges. It must not
 # repoint the existing store or general payment-link iframe terminal.
 BUSINESS_CHARGE_TRANZILA_TERMINAL = config('BUSINESS_CHARGE_TRANZILA_TERMINAL', default='')
+# The one-time business charge's own switch (owner, 30.9.2026: "only for this").
+# It opens Tranzila's hosted page for business charges alone; the store, the
+# till and general payment links stay behind TRANZILA_HOSTED_PAGE_ENABLED.
+BUSINESS_CHARGE_ENABLED = config('BUSINESS_CHARGE_ENABLED', default=False, cast=bool)
 
 # RESTful API v1 credentials (required for token-based charges)
 TRANZILA_PUBLIC_KEY = config('TRANZILA_PUBLIC_KEY', default='')  # Goes in X-tranzila-api-app-key header

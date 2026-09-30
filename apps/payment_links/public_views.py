@@ -131,10 +131,12 @@ class PublicPaymentStartView(_PublicView):
             # the customers webhook, which cannot resolve our row.
             logger.error('payment link start refused: CRM_API_BASE_URL is not set')
             return Response({'error': 'הסליקה אינה זמינה כרגע'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
-            # The link pays on Tranzila's hosted page, which runs on a test
-            # terminal: the payer would see "approved" and nothing would be
-            # charged. Refused before a payment row is written.
+        # A business charge opens only with its own switch; every other link
+        # with the general one. Refused before a payment row is written.
+        hosted_page_open = bool(getattr(
+            settings, 'BUSINESS_CHARGE_ENABLED' if business_charge else 'TRANZILA_HOSTED_PAGE_ENABLED', False,
+        ))
+        if not hosted_page_open:
             return Response({'error': 'הסליקה אינה זמינה כרגע'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         business_terminal = (
@@ -189,6 +191,7 @@ class PublicPaymentStartView(_PublicView):
         front = link.public_url()
         try:
             iframe_url = tranzila.create_payment_request(
+                hosted_page_allowed=hosted_page_open,
                 amount=row.amount,
                 currency='ILS',
                 description=f'{link.title} — {option.label}'[:80],

@@ -141,7 +141,7 @@ class BusinessChargeTests(TestCase):
 
     @override_settings(
         CRM_API_BASE_URL='https://api.example.test',
-        TRANZILA_HOSTED_PAGE_ENABLED=True,
+        BUSINESS_CHARGE_ENABLED=True,
     )
     def test_business_charge_refuses_any_hosted_terminal_other_than_cogolive(self):
         link = self.create_link()
@@ -158,7 +158,7 @@ class BusinessChargeTests(TestCase):
 
     @override_settings(
         CRM_API_BASE_URL='https://api.example.test',
-        TRANZILA_HOSTED_PAGE_ENABLED=True,
+        BUSINESS_CHARGE_ENABLED=True,
     )
     def test_business_charge_uses_locked_customer_details_on_cogolive(self):
         link = self.create_link()
@@ -180,7 +180,7 @@ class BusinessChargeTests(TestCase):
 
     @override_settings(
         CRM_API_BASE_URL='https://api.example.test',
-        TRANZILA_HOSTED_PAGE_ENABLED=True,
+        BUSINESS_CHARGE_ENABLED=True,
         TRANZILA_TERMINAL='general-hosted',
         BUSINESS_CHARGE_TRANZILA_TERMINAL='cogolive',
         TRANZILA_PUBLIC_KEY='pk-business-charge',
@@ -234,3 +234,56 @@ class BusinessChargeTests(TestCase):
         self.assertEqual(row.status, PaymentLinkPayment.STATUS_COMPLETED, row.review_reason)
         self.assertEqual(row.tranzila_terminal, 'cogolive')
         self.assertEqual(row.formal_document.document_type, 'combined')
+
+    @override_settings(
+        CRM_API_BASE_URL='https://api.example.test',
+        TRANZILA_HOSTED_PAGE_ENABLED=True,
+        BUSINESS_CHARGE_ENABLED=False,
+    )
+    def test_the_general_hosted_page_switch_does_not_open_a_business_charge(self):
+        """Owner, 30.9.2026: business charges have a switch of their own."""
+        link = self.create_link()
+        with patch('apps.payment_links.public_views.TranzilaService.iframe') as iframe:
+            iframe.return_value.terminal = 'cogolive'
+            response = APIClient().post(
+                f'/api/v1/payment-links/public/{link.slug}/start/',
+                {'option_id': str(link.options.get().id)}, format='json',
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(PaymentLinkPayment.objects.filter(link=link).exists())
+
+    @override_settings(
+        CRM_API_BASE_URL='https://api.example.test',
+        TRANZILA_HOSTED_PAGE_ENABLED=False,
+        BUSINESS_CHARGE_ENABLED=True,
+    )
+    def test_the_business_switch_opens_business_charges_and_nothing_else(self):
+        from apps.payment_links.models import PaymentLinkOption
+
+        link = self.create_link()
+        general = PaymentLink.objects.create(title='קישור כללי', created_by=self.manager)
+        option = PaymentLinkOption.objects.create(link=general, label='כרטיס', amount=Decimal('50'))
+        public = APIClient()
+        with patch('apps.payment_links.public_views.TranzilaService.iframe') as iframe:
+            iframe.return_value.terminal = 'cogolive'
+            iframe.return_value.create_payment_request.return_value = 'https://direct.tranzila.com/cogolive/iframenew.php'
+            business = public.post(
+                f'/api/v1/payment-links/public/{link.slug}/start/',
+                {'option_id': str(link.options.get().id)}, format='json',
+            )
+            other = public.post(
+                f'/api/v1/payment-links/public/{general.slug}/start/',
+                {'option_id': str(option.id), 'payer_name': 'דנה', 'payer_phone': '0501234567'}, format='json',
+            )
+        self.assertEqual(business.status_code, 200, business.data)
+        self.assertTrue(iframe.return_value.create_payment_request.call_args.kwargs['hosted_page_allowed'])
+        self.assertEqual(other.status_code, 503)
+
+    @override_settings(TRANZILA_HOSTED_PAGE_ENABLED=False)
+    def test_the_gateway_refuses_the_hosted_page_unless_the_flow_is_allowed(self):
+        from apps.core.tranzila_service import HostedPageDisabled, TranzilaService
+
+        with self.assertRaises(HostedPageDisabled):
+            TranzilaService(terminal='cogolive').create_payment_request(amount=Decimal('10'))
+        with self.assertRaises(HostedPageDisabled):
+            TranzilaService(terminal='cogolive').create_payment_request(amount=Decimal('10'), hosted_page_allowed=False)
