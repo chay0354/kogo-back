@@ -12,8 +12,9 @@ These pin:
 - ManyChatService.reach: finds or creates, sends nothing, writes nothing to a
   contact it finds, and names what it cannot fix.
 - The morning check over every recipient: slices, resumes, lists, alerts once.
-- An alert for every WhatsApp that did not go out — one per phone a day, the
-  office's phone spared a flood — and for free text.
+- An alert for every WhatsApp that did not go out — one per phone a day — and
+  for free text, all in the system only: the owner does not want them on the
+  office's WhatsApp.
 """
 from datetime import date
 from unittest.mock import MagicMock, patch
@@ -30,14 +31,7 @@ from apps.core.manychat_service import (
 )
 from apps.core.models import Branch, ManyChatContact, OfficeAlert
 from apps.core.office_alerts import HELD_NOTE
-from apps.core.whatsapp_alerts import (
-    KIND_FAILED,
-    KIND_FAILED_MANY,
-    KIND_FREE_TEXT,
-    KIND_UNREACHABLE,
-    MAX_DELIVERED_PER_DAY,
-    alert_send_failure,
-)
+from apps.core.whatsapp_alerts import KIND_FAILED, KIND_FREE_TEXT, alert_send_failure
 from apps.customers.models import Child, Family, Parent
 
 TODAY = date(2026, 9, 30)
@@ -151,22 +145,20 @@ class FailureAlertTests(NoNetworkMixin, TestCase):
         self.assertIn('אור שלמה', alert.customer)
         self.assertIn('חסר לו השדה', alert.why)
         self.assertIn('לייבא אותו ב-ManyChat', alert.action)
-        self.deliver.assert_called_once()
+        # In the system only: never on the office's WhatsApp.
+        self.deliver.assert_not_called()
+        self.assertEqual(alert.error, HELD_NOTE)
 
     def test_one_alert_per_phone_a_day(self):
         self.fail('0545757056', reason='lookup_failed')
         self.fail('054-575-7056', reason='send_flow_failed')
         self.assertEqual(OfficeAlert.objects.filter(kind=KIND_FAILED).count(), 1)
 
-    def test_a_flood_reaches_the_office_phone_as_one_message(self):
-        for n in range(MAX_DELIVERED_PER_DAY + 3):
+    def test_a_flood_stays_in_the_system(self):
+        for n in range(20):
             self.fail(f'05450000{n:02d}', reason='send_flow_failed')
-        failed = OfficeAlert.objects.filter(kind=KIND_FAILED)
-        self.assertEqual(failed.count(), MAX_DELIVERED_PER_DAY + 3)
-        self.assertEqual(failed.filter(error=HELD_NOTE).count(), 3)
-        self.assertEqual(OfficeAlert.objects.filter(kind=KIND_FAILED_MANY).count(), 1)
-        # The first few, then the one saying more failed — nothing else.
-        self.assertEqual(self.deliver.call_count, MAX_DELIVERED_PER_DAY + 1)
+        self.assertEqual(OfficeAlert.objects.filter(kind=KIND_FAILED, error=HELD_NOTE).count(), 20)
+        self.deliver.assert_not_called()
 
     @override_settings(MANYCHAT_KEY='')
     def test_no_manychat_at_all_is_not_one_alert_per_parent(self):
@@ -230,6 +222,7 @@ class NotifyRegistrationAlertTests(NoNetworkMixin, TestCase):
             svc.notify_registration(kind='subscription', **self.ARGS)
         self.assertEqual((first['sent'], first['method']), (True, 'text'))
         alert = OfficeAlert.objects.get(kind=KIND_FREE_TEXT)
+        self.assertEqual(alert.error, HELD_NOTE)
         self.assertIn('הרשמה למנוי', alert.title)
         self.assertIn('24 השעות', alert.why)
         self.assertIn('MANYCHAT_REGISTRATION_FLOW_NS', alert.action)
@@ -342,13 +335,11 @@ class ReachabilityCheckTests(NoNetworkMixin, TestCase):
         self.assertIn('הורה נוסף', labels['נוסף x · ילד x']['detail'])
         self.assertIn('לא רשום בוואטסאפ', labels['נוסף x · ילד x']['detail'])
 
-    def test_the_office_gets_one_alert_a_day_for_them(self):
+    def test_they_are_listed_in_the_brief_and_nowhere_else(self):
         states = {'972541000002': 'unfindable', '972521000009': 'created', '972541000003': 'created'}
-        self.run_check(states)
-        self.run_check(states)
-        alert = OfficeAlert.objects.get(kind=KIND_UNREACHABLE)
-        self.assertEqual(alert.title, '1 לקוחות לא יקבלו הודעות וואטסאפ')
-        self.assertIn('אבוד x', alert.customer)
+        item, _ = self.run_check(states)
+        self.assertEqual(item.severity, RED)
+        self.assertFalse(OfficeAlert.objects.exists())
 
     def test_all_reachable_is_green_and_alerts_nothing(self):
         item, _ = self.run_check({'972541000002': 'found', '972521000009': 'found', '972541000003': 'created'})
@@ -413,10 +404,12 @@ class HealthFreeTextTests(NoNetworkMixin, TestCase):
 
 @override_settings(MANYCHAT_KEY='test-key')
 class HeldAlertInBriefTests(TestCase):
-    def test_a_held_alert_says_why_it_was_not_sent(self):
+    def test_a_system_only_alert_says_so_and_is_not_counted_as_undelivered(self):
         OfficeAlert.objects.create(
             kind=KIND_FAILED, dedup_key='k', title='וואטסאפ לא יצא ל-x', where='w', what='w', error=HELD_NOTE,
         )
-        row = daily_brief.check_office_alerts(TODAY).rows[0]
-        self.assertIn(HELD_NOTE, row['detail'])
-        self.assertNotIn('ממתינה לשליחה', row['detail'])
+        item = daily_brief.check_office_alerts(TODAY)
+        self.assertEqual(item.severity, RED)
+        self.assertIn(HELD_NOTE, item.rows[0]['detail'])
+        self.assertNotIn('ממתינה לשליחה', item.rows[0]['detail'])
+        self.assertNotIn('לא נשלחו בווטסאפ', item.summary)

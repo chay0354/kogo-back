@@ -50,7 +50,7 @@ ALERT_FIELDS = {
 _MAX_VALUE = 900
 
 # Why an alert kept with deliver=False never reached the office's WhatsApp.
-HELD_NOTE = 'לא נשלחה בווטסאפ — נכללה בהתראה מרוכזת'
+HELD_NOTE = 'במערכת בלבד, בלי וואטסאפ למשרד'
 
 
 def _one_line(value) -> str:
@@ -90,9 +90,9 @@ def raise_office_alert(
     """
     Keep the alert and send it to the office once the caller's transaction commits. Never raises.
 
-    ``deliver=False`` keeps it for the morning brief without a WhatsApp — for
-    the many alerts of one event, where the office should get one message
-    saying so rather than one per customer.
+    ``deliver=False`` keeps it in the system only — the morning brief — with
+    no WhatsApp to the office (the WhatsApp-delivery alerts, by the owner's
+    choice on 30.9.2026).
     """
     fields = dict(title=title, where=where, what=what, why=why, customer=customer, action=action, link=link)
 

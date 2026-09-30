@@ -594,6 +594,7 @@ def check_office_alerts(today: date) -> BriefItem:
     from django.conf import settings
 
     from apps.core.models import OfficeAlert
+    from apps.core.office_alerts import HELD_NOTE
 
     crm_base = (getattr(settings, 'CRM_FRONTEND_URL', '') or '').rstrip('/')
     alerts = list(OfficeAlert.objects.filter(created_at__gte=timezone.now() - timedelta(days=1)).order_by('-created_at'))
@@ -608,7 +609,12 @@ def check_office_alerts(today: date) -> BriefItem:
     if not alerts:
         item.summary = 'לא הייתה תקלה בתשלום או בהרשמה ביממה האחרונה.'
         return item
-    item.summary = f'{len(alerts)} התראות ביממה האחרונה' + (f', {len(unsent)} מהן לא נשלחו בווטסאפ.' if unsent else '.')
+    # Kept in the system on purpose (deliver=False) is not "failed to send".
+    system_only = [a for a in unsent if a.status == OfficeAlert.STATUS_PENDING and a.error == HELD_NOTE]
+    not_delivered = len(unsent) - len(system_only)
+    item.summary = f'{len(alerts)} התראות ביממה האחרונה' + (
+        f', {not_delivered} מהן לא נשלחו בווטסאפ.' if not_delivered else '.'
+    )
     for alert in alerts[:MAX_ROWS]:
         item.rows.append(_row(
             alert.title,
@@ -616,8 +622,8 @@ def check_office_alerts(today: date) -> BriefItem:
                 alert.where, alert.customer, alert.action,
                 f'{timezone.localtime(alert.created_at):%d/%m %H:%M}',
                 '' if alert.status == OfficeAlert.STATUS_SENT else (
-                    # Held on purpose (one message for many): the note says so,
-                    # where "waiting to be sent" would not be true.
+                    # Kept in the system on purpose: the note says so, where
+                    # "waiting to be sent" would not be true.
                     alert.error if alert.status == OfficeAlert.STATUS_PENDING and alert.error
                     else alert.get_status_display()
                 ),
@@ -1433,8 +1439,8 @@ def check_whatsapp_reachability(today: date) -> BriefItem:
     not yet remembered, finds its ManyChat contact and remembers it, or creates
     it when ManyChat has none (as the first message would), sending nothing
     (ManyChatService.reach). What cannot be fixed that way — a contact ManyChat
-    has but will not find, a number not on WhatsApp — is listed here and sent
-    to the office as one alert. A new customer is covered the morning after
+    has but will not find, a number not on WhatsApp — is listed here, in red.
+    Only here: the owner wants these in the system, not on the office phone. A new customer is covered the morning after
     they join; their first message, if it fails before then, alerts on its own
     (apps/core/whatsapp_alerts.py).
 
@@ -1539,21 +1545,6 @@ def check_whatsapp_reachability(today: date) -> BriefItem:
             detail += ' · הורה נוסף'
         item.rows.append(_row(who, detail, _child_href(problem['child_id']) if problem.get('child_id') else ''))
 
-    if unreachable:
-        from apps.core.office_alerts import raise_office_alert
-        from apps.core.whatsapp_alerts import KIND_UNREACHABLE
-
-        names = [p['name'] or p['phone'] for p in problems if p['state'] != 'error']
-        raise_office_alert(
-            kind=KIND_UNREACHABLE,
-            dedup_key=f'{KIND_UNREACHABLE}:{today.isoformat()}',
-            title=f'{unreachable} לקוחות לא יקבלו הודעות וואטסאפ',
-            where='בדיקת הבוקר של הטלפונים (בריף יומי)',
-            what=item.summary,
-            why='קוגו לא יכולה לשלוח אליהם: איש הקשר קיים ב-ManyChat ולא נמצא, או שהמספר לא רשום בוואטסאפ.',
-            customer=', '.join(names[:5]) + (f' ועוד {len(names) - 5}' if len(names) > 5 else ''),
-            action=item.action,
-        )
     return item
 
 

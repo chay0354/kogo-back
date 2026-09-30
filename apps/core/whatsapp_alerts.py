@@ -7,11 +7,11 @@ told, and the parent simply never heard. Every failure now becomes an office
 alert (apps/core/office_alerts.py) with who, what, why and what to do.
 
 One alert per phone per day: the trial-reminder cron retries every half hour,
-and a broadcast may send twice to the same number. The office's WhatsApp gets
-the first few of a day and then one message saying more failed — a broken
-automation fails every row of a broadcast, and four hundred messages to the
-office phone would bury the one that matters. The rest wait in the morning
-brief ("התראות למשרד").
+and a broadcast may send twice to the same number.
+
+In the system only: the owner asked (30.9.2026) that these never reach the
+office's WhatsApp — they wait in the morning brief ("התראות למשרד"). The
+alerts about payments and registrations still go out as before.
 
 A free-text fallback is reported too, once a day per message type: ManyChat
 accepts it and Kogo marks it sent, but WhatsApp delivers free text only to
@@ -29,12 +29,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 KIND_FAILED = 'whatsapp_failed'
-KIND_FAILED_MANY = 'whatsapp_failed_many'
 KIND_FREE_TEXT = 'whatsapp_free_text'
-KIND_UNREACHABLE = 'whatsapp_unreachable'
-
-# How many failed-send alerts a day reach the office's WhatsApp one by one.
-MAX_DELIVERED_PER_DAY = 3
 
 WHERE_SETTINGS = 'הגדרות › הודעות › "אנשי קשר ש-ManyChat לא מוצא"'
 
@@ -91,7 +86,6 @@ def alert_send_failure(
     """A WhatsApp to a customer did not go out. Never raises."""
     try:
         from apps.core.manychat_service import ManyChatService
-        from apps.core.models import OfficeAlert
         from apps.core.office_alerts import raise_office_alert
 
         # No key at all is one fact about the server, not one per parent: the
@@ -102,7 +96,6 @@ def alert_send_failure(
         key = ManyChatService.normalize_phone_e164(phone) or str(phone or '')
         day = _israel_day_start()
         why, action = REASONS.get(reason, DEFAULT_REASON)
-        already = OfficeAlert.objects.filter(kind=KIND_FAILED, created_at__gte=day).count()
         raise_office_alert(
             kind=KIND_FAILED,
             dedup_key=f'{KIND_FAILED}:{key}:{day.date().isoformat()}',
@@ -114,18 +107,8 @@ def alert_send_failure(
             action=action,
             link=link,
             details={'phone': key, 'reason': reason, 'error': error},
-            deliver=already < MAX_DELIVERED_PER_DAY,
+            deliver=False,
         )
-        if already == MAX_DELIVERED_PER_DAY:
-            raise_office_alert(
-                kind=KIND_FAILED_MANY,
-                dedup_key=f'{KIND_FAILED_MANY}:{day.date().isoformat()}',
-                title='עוד הודעות וואטסאפ ללקוחות לא יצאו היום',
-                where=where,
-                what=f'יותר מ-{MAX_DELIVERED_PER_DAY} הודעות ללקוחות לא יצאו היום. '
-                     'כדי לא להציף את הטלפון, השאר לא נשלחות לכאן.',
-                action='הרשימה המלאה בבריף: הגדרות › בריף יומי › "התראות למשרד".',
-            )
     except Exception:  # noqa: BLE001 — an alert must never break the send it reports on
         logger.exception('WhatsApp failure alert for %s could not be raised', phone)
 
@@ -146,6 +129,7 @@ def alert_free_text(*, label: str, flow_setting: str) -> None:
                 'לכל השאר ההודעה לא מגיעה, ו-ManyChat לא מדווח על כך.',
             action=f'ליצור ב-ManyChat אוטומציה עם תבנית להודעה הזו, ולהגדיר אותה ב-{flow_setting}.',
             details={'flow_setting': flow_setting},
+            deliver=False,
         )
     except Exception:  # noqa: BLE001
         logger.exception('Free-text alert for %s could not be raised', flow_setting)
