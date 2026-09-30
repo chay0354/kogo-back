@@ -69,17 +69,31 @@ def build_subscription_invoice_email(invoice: Invoice) -> tuple[str, str, str]:
     return subject, text, html
 
 
+def invoice_recipients(invoice: Invoice) -> list[str]:
+    """
+    The payer's email (as issued, else the family's), then every extra contact's
+    email from the child's card — one family, one consent, one message.
+    """
+    from apps.customers.customer_details import extra_invoice_emails
+
+    payer = (invoice.payer_email or '').strip()
+    if not payer and invoice.family_id:
+        payer = (invoice.family.email or '').strip()
+    family = invoice.family if invoice.family_id else None
+    return [e for e in [payer, *extra_invoice_emails(family, exclude=[payer])] if e]
+
+
 def send_subscription_invoice_email(invoice: Invoice) -> bool:
     """Send invoice PDF to payer email. Idempotent via invoice.email_sent_at."""
     if invoice.email_sent_at:
         return True
 
-    email = (invoice.payer_email or '').strip()
-    if not email and invoice.family_id:
-        email = (invoice.family.email or '').strip()
-    if not email:
+    recipients = invoice_recipients(invoice)
+    if not recipients:
         logger.info('Skipping subscription invoice email for %s: no payer email', invoice.invoice_number)
         return False
+    # Recorded on the signed original as where it went.
+    email = ', '.join(recipients)
 
     if not _email_configured():
         logger.warning('No email provider — cannot send invoice %s', invoice.invoice_number)
@@ -113,7 +127,7 @@ def send_subscription_invoice_email(invoice: Invoice) -> bool:
     try:
         if resend_configured():
             send_resend_email(
-                to=[email],
+                to=recipients,
                 subject=subject,
                 text=text,
                 html=html,
@@ -124,7 +138,7 @@ def send_subscription_invoice_email(invoice: Invoice) -> bool:
             )
         else:
             from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@kogomalo.com')
-            message = EmailMultiAlternatives(subject, text, from_email, [email])
+            message = EmailMultiAlternatives(subject, text, from_email, recipients)
             message.attach_alternative(html, 'text/html')
             message.attach(filename, pdf_bytes, 'application/pdf')
             message.send(fail_silently=False)

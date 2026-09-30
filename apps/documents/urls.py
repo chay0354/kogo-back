@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from apps.documents.michal import views as michal_views
 from apps.documents.signing import views as signing_views
 from apps.documents.views import (
     CashPlanViewSet,
@@ -31,5 +32,9 @@ urlpatterns = [
     path('signing/certificate/issue/', signing_views.signing_issue_certificate, name='signing-certificate-issue'),
     path('signing/selftest/', signing_views.signing_selftest, name='signing-selftest'),
     path('cron/sign-pending/', signing_views.cron_sign_pending, name='documents-cron-sign-pending'),
+    # Michal Kagan's site asks for her documents with a key of its own (apps/documents/michal).
+    path('integrations/michal/documents/', michal_views.MichalDocumentsView.as_view(), name='michal-documents'),
+    path('integrations/michal/documents/<str:number>/pdf/', michal_views.MichalDocumentPdfView.as_view(),
+         name='michal-document-pdf'),
     path('', include(router.urls)),
 ]

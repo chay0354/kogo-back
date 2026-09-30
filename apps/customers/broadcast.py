@@ -68,27 +68,16 @@ def _extra_recipients(child, phone_key: str) -> list:
 
     Every parent but the one the message already went to, the same split the
     card shows (customer_details.extra_phones_of). A number equal to the
-    primary's is the same person and is left out quietly. Two are listed but
-    skipped:
-
-    - a landline: the "add customer" form has always taken one as the extra
-      phone, and WhatsApp does not reach it;
-    - another family's own phone: that parent gets the message about their
-      own child, not this family's in its place.
+    primary's is the same person and is left out quietly. A landline is listed
+    but skipped: the "add customer" form has always taken one as the extra
+    phone, and WhatsApp does not reach it.
     """
-    from apps.customers.customer_details import phone_is_another_familys
-
     extras = []
     for parent in child.family.parents.all():
         key = ManyChatService.normalize_phone_e164(parent.phone or '')
         if not key or key == phone_key:
             continue
-        if not _MOBILE_E164.match(key):
-            extras.append((parent, key, 'not_mobile'))
-        elif phone_is_another_familys(child.family, parent.phone):
-            extras.append((parent, key, 'other_family_phone'))
-        else:
-            extras.append((parent, key, None))
+        extras.append((parent, key, None if _MOBILE_E164.match(key) else 'not_mobile'))
     return extras
 
 
@@ -125,6 +114,10 @@ def broadcast_to_children(
     own status, under the same rules: one message per phone across the whole
     run, and none when the template has no lesson to fill in. Without it the
     list stays empty and nothing reaches them.
+
+    Every parent in the request is sent to before any extra phone: a number
+    that is one family's extra and another family's own phone gets the message
+    about its own child, and the extra copy is then a duplicate.
     """
     svc = service or ManyChatService()
     seen_phones: set[str] = {ManyChatService.normalize_phone_e164(p) for p in skip_phones if p}
@@ -185,6 +178,8 @@ def broadcast_to_children(
                 target['reason'] = 'contact_unfindable'
             tally['failed'] += 1
 
+    pending_extras: list[tuple[dict, object, dict, str]] = []
+
     for child in children:
         row = {
             'child_id': str(child.id),
@@ -239,8 +234,10 @@ def broadcast_to_children(
             if row['status'] == 'failed':
                 logger.warning('Broadcast to child %s failed: %s', child.id, row['error'])
 
-        if not include_extra_phones or (automation_type == 'kind' and lesson is None):
-            continue
+        if include_extra_phones and not (automation_type == 'kind' and lesson is None):
+            pending_extras.append((row, child, ctx, phone_key))
+
+    for row, child, ctx, phone_key in pending_extras:
         for parent, key, skip_reason in _extra_recipients(child, phone_key):
             name = f'{parent.first_name} {parent.last_name}'.strip() or row['parent_name']
             extra = {
