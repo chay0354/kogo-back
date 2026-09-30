@@ -330,46 +330,6 @@ class EndedOrderTests(TestCase):
         self.assertEqual(check_ended_standing_orders(TODAY).severity, GREEN)
 
 
-class StatusMismatchTests(TestCase):
-    """
-    Only the half the office can act on this morning.
-
-    Statuses drift in every direction and a list of every disagreement is too
-    long to be read; what matters is a child whose money is coming in, or whose
-    place is taken, who still reads as "ניסיון".
-    """
-
-    def _child_with(self, name, status):
-        family = TestDataFactory.create_family()
-        TestDataFactory.create_parent(family=family)
-        return TestDataFactory.create_child(family=family, first_name=name, status=status)
-
-    def test_a_trial_child_with_a_live_standing_order_is_raised(self):
-        from apps.core.daily_brief import check_status_mismatch
-
-        child = self._child_with('עבר לחוג', 'trial_completed')
-        _recurring(child)
-        Payment.objects.create(
-            child=child, family=child.family, base_amount=Decimal('225'),
-            final_amount=Decimal('225'), status='completed',
-        )
-        item = check_status_mismatch(TODAY)
-        self.assertEqual(item.count, 1)
-        self.assertIn('עבר לחוג', item.rows[0]['label'])
-
-    def test_a_child_who_really_is_only_a_trial_is_left_alone(self):
-        from apps.core.daily_brief import check_status_mismatch
-
-        self._child_with('רק ניסיון', 'trial_signed')
-        self.assertEqual(check_status_mismatch(TODAY).count, 0)
-
-    def test_a_child_marked_active_is_not_second_guessed(self):
-        from apps.core.daily_brief import check_status_mismatch
-
-        self._child_with('פעיל', 'active')
-        self.assertEqual(check_status_mismatch(TODAY).count, 0)
-
-
 class DocumentNumberingTests(TestCase):
     def test_a_working_series_reports_the_next_number(self):
         from apps.core.daily_brief import check_document_numbering

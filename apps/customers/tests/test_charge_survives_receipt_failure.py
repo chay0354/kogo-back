@@ -106,6 +106,21 @@ class MonthlyRunTest(TestCase):
         self.assertEqual(recurring.last_charge_date, _today())
         self.assertGreater(recurring.next_billing_date, _today())
 
+    def test_a_charge_never_moves_paid_until_back(self):
+        """Another course of the same child is already paid two months ahead."""
+        recurring = _due_standing_order()
+        child = recurring.child
+        ahead = _today() + timedelta(days=62)
+        child.paid_until_date = ahead
+        child.save(update_fields=['paid_until_date'])
+        with patch('apps.customers.recurring_billing.TranzilaService.charge_with_token',
+                   return_value=dict(TOKEN_CHARGE_OK)):
+            summary = process_due_recurring_charges()
+
+        self.assertEqual(summary['charged'], 1)
+        child.refresh_from_db()
+        self.assertEqual(child.paid_until_date, ahead)
+
     @patch('apps.customers.subscription_invoice_email.send_subscription_invoice_email', return_value=True)
     def test_the_receipt_is_still_issued_and_emailed_after_the_charge(self, email):
         recurring = _due_standing_order()

@@ -690,62 +690,6 @@ def check_expiring_cards(today: date) -> BriefItem:
     return item
 
 
-def check_status_mismatch(today: date) -> BriefItem:
-    """
-    Children being charged, or sitting in a lesson, who are still marked as a trial.
-
-    Statuses drift for all sorts of reasons and a list of every disagreement is
-    too long to act on — `manage.py audit_child_statuses` exists for that. This
-    is the half the office can do something about this morning: money is coming
-    in, or a place is taken, and the child still reads as "ניסיון" on every
-    screen.
-    """
-    from apps.customers.child_status import canonical_status, resolve_child_status, status_label
-    from apps.customers.models import Child, RecurringPayment
-
-    paying = set(
-        RecurringPayment.objects.filter(status='active').values_list('child_id', flat=True)
-    )
-    base = Child.objects.exclude(status='ghost')
-    total_children = base.count()
-    children = (
-        base
-        .filter(status__in=('trial_signed', 'trial_completed', 'pending'))
-        .select_related('family')
-        .prefetch_related('lesson_enrollments', 'payments')
-        .order_by('-updated_at')[:MAX_CHILDREN_SCANNED]
-    )
-    mismatched = []
-    for child in children.iterator(chunk_size=500):
-        should_be = resolve_child_status(child)
-        if not should_be or canonical_status(child.status) == should_be:
-            continue
-        if should_be == 'active' or child.id in paying:
-            mismatched.append((child, should_be))
-
-    item = BriefItem(
-        key='status_mismatch',
-        title='ילדים שרשומים כניסיון אבל כבר לומדים',
-        severity=YELLOW if mismatched else GREEN,
-        count=len(mismatched),
-        action='לפתוח את כרטיס הילד ולעדכן את הסטטוס לפעיל.',
-    )
-    if not mismatched:
-        item.summary = f'אין ילד שנשאר בסטטוס ניסיון אחרי שנרשם או שילם (מתוך {total_children} ילדים).'
-        return item
-    item.summary = (
-        f'{len(mismatched)} ילדים שהסטטוס שלהם עדיין ניסיון או ממתין, למרות שיש להם הוראת קבע פעילה '
-        'או רישום לחוג.'
-    )
-    for child, should_be in mismatched[:MAX_ROWS]:
-        item.rows.append(_row(
-            child.full_name,
-            f'רשום {status_label(child.status)} · אמור להיות {status_label(should_be)}',
-            _child_href(child.id),
-        ))
-    return item
-
-
 def check_missing_receipts(today: date) -> BriefItem:
     """Money that came in without its receipt."""
     from apps.documents.missing_receipts import payments_without_invoice
@@ -1568,7 +1512,6 @@ CHECKS = (
     check_active_without_standing_order,
     check_ended_standing_orders,
     check_overdue_instalments,
-    check_status_mismatch,
     check_missing_receipts,
     check_business_categories,
     check_document_numbering,
@@ -1618,7 +1561,6 @@ def check_catalogue() -> list[dict]:
         'active_without_standing_order': 'ילדים פעילים בלי הוראת קבע',
         'ended_standing_orders': 'הוראות קבע שהסתיימו',
         'overdue_instalments': 'מזומן וצ׳קים בלי מסמך',
-        'status_mismatch': 'ילדים שרשומים כניסיון אבל כבר לומדים',
         'missing_receipts': 'תשלומים ללא חשבונית',
         'business_categories': 'עסקים בלי קטגוריה',
         'document_numbering': 'מספור מסמכים',

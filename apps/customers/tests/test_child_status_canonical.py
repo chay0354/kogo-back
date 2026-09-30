@@ -233,6 +233,49 @@ class ResolveStatusTest(TestCase):
         )
         self.assertEqual(resolve_child_status(child), 'payment_problem')
 
+    def test_a_former_student_who_books_a_trial_is_signed_for_it_not_a_card_problem(self):
+        """
+        Paid up to last month, left, and now booked a trial. The trial's row is
+        live, and it used to read as a course left unpaid — בעיה באשראי — which
+        the course-change and merge paths then wrote (30.9.2026).
+        """
+        child = self.make_child(status='inactive', paid_until_date=TODAY - timedelta(days=90))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active',
+            start_date=TODAY, trial_lesson_date=TODAY + timedelta(days=4),
+        )
+        self.assertEqual(resolve_child_status(child), 'trial_signed')
+
+    def test_a_former_student_whose_return_trial_took_place_has_completed_it(self):
+        child = self.make_child(status='trial_signed', paid_until_date=TODAY - timedelta(days=90))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive', trial_outcome='attended',
+            start_date=TODAY - timedelta(days=10), end_date=TODAY - timedelta(days=3),
+            trial_lesson_date=TODAY - timedelta(days=3), trial_held_on=TODAY - timedelta(days=3),
+        )
+        self.assertEqual(resolve_child_status(child), 'trial_completed')
+
+    def test_a_trial_from_before_they_left_does_not_count_as_a_return(self):
+        child = self.make_child(status='active', paid_until_date=TODAY - timedelta(days=30))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='inactive', trial_outcome='attended',
+            start_date=TODAY - timedelta(days=400), end_date=TODAY - timedelta(days=400),
+            trial_lesson_date=TODAY - timedelta(days=400), trial_held_on=TODAY - timedelta(days=400),
+        )
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_unpaid_in_a_class_is_still_a_card_problem_with_a_trial_ahead_elsewhere(self):
+        child = self.make_child(status='active', paid_until_date=TODAY - timedelta(days=3))
+        LessonEnrollment.objects.create(
+            lesson=self.lesson, child=child, status='active', start_date=TODAY - timedelta(days=200),
+        )
+        other = TestDataFactory.create_lesson(course=self.course, branch=self.branch)
+        LessonEnrollment.objects.create(
+            lesson=other, child=child, status='active',
+            start_date=TODAY, trial_lesson_date=TODAY + timedelta(days=4),
+        )
+        self.assertEqual(resolve_child_status(child), 'payment_problem')
+
     def test_a_ghost_stays_a_ghost(self):
         child = self.make_child(status='ghost')
         self.assertEqual(resolve_child_status(child), 'ghost')
