@@ -484,12 +484,23 @@ class StoreInvoice(models.Model):
     # beyond tranzila_transaction_id: a second tab, a page paid twice, a
     # number the report has not answered for yet. None is ever dropped; each
     # is [{"index", "code", "terminal", "reported_at", "state"}] with state
-    # open (not settled), second_charge (a real second payment, for a refund)
-    # or rejected (the report says it did not pay for this order).
+    # open (not settled), second_charge (a real second payment, for a refund),
+    # rejected (the report, or a person, says it did not pay for this order)
+    # or suspected (a charge of this sum found in the terminal's report after
+    # this order's page opened, whose notify never came: a person decides).
     other_transactions = models.JSONField(
         null=True,
         blank=True,
         verbose_name="מספרי עסקה נוספים שדווחו",
+    )
+    # What a person decided about a payment in review, and who and when
+    # (apps/store/payment_followup.release_reported_payment /
+    # complete_reported_payment): [{"action", "by", "at", "reason", "numbers",
+    # "outcome"}]. Never edited, only added to.
+    payment_review_log = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="החלטות על תשלום בבדיקה",
     )
 
     # Timestamps

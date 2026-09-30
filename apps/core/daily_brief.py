@@ -13,9 +13,9 @@ Rules the checks follow:
     morning fixes at the top of the list (apps/core/morning_fixes.py), which the
     owner asked for and which touch only statuses and the dashboard's counts;
     and the store's stuck payments (check_stuck_store_payments), which read
-    Tranzila's report, record a confirmed second charge and repeat the
-    website's "paid" call — and finish a sale the report confirms only while
-    STORE_SWEEP_COMPLETES_PAYMENTS is on (off until the owner decides);
+    Tranzila's report and repeat the website's "paid" call — and, only while
+    STORE_SWEEP_COMPLETES_PAYMENTS is on (off until the owner decides), finish
+    a sale the report confirms and record a confirmed second charge;
   * one failing check never hides the rest: it comes back as its own red item;
   * a quiet morning must read as quiet, so a check that finds nothing says so
     instead of filling the screen.
@@ -594,19 +594,23 @@ def check_stuck_store_payments(today: date) -> BriefItem:
     cleanly — every one Tranzila reported and the CRM has neither confirmed
     nor ruled out, at any age — and what this very check settled.
 
-    It reads Tranzila's report about every number such an order holds. A
-    confirmed payment is completed through the notify's own path (the sale,
-    the stock, the document, the customer's email) only while
-    STORE_SWEEP_COMPLETES_PAYMENTS is on; until the owner decides, it is
-    listed and told to the office instead. A further number confirmed on a
-    paid order is recorded as a second charge (listed under "חיובים כפולים");
-    a paid website order the site never acknowledged is told again. Nothing
-    is charged, refunded or marked failed (apps/store/payment_followup.py).
+    It reads Tranzila's report about every number such an order holds, and
+    looks in the report for a charge of the same sum for an order whose page
+    opened but whose notify never came. With STORE_SWEEP_COMPLETES_PAYMENTS
+    off (until the owner decides) it only reads and tells: nothing is sold,
+    no document, no email, no status changes. On, a confirmed payment is
+    completed through the notify's own path and a confirmed second charge is
+    recorded (listed under "חיובים כפולים"). A charge found for an order whose
+    notify never came is never completed here: a person decides, in the
+    invoice's "payment-review". A paid website order the site never
+    acknowledged is told again. Nothing is charged or refunded
+    (apps/store/payment_followup.py).
     """
     from apps.store.payment_followup import shown_number, sweep_stuck_store_payments
 
     result = sweep_stuck_store_payments()
-    open_items = sum(len(result[key]) for key in ('still_pending', 'confirmed', 'second_open', 'site_not_told', 'not_reached'))
+    open_items = sum(len(result[key]) for key in (
+        'still_pending', 'confirmed', 'second_open', 'unexplained', 'site_not_told', 'not_reached'))
     done_items = len(result['settled']) + len(result['site_told'])
     item = BriefItem(
         key='stuck_store_payments',
@@ -637,7 +641,7 @@ def check_stuck_store_payments(today: date) -> BriefItem:
     for invoice in result['confirmed']:
         item.rows.append(_row(
             label(invoice),
-            f'{_money(invoice.total_amount)} · הדוח מאשר שהלקוח שילם, וההזמנה לא הושלמה (הבדיקה לא משלימה מכירות) '
+            f'{_money(invoice.total_amount)} · הדוח מאשר שהלקוח שילם, וההזמנה לא הושלמה (בדיקת הבוקר לא משלימה מכירות) '
             f'· עסקה {shown_number(invoice.tranzila_transaction_id)} · {when(invoice)}',
             '/invoices',
         ))
@@ -648,6 +652,13 @@ def check_stuck_store_payments(today: date) -> BriefItem:
         item.rows.append(_row(
             label(invoice),
             f'{_money(invoice.total_amount)} · שולם, ודווחה עליו עוד עסקה ({numbers}) שעדיין בבדיקה — ייתכן חיוב כפול',
+            '/invoices',
+        ))
+    for invoice in result['unexplained']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · בדוח של טרנזילה יש חיוב באותו סכום שלא הגיעה עליו הודעה — '
+            'ייתכן שהלקוח שילם. להחליט במסך החשבונית',
             '/invoices',
         ))
     for invoice in result['site_not_told']:

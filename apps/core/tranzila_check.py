@@ -69,6 +69,16 @@ def _our_record(terminal: str, index: str) -> Optional[dict]:
     )
     if invoice is not None:
         return _describe_invoice(invoice)
+    # A further number reported for a store order (a second tab, a page paid
+    # twice, a charge found in the report): kept beside the order's own.
+    invoice = (
+        StoreInvoice.objects.filter(other_transactions__contains=[{'index': index, 'terminal': terminal}])
+        .order_by('-created_at').first()
+    )
+    if invoice is not None:
+        entry = next(e for e in invoice.other_transactions if str(e.get('index')) == index)
+        return {**_describe_invoice(invoice), 'approval_number': str(entry.get('code') or ''),
+                'number_state': str(entry.get('state') or '')}
     link_payment = (
         PaymentLinkPayment.objects.filter(gateway_transaction_id=index)
         .select_related('link').order_by('-created_at').first()
@@ -93,6 +103,13 @@ def _describe_invoice(invoice) -> dict:
         'amount': str(invoice.total_amount),
         'status': invoice.payment_status,
         'approval_number': invoice.tranzila_confirmation_code,
+        'number_state': 'own',
+        # Every further number reported for the order, and what became of it.
+        'other_transactions': [
+            {'index': str(e.get('index') or ''), 'terminal': str(e.get('terminal') or ''),
+             'state': str(e.get('state') or '')}
+            for e in (invoice.other_transactions or [])
+        ],
         'created_at': invoice.created_at.isoformat(),
         '_created': invoice.created_at,
     }
@@ -116,9 +133,16 @@ def check_transaction(*, invoice_number: str = '', terminal: str = '', index: st
             raise CheckError('לא נמצאה חשבונית במספר הזה')
         terminal = invoice.tranzila_terminal
         index = invoice.tranzila_transaction_id
+        ours = _describe_invoice(invoice)
+        if (not terminal or not index) and invoice.other_transactions:
+            # No number of its own (a payment ruled out, released, or never
+            # reported), but further ones kept: the latest of them is checked.
+            latest = invoice.other_transactions[-1]
+            terminal, index = str(latest.get('terminal') or ''), str(latest.get('index') or '')
+            ours = {**ours, 'approval_number': str(latest.get('code') or ''),
+                    'number_state': str(latest.get('state') or '')}
         if not terminal or not index:
             raise CheckError('על החשבונית אין מסוף או מספר עסקה — היא לא שולמה בטרנזילה, או שקדמה לרישום המסוף')
-        ours = _describe_invoice(invoice)
 
     terminal = (terminal or '').strip()
     index = str(index or '').strip()

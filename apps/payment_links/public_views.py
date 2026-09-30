@@ -220,6 +220,16 @@ def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> boo
         .exists()
     ):
         return True
+    # A store order paid twice keeps its second, real charge beside its own
+    # number (other_transactions, state second_charge): paid, for that order.
+    if (
+        StoreInvoice.objects.filter(
+            other_transactions__contains=[{'index': txn_index, 'terminal': terminal, 'state': 'second_charge'}],
+        )
+        .exclude(id=row_id)
+        .exists()
+    ):
+        return True
     return (
         PaymentLinkPayment.objects.filter(
             Q(tranzila_terminal=terminal) | Q(tranzila_terminal=''),

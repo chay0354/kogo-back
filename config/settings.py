@@ -286,6 +286,9 @@ REST_FRAMEWORK = {
         # its customers at once — so this is the whole shop's rate. Tranzila is
         # protected per order (apps/store/payment_followup.RECHECK_INTERVAL).
         'store_payment_status': '300/min',
+        # The website reporting the number Tranzila's page handed back
+        # (widget/payment/returned/): once per payment, from the site's server.
+        'store_payment_returned': '120/min',
     },
 }
 

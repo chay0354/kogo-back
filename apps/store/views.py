@@ -14,7 +14,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from apps.core.permissions import IsManagerOrPartner
+from apps.core.permissions import IsManager, IsManagerOrPartner
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -428,6 +428,60 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
                 'error': result.get('error', 'שגיאה בזיכוי החשבונית'),
                 'uncertain': bool(result.get('uncertain')),
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='payment-review', permission_classes=[IsAuthenticated, IsManager])
+    def payment_review(self, request, pk=None):
+        """
+        POST /api/v1/store/invoices/{id}/payment-review/
+        Body: {"action": "complete" | "release", "reason": "...", "confirmation_code": "..."}
+
+        A manager settles a website/till payment that is in review
+        (apps/store/payment_followup.py) — a number Tranzila reported that the
+        report neither confirms nor rules out, or a charge found in the report
+        whose notify never came:
+
+          complete  "השלם אחרי אימות" — only through the report: the sale
+                    happens on the notify's locked path if the report confirms
+                    one of the numbers (a suspected charge included);
+                    `confirmation_code` is the approval number read in
+                    Tranzila, for a number that came without one. 409 when the
+                    report does not confirm.
+          release   "אין תשלום — שחרר" — after checking Tranzila: the numbers
+                    are marked rejected with the reason, the order is failed
+                    (the customer may pay again) and the site is told.
+
+        A reason is required; who, when and why are kept on the invoice
+        (payment_review_log). Nothing is charged or refunded.
+        """
+        from apps.store import payment_followup
+
+        invoice = self.get_object()
+        action_name = str(request.data.get('action') or '').strip()
+        reason = str(request.data.get('reason') or '').strip()[:500]
+        if action_name not in ('complete', 'release'):
+            return Response({'error': 'action חייב להיות complete או release'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(reason) < 3:
+            return Response({'error': 'חובה לכתוב סיבה'}, status=status.HTTP_400_BAD_REQUEST)
+        by = getattr(request.user, 'email', '') or str(request.user.pk)
+        if action_name == 'release':
+            result = payment_followup.release_reported_payment(invoice.pk, by=by, reason=reason)
+        else:
+            result = payment_followup.complete_reported_payment(
+                invoice.pk, by=by, reason=reason,
+                confirmation_code=str(request.data.get('confirmation_code') or ''),
+            )
+        outcome = result.get('outcome')
+        invoice.refresh_from_db()
+        body = {'outcome': outcome, 'invoice': StoreInvoiceSerializer(invoice).data}
+        if outcome == 'not_in_review':
+            return Response({**body, 'error': 'החשבונית אינה בבדיקה'}, status=status.HTTP_409_CONFLICT)
+        if action_name == 'complete' and outcome != 'completed':
+            return Response(
+                {**body, 'error': 'הדוח של טרנזילה לא מאשר את התשלום, ולכן ההזמנה לא הושלמה. '
+                                  'אם בדקתם ואין תשלום — "אין תשלום — שחרר".'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(body)
 
     @action(detail=True, methods=['get'], url_path='download')
     def download(self, request, pk=None):

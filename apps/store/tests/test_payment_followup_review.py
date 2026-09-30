@@ -171,13 +171,12 @@ class ReportedPaymentIsInReviewTest(ReviewBase):
 
 class WebsiteContractTest(ReviewBase):
     def test_a_refunded_order_is_refunded_and_not_paid(self):
-        for status in ('refunded', 'refund_failed'):
-            StoreInvoice.objects.all().delete()
-            invoice = self.invoice(status=status, txn='123456', code='0001234')
-            self.assertEqual(self.poll().json(), {
-                'status': 'refunded', 'invoice_number': invoice.invoice_number, 'paid': False,
-                'payment_reported': False,
-            })
+        # (A refund that failed leaves the money with us: paid — round 3, test_payment_followup_round3.)
+        invoice = self.invoice(status='refunded', txn='123456', code='0001234')
+        self.assertEqual(self.poll().json(), {
+            'status': 'refunded', 'invoice_number': invoice.invoice_number, 'paid': False,
+            'payment_reported': False,
+        })
 
     def test_an_order_from_the_retired_endpoint_is_not_paid(self):
         # widget/order/ wrote "completed" with no payment and no transaction number.
@@ -246,7 +245,8 @@ class NoNumberIsLostTest(ReviewBase):
 
         self.ledger_down = False
         self.ledger_rows.append(paid_row(index='222222', approval='0002222'))
-        payment_followup.sweep_stuck_store_payments()
+        # Recording it is a write: the sweep does it with its switch on (round 3).
+        payment_followup.sweep_stuck_store_payments(complete=True)
         self.assertTrue(TranzilaTransaction.objects.filter(
             idempotency_key=f'store_second_{invoice.id}_222222').exists())
         self.assertEqual(self.state(invoice), ('completed', 1, 8), 'sold once')

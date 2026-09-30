@@ -8,8 +8,14 @@ class Migration(migrations.Migration):
     What a store invoice keeps for following a hosted-page payment up
     (apps/store/payment_followup.py): when the website acknowledged "paid",
     when the CRM last followed the payment up by itself, when Tranzila first
-    reported a payment, when the last payment page was handed out, and every
-    further transaction number Tranzila reported.
+    reported a payment, when the last payment page was handed out, every
+    further transaction number Tranzila reported, and what a person decided
+    about a payment in review.
+
+    Rolling this back (migrate store 0015) drops other_transactions and
+    payment_review_log, and with them numbers nothing else keeps. A retreat
+    from this change is a revert of the code only: the columns stay, NULL
+    and unread.
 
     A branch push runs `migrate` on the production database before its code
     reaches main (vercel_build.py), so for a while the running code does not
@@ -49,5 +55,10 @@ class Migration(migrations.Migration):
             model_name='storeinvoice',
             name='other_transactions',
             field=models.JSONField(blank=True, null=True, verbose_name='מספרי עסקה נוספים שדווחו'),
+        ),
+        migrations.AddField(
+            model_name='storeinvoice',
+            name='payment_review_log',
+            field=models.JSONField(blank=True, null=True, verbose_name='החלטות על תשלום בבדיקה'),
         ),
     ]

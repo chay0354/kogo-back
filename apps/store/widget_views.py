@@ -479,7 +479,17 @@ def _resolve_website_cart_items(items, *, delivery_method='delivery', pickup_bra
 
 
 def _website_payment_initiate_response(invoice, *, callback_url, success_url, error_url, customer, status=200):
-    """Build Tranzila iframe response for a pending website invoice (or short-circuit if already paid)."""
+    """
+    Build Tranzila iframe response for a pending website invoice (or short-circuit if already paid).
+
+    Nothing is decided on a copy of the invoice read before a wait: the day
+    report, the recheck and the handshake each take seconds, and a notify can
+    complete the sale — or report a payment — meanwhile. The invoice is read
+    again before each decision, the only write (failed → pending) is a
+    conditional UPDATE that re-decides when it finds the row changed, and the
+    last look, right before a page is handed out, is whether a payment was
+    reported meanwhile (review round 3, 30.9.2026).
+    """
     from django.utils import timezone
 
     from apps.core.payment_service import parse_store_cart_notes
@@ -493,17 +503,7 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             'invoice_number': invoice.invoice_number,
         }, status=409)
 
-    if followup.holds_reported_payment(invoice):
-        # Tranzila already reported a payment for this order that the report
-        # has not confirmed or ruled out (apps/store/payment_followup.py) —
-        # whatever the status reads. Asked again first; a second page now
-        # could take the same customer's money twice.
-        followup.recheck_pending_payment(invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS)
-        invoice.refresh_from_db()
-        if invoice.payment_status != 'completed':
-            return in_review()
-
-    if invoice.payment_status == 'completed':
+    def already_paid():
         return Response({
             'ok': True,
             'invoice_number': invoice.invoice_number,
@@ -511,29 +511,66 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             'already_paid': True,
         }, status=status)
 
-    if invoice.payment_status in ('refunded', 'refund_failed'):
-        # Paid and refunded: a payment now would be taken as the same order
-        # paid twice, and sell nothing.
-        return Response({'error': 'ההזמנה הזאת זוכתה. צרו הזמנה חדשה.'}, status=400)
-
-    opened = invoice.payment_page_opened_at
-    if opened is not None and timezone.now() - opened < followup.UNREPORTED_WINDOW:
-        # A page for this order was handed out minutes ago. If its notify
-        # never came, the report is the only place the payment shows: a
-        # matching charge there — or a report that cannot say — means no
-        # second page (review item 4, 29.9.2026).
-        found, rows = followup.find_unreported_payment(invoice)
-        if found != 'none':
-            logger.error('Website order %s: no second page — the day report %s', invoice.website_order_number,
-                         'shows a matching charge' if rows else 'could not be asked')
-            followup.alert_payment_unreported(invoice, rows)
+    for _attempt in range(3):
+        invoice.refresh_from_db()
+        if followup.holds_reported_payment(invoice):
+            # Tranzila already reported a payment for this order — or the
+            # report shows one whose notify never came — that is neither
+            # confirmed nor ruled out, whatever the status reads. Asked again
+            # first; a second page now could take the same customer's money
+            # twice. A suspected charge waits for a person.
+            followup.recheck_pending_payment(invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS)
+            invoice.refresh_from_db()
+            if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
+                return already_paid()
             return in_review()
 
-    if invoice.payment_status == 'failed':
-        if parse_store_cart_notes(invoice.notes) is None:
-            return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
-        invoice.payment_status = 'pending'
-        invoice.save(update_fields=['payment_status'])
+        if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
+            return already_paid()
+
+        if invoice.payment_status == 'refunded':
+            # Paid and refunded: a payment now would be taken as the same order
+            # paid twice, and sell nothing.
+            return Response({'error': 'ההזמנה הזאת זוכתה. צרו הזמנה חדשה.'}, status=400)
+
+        opened = invoice.payment_page_opened_at
+        if opened is not None and timezone.now() - opened < followup.SEARCH_WINDOW:
+            # A page for this order was handed out before. If its notify never
+            # came, the report is the only place the payment shows: a matching
+            # charge there is kept on the order ("suspected") and holds it in
+            # review until a person decides; a report that cannot say holds
+            # it for half an hour from the page (review items 2-4, 30.9.2026).
+            found, rows = followup.find_unreported_payment(invoice)
+            if found == 'found':
+                logger.error('Website order %s: no second page — the day report shows a matching charge',
+                             invoice.website_order_number)
+                followup.keep_suspected_charges(invoice.pk, rows)
+                followup.alert_payment_unreported(invoice, rows)
+                return in_review()
+            if found == 'unknown' and timezone.now() - opened < followup.UNREPORTED_WINDOW:
+                logger.error('Website order %s: no second page — the day report could not be asked',
+                             invoice.website_order_number)
+                followup.alert_payment_unreported(invoice, [])
+                return in_review()
+            # The report took time: decide again on what the invoice is now.
+            invoice.refresh_from_db()
+            if followup.holds_reported_payment(invoice) or invoice.payment_status in followup.PAID_STATUSES:
+                continue
+
+        if invoice.payment_status == 'failed':
+            if parse_store_cart_notes(invoice.notes) is None:
+                return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
+            reopened = StoreInvoice.objects.filter(
+                pk=invoice.pk, payment_status='failed', tranzila_transaction_id='',
+            ).update(payment_status='pending')
+            if not reopened:
+                continue  # changed since it was read: decide again
+            invoice.payment_status = 'pending'
+        break
+    else:
+        # Still changing after three reads: nothing is handed out now.
+        logger.error('Website order %s: kept changing while a page was asked for', invoice.website_order_number)
+        return in_review()
 
     if not callback_url:
         return Response({'error': 'callback_url required'}, status=400)
@@ -572,6 +609,13 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
         followup.alert_payment_page_failed(invoice, str(exc), tranzila.terminal)
         return Response({'error': WEBSITE_PAYMENT_PAGE_FAILED_MESSAGE}, status=503)
 
+    # The last look before a page leaves: a payment reported, or a sale
+    # completed, while the page was being asked for.
+    invoice.refresh_from_db()
+    if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
+        return already_paid()
+    if followup.holds_reported_payment(invoice) or invoice.payment_status == 'refunded':
+        return in_review()
     StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=timezone.now())
     return Response({
         'ok': True,
@@ -735,6 +779,44 @@ class WidgetStorePaymentStatusView(_KeyBeforeThrottle, APIView):
         from apps.store.payment_followup import website_order_status
 
         payload = website_order_status(order)
+        if payload is None:
+            return Response({'error': 'order not found'}, status=404)
+        return Response(payload)
+
+
+class WidgetStorePaymentReturnedView(_KeyBeforeThrottle, APIView):
+    """
+    POST /api/v1/store/widget/payment/returned/
+    {"order": "<website_order_number>", "index": "<Tranzila's transaction number>", "code": "<ConfirmationCode>"}
+    → the same answer as the status endpoint.
+
+    Server to server, from the website, with the integration key: the number
+    Tranzila's page handed back to the site's return address, for an order
+    whose notify may never come. It is recorded as reported and judged by the
+    report exactly like a notify — believed no more than one. `code` (the
+    approval number the page returned) is optional; without it the report
+    cannot tie the number to the order, and the order stays in review for a
+    person. A number that is not this order's payment does not pass, and is
+    kept for the office like any other. Call it only for the page's
+    success return.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'store_payment_returned'
+
+    def post(self, request):
+        # The key was checked before the throttle (_KeyBeforeThrottle.initial).
+        order = str(request.data.get('order') or '').strip()
+        index = str(request.data.get('index') or '').strip()
+        code = str(request.data.get('code') or request.data.get('ConfirmationCode') or '').strip()[:100]
+        if not order:
+            return Response({'error': 'order required'}, status=400)
+        if not index.isdigit():
+            return Response({'error': 'index must be the transaction number Tranzila returned'}, status=400)
+        from apps.store.payment_followup import record_returned_number
+
+        payload = record_returned_number(order, index, code)
         if payload is None:
             return Response({'error': 'order not found'}, status=404)
         return Response(payload)

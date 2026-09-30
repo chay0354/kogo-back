@@ -489,7 +489,26 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
     line_items = StoreSaleSerializer(many=True, read_only=True)
     child_name = serializers.CharField(source='child.full_name', read_only=True, allow_null=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
-    
+    # A payment in review (apps/store/payment_followup.py): the numbers the
+    # managers' "payment-review" action decides about.
+    payment_in_review = serializers.SerializerMethodField()
+    payment_review_numbers = serializers.SerializerMethodField()
+
+    def get_payment_in_review(self, obj) -> bool:
+        from apps.store.payment_followup import holds_reported_payment
+
+        return holds_reported_payment(obj)
+
+    def get_payment_review_numbers(self, obj) -> list:
+        from apps.store.payment_followup import holds_reported_payment, open_numbers
+
+        if not holds_reported_payment(obj):
+            return []
+        return [
+            {'index': n.index, 'suspected': n.suspected, 'reported_at': n.reported_at.isoformat()}
+            for n in open_numbers(obj, include_suspected=True)
+        ]
+
     class Meta:
         model = StoreInvoice
         fields = [
@@ -502,7 +521,8 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
             'branch', 'branch_name',
             'issue_date', 'notes',
             'line_items',
-            'created_at'
+            'created_at',
+            'payment_in_review', 'payment_review_numbers',
         ]
         read_only_fields = ['id', 'invoice_number', 'issue_date', 'created_at', 'refunded_amount', 'amount_paid']
 
