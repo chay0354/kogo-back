@@ -5,10 +5,11 @@ The backups of the books as calls a scheduler can make (apps/documents/quarterly
     GET|POST /api/v1/documents/cron/quarterly-backup/[?quarter=YYYY-Qn]
 
 Guarded like every other cron: X-Cron-Token, ?token= or a Bearer matching
-CRON_TOKEN / CRON_SECRET. Neither is in vercel.json: when they run is the
-owner's decision; until then `manage.py daily_backup` / `quarterly_backup` do
-the same from a machine. Only to a bucket: a serverless function has no
-directory worth keeping, so with no bucket configured they answer 409.
+CRON_TOKEN / CRON_SECRET. The daily one runs from vercel.json at 00:30 UTC
+(the owner's approval, 30.9.2026); the quarterly one is not scheduled —
+`manage.py quarterly_backup` or a call with the token runs it. Only to a
+bucket: a serverless function has no directory worth keeping, so with no
+bucket configured they answer 409.
 """
 from __future__ import annotations
 

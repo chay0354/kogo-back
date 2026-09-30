@@ -33,7 +33,7 @@ urlpatterns = [
     path('signing/certificate/issue/', signing_views.signing_issue_certificate, name='signing-certificate-issue'),
     path('signing/selftest/', signing_views.signing_selftest, name='signing-selftest'),
     path('cron/sign-pending/', signing_views.cron_sign_pending, name='documents-cron-sign-pending'),
-    # The books to Israel, daily and quarterly (25(ו)(2)); not scheduled in vercel.json — the owner decides when.
+    # The books to Israel: daily (vercel.json, 00:30 UTC) and quarterly (25(ו)(2), run by hand).
     path('cron/daily-backup/', cron_daily_backup, name='documents-cron-daily-backup'),
     path('cron/quarterly-backup/', cron_quarterly_backup, name='documents-cron-quarterly-backup'),
     path('', include(router.urls)),
