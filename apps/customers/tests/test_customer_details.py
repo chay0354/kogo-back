@@ -375,3 +375,23 @@ class ReviewRoundTests(_Card):
         Family.objects.create(name='לוי', phone='0541234567', branch=self.branch)
         res = self.patch({'parent': {'phone': '0541234567'}, 'confirm_duplicates': 'false'})
         self.assertEqual(res.status_code, 409)
+
+
+class MakeExtraPrimaryTests(_Card):
+    def test_the_swap_the_card_sends(self):
+        # What the card's "הפוך לראשי" sends: the two swap names and phones.
+        extra = Parent.objects.create(family=self.family, first_name='דני', last_name='כהן', phone='0525556666')
+        res = self.patch({
+            'parent': {'first_name': 'דני', 'last_name': 'כהן', 'phone': '0525556666'},
+            'extra_phones': [{'id': str(extra.id), 'name': 'יעל כהן', 'phone': '050-777-8899'}],
+            'extra_phone_ids_seen': [str(extra.id)],
+        })
+        self.assertEqual(res.status_code, 200, res.content)
+        self.reload()
+        extra.refresh_from_db()
+        self.assertEqual((self.parent.first_name, self.parent.phone, self.parent.is_primary), ('דני', '0525556666', True))
+        self.assertEqual(self.family.phone, '0525556666')
+        self.assertEqual((extra.first_name, extra.last_name, extra.phone, extra.is_primary), ('יעל', 'כהן', '0507778899', False))
+        # Payment and card links now go to the new number.
+        from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
+        self.assertEqual(build_enrollment_whatsapp_context(child=self.child)['phone'], '0525556666')

@@ -151,12 +151,8 @@ def _digits_expr(field: str):
     return expr
 
 
-def _other_families_with_phone(family: Family, digits: str, *, primary_only: bool = False):
-    """
-    Families other than this one holding the phone, however stored: on the
-    family or on any of its parents — or, with primary_only, only as the phone
-    the family's own messages go to.
-    """
+def _other_families_with_phone(family: Family, digits: str):
+    """Families other than this one holding the phone on the family or on any parent, however stored."""
     # 050-123-4567, 0501234567 and +972 50 123 4567 are one phone.
     same = Q(_d=digits) | Q(_d='972' + digits[1:])
     by_family = (
@@ -165,23 +161,14 @@ def _other_families_with_phone(family: Family, digits: str, *, primary_only: boo
         .filter(same)
         .values_list('pk', flat=True)
     )
-    parents = Parent.objects.exclude(family_id=family.pk)
-    if primary_only:
-        parents = parents.filter(is_primary=True)
     by_parent = (
-        parents
+        Parent.objects.exclude(family_id=family.pk)
         .annotate(_d=_digits_expr('phone'))
         .filter(same)
         .values_list('family_id', flat=True)
     )
     ids = set(by_family) | set(by_parent)
     return Family.objects.filter(pk__in=ids).exclude(name=SHARED_GHOST_FAMILY_NAME).order_by('name')
-
-
-def phone_is_another_familys(family: Family, phone: str) -> bool:
-    """True when the phone is what another family's own messages go to (see broadcast)."""
-    digits = normalise_phone(phone)
-    return bool(digits) and _other_families_with_phone(family, digits, primary_only=True).exists()
 
 
 def _id_error(digits: str) -> str | None:
