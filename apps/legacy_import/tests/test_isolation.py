@@ -29,10 +29,12 @@ class LegacyDocumentsFixture(RegisterFixture):
         super().setUp()
         self.business = Business.objects.create(name='עסק בדיקה')
         self.category = BusinessCategory.objects.create(business=self.business, name='כללי')
-        # One of every type, dated inside August 2026 and numbered 1, the way a
-        # kogo run's first number would read.
-        for doc_type in ('combined', 'tax_invoice', 'receipt', 'transaction_invoice', 'credit_invoice'):
+        # One of every type from each of two softwares, dated inside August 2026
+        # and numbered 1, the way a kogo run's first number would read.
+        for source_system, doc_type in [(s, t) for s in ('tazman', 'greeninvoice') for t in (
+                'combined', 'tax_invoice', 'receipt', 'transaction_invoice', 'credit_invoice')]:
             LegacyDocument.objects.create(
+                source_system=source_system,
                 original_type=doc_type, doc_type=doc_type, number=1, document_date=date(2026, 8, 10),
                 invoice_total=Decimal('1000.00'), receipt_total=Decimal('1000.00'), credit_total=Decimal('0.00'),
                 customer_name='לקוח ישן', business=self.business, business_category=self.category,
@@ -57,7 +59,7 @@ class IsolationTests(LegacyDocumentsFixture, TestCase):
         self.assertEqual(channel_documents(None, *AUGUST), [])
         report = self.report()
         self.assertEqual(set(self.rows(report)), {'TI-2026-000001'})
-        self.assertEqual(report.revenue_total, Decimal('118.00'))  # kogo's one document, not the ₪5,000 of history
+        self.assertEqual(report.revenue_total, Decimal('118.00'))  # kogo's one document, not the ₪10,000 of history
 
     def test_the_dashboards_income_by_business(self):
         buckets = aggregate_income_by_business(*AUGUST)
