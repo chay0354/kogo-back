@@ -81,6 +81,11 @@ REASON_TAMPERED = 'הקובץ השמור אינו תואם לטביעת האצב
 MAX_SEND_ATTEMPTS = 5
 # The cron leaves a fresh row to the request that issued it.
 CRON_GRACE = timedelta(minutes=2)
+# An original from before every original had a channel (30.9.2026) that never
+# went out is mailed by the cron only while it is this recent. An older one
+# waits for the office's "שלח" rather than reaching a customer weeks late with
+# no warning; reroute_undelivered --apply gives old rows a channel on purpose.
+UNROUTED_AUTO_MAIL_WINDOW = timedelta(days=3)
 
 
 def _short_error(exc: BaseException) -> str:
@@ -557,7 +562,7 @@ def sign_pending(*, limit: int = 25) -> dict:
     unsent = originals.filter(
         signed_at__isnull=False, sent_at__isnull=True, paper_original_printed_at__isnull=True,
         send_attempts__lt=MAX_SEND_ATTEMPTS, created_at__lte=timezone.now() - CRON_GRACE,
-    )
+    ).exclude(channel='', created_at__lt=timezone.now() - UNROUTED_AUTO_MAIL_WINDOW)
     due = unsent.filter(delivery__in=(HELD, EMAIL)).order_by('updated_at')
     for row in due[:limit]:
         try:

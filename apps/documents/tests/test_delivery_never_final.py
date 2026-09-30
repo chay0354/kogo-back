@@ -505,6 +505,30 @@ class RerouteUndeliveredTests(DeliveryMixin, TestCase):
         self.assertEqual(sign_pending()['sent'], 2)  # the card and the transfer receipt
         self.assertEqual(self.formal_mail.call_count, 2)
 
+    def test_the_cron_leaves_an_old_unrouted_original_for_the_office(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        self.formal_mail.side_effect = RuntimeError('not at issue')
+        old = self.receipt('אשראי')
+        recent = self.receipt('אשראי')
+        self.formal_mail.side_effect = None
+        # Both as the code before 30.9.2026 left a mail that never went: no channel, 'email', unsent.
+        SignedOriginal.objects.filter(number__in=(old.document_number, recent.document_number)).update(
+            channel='', delivery=EMAIL, sent_at=None, send_attempts=0,
+        )
+        self.formal_mail.reset_mock()
+        past_the_grace_period()
+        SignedOriginal.objects.filter(number=old.document_number).update(
+            created_at=timezone.now() - timedelta(days=10),
+        )
+
+        self.assertEqual(sign_pending()['sent'], 1)
+        self.assertEqual(self.formal_mail.call_count, 1)
+        self.assertIsNone(self.row(old).sent_at)  # the office sends it with "שלח"
+        self.assertIsNotNone(self.row(recent).sent_at)
+
     def test_since_limits_it(self):
         doc = self.receipt('מזומן')
         self.as_before(doc)
