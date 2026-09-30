@@ -263,7 +263,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
             return ''
         return str(value).strip()
 
-    def _sync_size_stocks(self, product, size_stocks, *, expected_rows=None):
+    def _sync_size_stocks(self, product, size_stocks, *, expected_rows=None, record=True):
         """
         Bring the product's stock rows to the list the office saved, keyed by
         (size, location): rows that are there are updated in place, new ones
@@ -330,7 +330,8 @@ class StoreProductSerializer(serializers.ModelSerializer):
                 for row in found:
                     # The history row outlives the stock row (size_stock → NULL); its note keeps the place.
                     if row.stock_quantity:
-                        _record_recount(product, row, -int(row.stock_quantity), _row_label(key), self._user())
+                        if record:
+                            _record_recount(product, row, -int(row.stock_quantity), _row_label(key), self._user())
                     row.delete()
 
             for key, entry, qty in plan:
@@ -351,7 +352,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
                         fields.append('sort_order')
                     if fields:
                         row.save(update_fields=[*fields, 'updated_at'])
-                    if qty != before:
+                    if record and qty != before:
                         _record_recount(product, row, qty - before, _row_label(key), self._user())
                 else:
                     row = StoreProductSize.objects.create(
@@ -361,7 +362,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
                         sort_order=entry['sort_order'],
                         branch_id=entry.get('branch'),
                     )
-                    if qty:
+                    if record and qty:
                         _record_recount(product, row, qty, _row_label(key), self._user())
 
             remaining = list(StoreProductSize.objects.filter(product=product).order_by('sort_order', 'size'))
@@ -423,12 +424,40 @@ class StoreProductSerializer(serializers.ModelSerializer):
         expected = validated_data.pop('stock_expected', None)
         expected_rows, expected_flat = _read_expected(expected)
         with transaction.atomic():
+            if size_stocks and not StoreProductSize.objects.filter(product=instance).exists():
+                return self._convert_to_rows(instance, validated_data, size_stocks, expected_rows, expected_flat)
             flat_delta = self._apply_flat_stock(instance, validated_data, expected_flat)
             product = super().update(instance, validated_data)
             if flat_delta:
                 _record_recount(product, None, flat_delta, 'מלאי כללי', self._user())
             if size_stocks is not None:
                 self._sync_size_stocks(product, size_stocks, expected_rows=expected_rows)
+        return product
+
+
+    def _convert_to_rows(self, instance, validated_data, size_stocks, expected_rows, expected_flat):
+        """
+        A product that kept one number gets its first rows (a size, or a place).
+
+        Moving that number into rows is not a change in stock, so the history
+        gets only the difference between the rows and what the number held —
+        not every row as if it had just arrived. The edit form carries the old
+        number over as a row of its own, so adding a size adds to the stock;
+        an older form that did not, replaced it, and the difference says so.
+        """
+        locked = StoreProduct.objects.select_for_update().get(pk=instance.pk)
+        before = int(locked.stock_quantity or 0)
+        if expected_flat is not None and before != int(expected_flat):
+            raise StockChangedSinceOpened(
+                f'המלאי השתנה מאז שנפתח החלון (עכשיו {before}, כשנפתח {int(expected_flat)}). '
+                'סגרו את החלון, פתחו אותו מחדש ועדכנו שוב.'
+            )
+        validated_data.pop('stock_quantity', None)
+        instance.stock_quantity = before
+        product = super().update(instance, validated_data)
+        self._sync_size_stocks(product, size_stocks, expected_rows=expected_rows, record=False)
+        product.refresh_from_db(fields=['stock_quantity', 'size', 'branch'])
+        _record_recount(product, None, int(product.stock_quantity or 0) - before, 'מעבר למלאי לפי מידות ומיקומים', self._user())
         return product
 
 

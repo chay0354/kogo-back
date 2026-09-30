@@ -268,3 +268,44 @@ class AdjustAndTransferTests(_Store):
         }, format='json')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(self.rows(), {('M', None): 4, ('M', self.branch.id): 5})
+
+
+class FirstRowsKeepTheStockTests(_Store):
+    """A product that kept one number gets its first size: the number is not lost."""
+
+    def setUp(self):
+        super().setUp()
+        self.bag = StoreProduct.objects.create(
+            name='תיק', category='אביזרים', sale_price=Decimal('80'), cost_price=Decimal('30'),
+            stock_quantity=10, branch=self.branch,
+        )
+
+    def test_the_form_carries_the_old_number_over_and_the_size_adds_to_it(self):
+        rows = [
+            {'size': '', 'stock_quantity': 10, 'branch': str(self.branch.id)},   # what the form carries over
+            {'size': 'M', 'stock_quantity': 5, 'branch': str(self.branch.id)},
+        ]
+        res = self.patch(self.bag, {'size_stocks': rows, 'stock_quantity': 15,
+                                    'stock_expected': {'rows': [], 'stock_quantity': 10}})
+        self.assertEqual(res.status_code, 200, res.content)
+        self.bag.refresh_from_db()
+        self.assertEqual(self.bag.stock_quantity, 15)
+        self.assertEqual(self.rows(self.bag), {('', self.branch.id): 10, ('M', self.branch.id): 5})
+        # One history line, for what really changed.
+        self.assertEqual(
+            list(InventoryAdjustment.objects.filter(product=self.bag).values_list('quantity_delta', 'note')),
+            [(5, 'עדכון בחלון עריכת מוצר — מעבר למלאי לפי מידות ומיקומים')],
+        )
+
+    def test_a_sale_since_the_form_opened_refuses_the_move(self):
+        decrement_product_stock(self.bag, {'quantity': 2})
+        res = self.patch(self.bag, {'size_stocks': [{'size': 'M', 'stock_quantity': 5, 'branch': None}],
+                                    'stock_expected': {'rows': [], 'stock_quantity': 10}})
+        self.assertEqual(res.status_code, 409, res.content)
+        self.assertFalse(StoreProductSize.objects.filter(product=self.bag).exists())
+
+    def test_an_older_form_that_replaced_the_number_is_in_the_history(self):
+        res = self.patch(self.bag, {'size_stocks': [{'size': 'M', 'stock_quantity': 5, 'branch': None}],
+                                    'stock_quantity': 5})
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(list(InventoryAdjustment.objects.filter(product=self.bag).values_list('quantity_delta', flat=True)), [-5])
