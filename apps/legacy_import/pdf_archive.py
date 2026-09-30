@@ -45,7 +45,13 @@ logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 4_300_000
 MAX_FILES = 500
 MAX_PDF_BYTES = 20_000_000
-TIME_BUDGET_SECONDS = 20.0
+# What a ZIP may unpack to in all: PDFs barely compress, so a 4.3MB ZIP of real
+# PDFs is far below this; a ZIP that claims more is not the old software's.
+MAX_ZIP_UNPACKED_BYTES = 60_000_000
+# Like the signed-file backup's cron (signing/backup.DEFAULT_TIME_BUDGET): well
+# inside a serverless function's limit. What is left is reported, and the
+# screen sends the same files again.
+TIME_BUDGET_SECONDS = 8.0
 REPORT_LIMIT = 300
 
 _DIGITS = re.compile(r'\d+')
@@ -100,6 +106,8 @@ def _zip_entries(content: bytes) -> list:
     except zipfile.BadZipFile as exc:
         raise ImportFileError('קובץ ה-ZIP פגום') from exc
     files = []
+    if sum(info.file_size for info in archive.infolist()) > MAX_ZIP_UNPACKED_BYTES:
+        raise ImportFileError('קובץ ה-ZIP גדול מדי לפתיחה. שלחו את קובצי ה-PDF עצמם, בכמה חלקים.')
     with archive:
         for info in archive.infolist():
             if info.is_dir() or info.filename.startswith('__MACOSX/') or '/.' in f'/{info.filename}':

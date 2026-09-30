@@ -123,6 +123,19 @@ class WithoutBucketTests(PdfFixture, APITestCase):
         self.other_software.refresh_from_db()
         self.assertTrue(self.printed.pdf_sha256 and self.other_software.pdf_sha256)
 
+    def test_out_of_time_it_says_how_many_are_left_and_the_same_files_pick_up_there(self):
+        files = [pdf_archive.Upload('33001.pdf', pdf('a')), pdf_archive.Upload('חשבונית מס 40001.pdf', pdf('b'))]
+        first = pdf_archive.attach(files, 'tazman', time_budget=0)
+        self.assertEqual((first['counts'], first['remaining']), ({'fingerprinted': 1}, 1))
+        second = pdf_archive.attach(files, 'tazman', time_budget=0)
+        self.assertEqual((second['counts'], second['remaining']), ({'already': 1, 'fingerprinted': 1}, 0))
+
+    def test_a_zip_that_unpacks_to_too_much_is_refused(self):
+        with patch.object(pdf_archive, 'MAX_ZIP_UNPACKED_BYTES', 10):
+            res = self.send(file=zipped({'33001.pdf': pdf('receipt')}))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('ZIP', res.data['error'])
+
     def test_the_request_limit(self):
         big = SimpleUploadedFile('big.zip', b'\0' * (pdf_archive.MAX_UPLOAD_BYTES + 1))
         res = self.send(file=big)
