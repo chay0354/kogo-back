@@ -283,3 +283,21 @@ class TwoRunsAtOnceTests(TransactionTestCase):
         self.assertEqual(sorted(results), [0, 1], results)
         self.assertEqual(FormalDocument.objects.filter(document_type='tax_invoice').count(), 1)
         self.assertEqual(DocumentSettlement.objects.count(), 1)
+
+
+@override_settings(TRANZILA_BILLING_TERMINAL='')
+class PartnerTests(Fixture, APITestCase):
+    def test_another_branchs_plan_cannot_be_bounced_or_cancelled(self):
+        from apps.rentals.tests.factories import make_branch
+        from apps.rentals.tests.factories import make_user as make_scoped_user
+
+        plan = register_check_plan(child_id=str(self.kid.id), checks=[check(self.today + timedelta(days=9), '9501')])
+        self.client.force_authenticate(
+            make_scoped_user('checks-partner@test', UserProfile.ROLE_PARTNER, [make_branch('אחר')]),
+        )
+        item = plan.items.get()
+        self.assertEqual(self.client.post(f'{PLANS}{plan.id}/bounce/', {'item_id': str(item.id)},
+                                          format='json').status_code, 404)
+        self.assertEqual(self.client.post(f'{PLANS}{plan.id}/cancel/', {}, format='json').status_code, 404)
+        item.refresh_from_db()
+        self.assertIsNone(item.bounced_at)

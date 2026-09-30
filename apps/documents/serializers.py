@@ -78,7 +78,8 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
         if obj.pk not in cache:
             from apps.documents.settlement import document_settlements
 
-            cache[obj.pk] = document_settlements(obj)
+            request = self.context.get('request')
+            cache[obj.pk] = document_settlements(obj, user=getattr(request, 'user', None))
         return cache[obj.pk]
 
     def get_balance(self, obj):

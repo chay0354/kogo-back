@@ -469,3 +469,19 @@ class TwoReceiptsAtOnceTests(TransactionTestCase):
         self.assertEqual(FormalDocument.objects.filter(document_type='receipt').count(), 1)
         # The refused receipt rolled back with its number: the run has no gap.
         self.assertEqual(DocumentSeries.objects.get(series='RC', year=fixture.year).counter, 1)
+
+
+@override_settings(TRANZILA_BILLING_TERMINAL='')
+class PartnerDetailTests(SettlementFixture, APITestCase):
+    def test_a_partner_sees_only_their_branches_documents_among_the_lines(self):
+        mine = self.kid.family.branch
+        ti = self.invoice(f'TI-{self.year}-000900')
+        elsewhere = self.invoice(f'RC-{self.year}-000900', kind='receipt', total='100.00', branch=make_branch('רחוק'))
+        ours = self.invoice(f'RC-{self.year}-000901', kind='receipt', total='100.00')
+        for payer in (elsewhere, ours):
+            DocumentSettlement.objects.create(payer=payer, invoice=ti, invoice_number=ti.document_number,
+                                              amount=Decimal('100.00'))
+        self.client.force_authenticate(make_scoped_user('detail-partner@test', UserProfile.ROLE_PARTNER, [mine]))
+        detail = self.client.get(DETAIL.format(ti.pk)).data
+        self.assertEqual([line['document_number'] for line in detail['settled_by']], [ours.document_number])
+        self.assertEqual(detail['balance']['paid'], '200.00')

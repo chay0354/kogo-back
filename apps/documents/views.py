@@ -408,7 +408,7 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 else:
                     doc = service.create_draft(data)
 
-            out = dict(FormalDocumentSerializer(doc).data)
+            out = dict(FormalDocumentSerializer(doc, context={'request': request}).data)
             if check_plan is not None:
                 out['check_plan_id'] = str(check_plan.pk)
             return Response(out, status=status.HTTP_201_CREATED)

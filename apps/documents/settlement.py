@@ -504,11 +504,24 @@ def _line(row, *, other: FormalDocument | None, other_number: str, source: str) 
     }
 
 
-def document_settlements(doc: FormalDocument) -> dict:
+def _visible(lines: list[dict], user) -> list[dict]:
+    """A partner sees the lines whose other document is one of their branches' (partner_scope)."""
+    from apps.documents.partner_scope import partner_branches, scope_documents
+
+    if user is None or partner_branches(user) is None:
+        return lines
+    ids = [line['document_id'] for line in lines if line['document_id']]
+    allowed = {str(pk) for pk in scope_documents(FormalDocument.objects.filter(pk__in=ids), user).values_list('pk', flat=True)}
+    return [line for line in lines if line['document_id'] in allowed]
+
+
+def document_settlements(doc: FormalDocument, *, user=None) -> dict:
     """
     What a document's detail shows: its balance when it is an invoice, what
     paid it (settled_by) and what it paid (settles) — settlement rows, voided
-    ones too (with voided_at), and what an older record implies (source).
+    ones too (with voided_at), and what an older record implies (source). For
+    a partner (`user`), only the lines whose other document they may see; the
+    balance is the invoice's own.
     """
     out = {'balance': None, 'settled_by': [], 'settles': []}
     if doc.document_type in INVOICE_TYPES:
@@ -536,6 +549,8 @@ def document_settlements(doc: FormalDocument) -> dict:
             line = _line(None, other=invoices.get(fact.invoice_id), other_number='', source=fact.source)
             line['amount'] = str(fact.amount)
             out['settles'].append(line)
+    out['settled_by'] = _visible(out['settled_by'], user)
+    out['settles'] = _visible(out['settles'], user)
     return out
 
 
