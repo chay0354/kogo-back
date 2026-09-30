@@ -193,3 +193,24 @@ class ReceiptCardBrandTests(Fixture, TestCase):
                                 'card_brand': 'מאסטרקארד'},
         })
         self.assertEqual(doc.payments.get().card_brand, 'מאסטרקארד')
+
+
+class PaymentDateRowTests(TestCase):
+    """The day a payment was made is printed only when it is not the document's own day."""
+
+    def document(self, paid_on):
+        doc = FormalDocument.objects.create(
+            document_number='RC-2026-000321', document_type='receipt', client_type='existing',
+            document_date=date(2026, 9, 10), subtotal=Decimal('100.00'), total_amount=Decimal('100.00'),
+        )
+        DocumentPayment.objects.create(document=doc, payment_method='bank_transfer', amount=Decimal('100.00'),
+                                       reference='TRF-1', paid_on=paid_on)
+        return doc
+
+    def test_a_payment_made_on_the_documents_day_adds_no_row(self):
+        printed = fields(build_document_layout(self.document(date(2026, 9, 10))))
+        self.assertEqual(printed.get('תאריך התשלום', ''), '')
+
+    def test_a_payment_made_on_another_day_names_it(self):
+        printed = fields(build_document_layout(self.document(date(2026, 9, 3))))
+        self.assertEqual(printed['תאריך התשלום'], '03/09/2026')

@@ -223,12 +223,16 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
             # check, as the reference was, so a plan of twelve checks stays short.
             fields.append(Field(f"פרטי הצ'ק{suffix}", check_details(payment)))
         else:
+            # The day it was paid only when it is not the document's own day: a
+            # payment made that day is dated by the document, and one more row
+            # would carry an ordinary one-page receipt over to a second page.
+            paid_on = getattr(payment, 'paid_on', None)
             fields += [
                 Field(f'סוג כרטיס{suffix}', getattr(payment, 'card_brand', '') or ''),
                 Field(f'4 ספרות אחרונות{suffix}', payment.card_last_four or ''),
                 Field(f'מספר תשלומים{suffix}', str(installments) if installments > 1 else ''),
                 Field(f'אסמכתא / אישור{suffix}', payment.reference or ''),
-                Field(f'תאריך התשלום{suffix}', date_stamp(getattr(payment, 'paid_on', None))),
+                Field(f'תאריך התשלום{suffix}', date_stamp(paid_on) if paid_on and paid_on != doc.document_date else ''),
             ]
         fields.append(Field(f'סכום ששולם{suffix}', money(payment.amount)))
     paid = sum((p.amount for p in payments), Decimal('0'))
