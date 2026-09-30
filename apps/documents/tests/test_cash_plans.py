@@ -94,19 +94,22 @@ class RegisterTests(TestCase):
         self.assertEqual(plan.months.count(), 10)
         self.assertEqual(plan.months.first().due_date, date(2026, 9, 1))
 
-    def test_months_already_past_get_their_document_immediately(self):
-        """Registering in the middle of a year must not leave the past unissued."""
+    def test_every_month_is_covered_by_the_one_document_from_the_start(self):
+        """Nothing is left pending for a monthly run — this code's or, were it put back, the older code's."""
         plan = self._register()
-        issued = plan.months.filter(status='invoiced').count()
-        self.assertGreater(issued, 0)
-        self.assertTrue(
-            all(m.due_date <= date.today() for m in plan.months.filter(status='invoiced'))
-        )
+        self.assertEqual(set(plan.months.values_list('status', flat=True)), {'invoiced'})
+        self.assertEqual(set(plan.months.values_list('document', flat=True)), {plan.receipt_id})
 
-    def test_a_future_month_waits(self):
-        plan = self._register()
-        future = plan.months.filter(due_date__gt=date.today())
-        self.assertTrue(all(m.status == 'pending' for m in future))
+    def test_a_plan_with_months_to_come_stays_active_until_its_last_month_begins(self):
+        plan = register_cash_plan(
+            child_id=str(self.child.id), total_amount='720', monthly_amount='240',
+            lesson_id=str(self.lesson.id), start_month=israel_today().replace(day=1),
+        )
+        self.assertEqual(plan.status, 'active')
+        last = plan.months.order_by('-due_date').first().due_date
+        issue_due_cash_documents(today=last, plan_id=plan.id)
+        plan.refresh_from_db()
+        self.assertEqual(plan.status, 'active' if last > israel_today() else 'completed')
 
     def test_no_monthly_document_is_issued_whatever_an_older_screen_asks(self):
         plan = self._register(monthly_document_type='tax_invoice')

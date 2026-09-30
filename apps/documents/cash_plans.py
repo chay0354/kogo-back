@@ -5,9 +5,10 @@ A parent pays the whole year in cash. For a service the VAT falls due when the
 money is received (חוק מע"מ ס' 24, 29), so the moment the cash is taken ONE
 חשבונית מס/קבלה (IRM) is issued for the whole sum, with a cash payment line
 for all of it. The months are laid out as the schedule of lessons it covers;
-no further fiscal document is issued for them. As each month begins, the
-hourly run marks it covered by that IRM (the plan completes with its last
-month, and the child's status reads it as before).
+no further fiscal document is issued for them. Every month is marked covered
+by that IRM when the plan is registered (none is left pending for a monthly
+run); the plan completes when its last month begins, and the child's status
+reads it as before.
 
 `CashPlan.mode` says which design a plan was registered under:
 
@@ -33,6 +34,7 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from apps.core.payment_service import JERUSALEM_TZ
@@ -207,11 +209,17 @@ def register_cash_plan(
         branch=branch,
         created_by=actor if getattr(actor, 'is_authenticated', False) else None,
     )
+    # Every month is covered by the one document from the start: none is left
+    # pending for a monthly run to issue anything for — not this code's run,
+    # and not the older code's either, were it ever put back.
+    now = timezone.now()
     for row in rows:
-        CashPlanMonth.objects.create(plan=plan, due_date=row['due_date'], amount=row['amount'])
+        CashPlanMonth.objects.create(
+            plan=plan, due_date=row['due_date'], amount=row['amount'],
+            status='invoiced', document=document, invoiced_at=now,
+        )
 
-    # The months already begun are covered at once, so the plan reads right
-    # from the moment it is registered.
+    # A plan whose last month has already begun is complete at once.
     issue_due_cash_documents(today=_today(), plan_id=plan.id)
     plan.refresh_from_db()
     # Cash never writes paid_until_date, so nothing else would tell the child's
@@ -329,10 +337,23 @@ def issue_due_cash_documents(*, today: date | None = None, plan_id=None, limit: 
     affected = {month.plan_id for month in rows}
     if plan_id is not None:
         affected.add(plan_id)
-    for plan in CashPlan.objects.filter(id__in=affected, status='active'):
+    # An older plan completes when its last month has its document.
+    for plan in CashPlan.objects.filter(id__in=affected, status='active', mode__isnull=True):
         if not plan.months.filter(status='pending').exists():
             plan.status = 'completed'
             plan.save(update_fields=['status', 'updated_at'])
+    # An 'upfront' plan's months are all covered from the start: it completes
+    # when its last month begins, and counts for that month until it ends
+    # (child_status._plan_covers_this_month), as an older plan does.
+    finished = (
+        CashPlan.objects.filter(mode=MODE_UPFRONT, status='active')
+        .annotate(last_month=Max('months__due_date')).filter(last_month__lte=today)
+    )
+    if plan_id is not None:
+        finished = finished.filter(pk=plan_id)
+    for plan in finished:
+        plan.status = 'completed'
+        plan.save(update_fields=['status', 'updated_at'])
 
     return {'checked': len(rows), 'issued': issued, 'covered': covered, 'errors': errors}
 
