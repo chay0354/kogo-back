@@ -161,6 +161,14 @@ def document_create_refusal(user, data: dict):
         linked = (data.get(section) or {}).get('linked_invoice_id')
         if linked and _linked_elsewhere(linked, user, ids):
             return 403, LINKED_NOT_YOURS
+    # The invoices a receipt pays (settlement.py) must be the partner's own too.
+    invoice_ids = [row.get('invoice_id') for row in data.get('settlements') or [] if row.get('invoice_id')]
+    if invoice_ids:
+        from apps.documents.models import FormalDocument
+
+        found = FormalDocument.objects.filter(pk__in=invoice_ids)
+        if scope_documents(found, user).count() != found.count():
+            return 403, LINKED_NOT_YOURS
     return None
 
 

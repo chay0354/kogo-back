@@ -39,6 +39,11 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
     business_name = serializers.CharField(source='business.name', read_only=True, default='')
     business_category_name = serializers.CharField(source='business_category.name', read_only=True, default='')
     allocation_required = serializers.SerializerMethodField()
+    # Receipts against invoices (settlement.py): an invoice's balance, what
+    # paid it and what a receipt paid. Detail only — never on the list.
+    balance = serializers.SerializerMethodField()
+    settled_by = serializers.SerializerMethodField()
+    settles = serializers.SerializerMethodField()
 
     class Meta:
         model = FormalDocument
@@ -57,6 +62,7 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
             'allocation_number', 'allocation_required', 'allocation_entered_at',
             'branch', 'created_at', 'updated_at', 'issued_at',
             'line_items', 'payments',
+            'balance', 'settled_by', 'settles',
         ]
         read_only_fields = [
             'id', 'document_number', 'created_at', 'updated_at', 'issued_at', 'customer_ack_at', 'customer_ack_note',
@@ -64,6 +70,25 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
 
     def get_allocation_required(self, obj):
         return _allocation_required(obj)
+
+    def _settlements(self, obj) -> dict:
+        cache = getattr(self, '_settlement_cache', None)
+        if cache is None:
+            cache = self._settlement_cache = {}
+        if obj.pk not in cache:
+            from apps.documents.settlement import document_settlements
+
+            cache[obj.pk] = document_settlements(obj)
+        return cache[obj.pk]
+
+    def get_balance(self, obj):
+        return self._settlements(obj)['balance']
+
+    def get_settled_by(self, obj):
+        return self._settlements(obj)['settled_by']
+
+    def get_settles(self, obj):
+        return self._settlements(obj)['settles']
 
 
 
@@ -220,6 +245,15 @@ class ReceiptDetailsInputSerializer(serializers.Serializer):
     bank_notes = serializers.CharField(required=False, allow_blank=True, default='')
 
 
+class SettlementInputSerializer(serializers.Serializer):
+    """One invoice a receipt (or an invoice-receipt) pays, and how much of it (settlement.py)."""
+    invoice_id = serializers.UUIDField(error_messages={'invalid': 'מזהה חשבונית לא תקין'})
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+        error_messages={'min_value': 'הסכום שנסגר בכל חשבונית חייב להיות גדול מאפס'},
+    )
+
+
 class CreditInvoiceInputSerializer(serializers.Serializer):
     document_date = serializers.DateField()
     # A credit note names the document it credits (its number and date): the
@@ -270,6 +304,9 @@ class CreateDocumentSerializer(serializers.Serializer):
     invoice_details = InvoiceDetailsInputSerializer(required=False)
     receipt_details = ReceiptDetailsInputSerializer(required=False)
     credit_invoice_details = CreditInvoiceInputSerializer(required=False)
+    # The invoices a receipt pays (tax invoices) or an invoice-receipt closes
+    # (transaction invoices), and how much of each (settlement.py, C).
+    settlements = SettlementInputSerializer(many=True, required=False, default=list)
 
     # Which section each type is built from. Optional above because a receipt
     # carries no invoice section and an invoice carries no receipt one.
@@ -321,6 +358,10 @@ class CreateDocumentSerializer(serializers.Serializer):
                 raise serializers.ValidationError({'credit_invoice_details': {'linked_document_date': [
                     f'{number} אינו מסמך שהופק בקוגו — יש לציין את תאריך המסמך המקורי',
                 ]}})
+        if attrs.get('settlements') and attrs.get('document_type') not in ('receipt', 'combined'):
+            raise serializers.ValidationError({'settlements': [
+                'חשבונית נסגרת בקבלה או בחשבונית מס/קבלה בלבד',
+            ]})
         if attrs.get('document_type') == 'combined':
             details = attrs['invoice_details']
             if not details.get('payments'):

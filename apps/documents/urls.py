@@ -8,6 +8,7 @@ from apps.documents.views import (
     DocumentSeriesViewSet,
     FormalDocumentViewSet,
     MissingReceiptsViewSet,
+    SettlementViewSet,
 )
 
 router = DefaultRouter()
@@ -16,6 +17,7 @@ router.register(r'check-plans', CheckPlanViewSet, basename='check-plan')
 router.register(r'cash-plans', CashPlanViewSet, basename='cash-plan')
 router.register(r'missing-receipts', MissingReceiptsViewSet, basename='missing-receipts')
 router.register(r'series', DocumentSeriesViewSet, basename='document-series')
+router.register(r'settlements', SettlementViewSet, basename='document-settlement')
 
 urlpatterns = [
     # Signed originals (apps/documents/signing).

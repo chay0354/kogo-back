@@ -19,7 +19,8 @@ The answer, top to bottom:
               only, as /legacy-import/documents/ is; null for anyone else
   tenancies   the studio rentals the customer holds, with their slots (read only)
   totals      what the documents add up to, by type
-  balance     null — what is still open arrives with settlements (another stream)
+  balance     what is still open: every tax / transaction invoice still owing,
+              with what paid and credited it (apps/documents/settlement.py)
 
 Scoping: the customer itself comes through the viewset's get_object(), so a
 partner reaches only the customers scope_business_customers gives them and any
@@ -223,6 +224,7 @@ def _tenancies(customer, user) -> list[dict]:
 def business_customer_summary(customer, user, *, include_legacy: bool) -> dict:
     """The card's whole answer for `customer`, as `user` may see it (see the module docstring)."""
     from apps.customers.serializers import BusinessCustomerSerializer
+    from apps.documents.settlement import customer_balance
 
     all_docs = list(_scoped_documents(customer, user))
     drafts = [doc for doc in all_docs if doc.document_type == DRAFT]
@@ -241,8 +243,8 @@ def business_customer_summary(customer, user, *, include_legacy: bool) -> dict:
         'is_tenant': bool(tenancies),
         'tenancies': tenancies,
         'totals': _totals(issued, len(drafts)),
-        # What the customer still owes, and which invoice each receipt closed,
-        # come with settlements (DocumentSettlement); until then the card says
-        # nothing rather than a number it cannot back.
-        'balance': None,
+        # What the customer still owes: each invoice's total less the
+        # receipts that paid it and the credit notes that took it back
+        # (settlement.customer_balance), from the documents this user may see.
+        'balance': customer_balance(issued),
     }
