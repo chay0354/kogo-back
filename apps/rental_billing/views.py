@@ -2,8 +2,9 @@
 
 Office — managers and partners. A partner reaches the orders and charges of
 their own branches only (another branch's is 404); a worker is refused (403).
-The four decisions on money — retry, mark-charged, void, issue-receipt — are
-managers' only, as issuing a document is in apps/documents (a partner: 403).
+The decisions on money — retry, mark-charged, void, issue-receipt,
+record-offline-payment — are managers' only, as issuing a document is in
+apps/documents (a partner: 403).
 
     GET, POST   standing-orders/                    list (?tenancy= ?status=a,b ?branch=) / open one from a tenancy
     GET, PATCH  standing-orders/{id}/               one order / amount_before_vat, billing_day, end_date, notes
@@ -18,8 +19,15 @@ managers' only, as issuing a document is in apps/documents (a partner: 403).
     GET         charges/{id}/
     POST        charges/{id}/retry/                 a failed month, now — refused while billing is off
     POST        charges/{id}/mark-charged/          {"transaction_id", "confirmation_code"?, "note"?} a month in review went through
+                                                    (or a voided one Tranzila charged after all — late_card_charge)
     POST        charges/{id}/void/                  {"reason"} a month in review, or a failed one, is not charged
     POST        charges/{id}/issue-receipt/         the receipt of a charged month that has none
+    POST        charges/{id}/record-offline-payment/
+                                                    {"method": cash|check|bank_transfer, "amount", "paid_on"?,
+                                                    "reference"?, "note"?, "check"?: {number, bank, branch,
+                                                    account, date, crossed}} a failed or voided month paid at the
+                                                    office: charged, with its RT receipt (offline.py). A second
+                                                    call returns it as it is ({"created": false}).
     GET         status/                             {"enabled", "business_name", "business_found", "business_id"}
 
 Public — the tenant, no login, throttled:
@@ -28,8 +36,9 @@ Public — the tenant, no login, throttled:
 
 Cron — the courses' cron auth (CRON_TOKEN / CRON_SECRET):
 
-    GET, POST   cron/charge/                        ?limit= ; Vercel Cron calls with GET. Not scheduled
-                                                    in vercel.json until phase 7
+    GET, POST   cron/charge/                        ?limit= ; Vercel Cron calls with GET — scheduled in
+                                                    vercel.json daily at 06:00 UTC. It charges nothing while
+                                                    RENTAL_BILLING_ENABLED is off.
 """
 from __future__ import annotations
 
@@ -38,6 +47,7 @@ import uuid
 from datetime import date
 
 from django.db.models import Prefetch
+from django.utils import timezone
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
@@ -50,12 +60,17 @@ from apps.core.card_validation import CardValidationError, validate_card_details
 from apps.core.models import BusinessCategory
 from apps.core.permissions import IsManager, IsManagerOrPartner
 from apps.core.scoping import scope_branches
-from apps.rental_billing import billing, orders
+from apps.rental_billing import billing, offline, orders
 from apps.rental_billing.card import CardEntryError, apply_card, preview_payload, resolve_link
 from apps.rental_billing.errors import DISABLED_MESSAGE, BillingDisabled, BillingError
 from apps.rental_billing.links import rotate_card_link
 from apps.rental_billing.models import TenantCardLink, TenantCharge, TenantStandingOrder
-from apps.rental_billing.serializers import StandingOrderSerializer, TenantChargeSerializer, card_link_payload
+from apps.rental_billing.serializers import (
+    StandingOrderSerializer,
+    TenantChargeSerializer,
+    card_link_payload,
+    signed_originals_by_number,
+)
 from apps.rentals.models import BILLING_DAY_MAX, BILLING_DAY_MIN, Tenancy
 
 logger = logging.getLogger(__name__)
@@ -114,9 +129,19 @@ def _charges_queryset(user):
     queryset = TenantCharge.objects.select_related(
         'standing_order', 'standing_order__tenant', 'standing_order__branch',
         'business', 'business_category', 'receipt', 'resolved_by',
+    ).prefetch_related(
+        # How a month was paid is its receipt's payment line (offline.offline_payment_of).
+        'receipt__payments',
     )
     # A partner reaches the charges of their own branches' orders only.
     return scope_branches(queryset, user, 'standing_order__branch')
+
+
+def _charges_data(charges, context: dict) -> list:
+    """A list of charges, their receipts' signed originals read in one query."""
+    charges = list(charges)
+    context = {**context, 'signed_originals': signed_originals_by_number(charges)}
+    return TenantChargeSerializer(charges, many=True, context=context).data
 
 
 class StandingOrderViewSet(viewsets.GenericViewSet):
@@ -282,7 +307,7 @@ class StandingOrderViewSet(viewsets.GenericViewSet):
         order = self.get_object()
         billing.sweep_stale_reservations()
         queryset = _charges_queryset(request.user).filter(standing_order=order).order_by('-period', '-created_at')
-        return Response(TenantChargeSerializer(queryset, many=True, context=self.get_serializer_context()).data)
+        return Response(_charges_data(queryset, self.get_serializer_context()))
 
 
 class TenantChargeViewSet(viewsets.GenericViewSet):
@@ -323,7 +348,7 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
         if str(params.get('needs_receipt', '')).lower() in ('1', 'true', 'yes'):
             queryset = queryset.filter(status=TenantCharge.STATUS_CHARGED, receipt__isnull=True)
         queryset = queryset.order_by('-period', '-created_at')[:CHARGES_LIST_CAP]
-        return Response(self.get_serializer(queryset, many=True).data)
+        return Response(_charges_data(queryset, self.get_serializer_context()))
 
     def retrieve(self, request, pk=None):
         billing.sweep_stale_reservations()
@@ -376,6 +401,31 @@ class TenantChargeViewSet(viewsets.GenericViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
         return Response(self._read(charge))
+
+    @action(
+        detail=True, methods=['post'], url_path='record-offline-payment', permission_classes=[IsAuthenticated, IsManager],
+    )
+    def record_offline_payment(self, request, pk=None):
+        """
+        A failed or voided month the tenant paid at the office — in cash, by
+        check or by bank transfer. It turns charged and gets its RT receipt,
+        in one commit. {"created", "charge"}; the receipt number is
+        charge.receipt.document_number. Nothing reaches Tranzila, so the
+        billing switch does not gate it. 409 for a month whose card outcome is
+        unknown, or that a card paid; 400 for a form that does not add up.
+        """
+        charge = self.get_object()
+        try:
+            payment, amount, note = offline.parse_offline_payment(_body(request), today=timezone.localdate())
+            fresh, created = offline.record_offline_payment(
+                charge, payment=payment, amount=amount, note=note, user=request.user,
+            )
+        except BillingError as exc:
+            return _billing_error(exc)
+        return Response(
+            {'created': created, 'charge': self._read(fresh)},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 class BillingStatusView(APIView):
@@ -485,7 +535,7 @@ def cron_charge(request):
     GET as well as POST, as cron_recurring_billing takes: Vercel Cron calls with GET.
 
     While RENTAL_BILLING_ENABLED is off it answers {"summary": {"disabled": true}}
-    and touches nothing. Not in vercel.json: it is scheduled in phase 7.
+    and touches nothing. Scheduled in vercel.json (daily, 06:00 UTC).
     """
     from apps.customers.views import _cron_request_authorized
 
