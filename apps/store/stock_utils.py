@@ -158,7 +158,10 @@ def restore_stock_for_sale(sale: StoreSale) -> None:
         item['branch'] = str(sale.branch_id)
 
     with transaction.atomic():
-        if size and product.has_per_size_stock():
+        # A product without sizes keeps its stock per location in rows with an
+        # empty size; the refund goes back to that row, as the sale came out of
+        # it. Returned to the flat total, it was erased by the next retotal.
+        if product.has_per_size_stock():
             size_row = _resolve_size_row(product, item)
             if size_row is not None:
                 size_row.stock_quantity = max(0, size_row.stock_quantity + quantity)
