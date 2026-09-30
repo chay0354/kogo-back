@@ -379,15 +379,17 @@ def check_draft_settlements(draft: FormalDocument, target_type: str, rows) -> li
     if not wanted:
         return []
     # The draft as the document it will become: its type, customer and what it
-    # can settle. Unsaved — never a row, never a payer in any balance.
+    # can settle, as saved (the caller's copy may hold ids as it was given
+    # them). Unsaved — never a row, never a payer in any balance.
+    saved = FormalDocument.objects.get(pk=draft.pk)
     probe = FormalDocument(
-        pk=draft.pk,
-        document_number=draft.document_number,
+        pk=saved.pk,
+        document_number=saved.document_number,
         document_type=target_type,
-        child_id=draft.child_id,
-        business_customer_id=draft.business_customer_id,
-        total_amount=draft.total_amount,
-        withholding_amount=draft.withholding_amount,
+        child_id=saved.child_id,
+        business_customer_id=saved.business_customer_id,
+        total_amount=saved.total_amount,
+        withholding_amount=saved.withholding_amount,
     )
     _, invoices = _checked(probe, wanted, lock_payer=False)
     return [
