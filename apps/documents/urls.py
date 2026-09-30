@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from apps.documents.backup_views import cron_quarterly_backup
 from apps.documents.signing import views as signing_views
 from apps.documents.views import (
     CashPlanViewSet,
@@ -31,5 +32,7 @@ urlpatterns = [
     path('signing/certificate/issue/', signing_views.signing_issue_certificate, name='signing-certificate-issue'),
     path('signing/selftest/', signing_views.signing_selftest, name='signing-selftest'),
     path('cron/sign-pending/', signing_views.cron_sign_pending, name='documents-cron-sign-pending'),
+    # The quarterly backup (25(ו)(2)); not scheduled in vercel.json — the owner decides when.
+    path('cron/quarterly-backup/', cron_quarterly_backup, name='documents-cron-quarterly-backup'),
     path('', include(router.urls)),
 ]
