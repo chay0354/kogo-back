@@ -20,7 +20,12 @@ AGORA = Decimal('0.01')
 
 
 DRAFT_TYPE = 'draft'
-DRAFT_TARGET_TYPES = ('tax_invoice', 'transaction_invoice')
+# What a draft may become. A receipt and an invoice-receipt (owner, 25.9) carry
+# their payment rows from the draft on, and the invoices they will settle in
+# draft_settlements — both checked again when the draft is approved.
+DRAFT_TARGET_TYPES = ('tax_invoice', 'transaction_invoice', 'receipt', 'combined')
+# The draft targets that receive money: they settle invoices and are paid in rows.
+PAYING_DRAFT_TARGETS = ('receipt', 'combined')
 
 
 def _generate_draft_number() -> str:
@@ -210,12 +215,36 @@ def create_invoice(data: dict, document_type: str, *, issued_by=None) -> FormalD
     return doc
 
 
+def _create_line_items(doc: FormalDocument, line_items: list) -> None:
+    for item in line_items:
+        DocumentLineItem.objects.create(
+            document=doc,
+            sku=item.get('sku', ''),
+            description=item.get('description', ''),
+            quantity=Decimal(str(item.get('quantity', 1))),
+            unit_price=Decimal(str(item.get('price', 0))),
+        )
+
+
 @transaction.atomic
 def create_draft(data: dict) -> FormalDocument:
-    """Save an invoice as a draft: no fiscal number, nothing sent to Tranzila."""
+    """
+    Save a document as a draft: no fiscal number, never signed, nothing sent
+    to Tranzila, in no report, export or run.
+
+    A tax invoice or a transaction invoice keeps its lines. A receipt or an
+    invoice-receipt keeps its payment rows too — built and checked exactly as
+    when it is issued directly — and the invoices it will settle, checked
+    against today's balances (so the office hears now that one is closed) and
+    kept in draft_settlements: a draft pays nothing until it is approved.
+    """
     target = data.get('draft_target_type') or 'tax_invoice'
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'לא ניתן לשמור טיוטה לסוג {target}')
+    if target == 'receipt':
+        return _create_receipt_draft(data)
+    if target == 'combined':
+        return _create_combined_draft(data)
     invoice_data = data['invoice_details']
     vat_exempt = invoice_data.get('vat_exempt', False)
     totals = _compute_totals(
@@ -257,6 +286,101 @@ def create_draft(data: dict) -> FormalDocument:
     return doc
 
 
+def _draft_settlements(doc: FormalDocument, target: str, data: dict):
+    """The settlements a paying draft carries: checked now, written only when it is approved."""
+    from apps.documents.settlement import check_draft_settlements
+
+    rows = check_draft_settlements(doc, target, data.get('settlements') or [])
+    return rows or None
+
+
+def _create_receipt_draft(data: dict) -> FormalDocument:
+    """A receipt's draft: its amount, payment rows and settlements, as create_receipt builds them."""
+    receipt = data['receipt_details']
+    if receipt.get('invoice_per_check'):
+        # A check plan opens with the receipt, and its invoices are issued on
+        # the checks' days — nothing a draft can wait with.
+        raise ValueError(
+            "חשבונית מס לכל צ'ק לא נשמרת בטיוטה — היא פותחת תוכנית צ'קים עם הקבלה. "
+            'הפיקו את הקבלה עצמה, או שמרו טיוטה בלי הסימון.'
+        )
+    fields = _receipt_fields(data)
+    rows = _receipt_payment_rows(receipt, fields['total_amount'])
+    _check_paid_in_rows('receipt', fields['total_amount'], fields['withholding_amount'], rows)
+    doc = FormalDocument.objects.create(
+        document_number=_generate_draft_number(),
+        document_type=DRAFT_TYPE,
+        draft_target_type='receipt',
+        # Typed for reference only: an approved draft is dated the day it is approved.
+        document_date=data.get('document_date') or israel_today(),
+        **fields,
+    )
+    for row in rows:
+        DocumentPayment.objects.create(document=doc, **row)
+    doc.draft_settlements = _draft_settlements(doc, 'receipt', data)
+    doc.save(update_fields=['draft_settlements'])
+    return doc
+
+
+def _create_combined_draft(data: dict) -> FormalDocument:
+    """An invoice-receipt's draft: its lines, totals, payment rows and settlements, as create_combined builds them."""
+    invoice_data = data['invoice_details']
+    fields = _combined_fields(data)
+    rows = _combined_payment_rows(data, invoice_data, fields['total_amount'])
+    _check_paid_in_rows('combined', fields['total_amount'], fields['withholding_amount'], rows)
+    doc = FormalDocument.objects.create(
+        document_number=_generate_draft_number(),
+        document_type=DRAFT_TYPE,
+        draft_target_type='combined',
+        document_date=invoice_data['document_date'],
+        **fields,
+    )
+    _create_line_items(doc, invoice_data['line_items'])
+    for row in rows:
+        DocumentPayment.objects.create(document=doc, **row)
+    doc.draft_settlements = _draft_settlements(doc, 'combined', data)
+    doc.save(update_fields=['draft_settlements'])
+    return doc
+
+
+def _check_paid_in_rows(target: str, total: Decimal, withheld, rows) -> None:
+    """
+    A receipt or an invoice-receipt is paid in rows of its own amounts: at
+    least one, each above zero. A receipt's rows are what it received (its
+    total; ניכוי במקור is kept beside it); an invoice-receipt's rows and the
+    withholding come to its total exactly (G). Checked when a draft is saved
+    and again when it is approved, on the rows it carries.
+    """
+    amounts = [Decimal(str(row['amount'])) for row in rows]
+    if not amounts or any(amount <= 0 for amount in amounts) or total <= 0:
+        raise ValueError('למסמך שמקבל תשלום צריך לפחות אמצעי תשלום אחד, בסכום גדול מאפס')
+    paid = sum(amounts, Decimal('0'))
+    due = total if target == 'receipt' else total - (withheld or Decimal('0'))
+    if paid != due:
+        raise ValueError(
+            f'סכומי אמצעי התשלום ({_money_text(paid)}) אינם שווים לסכום המסמך ({_money_text(due)}). '
+            'כל שקל שהתקבל נרשם פעם אחת, באמצעי שבו שולם.'
+        )
+
+
+def _settle_approved_draft(doc: FormalDocument, pending, issued_by) -> list:
+    """
+    The invoices an approved receipt or invoice-receipt settles, recorded
+    through settle_on_issue — the call a directly issued document goes
+    through — against the balances of now: a receipt or a credit note may have
+    closed one of them since the draft was saved. A refusal (SettlementError,
+    a ValueError) rolls the approval back, number and all.
+    """
+    from apps.documents.settlement import settle_on_issue
+
+    data = {
+        'settlements': [{'invoice_id': row.get('invoice_id'), 'amount': row.get('amount')} for row in pending or []],
+        # The older form's free-text link, kept on the draft as on a receipt.
+        'receipt_details': {'linked_invoice_id': doc.linked_document_number or ''},
+    }
+    return settle_on_issue(doc, data, user=issued_by)
+
+
 @transaction.atomic
 def finalize_draft(doc: FormalDocument, *, issued_by=None) -> FormalDocument:
     """
@@ -272,6 +396,13 @@ def finalize_draft(doc: FormalDocument, *, issued_by=None) -> FormalDocument:
     The date is today in Israel, not the day the draft was typed: a document
     is dated when it is issued (הוראה 17), and a draft kept for a week would
     otherwise take a number after documents dated later than it.
+
+    A receipt or an invoice-receipt is checked again before its number: its
+    payment rows still add up (_check_paid_in_rows), and the invoices it
+    settles still owe what it pays (settlement.record_settlements, under the
+    invoices' locks). Any refusal rolls the approval back and uses no number.
+    Signing and delivery are the direct issue's: the same _sign_at_issue on
+    the same document, whose payment rows decide mail or paper.
     """
     doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
     if doc.document_type != DRAFT_TYPE:
@@ -279,22 +410,56 @@ def finalize_draft(doc: FormalDocument, *, issued_by=None) -> FormalDocument:
     target = doc.draft_target_type or 'tax_invoice'
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'סוג יעד לא נתמך: {target}')
+    paying = target in PAYING_DRAFT_TARGETS
+    if paying:
+        _check_paid_in_rows(
+            target, doc.total_amount, doc.withholding_amount,
+            [{'amount': payment.amount} for payment in doc.payments.all()],
+        )
+    pending = doc.draft_settlements
     doc.document_type = target
     doc.document_number, doc.document_date = _number_and_date(target, israel_today())
     issued = _issued(issued_by)
     doc.issued_at = issued['issued_at']
     doc.issued_by = issued['issued_by']
+    # From here the settlement rows are the record of what it pays.
+    doc.draft_settlements = None
     doc.save(update_fields=[
-        'document_type', 'document_number', 'document_date', 'issued_at', 'issued_by', 'updated_at',
+        'document_type', 'document_number', 'document_date', 'issued_at', 'issued_by',
+        'draft_settlements', 'updated_at',
     ])
+    if paying:
+        # Before anything leaves the system (Tranzila, the signed original):
+        # a settlement refused here rolls back a document nobody saw.
+        _settle_approved_draft(doc, pending, issued_by)
     _attempt_tranzila(doc)
     _sign_at_issue(doc)
     return doc
 
 
 @transaction.atomic
-def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
-    """Create a combined tax invoice + receipt."""
+def discard_draft(doc: FormalDocument) -> str:
+    """
+    Delete a draft. It never took a number, was never signed and settled
+    nothing, so nothing is left behind: no gap in any run, no original, no
+    settlement (its payment rows and lines go with it). Anything no longer a
+    draft is refused — an issued document is never deleted (סעיף 23(ב)).
+    """
+    doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
+    if doc.document_type != DRAFT_TYPE:
+        raise ValueError('רק טיוטה נמחקת. מסמך שהונפק מתוקן בחשבונית זיכוי.')
+    number = doc.document_number
+    doc.delete()
+    return number
+
+
+def _combined_fields(data: dict) -> dict:
+    """
+    What an invoice-receipt records besides its number, date, stamp and
+    allocation number — its customer, tags, terms and totals. Shared by
+    create_combined and an invoice-receipt's draft, so a draft is approved as
+    exactly what a direct issue would have written.
+    """
     invoice_data = data['invoice_details']
     totals = _compute_totals(
         invoice_data['line_items'],
@@ -303,42 +468,47 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
         invoice_data.get('vat_exempt', False),
         invoice_data.get('prices_include_vat', False),
     )
+    return {
+        'client_type': data['client_type'],
+        'child_id': data.get('child_id'),
+        'business_customer_id': data.get('business_customer_id'),
+        **_income_tags(data),
+        'branch_id': _branch_for(data),
+        'due_date': invoice_data.get('due_date') or None,
+        'description': invoice_data.get('description', ''),
+        'currency': invoice_data.get('currency', 'ILS'),
+        'prices_include_vat': invoice_data.get('prices_include_vat', False),
+        'payment_terms': invoice_data.get('payment_terms', ''),
+        'vat_exempt': invoice_data.get('vat_exempt', False),
+        'vat_percent': Decimal('18'),
+        'customer_notes': invoice_data.get('customer_notes', ''),
+        'internal_notes': invoice_data.get('internal_notes', ''),
+        'withholding_amount': _withholding(invoice_data.get('withholding_amount')),
+        **totals,
+    }
+
+
+@transaction.atomic
+def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
+    """Create a combined tax invoice + receipt."""
+    invoice_data = data['invoice_details']
+    fields = _combined_fields(data)
+    # How it was paid is checked before the number is taken (a refusal used to
+    # come after it, and roll it back with the rest).
+    payments = _combined_payment_rows(data, invoice_data, fields['total_amount'])
 
     number, document_date = _number_and_date('combined', invoice_data['document_date'])
     doc = FormalDocument.objects.create(
         document_number=number,
         document_type='combined',
-        client_type=data['client_type'],
-        child_id=data.get('child_id'),
-        business_customer_id=data.get('business_customer_id'),
-        **_income_tags(data),
-        branch_id=_branch_for(data),
         document_date=document_date,
-        due_date=invoice_data.get('due_date') or None,
-        description=invoice_data.get('description', ''),
-        currency=invoice_data.get('currency', 'ILS'),
-        prices_include_vat=invoice_data.get('prices_include_vat', False),
-        payment_terms=invoice_data.get('payment_terms', ''),
-        vat_exempt=invoice_data.get('vat_exempt', False),
-        vat_percent=Decimal('18'),
-        customer_notes=invoice_data.get('customer_notes', ''),
-        internal_notes=invoice_data.get('internal_notes', ''),
-        withholding_amount=_withholding(invoice_data.get('withholding_amount')),
-        **totals,
+        **fields,
         **_issued(issued_by),
         **_allocation_at_issue(invoice_data, issued_by),
     )
 
-    for item in invoice_data['line_items']:
-        DocumentLineItem.objects.create(
-            document=doc,
-            sku=item.get('sku', ''),
-            description=item.get('description', ''),
-            quantity=Decimal(str(item.get('quantity', 1))),
-            unit_price=Decimal(str(item.get('price', 0))),
-        )
-
-    for row in _combined_payment_rows(data, invoice_data, doc.total_amount):
+    _create_line_items(doc, invoice_data['line_items'])
+    for row in payments:
         DocumentPayment.objects.create(document=doc, **row)
 
     _attempt_tranzila(doc)
@@ -346,12 +516,85 @@ def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
     return doc
 
 
+def _receipt_fields(data: dict) -> dict:
+    """
+    What a receipt records besides its number, date and stamp: its customer,
+    tags, the amount it received and the ניכוי במקור beside it. Shared by
+    create_receipt and a receipt's draft.
+    """
+    receipt = data['receipt_details']
+    amount = _receipt_amount(receipt)
+    return {
+        'client_type': data['client_type'],
+        'child_id': data.get('child_id'),
+        'business_customer_id': data.get('business_customer_id'),
+        **_income_tags(data),
+        'branch_id': _branch_for(data),
+        'currency': 'ILS',
+        'vat_exempt': True,
+        'vat_percent': Decimal('18'),
+        'subtotal': amount,
+        'discount_amount': Decimal('0'),
+        'discount_percent': Decimal('0'),
+        'vat_amount': Decimal('0'),
+        'total_amount': amount,
+        'linked_document_number': receipt.get('linked_invoice_id', ''),
+        'customer_notes': (
+            receipt.get('check_notes', '') or receipt.get('cash_notes', '')
+            or receipt.get('bank_notes', '') or receipt.get('card_notes', '')
+        ),
+        # ניכוי במקור the customer withheld — it was read and dropped before.
+        'withholding_amount': _withholding(receipt.get('withholding')),
+    }
+
+
+def _receipt_payment_rows(receipt: dict, amount: Decimal) -> list[dict]:
+    """A receipt's payment rows (DocumentPayment fields): one per confirmed check, else one for the amount."""
+    method_key = _map_payment_method(receipt['payment_method'])
+    if method_key == 'check':
+        confirmed = [c for c in receipt.get('checks', []) if c.get('confirmed') and c.get('amount', 0) > 0]
+        return [
+            {
+                'payment_method': 'check',
+                'amount': Decimal(str(chk['amount'])),
+                'reference': chk.get('check_number', ''),
+                'check_date': chk.get('date') or None,
+                'check_bank': chk.get('bank', ''),
+                'check_branch': chk.get('branch', ''),
+                'check_account': chk.get('account_number', ''),
+                # הוראה 18ב(ד)(2): only a check crossed "לא סחיר", in the
+                # customer's name, lets the signed receipt go by mail.
+                'check_crossed': chk.get('check_crossed') is True,
+            }
+            for chk in confirmed
+        ]
+    if method_key == 'credit_card':
+        return [{
+            'payment_method': 'credit_card',
+            'amount': Decimal(str(receipt.get('card_amount', 0))),
+            'card_last_four': receipt.get('card_last_four', ''),
+            'card_brand': (receipt.get('card_brand') or '').strip() or None,
+            'card_expiry': receipt.get('card_expiry', ''),
+            'card_installments': receipt.get('card_installments', 1),
+            'notes': receipt.get('card_notes', ''),
+        }]
+    if method_key == 'bank_transfer':
+        return [{
+            'payment_method': 'bank_transfer',
+            'amount': Decimal(str(receipt.get('bank_amount', 0))),
+            'reference': receipt.get('bank_reference', ''),
+            'paid_on': receipt.get('bank_date') or None,
+            'notes': receipt.get('bank_notes', ''),
+        }]
+    return [{'payment_method': method_key, 'amount': amount, 'notes': receipt.get('cash_notes', '')}]
+
+
 @transaction.atomic
 def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a standalone receipt."""
     receipt = data['receipt_details']
-    method_key = _map_payment_method(receipt['payment_method'])
-    amount = _receipt_amount(receipt)
+    fields = _receipt_fields(data)
+    payments = _receipt_payment_rows(receipt, fields['total_amount'])
 
     # Today in Israel when no date is given — the server's UTC date was the
     # previous day for the first two or three hours of every Israeli morning.
@@ -359,70 +602,12 @@ def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
     doc = FormalDocument.objects.create(
         document_number=number,
         document_type='receipt',
-        client_type=data['client_type'],
-        child_id=data.get('child_id'),
-        business_customer_id=data.get('business_customer_id'),
-        **_income_tags(data),
-        branch_id=_branch_for(data),
         document_date=document_date,
-        currency='ILS',
-        vat_exempt=True,
-        vat_percent=Decimal('18'),
-        subtotal=amount,
-        discount_amount=Decimal('0'),
-        discount_percent=Decimal('0'),
-        vat_amount=Decimal('0'),
-        total_amount=amount,
-        linked_document_number=receipt.get('linked_invoice_id', ''),
-        customer_notes=receipt.get('check_notes', '') or receipt.get('cash_notes', '') or receipt.get('bank_notes', '') or receipt.get('card_notes', ''),
-        # ניכוי במקור the customer withheld — it was read and dropped before.
-        withholding_amount=_withholding(receipt.get('withholding')),
+        **fields,
         **_issued(issued_by),
     )
-
-    payment_kwargs = dict(
-        document=doc,
-        payment_method=method_key,
-        amount=amount,
-    )
-    if method_key == 'check':
-        confirmed = [c for c in receipt.get('checks', []) if c.get('confirmed') and c.get('amount', 0) > 0]
-        for chk in confirmed:
-            DocumentPayment.objects.create(
-                document=doc,
-                payment_method='check',
-                amount=Decimal(str(chk['amount'])),
-                reference=chk.get('check_number', ''),
-                check_date=chk.get('date') or None,
-                check_bank=chk.get('bank', ''),
-                check_branch=chk.get('branch', ''),
-                check_account=chk.get('account_number', ''),
-                # הוראה 18ב(ד)(2): only a check crossed "לא סחיר", in the
-                # customer's name, lets the signed receipt go by mail.
-                check_crossed=chk.get('check_crossed') is True,
-            )
-    elif method_key == 'credit_card':
-        DocumentPayment.objects.create(
-            document=doc,
-            payment_method='credit_card',
-            amount=Decimal(str(receipt.get('card_amount', 0))),
-            card_last_four=receipt.get('card_last_four', ''),
-            card_brand=(receipt.get('card_brand') or '').strip() or None,
-            card_expiry=receipt.get('card_expiry', ''),
-            card_installments=receipt.get('card_installments', 1),
-            notes=receipt.get('card_notes', ''),
-        )
-    elif method_key == 'bank_transfer':
-        DocumentPayment.objects.create(
-            document=doc,
-            payment_method='bank_transfer',
-            amount=Decimal(str(receipt.get('bank_amount', 0))),
-            reference=receipt.get('bank_reference', ''),
-            paid_on=receipt.get('bank_date') or None,
-            notes=receipt.get('bank_notes', ''),
-        )
-    else:
-        DocumentPayment.objects.create(**payment_kwargs, notes=receipt.get('cash_notes', ''))
+    for row in payments:
+        DocumentPayment.objects.create(document=doc, **row)
 
     _attempt_tranzila(doc)
     _sign_at_issue(doc)

@@ -283,6 +283,8 @@ def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
             'source': 'tranzila' if doc.tranzila_issued else 'local',
             'tranzila_issued': doc.tranzila_issued,
             'is_draft': doc.document_type == 'draft',
+            # What a draft becomes when approved (a receipt, an invoice-receipt…).
+            'draft_target_type': (doc.draft_target_type or 'tax_invoice') if is_draft else '',
             # מספר הקצאה: the number itself, and whether this row is one that
             # needs one. The threshold lives in one place; the screen reads the
             # answer rather than recomputing it.

@@ -429,13 +429,36 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         """
         POST /api/v1/documents/documents/{id}/finalize/
         Approve a draft: it becomes its target type and takes the next fiscal number.
+
+        A receipt's or an invoice-receipt's draft is checked again first — its
+        payments add up, and each invoice it settles still owes what it pays.
+        A refusal is 400 with the reason, and no number is used.
         """
         doc = self.get_object()
         try:
             doc = service.finalize_draft(doc, issued_by=request.user)
         except ValueError as exc:
+            logger.info('Draft approval refused: %s', exc)
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(FormalDocumentSerializer(doc).data)
+        return Response(FormalDocumentSerializer(doc, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'], url_path='discard',
+            permission_classes=[IsAuthenticated, IsManager])
+    def discard(self, request, pk=None):
+        """
+        POST /api/v1/documents/documents/{id}/discard/
+
+        Delete a draft — it has no number, no original and settles nothing, so
+        nothing is left behind. Managers only, like the approval. 200
+        {id, document_number}; 400 on anything that is no longer a draft.
+        """
+        doc = self.get_object()
+        try:
+            number = service.discard_draft(doc)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info('Draft %s discarded by %s', number, getattr(request.user, 'email', request.user))
+        return Response({'id': str(pk), 'document_number': number})
 
     @action(detail=True, methods=['get'], url_path='pdf')
     def pdf(self, request, pk=None):

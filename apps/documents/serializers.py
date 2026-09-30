@@ -58,6 +58,7 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
             'customer_notes', 'internal_notes',
             'linked_document', 'linked_document_number', 'linked_document_date', 'credit_reason',
             'customer_ack_at', 'customer_ack_note', 'withholding_amount',
+            'draft_settlements',
             'tranzila_doc_id', 'pdf_url', 'tranzila_issued',
             'allocation_number', 'allocation_required', 'allocation_entered_at',
             'branch', 'created_at', 'updated_at', 'issued_at',
@@ -66,6 +67,7 @@ class FormalDocumentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'document_number', 'created_at', 'updated_at', 'issued_at', 'customer_ack_at', 'customer_ack_note',
+            'draft_settlements',
         ]
 
     def get_allocation_required(self, obj):
@@ -290,9 +292,10 @@ class CreateDocumentSerializer(serializers.Serializer):
     # Income tagging; defaults to the business customer's own when omitted.
     business_id = serializers.UUIDField(required=False, allow_null=True)
     business_category_id = serializers.UUIDField(required=False, allow_null=True)
-    # Only for drafts: what the document becomes when approved.
+    # Only for drafts: what the document becomes when approved. A receipt and
+    # an invoice-receipt carry their payment rows and settlements (audit M11).
     draft_target_type = serializers.ChoiceField(
-        choices=['tax_invoice', 'transaction_invoice'], required=False, allow_blank=True,
+        choices=['tax_invoice', 'transaction_invoice', 'receipt', 'combined'], required=False, allow_blank=True,
     )
     client_type = serializers.ChoiceField(choices=['business', 'existing'])
     child_id = serializers.UUIDField(required=False, allow_null=True)
@@ -317,7 +320,6 @@ class CreateDocumentSerializer(serializers.Serializer):
     _SECTIONS_BY_TYPE = {
         'tax_invoice': ('invoice_details',),
         'transaction_invoice': ('invoice_details',),
-        'draft': ('invoice_details',),
         # A combined document is built from the invoice section alone; how it
         # was paid comes from invoice_details.payment_methods.
         'combined': ('invoice_details',),
@@ -332,9 +334,12 @@ class CreateDocumentSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         """Say which section is missing, instead of failing deep inside the service."""
+        document_type = attrs.get('document_type')
+        # A draft is built, and checked, as the document it becomes.
+        effective = (attrs.get('draft_target_type') or 'tax_invoice') if document_type == 'draft' else document_type
         missing = {
             section: [f'{self._SECTION_LABELS[section]} חסרים למסמך מסוג זה']
-            for section in self._SECTIONS_BY_TYPE.get(attrs.get('document_type'), ())
+            for section in self._SECTIONS_BY_TYPE.get(effective, ())
             if section not in attrs
         }
         if missing:
@@ -346,7 +351,12 @@ class CreateDocumentSerializer(serializers.Serializer):
         if attrs.get('client_type') == 'business' and not attrs.get('business_customer_id'):
             raise serializers.ValidationError({'business_customer_id': ['יש לבחור את הלקוח העסקי שהמסמך מופק לו']})
         details = attrs.get('invoice_details') or {}
-        if details.get('allocation_number') and attrs.get('document_type') not in ('tax_invoice', 'combined'):
+        if details.get('allocation_number') and document_type == 'draft':
+            # The number is asked for an issued invoice — its number and date.
+            raise serializers.ValidationError({'invoice_details': {'allocation_number': [
+                'טיוטה אינה נושאת מספר הקצאה — מזינים אותו אחרי האישור, כשלמסמך יש מספר ותאריך',
+            ]}})
+        if details.get('allocation_number') and document_type not in ('tax_invoice', 'combined'):
             raise serializers.ValidationError({'invoice_details': {'allocation_number': [
                 'מספר הקצאה נרשם על חשבונית מס או חשבונית מס/קבלה בלבד',
             ]}})
@@ -362,12 +372,17 @@ class CreateDocumentSerializer(serializers.Serializer):
                 raise serializers.ValidationError({'credit_invoice_details': {'linked_document_date': [
                     f'{number} אינו מסמך שהופק בקוגו — יש לציין את תאריך המסמך המקורי',
                 ]}})
-        if attrs.get('settlements') and attrs.get('document_type') not in ('receipt', 'combined'):
+        if attrs.get('settlements') and effective not in ('receipt', 'combined'):
             raise serializers.ValidationError({'settlements': [
                 'חשבונית נסגרת בקבלה או בחשבונית מס/קבלה בלבד',
             ]})
         receipt = attrs.get('receipt_details') or {}
-        if attrs.get('document_type') == 'receipt' and receipt.get('invoice_per_check'):
+        if document_type == 'draft' and effective == 'receipt' and receipt.get('invoice_per_check'):
+            raise serializers.ValidationError({'receipt_details': {'invoice_per_check': [
+                "חשבונית מס לכל צ'ק לא נשמרת בטיוטה — היא פותחת תוכנית צ'קים עם הקבלה. "
+                'הפיקו את הקבלה עצמה, או שמרו טיוטה בלי הסימון.',
+            ]}})
+        if document_type == 'receipt' and receipt.get('invoice_per_check'):
             if attrs.get('client_type') != 'existing':
                 raise serializers.ValidationError({'receipt_details': {'invoice_per_check': [
                     "חשבונית לכל צ'ק מופקת ללקוח פרטי (ילד) בלבד. ללקוח עסקי מפיקים חשבונית מס לכל צ'ק מהטופס.",
@@ -380,7 +395,7 @@ class CreateDocumentSerializer(serializers.Serializer):
                 raise serializers.ValidationError({'receipt_details': {'invoice_per_check': [
                     "קבלה שסוגרת חשבונית קיימת לא מפיקה חשבונית לכל צ'ק — החשבונית כבר הונפקה.",
                 ]}})
-        if attrs.get('document_type') == 'combined':
+        if effective == 'combined':
             details = attrs['invoice_details']
             if not details.get('payments'):
                 methods = details.get('payment_methods') or []
