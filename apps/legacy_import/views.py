@@ -12,7 +12,8 @@
     POST /api/v1/legacy-import/pdfs/               multipart `file` (a ZIP) and/or `files` (PDFs),
                                                    `source_system` -> the matching report
     GET  /api/v1/legacy-import/documents/?business_customer=&q=
-    GET  /api/v1/legacy-import/series/             last number per software and type
+    GET  /api/v1/legacy-import/series/?source_system=   last number per type — the previous software's
+                                                   by default, one software's, or `all`
 
 Managers only, like the register and the period report: it writes customer
 cards in bulk and shows every document the business issued.
@@ -137,7 +138,13 @@ class LegacyImportViewSet(viewsets.GenericViewSet):
 
     @action(detail=False, methods=['get'])
     def series(self, request):
-        return Response({'series': service.series_summary()})
+        # The previous software's by default (the numbering screen's prefill); ?source_system=all for every one.
+        requested = (request.query_params.get('source_system') or '').strip()
+        if requested == service.SERIES_ALL:
+            source_system = service.SERIES_ALL
+        else:
+            source_system = source_registry.normalise_source_system(requested) or source_registry.SOURCE_TAZMAN
+        return Response({'series': service.series_summary(source_system)})
 
     @action(detail=False, methods=['post'])
     def pdfs(self, request):

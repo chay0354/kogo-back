@@ -147,11 +147,16 @@ class TwoSoftwaresTests(AnySoftwareFixture, APITestCase):
     def test_the_last_numbers_are_per_software(self):
         self.commit(LegacyImport.objects.get(pk=self.client.post(f'{BASE}preview/', {'file': tazman_upload()}).data['id']))
         self.commit(LegacyImport.objects.get(pk=self.preview(csv_upload()).data['id']))
-        series = self.client.get(f'{BASE}series/').data['series']
+        series = self.client.get(f'{BASE}series/', {'source_system': 'all'}).data['series']
         self.assertEqual(series[0]['source_system'], 'tazman')
         by_source = {(s['source_system'], s['doc_type']): s['count'] for s in series}
         self.assertEqual(by_source[('tazman', 'tax_invoice')], 1)
         self.assertEqual(by_source[('greeninvoice', 'tax_invoice')], 1)
+        # The numbering screen continues the previous software's runs: by default only its numbers.
+        default = self.client.get(f'{BASE}series/').data['series']
+        self.assertEqual({s['source_system'] for s in default}, {'tazman'})
+        one = self.client.get(f'{BASE}series/', {'source_system': 'Green Invoice'}).data['series']
+        self.assertEqual({s['source_system'] for s in one}, {'greeninvoice'})
 
     def test_every_document_says_which_software_issued_it(self):
         self.commit(LegacyImport.objects.get(pk=self.preview(csv_upload()).data['id']))

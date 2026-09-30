@@ -774,17 +774,27 @@ def search_documents(queryset, term: str):
     return queryset.filter(condition)
 
 
-def series_summary() -> list:
+SERIES_ALL = 'all'
+
+
+def series_summary(source_system: str = SOURCE_TAZMAN) -> list:
     """
     Per software and document type: the last number (and its date) of
     everything committed. It is the last number the files showed, not
-    necessarily the software's last — see parser.type_table. The previous
-    software (Tazman) comes first; each software's runs are its own.
+    necessarily the software's last — see parser.type_table.
+
+    By default only the previous software's (Tazman's): the numbering screen
+    prefills "continue the previous software's run" from this, and another
+    software's numbers must never become that. SERIES_ALL gives every software,
+    the previous one first; each software's runs are its own.
     """
-    systems = sorted(
-        set(LegacyDocument.objects.values_list('source_system', flat=True).distinct()),
-        key=lambda slug: (slug != SOURCE_TAZMAN, slug),
-    )
+    if source_system == SERIES_ALL:
+        systems = sorted(
+            set(LegacyDocument.objects.values_list('source_system', flat=True).distinct()),
+            key=lambda slug: (slug != SOURCE_TAZMAN, slug),
+        )
+    else:
+        systems = [source_system]
     summary = []
     for source_system in systems:
         for doc_type in TYPE_ORDER:
