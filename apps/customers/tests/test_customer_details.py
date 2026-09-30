@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient, APITestCase
 
@@ -216,7 +217,7 @@ class ExtraPhonesTests(_Card):
         extra = Parent.objects.get(family=self.family, is_primary=False)
         self.assertEqual((extra.first_name, extra.last_name, extra.phone), ('סבתא', 'רחל', '0525556666'))
         self.assertEqual(res.data['child']['extra_phones'],
-                         [{'id': str(extra.id), 'name': 'סבתא רחל', 'phone': '0525556666'}])
+                         [{'id': str(extra.id), 'name': 'סבתא רחל', 'phone': '0525556666', 'email': ''}])
         # The primary is untouched.
         self.reload()
         self.assertTrue(self.parent.is_primary)
@@ -395,3 +396,88 @@ class MakeExtraPrimaryTests(_Card):
         # Payment and card links now go to the new number.
         from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
         self.assertEqual(build_enrollment_whatsapp_context(child=self.child)['phone'], '0525556666')
+
+
+class ExtraEmailTests(_Card):
+    """An extra contact's email gets a copy of the receipt each month."""
+
+    def test_a_contact_with_an_email_only_or_both(self):
+        res = self.patch({'extra_phones': [
+            {'name': 'רואה חשבון', 'phone': '', 'email': 'cpa@example.com'},
+            {'name': 'אבא', 'phone': '0521112233', 'email': 'dad@example.com'},
+        ]})
+        self.assertEqual(res.status_code, 200, res.content)
+        rows = {e['name']: e for e in res.data['child']['extra_phones']}
+        self.assertEqual((rows['רואה חשבון']['phone'], rows['רואה חשבון']['email']), ('', 'cpa@example.com'))
+        self.assertEqual((rows['אבא']['phone'], rows['אבא']['email']), ('0521112233', 'dad@example.com'))
+        # Changing only the email of an existing contact.
+        dad = Parent.objects.get(family=self.family, email='dad@example.com')
+        res = self.patch({'extra_phones': [
+            {'id': rows['רואה חשבון']['id'], 'name': 'רואה חשבון', 'phone': '', 'email': 'cpa@example.com'},
+            {'id': str(dad.id), 'name': 'אבא', 'phone': '0521112233', 'email': 'father@example.com'},
+        ]})
+        self.assertEqual(res.status_code, 200, res.content)
+        dad.refresh_from_db()
+        self.assertEqual(dad.email, 'father@example.com')
+
+    def test_rules(self):
+        for rows in (
+            [{'phone': '', 'email': ''}],                          # neither
+            [{'phone': '', 'email': 'not-an-email'}],
+            [{'phone': '', 'email': 'YAEL@example.com'}],           # the parent's own
+            [{'phone': '', 'email': 'a@example.com'}, {'phone': '', 'email': 'A@example.com'}],
+        ):
+            self.assertEqual(self.patch({'extra_phones': rows}).status_code, 400, rows)
+        self.assertEqual(Parent.objects.filter(family=self.family).count(), 1)
+
+
+@override_settings(
+    EMAIL_HOST='smtp.test',
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    RESEND_API_KEY='',
+    DOCUMENT_SIGNING_ENABLED=False,
+)
+class ReceiptToExtraEmailsTests(_Card):
+    def _receipt(self):
+        from django.utils import timezone
+        from apps.core.payment_service import PaymentService
+
+        payment = Payment.objects.create(
+            child=self.child, family=self.family, payment_type='recurring_subscription', status='completed',
+            base_amount=Decimal('250'), final_amount=Decimal('250'), payment_date=timezone.now(),
+        )
+        return PaymentService()._create_invoice_from_payment(payment, None, send_email=False)
+
+    def test_the_monthly_receipt_goes_to_the_parent_and_the_extra_emails_in_one_message(self):
+        from django.core import mail
+        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+
+        self.patch({'extra_phones': [
+            {'name': 'אבא', 'phone': '0521112233', 'email': 'dad@example.com'},
+            {'name': 'סבתא', 'phone': '0525556666'},                        # a phone only: no email
+            {'name': 'רואה חשבון', 'phone': '', 'email': 'cpa@example.com'},
+        ]})
+        receipt = self._receipt()
+        mail.outbox = []
+        self.assertTrue(send_subscription_invoice_email(receipt))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ['yael@example.com', 'dad@example.com', 'cpa@example.com'])
+        self.assertEqual(len(mail.outbox[0].attachments), 1)
+        # Once: a second call does not mail again.
+        receipt.refresh_from_db()
+        self.assertTrue(send_subscription_invoice_email(receipt))
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_without_extra_emails_nothing_changes(self):
+        from django.core import mail
+        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+
+        mail.outbox = []
+        send_subscription_invoice_email(self._receipt())
+        self.assertEqual(mail.outbox[0].to, ['yael@example.com'])
+
+    def test_an_extra_email_equal_to_the_payers_is_not_listed_twice(self):
+        from apps.customers.subscription_invoice_email import invoice_recipients
+
+        Parent.objects.create(family=self.family, first_name='x', last_name='', phone='', email='Yael@Example.com')
+        self.assertEqual(invoice_recipients(self._receipt()), ['yael@example.com'])

@@ -74,7 +74,7 @@ LABELS = {
     'family.name': 'שם המשפחה',
     'family.address': 'כתובת',
     'family.notes': 'הערות (משפחה)',
-    'extra_phones': 'טלפונים נוספים',
+    'extra_phones': 'אנשי קשר נוספים',
 }
 
 
@@ -112,14 +112,40 @@ def parent_display_name(parent: Parent) -> str:
 
 
 def extra_phones_of(parents) -> list[dict]:
-    """Every parent of the family other than the one the card shows as the parent."""
+    """
+    Every parent of the family other than the one the card shows as the parent:
+    the extra contacts. A phone gets the group messages; an email gets a copy
+    of the receipt each month (extra_invoice_emails).
+    """
     parents = list(parents)
     primary = primary_parent_of(parents)
     return [
-        {'id': str(parent.id), 'name': parent_display_name(parent), 'phone': parent.phone or ''}
+        {
+            'id': str(parent.id),
+            'name': parent_display_name(parent),
+            'phone': parent.phone or '',
+            'email': parent.email or '',
+        }
         for parent in parents
         if primary is None or parent.pk != primary.pk
     ]
+
+
+def extra_invoice_emails(family: Family | None, *, exclude=()) -> list[str]:
+    """
+    The extra contacts' emails, in card order, each once and none of ``exclude``
+    (compared without case) — the addresses a receipt goes to besides the payer's.
+    """
+    if family is None:
+        return []
+    seen = {(e or '').strip().lower() for e in exclude if e}
+    emails = []
+    for extra in extra_phones_of(family.parents.all()):
+        email = extra['email'].strip()
+        if email and email.lower() not in seen:
+            seen.add(email.lower())
+            emails.append(email)
+    return emails
 
 
 def family_is_shared(family: Family | None) -> bool:
@@ -421,6 +447,7 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
                 parents=parents,
                 primary=primary,
                 primary_phone=new_phone if new_phone is not None else current_phone,
+                primary_email=new_email if new_email is not None else current_email,
                 # A nameless extra takes the parent's name, as the "add customer" form does.
                 fallback_first=(parent_updates.get('first_name') or (primary.first_name if primary else '')
                                 or family.name or ''),
@@ -480,13 +507,16 @@ def update_customer_details(child: Child, payload, *, user=None, reveal_names: b
             family_fields.add(key)
 
         if extras_plan is not None:
-            before = [e['phone'] for e in extra_phones_of(parents)]
+            def contacts(rows):
+                return ', '.join(' '.join(filter(None, (e['phone'], e['email']))) for e in rows)
+
+            before = contacts(extra_phones_of(parents))
             _apply_extras(extras_plan, family=family, primary=primary)
-            after = [e['phone'] for e in extra_phones_of(
+            after = contacts(extra_phones_of(
                 Parent.objects.filter(family=family).order_by('-is_primary', 'first_name')
-            )]
+            ))
             if extras_plan['changed']:
-                note('extra_phones', ', '.join(before), ', '.join(after))
+                note('extra_phones', before, after)
 
         if family_fields:
             family.save(update_fields=[*family_fields, 'updated_at'])
@@ -517,9 +547,12 @@ def _split_name(name: str, *, fallback_first: str, fallback_last: str) -> tuple[
     return parts[0][:100], (parts[1] if len(parts) > 1 else '')[:100]
 
 
-def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallback_last, errors) -> dict:
+def _plan_extras(rows, *, parents, primary, primary_phone, primary_email, fallback_first, fallback_last,
+                 errors) -> dict:
     """
-    Check the full list of extra phones the card sent and work out the writes.
+    Check the full list of extra contacts the card sent and work out the writes.
+    Each has a phone (mobile — it gets the group messages), an email (it gets a
+    copy of the receipt), or both.
 
     The list replaces what is there: a row with an id updates that parent, a
     row without one adds a parent, and an existing extra that is missing is
@@ -532,6 +565,7 @@ def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallb
         return {'updates': [], 'creates': [], 'deletes': [], 'changed': False}
 
     seen = {normalise_phone(primary_phone)} if primary_phone else set()
+    seen_emails = {primary_email.strip().lower()} if (primary_email or '').strip() else set()
     updates, creates, kept = [], [], set()
     for index, row in enumerate(rows):
         path = f'extra_phones.{index}'
@@ -541,6 +575,7 @@ def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallb
         row_id = _text(row.get('id'))
         name = _text(row.get('name'))
         phone = normalise_phone(_text(row.get('phone')))
+        email = _text(row.get('email'))
         if row_id and row_id not in existing:
             errors[path] = 'הטלפון הזה כבר לא קיים — רעננו את הכרטיס'
             continue
@@ -549,10 +584,25 @@ def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallb
             continue
         target = existing.get(row_id)
         unchanged_phone = target is not None and _same_phone(phone, target.phone or '')
-        if not unchanged_phone:
-            if not phone:
-                errors[f'{path}.phone'] = 'חסר מספר'
+        unchanged_email = target is not None and email == (target.email or '').strip()
+        if not phone and not email and not (unchanged_phone and unchanged_email):
+            errors[f'{path}.phone'] = 'צריך טלפון או מייל'
+            continue
+        if not unchanged_email and email:
+            try:
+                validate_email(email)
+            except DjangoValidationError:
+                errors[f'{path}.email'] = 'כתובת אימייל לא תקינה'
                 continue
+            if len(email) > 254:
+                errors[f'{path}.email'] = 'ארוך מדי'
+                continue
+            if email.lower() in seen_emails:
+                errors[f'{path}.email'] = 'המייל כבר מופיע בכרטיס'
+                continue
+        if email:
+            seen_emails.add(email.lower())
+        if not unchanged_phone and phone:
             if error := _phone_error(phone, mobile_only=True):
                 errors[f'{path}.phone'] = error
                 continue
@@ -562,7 +612,7 @@ def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallb
         if phone:
             seen.add(phone)
         if target is None:
-            creates.append({'name': name, 'phone': phone})
+            creates.append({'name': name, 'phone': phone, 'email': email})
             continue
         kept.add(row_id)
         new_name = None
@@ -570,11 +620,12 @@ def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallb
             first_last = _split_name(name, fallback_first=fallback_first, fallback_last=fallback_last)
             if first_last != (target.first_name, target.last_name):
                 new_name = first_last
-        if not unchanged_phone or new_name is not None or target.is_primary:
+        if not unchanged_phone or not unchanged_email or new_name is not None or target.is_primary:
             updates.append({
                 'parent': target,
                 'name': new_name,
                 'phone': None if unchanged_phone else phone,
+                'email': None if unchanged_email else email,
             })
 
     deletes = [p for key, p in existing.items() if key not in kept]
@@ -584,7 +635,9 @@ def _plan_extras(rows, *, parents, primary, primary_phone, fallback_first, fallb
                 f'לא ניתן להסיר את {parent.phone or parent_display_name(parent)}: '
                 'יש תשלום או חשבונית על שמו'
             )
-    changed = bool(creates or deletes or any(u['name'] is not None or u['phone'] for u in updates))
+    changed = bool(creates or deletes or any(
+        u['name'] is not None or u['phone'] is not None or u['email'] is not None for u in updates
+    ))
     return {
         'updates': updates, 'creates': creates, 'deletes': deletes, 'changed': changed,
         'fallback': (fallback_first, fallback_last),
@@ -604,8 +657,10 @@ def _apply_extras(plan, *, family, primary) -> None:
         parent = item['parent']
         if item['name'] is not None:
             parent.first_name, parent.last_name = item['name']
-        if item['phone']:
+        if item['phone'] is not None:
             parent.phone = item['phone']
+        if item['email'] is not None:
+            parent.email = item['email']
         # An extra is never the primary, whatever an old record said.
         parent.is_primary = False
         parent.save()
@@ -616,6 +671,6 @@ def _apply_extras(plan, *, family, primary) -> None:
             first_name=first,
             last_name=last,
             phone=item['phone'],
-            email='',
+            email=item['email'],
             is_primary=False,
         )

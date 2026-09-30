@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -202,3 +203,74 @@ class EditReachesEveryReaderTests(APITestCase):
             (self.receipt_before.payer_name, self.receipt_before.payer_phone, self.receipt_before.payer_email),
             ('כהן', OLD_PHONE, OLD_EMAIL),
         )
+
+
+@override_settings(
+    EMAIL_HOST='smtp.test',
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    RESEND_API_KEY='',
+    DOCUMENT_SIGNING_ENABLED=False,
+)
+class TwoParentsTests(APITestCase):
+    """
+    A child with two parents: the mother registered, and the office adds the
+    father on the card with his phone and his email. A group message the
+    office sends reaches both, and so does the monthly receipt.
+    """
+
+    def setUp(self):
+        user = User.objects.create_user(username='m-two-parents@test', password='pw-for-tests')
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        profile.role = UserProfile.ROLE_MANAGER
+        profile.save(update_fields=['role'])
+        self.client.force_authenticate(User.objects.get(pk=user.pk))
+        self.lesson = TestDataFactory.create_lesson()
+        self.family = Family.objects.create(
+            name='כהן', phone='0507778899', email='mom@example.com', branch=self.lesson.course.branch,
+        )
+        Parent.objects.create(family=self.family, first_name='יעל', last_name='כהן',
+                              phone='0507778899', email='mom@example.com', is_primary=True)
+        self.child = Child.objects.create(family=self.family, first_name='נועה', last_name='כהן',
+                                          birth_date=date(2016, 5, 5), gender='female', status='active')
+        LessonEnrollment.objects.create(child=self.child, lesson=self.lesson, status='active',
+                                        start_date=date(2026, 9, 1))
+        res = self.client.patch(f'/api/v1/customers/children/{self.child.id}/details/', {
+            'extra_phones': [{'name': 'דני כהן', 'phone': '052-111-2233', 'email': 'dad@example.com'}],
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_a_group_message_goes_to_both_parents(self):
+        from unittest.mock import patch
+
+        with patch('apps.customers.views.ManyChatService.is_configured', new=property(lambda self: True)), \
+             patch('apps.customers.broadcast.ManyChatService.notify_registration',
+                   return_value={'sent': True}) as send:
+            res = self.client.post('/api/v1/customers/children/broadcast/', {
+                'child_ids': [str(self.child.id)], 'automation_type': 'kind', 'automation_id': 'subscription',
+                'dry_run': False, 'include_extra_phones': True,
+            }, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(
+            [(c.kwargs['phone'], c.kwargs['parent_name'], c.kwargs['child_name']) for c in send.call_args_list],
+            [('0507778899', 'יעל כהן', 'נועה כהן'), ('0521112233', 'דני כהן', 'נועה כהן')],
+        )
+        self.assertEqual(res.data['phones'], ['972507778899', '972521112233'])
+
+    def test_the_monthly_receipt_goes_to_both_parents(self):
+        from django.core import mail
+        from apps.customers.subscription_invoice_email import send_subscription_invoice_email
+
+        payment = Payment.objects.create(
+            child=self.child, family=self.family, lesson=self.lesson, branch=self.lesson.course.branch,
+            payment_type='recurring_subscription', status='completed',
+            base_amount=Decimal('250.00'), discount_amount=Decimal('0.00'), final_amount=Decimal('250.00'),
+            payment_date=timezone.now(),
+        )
+        receipt = PaymentService()._create_invoice_from_payment(payment, None, send_email=False)
+        mail.outbox = []
+        self.assertTrue(send_subscription_invoice_email(receipt))
+        self.assertEqual([m.to for m in mail.outbox], [['mom@example.com', 'dad@example.com']])
+
+    def test_payment_and_card_links_still_go_to_the_registered_parent_only(self):
+        ctx = build_enrollment_whatsapp_context(child=self.child, lesson=self.lesson)
+        self.assertEqual(ctx['phone'], '0507778899')
