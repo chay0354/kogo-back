@@ -485,18 +485,33 @@ class CashPlanSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='lesson.course.name', read_only=True, default='')
     branch_name = serializers.CharField(source='branch.name', read_only=True, default='')
     receipt_number = serializers.CharField(source='receipt.document_number', read_only=True, default='')
+    # 'upfront' (D1, from 30.9.2026): `receipt` is the one חשבונית מס/קבלה for
+    # the whole sum; null: the older design, a receipt and a document a month.
+    receipt_document_type = serializers.CharField(source='receipt.document_type', read_only=True, default='')
     months = CashPlanMonthSerializer(many=True, read_only=True)
     months_paid = serializers.SerializerMethodField()
     months_total = serializers.SerializerMethodField()
+    unused_amount = serializers.SerializerMethodField()
+    cancelled_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = CashPlan
         fields = [
             'id', 'child', 'child_name', 'lesson', 'course_name', 'branch', 'branch_name',
             'description', 'status', 'total_amount', 'monthly_amount',
-            'monthly_document_type', 'receipt', 'receipt_number',
-            'months', 'months_paid', 'months_total', 'created_at',
+            'monthly_document_type', 'receipt', 'receipt_number', 'receipt_document_type', 'mode',
+            'months', 'months_paid', 'months_total', 'unused_amount', 'created_at',
+            'cancelled_at', 'cancelled_by_name',
         ]
+
+    def get_unused_amount(self, obj):
+        from apps.documents.cash_plans import unused_amount
+
+        return str(unused_amount(obj))
+
+    def get_cancelled_by_name(self, obj):
+        user = obj.cancelled_by
+        return (user.get_full_name() or user.email or user.username) if user is not None else ''
 
     def get_months_paid(self, obj):
         return sum(1 for m in obj.months.all() if m.status == 'invoiced')

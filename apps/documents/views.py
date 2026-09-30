@@ -828,7 +828,7 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         qs = (
             CashPlan.objects
-            .select_related('child', 'branch', 'receipt', 'lesson', 'lesson__course')
+            .select_related('child', 'branch', 'receipt', 'lesson', 'lesson__course', 'cancelled_by')
             .prefetch_related('months', 'months__document')
         )
         status_filter = self.request.query_params.get('status')
@@ -891,6 +891,37 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
 
         plan.refresh_from_db()
         return Response(CashPlanSerializer(plan).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """
+        POST /api/v1/documents/cash-plans/{id}/cancel/  {reason?, refund_amount?}
+
+        The months not yet begun stop (cash_plans.cancel_cash_plan). A plan
+        registered with one חשבונית מס/קבלה ('upfront') is credited for them,
+        or for refund_amount (0: nothing); an older plan has nothing invoiced
+        for them to credit, and `message` says so. Repeating it does nothing.
+        200 {...plan, credit_note_number, unused_amount, message}.
+        """
+        from apps.documents.cash_plans import CashPlanError, cancel_cash_plan
+        from apps.documents.check_plans import CheckPlanError
+
+        plan = self.get_object()
+        refund = request.data.get('refund_amount')
+        try:
+            result = cancel_cash_plan(
+                plan.pk, user=request.user, reason=str(request.data.get('reason') or ''),
+                refund_amount=refund if refund not in (None, '') else None,
+            )
+        except (CashPlanError, CheckPlanError, ArithmeticError) as exc:
+            return Response({'error': str(exc) or 'סכום ההחזר אינו תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        plan = self.get_queryset().get(pk=plan.pk)
+        return Response({
+            **CashPlanSerializer(plan).data,
+            'credit_note_number': result['credit_note'].document_number if result['credit_note'] else None,
+            'unused_amount': str(result['unused_amount']),
+            'message': result['message'],
+        })
 
 
 class SettlementViewSet(viewsets.GenericViewSet):

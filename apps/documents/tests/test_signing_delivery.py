@@ -148,17 +148,36 @@ class PaymentMeansTests(ReceiptsMixin, APITestCase):
         self.assertTrue(doc.payments.get().check_crossed)
         self.assertEqual(delivery_decision(FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL)[0], 'email')
 
-    def test_a_cash_plans_monthly_document_counts_as_cash(self):
+    def test_a_cash_plans_invoice_receipt_counts_as_cash(self):
+        # D1 (WS-3): one חשבונית מס/קבלה for the whole sum, its cash on one payment line.
         with self.captureOnCommitCallbacks(execute=True):
             plan = register_cash_plan(
                 child_id=str(self.kid.id), total_amount='480.00', monthly_amount='240.00',
                 start_month=timezone.localdate().replace(day=1),
             )
-        month = plan.months.filter(status='invoiced').first()
+        self.assertEqual(list(plan.receipt.payments.values_list('payment_method', flat=True)), ['cash'])
+        self.assertEqual((self.row(plan.receipt).delivery, self.row(plan.receipt).delivery_reason),
+                         (SignedOriginal.DELIVERY_PAPER, REASON_CASH_PLAN))
+
+    def test_an_older_cash_plans_monthly_invoice_counts_as_cash(self):
+        from apps.documents.cash_plans import issue_due_cash_documents
+        from apps.documents.models import CashPlan, CashPlanMonth
+
+        with self.captureOnCommitCallbacks(execute=True):
+            receipt = service.create_receipt({
+                'client_type': 'existing', 'child_id': str(self.kid.id),
+                'receipt_details': {'payment_method': 'מזומן', 'cash_amount': '240.00'},
+            })
+            plan = CashPlan.objects.create(child=self.kid, total_amount=Decimal('240.00'),
+                                           monthly_amount=Decimal('240.00'), receipt=receipt)
+            month = CashPlanMonth.objects.create(plan=plan, due_date=timezone.localdate().replace(day=1),
+                                                 amount=Decimal('240.00'))
+            issue_due_cash_documents(plan_id=plan.id)
+        month.refresh_from_db()
         self.assertEqual(month.document.payments.count(), 0)  # no payment line on it
         self.assertEqual((self.row(month.document).delivery, self.row(month.document).delivery_reason),
                          (SignedOriginal.DELIVERY_PAPER, REASON_CASH_PLAN))
-        self.assertEqual(self.row(plan.receipt).delivery_reason, REASON_CASH)
+        self.assertEqual(self.row(receipt).delivery_reason, REASON_CASH)
 
     def test_a_check_plans_monthly_invoice_follows_its_checks(self):
         today = timezone.localdate()

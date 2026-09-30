@@ -1,4 +1,4 @@
-"""Cash paid up front: a receipt now, a document on the 1st of each month."""
+"""Cash paid up front: one invoice-receipt for the whole sum now, the months a schedule (D1)."""
 from datetime import date
 from decimal import Decimal
 
@@ -17,6 +17,7 @@ from apps.documents.cash_plans import (
     schedule,
 )
 from apps.documents.models import CashPlan, CashPlanMonth, FormalDocument
+from apps.documents.numbering import israel_today
 
 User = get_user_model()
 URL = '/api/v1/documents/cash-plans/'
@@ -75,11 +76,18 @@ class RegisterTests(TestCase):
             lesson_id=str(self.lesson.id), start_month=date(2026, 9, 1), **kw,
         )
 
-    def test_a_receipt_for_the_whole_sum_is_issued_at_once(self):
+    def test_one_invoice_receipt_for_the_whole_sum_is_issued_at_once(self):
+        """D1: VAT on a service is due when the cash is received — one IRM, dated today, for all of it."""
         plan = self._register()
-        self.assertIsNotNone(plan.receipt)
-        self.assertEqual(plan.receipt.document_type, 'receipt')
+        self.assertEqual(plan.mode, 'upfront')
+        self.assertEqual(plan.receipt.document_type, 'combined')
         self.assertEqual(plan.receipt.total_amount, Decimal('2400.00'))
+        self.assertEqual(plan.receipt.document_date, israel_today())
+        self.assertEqual(
+            list(plan.receipt.payments.values_list('payment_method', 'amount')), [('cash', Decimal('2400.00'))],
+        )
+        self.assertIn('09/2026–06/2027', plan.receipt.line_items.get().description)
+        self.assertEqual(FormalDocument.objects.count(), 1)
 
     def test_the_months_are_laid_out(self):
         plan = self._register()
@@ -100,11 +108,11 @@ class RegisterTests(TestCase):
         future = plan.months.filter(due_date__gt=date.today())
         self.assertTrue(all(m.status == 'pending' for m in future))
 
-    def test_the_monthly_document_is_the_type_that_was_chosen(self):
+    def test_no_monthly_document_is_issued_whatever_an_older_screen_asks(self):
         plan = self._register(monthly_document_type='tax_invoice')
         month = plan.months.filter(status='invoiced').first()
-        self.assertIsNotNone(month)
-        self.assertEqual(month.document.document_type, 'tax_invoice')
+        self.assertEqual(month.document, plan.receipt)
+        self.assertEqual(FormalDocument.objects.count(), 1)
 
     def test_the_default_monthly_document_is_the_combined_one(self):
         plan = self._register()
@@ -132,10 +140,11 @@ class RegisterTests(TestCase):
         plan.refresh_from_db()
         self.assertEqual(plan.status, 'completed')
 
-    def test_the_monthly_document_carries_the_regular_price_not_the_whole_sum(self):
+    def test_the_months_carry_the_regular_price_as_a_schedule(self):
         plan = self._register()
+        self.assertEqual(set(plan.months.values_list('amount', flat=True)), {Decimal('240.00')})
         month = plan.months.filter(status='invoiced').first()
-        self.assertEqual(month.document.total_amount, Decimal('240.00'))
+        self.assertEqual(month.document, plan.receipt)
 
 
 class ApiTests(TestCase):
@@ -204,9 +213,12 @@ class CronTests(TestCase):
         CashPlanMonth.objects.filter(plan=plan).update(status='pending', document=None, invoiced_at=None)
         CashPlan.objects.filter(pk=plan.pk).update(status='active')
 
+        before = FormalDocument.objects.count()
         summary = process_due_recurring_charges(dry_run=False, limit=40)
         self.assertIn('cash_documents', summary)
-        self.assertEqual(summary['cash_documents']['issued'], 2)
+        # An 'upfront' plan's months are covered by its IRM: no new document.
+        self.assertEqual((summary['cash_documents']['issued'], summary['cash_documents']['covered']), (0, 2))
+        self.assertEqual(FormalDocument.objects.count(), before)
 
     def test_a_dry_run_issues_nothing(self):
         from apps.customers.recurring_billing import process_due_recurring_charges

@@ -186,17 +186,18 @@ class DatesThroughTheApiTests(Fixture, APITestCase):
 
 
 @override_settings(TRANZILA_BILLING_TERMINAL='')
-class PlanPathsSkipTheRulesTests(Fixture, TestCase):
-    """The check and cash plans date a month's document on its own day (WS-3 fixes that); they are let through."""
+class NoCallerSkipsTheRulesTests(Fixture, TestCase):
+    """
+    The check and cash plans were let past the date rules (WS-2); since WS-3
+    their documents are dated the day they are issued, and the way past is gone.
+    """
 
-    def test_a_plan_invoice_may_be_dated_before_the_runs_latest(self):
+    def test_an_invoice_dated_before_the_runs_latest_is_refused_for_every_caller(self):
         earlier = self.earlier_this_year()
         self.issued(f'TI-{self.year}-000900', 'tax_invoice', self.today)
         payload = self.invoice_payload('tax_invoice', earlier)
 
         with self.assertRaises(DocumentDateError):
             service.create_invoice(payload, 'tax_invoice')
-        doc = service.create_invoice(payload, 'tax_invoice', skip_date_rules=True)
-
-        doc.refresh_from_db()
-        self.assertEqual(doc.document_date, earlier)
+        with self.assertRaises(TypeError):
+            service.create_invoice(payload, 'tax_invoice', skip_date_rules=True)

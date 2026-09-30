@@ -88,7 +88,7 @@ def _generate_document_number(document_type: str) -> str:
     return formal_document_number(document_type)
 
 
-def _number_and_date(document_type: str, document_date, *, skip_date_rules: bool = False):
+def _number_and_date(document_type: str, document_date):
     """
     (the next number of the type's run, the date the document carries).
 
@@ -99,15 +99,11 @@ def _number_and_date(document_type: str, document_date, *, skip_date_rules: bool
     moment are so checked one after the other, and a refused date rolls its
     number back with the rest of the transaction: no gap.
 
-    `skip_date_rules` is for the office's check and cash plans only
-    (check_plans.py, cash_plans.py). They date a month's document on its
-    check's or month's day, which can be earlier than a document already in
-    the run; their dating is being fixed on its own (work stream WS-3). No
-    other caller passes it.
+    Every caller goes through the rules. The check and cash plans used to be
+    let past them (their documents were dated on the check's or the month's
+    day); since WS-3 (30.9.2026) they are dated the day they are issued.
     """
     number = _generate_document_number(document_type)
-    if skip_date_rules:
-        return number, document_date
     return number, validate_document_date(document_type, document_date)
 
 
@@ -160,13 +156,8 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
 
 
 @transaction.atomic
-def create_invoice(data: dict, document_type: str, *, issued_by=None,
-                   skip_date_rules: bool = False) -> FormalDocument:
-    """
-    Create a tax invoice or transaction invoice.
-
-    `skip_date_rules=True` only from the check and cash plans (see _number_and_date).
-    """
+def create_invoice(data: dict, document_type: str, *, issued_by=None) -> FormalDocument:
+    """Create a tax invoice or transaction invoice."""
     invoice_data = data['invoice_details']
     # A חשבונית עסקה is a demand for payment: it shows the VAT the tax invoice
     # issued with the payment will charge, so the customer is asked for the
@@ -181,9 +172,7 @@ def create_invoice(data: dict, document_type: str, *, issued_by=None,
         invoice_data.get('prices_include_vat', False),
     )
 
-    number, document_date = _number_and_date(
-        document_type, invoice_data['document_date'], skip_date_rules=skip_date_rules,
-    )
+    number, document_date = _number_and_date(document_type, invoice_data['document_date'])
     doc = FormalDocument.objects.create(
         document_number=number,
         document_type=document_type,
