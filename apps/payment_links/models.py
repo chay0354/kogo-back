@@ -29,10 +29,26 @@ def _new_slug() -> str:
 
 
 class PaymentLink(models.Model):
+    KIND_GENERAL = 'general'
+    KIND_BUSINESS_CHARGE = 'business_charge'
+    KIND_CHOICES = [
+        (KIND_GENERAL, 'קישור תשלום כללי'),
+        (KIND_BUSINESS_CHARGE, 'גבייה עסקית חד־פעמית'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     slug = models.CharField(max_length=24, unique=True, default=_new_slug, editable=False)
     title = models.CharField(max_length=120, verbose_name='כותרת')
     description = models.TextField(blank=True, verbose_name='תיאור לעמוד התשלום')
+    kind = models.CharField(max_length=24, choices=KIND_CHOICES, default=KIND_GENERAL)
+    business_customer = models.ForeignKey(
+        'customers.BusinessCustomer', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='one_time_charge_links', verbose_name='לקוח עסקי',
+    )
+    target_invoice = models.ForeignKey(
+        'documents.FormalDocument', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='business_charge_links', verbose_name='חשבונית פתוחה לסגירה',
+    )
     business = models.ForeignKey(
         'core.Business', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='payment_links', verbose_name='עסק',
@@ -67,6 +83,10 @@ class PaymentLink(models.Model):
         if not self.is_active:
             return False
         if self.expires_at and self.expires_at <= timezone.now():
+            return False
+        if self.kind == self.KIND_BUSINESS_CHARGE and self.payments.filter(
+            status__in=(PaymentLinkPayment.STATUS_COMPLETED, PaymentLinkPayment.STATUS_REVIEW),
+        ).exists():
             return False
         return True
 
@@ -149,6 +169,10 @@ class PaymentLinkPayment(models.Model):
     formal_document = models.ForeignKey(
         'documents.FormalDocument', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='payment_link_payments',
+    )
+    document_error = models.TextField(
+        blank=True,
+        help_text='A verified charge is never hidden when automatic document issuance needs office attention.',
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

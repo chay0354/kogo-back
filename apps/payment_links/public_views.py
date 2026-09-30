@@ -86,7 +86,11 @@ class PublicPaymentStartView(_PublicView):
     throttle_scope = 'payment_link_start'
 
     def post(self, request, slug: str):
-        link = PaymentLink.objects.prefetch_related('options').filter(slug=slug).first()
+        link = (
+            PaymentLink.objects.prefetch_related('options')
+            .select_related('business_customer', 'business_category', 'target_invoice')
+            .filter(slug=slug).first()
+        )
         if link is None:
             return Response({'error': 'הקישור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
         if not link.is_open():
@@ -97,13 +101,26 @@ class PublicPaymentStartView(_PublicView):
         if option is None:
             return Response({'error': 'יש לבחור אפשרות תשלום'}, status=status.HTTP_400_BAD_REQUEST)
 
-        payer_name = str(request.data.get('payer_name') or '').strip()[:120]
-        payer_phone = _clean_phone(str(request.data.get('payer_phone') or ''))
-        payer_email = str(request.data.get('payer_email') or '').strip()[:254]
-        if len(payer_name) < 2:
-            return Response({'error': 'יש להזין שם'}, status=status.HTTP_400_BAD_REQUEST)
-        if len(payer_phone) < 9:
-            return Response({'error': 'יש להזין טלפון תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        business_charge = link.kind == PaymentLink.KIND_BUSINESS_CHARGE
+        if business_charge:
+            customer = link.business_customer
+            payer_name = (customer.full_name if customer else '')[:120]
+            payer_phone = _clean_phone(customer.phone if customer else '')
+            payer_email = (customer.email if customer else '')[:254]
+            try:
+                from apps.payment_links.business_charge import validate_business_charge_link
+
+                validate_business_charge_link(link, option.amount)
+            except ValueError as exc:
+                return Response({'error': str(exc), 'closed': True}, status=status.HTTP_409_CONFLICT)
+        else:
+            payer_name = str(request.data.get('payer_name') or '').strip()[:120]
+            payer_phone = _clean_phone(str(request.data.get('payer_phone') or ''))
+            payer_email = str(request.data.get('payer_email') or '').strip()[:254]
+            if len(payer_name) < 2:
+                return Response({'error': 'יש להזין שם'}, status=status.HTTP_400_BAD_REQUEST)
+            if len(payer_phone) < 9:
+                return Response({'error': 'יש להזין טלפון תקין'}, status=status.HTTP_400_BAD_REQUEST)
         if payer_email and '@' not in payer_email:
             return Response({'error': 'כתובת מייל לא תקינה'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -120,6 +137,14 @@ class PublicPaymentStartView(_PublicView):
             # charged. Refused before a payment row is written.
             return Response({'error': 'הסליקה אינה זמינה כרגע'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+        tranzila = TranzilaService.iframe()
+        if business_charge and (tranzila.terminal or '').strip().lower() != 'cogolive':
+            logger.error('business charge refused: hosted terminal is not cogolive')
+            return Response(
+                {'error': 'הגבייה העסקית זמינה רק במסוף Cogolive'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
         ip = _client_ip(request)
         now = timezone.now()
         from django.db.models import Q
@@ -129,25 +154,33 @@ class PublicPaymentStartView(_PublicView):
             .exclude(status=PaymentLinkPayment.STATUS_COMPLETED)
             .filter(Q(created_at__lte=now - ATTEMPT_SETTLE) | Q(status=PaymentLinkPayment.STATUS_FAILED))
         )
-        if settled.filter(payer_phone=payer_phone).count() >= ATTEMPT_CAP:
+        if payer_phone and settled.filter(payer_phone=payer_phone).count() >= ATTEMPT_CAP:
             return Response({'error': 'יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         if ip and settled.filter(ip_address=ip).count() >= IP_ATTEMPT_CAP:
             return Response({'error': 'יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
 
-        row = PaymentLinkPayment.objects.create(
-            link=link,
-            option=option,
-            option_label=option.label,
-            amount=money(option.amount),
-            payer_name=payer_name,
-            payer_phone=payer_phone,
-            payer_email=payer_email,
-            ip_address=ip,
-        )
+        with transaction.atomic():
+            if business_charge:
+                link = PaymentLink.objects.select_for_update().get(pk=link.pk)
+                if not link.is_open() or link.payments.filter(status=PaymentLinkPayment.STATUS_PENDING).exists():
+                    return Response(
+                        {'error': 'כבר התחיל ניסיון תשלום בקישור הזה. יש לבדוק את מצבו לפני ניסיון נוסף.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            row = PaymentLinkPayment.objects.create(
+                link=link,
+                option=option,
+                option_label=option.label,
+                amount=money(option.amount),
+                payer_name=payer_name,
+                payer_phone=payer_phone,
+                payer_email=payer_email,
+                ip_address=ip,
+            )
 
         front = link.public_url()
         try:
-            iframe_url = TranzilaService.iframe().create_payment_request(
+            iframe_url = tranzila.create_payment_request(
                 amount=row.amount,
                 currency='ILS',
                 description=f'{link.title} — {option.label}'[:80],
@@ -173,7 +206,7 @@ class PublicPaymentStatusView(_PublicView):
     throttle_scope = 'payment_link_status'
 
     def get(self, request, payment_id):
-        row = PaymentLinkPayment.objects.filter(id=payment_id).select_related('link').first()
+        row = PaymentLinkPayment.objects.filter(id=payment_id).select_related('link', 'formal_document').first()
         if row is None:
             return Response({'error': 'לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
         return Response({
@@ -182,6 +215,9 @@ class PublicPaymentStatusView(_PublicView):
             'amount': str(row.amount),
             'link_title': row.link.title,
             'failure_reason': row.failure_reason if row.status == PaymentLinkPayment.STATUS_FAILED else '',
+            'document_ready': bool(row.formal_document_id),
+            'document_number': row.formal_document.document_number if row.formal_document_id else '',
+            'document_pending': bool(row.status == PaymentLinkPayment.STATUS_COMPLETED and not row.formal_document_id),
         })
 
 
@@ -354,6 +390,10 @@ def payment_link_callback(request):
                 row.review_reason = f'second_charge:{txn_index}'[:200]
                 row.save(update_fields=['review_reason', 'updated_at'])
                 logger.error('payment link %s: a second approved transaction %s was reported', row.id, txn_index)
+            if row.link.kind == PaymentLink.KIND_BUSINESS_CHARGE and not row.formal_document_id:
+                from apps.payment_links.business_charge import ensure_business_charge_document
+
+                transaction.on_commit(lambda: ensure_business_charge_document(row.id))
             return Response({'success': True, 'message': 'Already processed'})
 
         # The same gateway index can belong to one payment only.
@@ -418,6 +458,11 @@ def payment_link_callback(request):
                 row.review_reason = ('unverified_callback' if verdict == 'unverified' else 'verification_unavailable')
                 logger.error('payment link %s: callback not confirmed by Tranzila (%s)', row.id, verdict)
         row.save()
+
+        if row.status == PaymentLinkPayment.STATUS_COMPLETED and row.link.kind == PaymentLink.KIND_BUSINESS_CHARGE:
+            from apps.payment_links.business_charge import ensure_business_charge_document
+
+            transaction.on_commit(lambda: ensure_business_charge_document(row.id))
 
     return Response({'success': True, 'status': row.status, 'new_transaction': created})
 
