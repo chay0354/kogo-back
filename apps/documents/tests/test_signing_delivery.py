@@ -758,13 +758,20 @@ class PrintOriginalTests(ReceiptsMixin, APITestCase):
         self.assertEqual(set(body), {
             'enabled', 'consent_enforced', 'backend', 'key_id', 'cert_fingerprint', 'cert_subject',
             'last_signed_at', 'counts',
+            # 30.9.2026 (audit M1): why documents without an original cannot be counted ('' when they can).
+            'missing_original_blocked',
         })
         self.assertEqual((body['enabled'], body['consent_enforced'], body['backend']), (True, False, 'local'))
         self.assertTrue(body['key_id'].startswith('local:'))
         self.assertEqual(len(body['cert_fingerprint']), 64)
         self.assertIn('516504412', body['cert_subject'])
         self.assertIsNotNone(body['last_signed_at'])
-        self.assertEqual(body['counts'], {'held': 0, 'paper_pending': 1, 'signed_today': 2, 'awaiting_allocation': 0})
+        self.assertEqual(body['counts'], {
+            'held': 0, 'paper_pending': 1, 'signed_today': 2, 'awaiting_allocation': 0,
+            'missing_original': 0, 'found_late': 0,
+        })
+        # No SIGNING_ARCHIVE_ISSUED_BEFORE here: the safety net does not guess where signing began.
+        self.assertTrue(body['missing_original_blocked'])
 
 
 class SigningPermissionsTests(RegisterFixture, APITestCase):

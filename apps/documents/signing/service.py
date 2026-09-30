@@ -89,6 +89,22 @@ CRON_GRACE = timedelta(minutes=2)
 # no warning; reroute_undelivered --apply gives old rows a channel on purpose.
 UNROUTED_AUTO_MAIL_WINDOW = timedelta(days=3)
 
+# An original whose row was written this long after its document was issued
+# was found late — by the cron's safety net for documents issued with no row
+# (sign_pending), since issue() never lets a failed insert cost the document.
+# It is never mailed by itself: it goes on the hand-delivery list with this
+# reason, and the office sends it ("שלח") or hands it over, knowing it is late.
+RECORDED_LATE_WINDOW = UNROUTED_AUTO_MAIL_WINDOW
+REASON_FOUND_LATE = (
+    'המקור נוצר באיחור, יותר משלושה ימים אחרי שהמסמך הונפק — לא נשלח אוטומטית; '
+    'לשלוח ("שלח") או למסור ידנית'
+)
+# The safety net leaves a document this fresh to the request that is issuing it.
+MISSING_GRACE = timedelta(minutes=10)
+# How many documents without an original one cron run gives one: each is drawn
+# and signed on the spot, and a Vercel function's run is capped.
+MISSING_PER_RUN = 10
+
 
 def _short_error(exc: BaseException) -> str:
     """What went wrong, for the row and the log — the exception's own words, never a token."""
@@ -527,6 +543,172 @@ def _allocation_arrived(originals, limit: int) -> list[SignedOriginal]:
     return [row for row in waiting.filter(source_id__in=arrived).order_by('updated_at')[:limit]]
 
 
+# ── originals found late ────────────────────────────────────────────────────
+
+def _recorded_late(row: SignedOriginal, source: Source) -> bool:
+    """Whether the row was written more than RECORDED_LATE_WINDOW after its document was issued."""
+    issued = source.issued_moment
+    return bool(issued and row.created_at and row.created_at - issued > RECORDED_LATE_WINDOW)
+
+
+def _hand_to_office(row_id) -> bool:
+    """
+    An original found late goes on the hand-delivery list instead of into the customer's mailbox.
+
+    Under the row's lock, and only while it is signed, unsent and unprinted:
+    paper, with REASON_FOUND_LATE. An original already on paper because of
+    how it was paid (18ב(ד)) keeps that reason; one on paper only for want of
+    an address takes this one, so the cron does not mail it once an address
+    appears. True when the row was moved now.
+    """
+    with transaction.atomic():
+        row = SignedOriginal.objects.select_for_update().filter(pk=row_id).first()
+        if row is None or row.is_archive_copy or not row.is_signed or row.sent_at or row.paper_original_printed_at:
+            return False
+        if row.delivery == PAPER and row.delivery_reason not in (REASON_NO_EMAIL, REASON_MAIL_FAILED):
+            return False
+        row.delivery, row.delivery_reason = PAPER, REASON_FOUND_LATE
+        row.save(update_fields=['delivery', 'delivery_reason', 'updated_at'])
+    logger.warning('Signing: %s was recorded late — on the hand-delivery list, not mailed', row.number)
+    return True
+
+
+def _late_to_office(row: SignedOriginal) -> bool:
+    """For the cron's mail passes: True (and on the office's list) when the row was recorded late."""
+    if not _recorded_late(row, load_source(row.kind, row.source_id)):
+        return False
+    _hand_to_office(row.pk)
+    return True
+
+
+# ── documents issued with no original at all ────────────────────────────────
+
+_NUMBER_FIELDS = {KIND_IR: 'invoice_number', KIND_STORE: 'invoice_number', KIND_FORMAL: 'document_number'}
+
+
+def _missing_cutoff():
+    """
+    The moment signing went on (SIGNING_ARCHIVE_ISSUED_BEFORE): (moment, '') or (None, why not).
+
+    The safety net takes only documents issued from then on — before it, a
+    document's customer already holds its unsigned original, and the archive
+    (archive.py) keeps a signed "העתק לארכיון" of it; a second "מקור" is never
+    drawn. Without the moment it does not guess.
+    """
+    from apps.documents.signing.archive import ArchiveNeedsCutoff, issued_before
+
+    try:
+        cutoff = issued_before()
+    except ArchiveNeedsCutoff as exc:
+        return None, str(exc)
+    if cutoff is None:
+        return None, 'signing is off'
+    return cutoff, ''
+
+
+def missing_originals(kind: str, cutoff, *, include_clashes: bool = False):
+    """
+    The documents of `kind` issued since `cutoff` that have no row at all — oldest first.
+
+    "Issued" is the fiscal register's own definition, the one the archive
+    reads (archive._issued): a lesson receipt in the IR run whose charge went
+    through, a store sale in the ST/SD run that was paid or billed monthly,
+    every FormalDocument that is not a draft (every run: TI, IRM, RC, TX, CR,
+    RT, MK) except a store sale's Tranzila copy. A document from the last
+    MISSING_GRACE is left to the request issuing it. A document whose number
+    already belongs to another document's row cannot get one of its own: it is
+    left out unless `include_clashes` (a count for a person to look at).
+    """
+    from django.db.models import Exists, OuterRef
+    from django.db.models.functions import Coalesce
+
+    from apps.documents.signing.archive import _has_row, _issued
+
+    documents = _issued(kind)
+    if kind == KIND_FORMAL:
+        documents = documents.annotate(_issued_moment=Coalesce('issued_at', 'created_at'))
+        moment = '_issued_moment'
+    else:
+        moment = 'created_at'
+    documents = documents.filter(**{
+        f'{moment}__gte': cutoff, f'{moment}__lte': timezone.now() - MISSING_GRACE,
+    }).filter(~_has_row(kind))
+    if not include_clashes:
+        documents = documents.filter(~Exists(SignedOriginal.objects.filter(number=OuterRef(_NUMBER_FIELDS[kind]))))
+    return documents.order_by(moment, 'pk')
+
+
+def missing_original_count() -> dict:
+    """How many issued documents have no original — for the status screen. No network, no key."""
+    cutoff, blocked = _missing_cutoff()
+    if cutoff is None:
+        return {'count': 0, 'blocked': blocked}
+    total = sum(missing_originals(kind, cutoff, include_clashes=True).count() for kind in _NUMBER_FIELDS)
+    return {'count': total, 'blocked': ''}
+
+
+def _recovery_channel(kind: str, obj) -> str:
+    """The exit that mails the document at issue, when its caller names it: a rent receipt's, Michal Kagan's."""
+    if kind != KIND_FORMAL:
+        return ''
+    from apps.documents.numbering import SERIES_MICHAL, SERIES_RENTAL
+
+    number = obj.document_number or ''
+    if number.startswith(f'{SERIES_RENTAL}-'):
+        return SignedOriginal.CHANNEL_RENTAL
+    if number.startswith(f'{SERIES_MICHAL}-'):
+        return SignedOriginal.CHANNEL_MICHAL
+    return ''
+
+
+def _give_original(kind: str, obj, summary: dict) -> None:
+    """
+    One document issued with no row: record it, sign it and route it the way issue() would have.
+
+    Found within RECORDED_LATE_WINDOW of its issue it is mailed, like any
+    original, through its channel's exit and claim_email (so never twice);
+    found later it goes on the hand-delivery list (REASON_FOUND_LATE). An
+    original that cannot be signed now stays held with the reason, and the
+    passes above sign it — and, through _late_to_office, keep a late one off
+    the customer's mailbox.
+    """
+    source = source_for(kind, obj)
+    if not source.issued() or SignedOriginal.objects.filter(number=source.number).exists():
+        # Not a document, or its row was written a moment ago by the request issuing it.
+        return
+    with transaction.atomic():
+        row = _ensure_row(source, channel=_recovery_channel(kind, obj))
+    summary['missing_found'] += 1
+    logger.warning('Signing: %s had no original row — recorded by the cron', row.number)
+    row = sign_original(kind, source.obj) or row
+    if _recorded_late(row, source):
+        if _hand_to_office(row.pk):
+            summary['late_to_office'] += 1
+        return
+    if row.is_signed and not row.sent_at and row.delivery == EMAIL and _send_by_channel(row):
+        summary['sent'] += 1
+
+
+def _recover_missing(limit: int, summary: dict) -> None:
+    """The safety net: give every document issued without a row its original, up to `limit` a run."""
+    cutoff, blocked = _missing_cutoff()
+    if cutoff is None:
+        summary['missing_blocked'] = blocked
+        return
+    budget = limit
+    for kind in (KIND_IR, KIND_STORE, KIND_FORMAL):
+        if budget <= 0:
+            break
+        for obj in list(missing_originals(kind, cutoff)[:budget]):
+            budget -= 1
+            try:
+                _give_original(kind, obj, summary)
+            except Exception:
+                summary['errors'] += 1
+                logger.exception('Signing cron: %s %s has no original and could not be given one', kind, obj.pk)
+    summary['missing_remaining'] = missing_original_count()['count']
+
+
 def sign_pending(*, limit: int = 25) -> dict:
     """
     The cron: sign what is still unsigned, then mail what became mailable.
@@ -544,11 +726,26 @@ def sign_pending(*, limit: int = 25) -> dict:
 
     Rows are taken least recently touched first, so a row that stays where it
     is moves to the back and cannot starve the rest.
+
+    4. the safety net (audit M1, 30.9.2026): a document issued since signing
+       went on that has no row at all — issue() logs a failed insert rather
+       than fail the document — is given its original here, through the same
+       row, signature and delivery rules (_give_original), up to
+       MISSING_PER_RUN a run. Idempotent: once it has a row it is no longer
+       missing.
+
+    An original whose row was written more than RECORDED_LATE_WINDOW after its
+    document was issued — what the safety net finds — is never mailed by
+    passes 2 and 3 or by the net: it goes on the hand-delivery list
+    (REASON_FOUND_LATE), and the office sends it or hands it over.
     """
     if not enabled():
         return {'disabled': True}
     limit = max(1, min(int(limit or 25), 200))
-    summary = {'signed': 0, 'still_unsigned': 0, 'sent': 0, 'not_sent': 0, 'paper_to_email': 0, 'errors': 0}
+    summary = {
+        'signed': 0, 'still_unsigned': 0, 'sent': 0, 'not_sent': 0, 'paper_to_email': 0, 'errors': 0,
+        'missing_found': 0, 'late_to_office': 0, 'missing_remaining': 0, 'missing_blocked': '',
+    }
 
     # An archive copy is never here: it is signed as it is created, and never mailed.
     originals = SignedOriginal.objects.exclude(purpose=SignedOriginal.PURPOSE_ARCHIVE)
@@ -586,6 +783,9 @@ def sign_pending(*, limit: int = 25) -> dict:
     due = unsent.filter(delivery__in=(HELD, EMAIL)).order_by('updated_at')
     for row in due[:limit]:
         try:
+            if _late_to_office(row):
+                summary['late_to_office'] += 1
+                continue
             if _send_by_channel(row):
                 summary['sent'] += 1
             else:
@@ -602,7 +802,12 @@ def sign_pending(*, limit: int = 25) -> dict:
     no_address = unsent.filter(delivery=PAPER, delivery_reason=REASON_NO_EMAIL).order_by('updated_at')
     for row in no_address[:limit]:
         try:
-            delivery, _reason = _decide(load_source(row.kind, row.source_id), row)
+            source = load_source(row.kind, row.source_id)
+            if _recorded_late(row, source):
+                if _hand_to_office(row.pk):
+                    summary['late_to_office'] += 1
+                continue
+            delivery, _reason = _decide(source, row)
             if delivery == EMAIL and _send_by_channel(row):
                 summary['paper_to_email'] += 1
                 summary['sent'] += 1
@@ -612,6 +817,13 @@ def sign_pending(*, limit: int = 25) -> dict:
             summary['errors'] += 1
             logger.exception('Signing cron: %s could not be looked at again', row.number)
             _touch(row, exc)
+
+    try:
+        _recover_missing(min(limit, MISSING_PER_RUN), summary)
+    except Exception:
+        # The net must never cost the passes above their summary.
+        summary['errors'] += 1
+        logger.exception('Signing cron: the pass for documents without an original failed')
     return summary
 
 

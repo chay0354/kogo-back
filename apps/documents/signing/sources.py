@@ -100,6 +100,19 @@ class Source:
     def issued(self) -> bool:
         return True
 
+    @property
+    def issued_moment(self):
+        """
+        When the document was issued — the moment its original row is normally written.
+
+        The row's birth for a lesson receipt and a store sale (both are created
+        as they are issued); a FormalDocument overrides it (a draft is issued
+        when it is approved). The signing service compares an original's row
+        with it: a row written days after its document was issued was found
+        late (service.sign_pending), and is not mailed by itself.
+        """
+        return getattr(self.obj, 'created_at', None)
+
     def awaiting_allocation(self) -> bool:
         """
         Whether the original must not be signed yet: it needs an allocation number it does not carry.
@@ -341,6 +354,11 @@ class FormalDocumentSource(Source):
 
     def issued(self) -> bool:
         return self.obj.document_type != 'draft'
+
+    @property
+    def issued_moment(self):
+        # A draft is issued when it is approved (issued_at), not when it was typed.
+        return self.obj.issued_at or self.obj.created_at
 
     def awaiting_allocation(self) -> bool:
         """

@@ -2,7 +2,7 @@
 The signing screens' API, the public certificate, and the sign-pending cron.
 
   GET  /api/v1/documents/signing/status/                      manager
-  GET  /api/v1/documents/signing/originals/?purpose=&kind=&q=&date_from=&date_to=&delivery=&printed=&limit=&offset=
+  GET  /api/v1/documents/signing/originals/?purpose=&kind=&q=&date_from=&date_to=&delivery=&printed=&order=&limit=&offset=
                                                               manager
   GET  /api/v1/documents/signing/originals/{id}/file/         manager — the stored signed file, logged (?copy=1: a copy of an
                                                               original, drawn now); an archive copy's bytes
@@ -63,6 +63,8 @@ def signing_status(request):
     from apps.documents.signing.backends import backend_name, configured_key_id
     from apps.documents.signing.certificate import fingerprint_sha256, subject_text
 
+    from apps.documents.signing.service import REASON_FOUND_LATE, missing_original_count
+
     certificate = _certificate_or_none()
     today_start = timezone.make_aware(datetime.combine(timezone.localdate(), time.min))
     # The originals only: an archive batch signs hundreds of copies in a day,
@@ -71,6 +73,7 @@ def signing_status(request):
     last = originals.filter(signed_at__isnull=False).order_by('-signed_at').values_list(
         'signed_at', flat=True,
     ).first()
+    missing = missing_original_count() if enabled() else {'count': 0, 'blocked': ''}
     return Response({
         'enabled': enabled(),
         'consent_enforced': consent_enforced(),
@@ -90,7 +93,20 @@ def signing_status(request):
                 signed_at__isnull=True, delivery=SignedOriginal.DELIVERY_HELD,
                 delivery_reason=_reason_awaiting_allocation(),
             ).count(),
+            # Added 30.9.2026 (audit M1). Documents issued since signing went on
+            # that have no original at all — the cron gives each one its
+            # original; what stays here needs a person (a number another
+            # document's original holds). 0 while the moment signing went on
+            # is not set (`missing_original_blocked` says so).
+            'missing_original': missing['count'],
+            # Part of `paper_pending`: originals the cron found late, on the
+            # hand-delivery list instead of in the customer's mailbox.
+            'found_late': originals.filter(
+                delivery=SignedOriginal.DELIVERY_PAPER, delivery_reason=REASON_FOUND_LATE,
+                paper_original_printed_at__isnull=True, sent_at__isnull=True,
+            ).count(),
         },
+        'missing_original_blocked': missing['blocked'],
     })
 
 
@@ -203,9 +219,20 @@ def signed_originals(request):
     """
     params = request.query_params
     try:
-        qs = _filtered_originals(params).order_by('-created_at', '-id')
+        qs = _filtered_originals(params)
     except _BadFilter as bad:
         return Response({'error': str(bad)}, status=status.HTTP_400_BAD_REQUEST)
+    order = (params.get('order') or '').strip()
+    if order == 'printed':
+        # "הודפסו לאחרונה" (added 30.9.2026): the last printed first, so a row
+        # printed today is at the top however old its document is.
+        from django.db.models import F
+
+        qs = qs.order_by(F('paper_original_printed_at').desc(nulls_last=True), '-created_at', '-id')
+    elif order:
+        return Response({'error': f'order לא מוכר: {order}'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        qs = qs.order_by('-created_at', '-id')
 
     limit = _int(params.get('limit'), 50, 1, MAX_PAGE)
     offset = _int(params.get('offset'), 0, 0, 10 ** 9)
