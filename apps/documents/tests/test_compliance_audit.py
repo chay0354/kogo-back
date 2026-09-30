@@ -25,6 +25,7 @@ from apps.documents.issuer import COPY_MARK, ORIGINAL_MARK
 from apps.documents.models import DocumentLineItem, DocumentPayment, FormalDocument
 from apps.documents.serializers import FormalDocumentListSerializer
 from apps.documents.tests.test_register import RegisterFixture
+from apps.documents.uniform_export import uniform_number
 from apps.store.invoice_pdf import build_store_invoice_layout
 
 CREATE = '/api/v1/documents/documents/create-document/'
@@ -163,16 +164,17 @@ class EveryRunReachesTheUniformFilesTests(RegisterFixture, APITestCase):
         inner = zipfile.ZipFile(io.BytesIO(outer.read(next(n for n in outer.namelist() if n.endswith('BKMVDATA.zip')))))
         records = inner.read('BKMVDATA.TXT').decode('iso-8859-8').splitlines()
         headers = {line[25:45].strip(): line[22:25] for line in records if line.startswith('C100')}
+        # 2.4(ד): the series part at most five positions — 'IR-2026-000001' is written 'IR26000001'.
         self.assertEqual(headers, {
-            'IR-2026-000001': '320',
-            sale.invoice_number: '320',
-            on_account.invoice_number: '300',
-            'RT-2026-000001': '320',
-            'TI-2026-000001': '305',
-            'IRM-2026-000001': '320',
-            'RC-2026-000001': '400',
-            'TX-2026-000001': '300',
-            'CR-2026-000001': '330',
+            'IR26000001': '320',
+            uniform_number(sale.invoice_number): '320',
+            uniform_number(on_account.invoice_number): '300',
+            'RT26000001': '320',
+            'TI26000001': '305',
+            'IRM26000001': '320',
+            'RC26000001': '400',
+            'TX26000001': '300',
+            'CR26000001': '330',
         })
 
 

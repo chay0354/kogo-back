@@ -525,6 +525,11 @@ SIGNING_ARCHIVE_ISSUED_BEFORE = config('SIGNING_ARCHIVE_ISSUED_BEFORE', default=
 # retention policy, so a copy cannot be deleted or replaced — not even by
 # someone holding the database password. Empty = no copy.
 SIGNING_BACKUP_BUCKET = config('SIGNING_BACKUP_BUCKET', default='')
+# The quarterly backup of the books (apps/documents/quarterly_backup.py, הוראות
+# ניהול פנקסי חשבונות 25(ו)(2)): a bucket in Israel (me-west1) with a retention
+# policy, the signing service account holding roles/storage.objectCreator on
+# it. Empty = `manage.py quarterly_backup --out DIR` writes the files locally only.
+SIGNING_QUARTERLY_BACKUP_BUCKET = config('SIGNING_QUARTERLY_BACKUP_BUCKET', default='')
 # Setup only: lets the two setup calls (issue the certificate, run the self-test)
 # be made against a deployment before anyone has logged in to it. Empty = those
 # calls need a manager. Remove it from Vercel once the key is in place.

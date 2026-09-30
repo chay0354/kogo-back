@@ -23,6 +23,13 @@ from apps.documents.serializers import (
 )
 from apps.documents import service
 from apps.documents.check_plans import register_check_plan
+from apps.documents.partner_scope import (
+    document_create_refusal,
+    partner_branches,
+    plan_create_refusal,
+    scope_documents,
+    scope_plans,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +193,9 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         if exclude_credits:
             qs = qs.exclude(document_type__in=('credit_invoice', 'draft'))
 
-        return qs
+        # A partner reaches their own branches' documents only — in the list and
+        # in every action that finds a document by id (partner_scope.py).
+        return scope_documents(qs, self.request.user)
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -210,10 +219,14 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 return None
 
         local_only = str(request.query_params.get('local_only') or '').lower() in ('1', 'true', 'yes')
+        # A partner gets their branches' local rows; Tranzila's list is the whole
+        # terminal's and carries no branch, so it is never fetched for them.
+        branch_ids = partner_branches(request.user)
         result = list_ledger_documents(
             start_date=parse_day(request.query_params.get('start_date')),
             end_date=parse_day(request.query_params.get('end_date')),
-            local_only=local_only,
+            local_only=local_only or branch_ids is not None,
+            branch_ids=branch_ids,
         )
         return Response(result)
 
@@ -288,10 +301,12 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         GET /api/v1/documents/documents/register-export/?month=YYYY-MM
         (or start_date/end_date). The same rows as the period report
         (apps/documents/register.py), and the numbers that never became a
-        document. Read-only; managers only, like the report.
+        document; below them, the period's income without a document.
+        Read-only; managers only, like the report.
         """
         from apps.documents.period_report import ReportInputError, build_report, parse_period
         from apps.documents.register import register_csv
+        from apps.documents.undocumented_income import collect_undocumented
 
         try:
             start, end, label = parse_period(request.query_params)
@@ -299,7 +314,17 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         except ReportInputError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        response = HttpResponse(register_csv(report), content_type='text/csv; charset=utf-8')
+        # The income with no document behind it goes in a second section, as on
+        # the period report. A failure there is said in the file, never hidden.
+        failed = False
+        try:
+            report.undocumented = collect_undocumented(request.user, start, end)
+        except Exception:
+            logger.exception('Register export: undocumented income failed')
+            failed = True
+
+        response = HttpResponse(register_csv(report, undocumented_failed=failed),
+                                content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = (
             f'attachment; filename="documents-{start.isoformat()}-{end.isoformat()}.csv"'
         )
@@ -349,6 +374,10 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
 
         data = serializer.validated_data
         doc_type = data['document_type']
+
+        refusal = document_create_refusal(request.user, data)
+        if refusal:
+            return Response({'error': refusal[1]}, status=refusal[0])
 
         user = request.user
         try:
@@ -488,7 +517,7 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
         branch_id = self.request.query_params.get('branch')
         if branch_id:
             qs = qs.filter(branch_id=branch_id)
-        return qs
+        return scope_plans(qs, self.request.user)
 
     def create(self, request):
         serializer = CreateCheckPlanSerializer(data=request.data)
@@ -496,6 +525,9 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         data = serializer.validated_data
+        refusal = plan_create_refusal(request.user, data['child_id'], data.get('lesson_id'))
+        if refusal:
+            return Response({'error': refusal[1]}, status=refusal[0])
         try:
             plan = register_check_plan(
                 child_id=str(data['child_id']),
@@ -705,7 +737,7 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
         branch_id = self.request.query_params.get('branch')
         if branch_id:
             qs = qs.filter(branch_id=branch_id)
-        return qs
+        return scope_plans(qs, self.request.user)
 
     @action(detail=False, methods=['post'], url_path='preview')
     def preview_plan(self, request):
@@ -729,6 +761,9 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         data = serializer.validated_data
+        refusal = plan_create_refusal(request.user, data['child_id'], data.get('lesson_id'))
+        if refusal:
+            return Response({'error': refusal[1]}, status=refusal[0])
         try:
             plan = register_cash_plan(
                 child_id=str(data['child_id']),
