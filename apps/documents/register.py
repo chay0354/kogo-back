@@ -279,10 +279,18 @@ def find_possible_duplicates(channel: list[ChannelDocument], documents) -> list[
 # ---------------------------------------------------------------- the export
 
 CSV_COLUMNS = (
-    'תאריך', 'מספר מסמך', 'סדרה', 'סוג מסמך', 'קוד מבנה אחיד', 'ערוץ', 'לקוח',
-    'לפני מע"מ', 'מע"מ', 'סה"כ', 'אמצעי תשלום', 'סניף', 'עסק', 'קטגוריה',
+    'תאריך', 'מספר מסמך', 'סדרה', 'מספר הקצאה', 'סוג מסמך', 'קוד מבנה אחיד', 'מספר במבנה אחיד', 'ערוץ',
+    'לקוח', 'לפני מע"מ', 'מע"מ', 'סה"כ', 'אמצעי תשלום', 'סניף', 'עסק', 'קטגוריה',
     'אסמכתא / מסמך מקושר', 'ייתכן כפל עם', 'מצב',
 )
+
+# The second section: money taken in the period with no document behind it
+# (undocumented_income.py), which the period report prints beside the documents.
+UNDOCUMENTED_TITLE = 'הכנסה ללא מסמך'
+UNDOCUMENTED_COLUMNS = (
+    'תאריך', 'מקור', 'לקוח', 'אסמכתא', 'פרטים', 'סניף', 'עסק', 'קטגוריה', 'סכום', 'מצב',
+)
+UNDOCUMENTED_FAILED = 'לא ניתן היה לאסוף את ההכנסה ללא מסמך — יש להפיק את הקובץ שוב'
 
 _RUN_NUMBER = re.compile(r'^([A-Z]+)-\d{4}-\d+$')
 _SHARED_RUN_NUMBER = re.compile(r'^\d{4}-\d{4,}$')
@@ -314,14 +322,23 @@ def _signed(amount: Decimal, negative: bool) -> str:
     return f'{-amount if negative else amount:.2f}'
 
 
-def register_csv(report) -> bytes:
+def register_csv(report, *, undocumented_failed: bool = False) -> bytes:
     """
     The register as a CSV the accountant opens in Excel — one row per document.
 
     UTF-8 with a byte-order mark, which is how Excel knows the Hebrew is UTF-8.
     A credit note is negative, so each column sums to the period's net; a number
     that never became a document is listed with zero amounts and says why.
+
+    Each document carries its allocation number (חשבוניות ישראל) and the number
+    the uniform-structure file writes it under (uniform_export.uniform_number).
+    When the report was given its income without a document
+    (report.undocumented), a second section below lists it, one row a charge,
+    and its total — so the file holds the period's whole take, as the report
+    does. `undocumented_failed` says in the file that it could not be gathered.
     """
+    from apps.documents.uniform_export import uniform_number
+
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator='\r\n')
     writer.writerow(CSV_COLUMNS)
@@ -338,8 +355,10 @@ def register_csv(report) -> bytes:
             row.document_date.strftime('%d/%m/%Y'),
             _text(row.document_number),
             series_of(row.document_number),
+            row.allocation_number,
             row.document_type_label,
             UNIFORM_TYPE_CODES.get(row.document_type, ''),
+            '' if row.void else _text(uniform_number(row.document_number)),
             CHANNEL_LABELS.get(row.channel, row.channel),
             _text(row.customer),
             net,
@@ -353,4 +372,34 @@ def register_csv(report) -> bytes:
             _text(row.duplicate_of),
             state,
         ])
+    if undocumented_failed or getattr(report, 'undocumented', None) is not None:
+        _write_undocumented(writer, None if undocumented_failed else report.undocumented)
     return buffer.getvalue().encode('utf-8-sig')
+
+
+def _write_undocumented(writer, income) -> None:
+    """The income-without-a-document section: a blank line, its title, its rows, its total."""
+    writer.writerow([])
+    writer.writerow([UNDOCUMENTED_TITLE])
+    if income is None:
+        writer.writerow([UNDOCUMENTED_FAILED])
+        return
+    writer.writerow(UNDOCUMENTED_COLUMNS)
+    rows = [(section, row) for section in income.sections for row in section.rows]
+    for section, row in sorted(rows, key=lambda pair: (pair[1].row_date, pair[1].reference)):
+        writer.writerow([
+            row.row_date.strftime('%d/%m/%Y'),
+            section.label,
+            _text(row.customer),
+            _text(row.reference),
+            _text(row.detail),
+            _text(row.branch_name),
+            _text(row.business_name),
+            _text(row.category_name),
+            f'{row.amount:.2f}',
+            # Folded into a document issued by hand for the same child and sum: shown, not counted.
+            f'לא נספר — נכלל במסמך {row.merged_document}' if row.merged_document else 'נספר',
+        ])
+    if not rows:
+        writer.writerow(['אין הכנסה ללא מסמך בתקופה'])
+    writer.writerow(['סה"כ ללא מסמך', '', '', '', '', '', '', '', f'{income.total:.2f}', ''])

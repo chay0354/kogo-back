@@ -44,10 +44,10 @@ MAX_ISSUE_BATCH = 100
 
 # A charge completed this recently is not "missing" yet — not on the list, and
 # not at the moment of issue. A family checkout marks its charges completed,
-# issues its one receipt pointing at the first, and only then writes the log
-# naming the others (checkout_invoice._finish_checkout_invoice); until it does,
-# those others look receipt-less, and a late receipt issued then would be a
-# second one. Every path that completes a charge stamps payment_date as it
+# issues its one receipt pointing at the first, and the log naming the others
+# (checkout_invoice._record_checkout_lines — in the receipt's own transaction
+# since 30.9.2026); until the receipt is issued, those others look receipt-less,
+# and a late receipt issued then would be a second one. Every path that completes a charge stamps payment_date as it
 # does, so that date is when it was completed. A real miss is still missing
 # fifteen minutes later.
 RECENT_CHARGE_GRACE = timedelta(minutes=15)

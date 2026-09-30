@@ -142,10 +142,21 @@ def issue_widget_checkout_invoice(payments, *, send_email: bool = True) -> Invoi
             txn = gateway.transaction_id.strip()
             break
 
+    # The lines are read first, outside the IR series' lock.
+    lines = [payment_checkout_line(payment) for payment in paid]
     stamp = timezone.now()
-    # The number and the document commit together, so the IR run never skips.
+    # The number, the receipt, its lines, the log naming every charge it covers
+    # and its signed original's row commit together, or none of them does (audit
+    # M1, 30.9.2026). Until then only the number and the receipt did: a failure
+    # after them left an IR with no lines and no original, and its other charges
+    # looked receipt-less to the missing-receipts screen — a second receipt.
+    # Now a failure gives the number back (the IR run stays gapless) and every
+    # charge is simply missing its receipt, which that screen issues. The card
+    # was charged before this is called and nothing here reaches Tranzila; the
+    # mail goes after the commit.
     with transaction.atomic():
         invoice = _create_checkout_invoice(first, family, total, txn, stamp)
+        _record_checkout_lines(invoice, paid, lines, send_email=send_email)
     return _finish_checkout_invoice(invoice, paid, send_email=send_email, total=total)
 
 
@@ -168,19 +179,18 @@ def _create_checkout_invoice(first, family, total, txn, stamp):
     )
 
 
-def _finish_checkout_invoice(invoice, paid, *, send_email: bool, total):
-    lines = []
+def _record_checkout_lines(invoice, paid, lines, *, send_email: bool) -> None:
+    """The receipt's children, its checkout log and its original's row — inside the receipt's transaction."""
     for payment in paid:
         child = payment.child
         lesson = payment.lesson
-        if child_id := (child.id if child else None):
+        if child is not None:
             InvoiceChild.objects.create(
                 invoice=invoice,
                 child=child,
                 course=lesson.course if lesson and lesson.course_id else None,
                 lesson=lesson,
             )
-        lines.append(payment_checkout_line(payment))
 
     InvoiceActivityLog.objects.create(
         invoice=invoice,
@@ -192,12 +202,17 @@ def _finish_checkout_invoice(invoice, paid, *, send_email: bool, total):
     )
 
     # Recorded now that its lines are written — the receipt prints them from
-    # the checkout log — and signed after the commit (off: a no-op).
+    # the checkout log — and signed after the commit (off: a no-op). issue()
+    # never raises: a failed row is logged, and the signing cron's safety net
+    # gives the receipt its original.
     from apps.documents.models import SignedOriginal
     from apps.documents.signing.service import KIND_IR, issue as issue_signed_original
 
     issue_signed_original(KIND_IR, invoice, channel=SignedOriginal.CHANNEL_IR if send_email else '')
 
+
+def _finish_checkout_invoice(invoice, paid, *, send_email: bool, total):
+    """After the commit: the receipt's mail (the stored original, once), and the log line."""
     if send_email:
         try:
             from apps.customers.subscription_invoice_email import send_subscription_invoice_email

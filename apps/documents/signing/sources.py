@@ -5,7 +5,9 @@ kogo issues fiscal documents from three tables: lesson receipts (Invoice, the
 IR run), store sales (StoreInvoice, ST/SD) and everything else (FormalDocument
 — TI, IRM, RC, TX, CR, RT). Each answers the same questions here: its number,
 who it is for and where their mail goes, whose consent covers it, how it was
-paid, and how its original is drawn.
+paid, how its original is drawn — and, since 25.9.2026, which mail channel
+carries it when its caller names none, and whether it must wait for an
+allocation number before it may be signed at all.
 
 How it was paid decides where the original may go (הוראה 18ב(ד)): "נישום
 המבקש לשלוח מסמך ממוחשב חתום בחתימה אלקטרונית מאובטחת, יקבל את התקבול בשל
@@ -70,6 +72,14 @@ def verdict_for_payment_rows(payments) -> PaymentVerdict:
 
 class Source:
     kind: str = ''
+    # How kogo mails the original when the code that issued it named no channel
+    # (owner's decision D5, 25.9.2026): every original reaches its customer —
+    # by mail when 18ב(ד) allows it, otherwise on the hand-delivery list, or it
+    # is held with a reason. Before, a document issued without a channel (a
+    # hand-issued invoice, a till sale, a late lesson receipt) was 'none' — kept
+    # in the archive and never delivered. A rental receipt and a credit note are
+    # still named by their callers (CHANNEL_RENTAL, CHANNEL_CREDIT_NOTE).
+    default_channel: str = ''
 
     def __init__(self, obj):
         self.obj = obj
@@ -90,10 +100,41 @@ class Source:
     def issued(self) -> bool:
         return True
 
+    @property
+    def issued_moment(self):
+        """
+        When the document was issued — the moment its original row is normally written.
+
+        The row's birth for a lesson receipt and a store sale (both are created
+        as they are issued); a FormalDocument overrides it (a draft is issued
+        when it is approved). The signing service compares an original's row
+        with it: a row written days after its document was issued was found
+        late (service.sign_pending), and is not mailed by itself.
+        """
+        return getattr(self.obj, 'created_at', None)
+
+    def awaiting_allocation(self) -> bool:
+        """
+        Whether the original must not be signed yet: it needs an allocation number it does not carry.
+
+        Only a FormalDocument can (a tax invoice to a business); a lesson receipt
+        and a store sale are to private families.
+        """
+        return False
+
     def payment_verdict(self) -> PaymentVerdict:
         raise NotImplementedError
 
     def render_original(self) -> bytes:
+        raise NotImplementedError
+
+    def render_copy(self) -> bytes:
+        """
+        The document drawn as "העתק" — what the office sends again or downloads.
+
+        Never the stored original's bytes: "מקור" leaves once (נספח ה'(א)(4)),
+        and every later print, download or mail is a copy, unsigned.
+        """
         raise NotImplementedError
 
     def render_archive(self) -> bytes:
@@ -110,6 +151,9 @@ class LessonReceiptSource(Source):
     """A lesson receipt (Invoice, IR). Charged through Tranzila, so a card, in practice."""
 
     kind = SignedOriginal.KIND_IR
+    # A late receipt from the missing-receipts screen, or one issued without
+    # its mail, is mailed by the IR exit all the same (subscription_invoice_email).
+    default_channel = SignedOriginal.CHANNEL_IR
 
     @property
     def number(self):
@@ -163,6 +207,11 @@ class LessonReceiptSource(Source):
 
         return generate_subscription_invoice_pdf(self.obj, copy=False, signed=True)
 
+    def render_copy(self) -> bytes:
+        from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
+
+        return generate_subscription_invoice_pdf(self.obj, copy=True)
+
     def render_archive(self) -> bytes:
         from apps.customers.subscription_invoice_pdf import generate_subscription_invoice_pdf
 
@@ -174,6 +223,9 @@ class StoreSaleSource(Source):
 
     kind = SignedOriginal.KIND_STORE
     ISSUED_STATUSES = ('completed', 'refunded', 'refund_failed')
+    # A website order and a till sale alike: the store exit mails both
+    # (apps/store/invoice_email.py).
+    default_channel = SignedOriginal.CHANNEL_STORE
 
     @property
     def number(self):
@@ -202,8 +254,14 @@ class StoreSaleSource(Source):
 
     @property
     def default_email(self):
-        # The address the sale's mail goes to (apps/store/invoice_email.py).
-        return (self.obj.customer_email or '').strip()
+        # The address the sale's mail goes to (apps/store/invoice_email.py): the
+        # buyer's own, and for a till sale — which records none — the child's
+        # family, read live, so an address added to the card later is found.
+        email = (self.obj.customer_email or '').strip()
+        if not email and self.obj.child_id:
+            family = getattr(self.obj.child, 'family', None)
+            email = (getattr(family, 'email', '') or '').strip() if family else ''
+        return email
 
     @property
     def consent_holder(self):
@@ -230,6 +288,11 @@ class StoreSaleSource(Source):
 
         return generate_store_invoice_pdf(self.obj, copy=False, signed=True)
 
+    def render_copy(self) -> bytes:
+        from apps.store.invoice_pdf import generate_store_invoice_pdf
+
+        return generate_store_invoice_pdf(self.obj, copy=True)
+
     def render_archive(self) -> bytes:
         from apps.store.invoice_pdf import generate_store_invoice_pdf
 
@@ -241,6 +304,9 @@ class FormalDocumentSource(Source):
 
     kind = SignedOriginal.KIND_FORMAL
     LABELS = dict(DOCUMENT_TYPE_CHOICES)
+    # A document issued by hand, by a cash or check plan: mailed by
+    # apps/documents/document_email.py.
+    default_channel = SignedOriginal.CHANNEL_FORMAL
 
     @property
     def number(self):
@@ -289,6 +355,35 @@ class FormalDocumentSource(Source):
     def issued(self) -> bool:
         return self.obj.document_type != 'draft'
 
+    @property
+    def issued_moment(self):
+        # A draft is issued when it is approved (issued_at), not when it was typed.
+        return self.obj.issued_at or self.obj.created_at
+
+    def awaiting_allocation(self) -> bool:
+        """
+        A tax invoice (or invoice-receipt) above the threshold, to a business, with no allocation number yet.
+
+        The Tax Authority's "חשבוניות ישראל" FAQ (question 10): the number
+        belongs on the original; one obtained after the original was issued
+        goes on a copy only. So the original is not signed — not drawn at all —
+        until the number is entered (apps/documents/views.py
+        set_allocation_number). The test is the one the PDF itself prints
+        ("נדרש לעסקה זו … טרם הוזן", document_pdf._notes): the same net amount,
+        the same "to a business" — what is held is exactly what would print
+        the number as missing. An RT rental receipt is a combined document to
+        a business, so it passes through the same gate.
+        """
+        from apps.documents.invoice_document import document_needs_allocation
+
+        doc = self.obj
+        if (doc.allocation_number or '').strip():
+            return False
+        return document_needs_allocation(
+            doc.document_type, (doc.subtotal or 0) - (doc.discount_amount or 0),
+            to_business=doc.client_type == 'business',
+        )
+
     def payment_verdict(self) -> PaymentVerdict:
         doc = self.obj
         # A cash plan's monthly document carries no payment line: the money was
@@ -317,6 +412,11 @@ class FormalDocumentSource(Source):
         from apps.documents.document_pdf import generate_document_pdf
 
         return generate_document_pdf(self.obj, signed=True)
+
+    def render_copy(self) -> bytes:
+        from apps.documents.document_pdf import generate_document_pdf
+
+        return generate_document_pdf(self.obj, copy=True)
 
     def render_archive(self) -> bytes:
         from apps.documents.document_pdf import generate_document_pdf

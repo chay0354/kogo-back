@@ -285,6 +285,13 @@ AUTHENTICATION_BACKENDS = [
 TRANZILA_TERMINAL = config('TRANZILA_TERMINAL', default='mock-terminal')  # Main terminal for iframe payments
 TRANZILA_TOKEN_TERMINAL = config('TRANZILA_TOKEN_TERMINAL', default=TRANZILA_TERMINAL)  # Separate terminal for REST API token charges
 TRANZILA_SUPPLIER = config('TRANZILA_SUPPLIER', default='mock-supplier')
+# Dedicated hosted terminal for one-time business charges. It must not
+# repoint the existing store or general payment-link iframe terminal.
+BUSINESS_CHARGE_TRANZILA_TERMINAL = config('BUSINESS_CHARGE_TRANZILA_TERMINAL', default='')
+# The one-time business charge's own switch (owner, 30.9.2026: "only for this").
+# It opens Tranzila's hosted page for business charges alone; the store, the
+# till and general payment links stay behind TRANZILA_HOSTED_PAGE_ENABLED.
+BUSINESS_CHARGE_ENABLED = config('BUSINESS_CHARGE_ENABLED', default=False, cast=bool)
 
 # RESTful API v1 credentials (required for token-based charges)
 TRANZILA_PUBLIC_KEY = config('TRANZILA_PUBLIC_KEY', default='')  # Goes in X-tranzila-api-app-key header
@@ -534,6 +541,11 @@ SIGNING_ARCHIVE_ISSUED_BEFORE = config('SIGNING_ARCHIVE_ISSUED_BEFORE', default=
 # retention policy, so a copy cannot be deleted or replaced — not even by
 # someone holding the database password. Empty = no copy.
 SIGNING_BACKUP_BUCKET = config('SIGNING_BACKUP_BUCKET', default='')
+# The quarterly backup of the books (apps/documents/quarterly_backup.py, הוראות
+# ניהול פנקסי חשבונות 25(ו)(2)): a bucket in Israel (me-west1) with a retention
+# policy, the signing service account holding roles/storage.objectCreator on
+# it. Empty = `manage.py quarterly_backup --out DIR` writes the files locally only.
+SIGNING_QUARTERLY_BACKUP_BUCKET = config('SIGNING_QUARTERLY_BACKUP_BUCKET', default='')
 # Setup only: lets the two setup calls (issue the certificate, run the self-test)
 # be made against a deployment before anyone has logged in to it. Empty = those
 # calls need a manager. Remove it from Vercel once the key is in place.

@@ -600,6 +600,37 @@ def probe_rental_orders() -> ProbeResult:
                        _rows(rows, lambda o: str(getattr(o, 'tenant', '') or o.id), lambda o: f'{o.amount_before_vat} ₪ לפני מע״מ'))
 
 
+def probe_rental_late_charges() -> ProbeResult:
+    """
+    A tenant's card Tranzila charged after the month was voided or paid at the
+    office (apps/rental_billing/offline.py, late_card_charge): money with no
+    receipt, or taken twice. Nothing refunds or charges it by itself.
+    """
+    from django.db.models import Q
+
+    from apps.rental_billing.models import TenantCharge
+    from apps.rental_billing.receipts import OFFLINE_METHODS
+
+    rows = (
+        TenantCharge.objects.exclude(transaction_id='')
+        .filter(
+            Q(status=TenantCharge.STATUS_VOIDED, receipt__isnull=True)
+            | Q(status=TenantCharge.STATUS_CHARGED, receipt__payments__payment_method__in=OFFLINE_METHODS)
+        )
+        .select_related('standing_order__tenant')
+        .distinct()
+        .order_by('period')
+    )
+    count = rows.count()
+    title = 'חיובי שוכרים שאושרו באיחור'
+    if not count:
+        return ProbeResult('rental_late_charges', title, 'green', 'אין חודש שכירות שחויב בכרטיס אחרי שבוטל או ששולם במשרד.')
+    return ProbeResult('rental_late_charges', title, 'red',
+                       f'{count} חודשי שכירות חויבו בכרטיס אחרי שבוטלו או ששולמו במשרד — לבדוק בטרנזילה: לסמן כחויב או לזכות.',
+                       _rows(rows, lambda c: f'{c.standing_order.tenant} · {c.period:%m/%Y}',
+                             lambda c: f'עסקה {c.transaction_id} · {c.get_status_display()}'))
+
+
 PROBES = {
     'billing': (probe_tranzila_terminals, probe_recurring_integrity, probe_payment_links),
     'registration': (probe_lessons_priced,),
@@ -607,7 +638,7 @@ PROBES = {
     'messages': (probe_manychat_automations, probe_email_backend),
     'customers': (probe_family_contacts,),
     'staff': (probe_lessons_staffed, probe_active_managers),
-    'rentals_store': (probe_rental_orders,),
+    'rentals_store': (probe_rental_orders, probe_rental_late_charges),
 }
 
 

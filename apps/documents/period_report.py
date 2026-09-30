@@ -263,6 +263,8 @@ class ReportRow:
     # A number handed to a sale that never became a document: listed, never summed.
     void: bool = False
     void_reason: str = ''
+    # מספר הקצאה (חשבוניות ישראל), when one was entered on the document.
+    allocation_number: str = ''
 
 
 @dataclass
@@ -477,6 +479,7 @@ def _row_from(doc) -> ReportRow:
         is_credit=doc.document_type == CREDIT_TYPE,
         currency=doc.currency,
         vat_exempt=doc.vat_exempt,
+        allocation_number=doc.allocation_number or '',
     )
 
 

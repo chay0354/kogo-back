@@ -15,6 +15,7 @@ document stored it with VAT in, because a D110 line is "before VAT" (1265).
 """
 from __future__ import annotations
 
+import re
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.utils import timezone
@@ -51,6 +52,27 @@ RECEIPT_CODE = DOCUMENT_TYPE_CODES['receipt']
 # 1257 holds up to twenty characters; a longer number is left off, never cut.
 LINK_WIDTH = 20
 
+# 2.4(ד): "a document number that also holds letters naming its series is written
+# with the series at the left of the field; a series may be up to 5 positions"
+# (AA123, or AA000000000000000123). Kogo prints 'IR-2026-000123': the part
+# before the running number, 'IR-2026-', is eight positions. The file writes
+# the same number as its letters, the tax year's last two digits and the running
+# number in full — 'IR26000123', 'IRM26000001' — so the series part stays within
+# five, nothing of the number is cut, and every record that repeats it (1204,
+# 1257, D110 1254, D120 1304) repeats the same value. The register CSV carries
+# both forms side by side. Numbers of any other shape (the closed shared run
+# '2026-0042', a Tranzila number) already fit and are written as printed.
+_KOGO_RUN_NUMBER = re.compile(r'^([A-Z]{1,3})-(\d{4})-(\d+)$')
+
+
+def uniform_number(number: str) -> str:
+    """The number as the uniform-structure file writes it: 'IR-2026-000123' -> 'IR26000123'."""
+    match = _KOGO_RUN_NUMBER.match((number or '').strip())
+    if not match:
+        return number
+    letters, year, running = match.groups()
+    return f'{letters}{year[2:]}{running}'
+
 
 def _digits(value) -> str:
     return ''.join(ch for ch in str(value or '') if ch.isdigit())
@@ -72,6 +94,7 @@ _RUN_TYPES = {
     'ST': DOCUMENT_TYPE_CODES['combined'],
     'RT': DOCUMENT_TYPE_CODES['combined'],
     'IRM': DOCUMENT_TYPE_CODES['combined'],
+    'MK': DOCUMENT_TYPE_CODES['combined'],
     'SD': DOCUMENT_TYPE_CODES['transaction_invoice'],
     'TX': DOCUMENT_TYPE_CODES['transaction_invoice'],
     'TI': DOCUMENT_TYPE_CODES['tax_invoice'],
@@ -119,7 +142,7 @@ def _produced(moment, fallback):
 
 
 def _document(row, type_code: int, lines, payments, *, customer_vat: str = '',
-              linked: tuple = (None, ''), produced_at=None) -> UniformDocument:
+              linked: tuple = (None, ''), produced_at=None, withholding: Decimal = ZERO) -> UniformDocument:
     issue_date, issue_time = _produced(produced_at, row.document_date)
     if type_code == RECEIPT_CODE:
         # הבהרה 4: a receipt's amount received goes in 1219, 1221 and 1223.
@@ -130,7 +153,7 @@ def _document(row, type_code: int, lines, payments, *, customer_vat: str = '',
     linked_type, linked_number = linked
     return UniformDocument(
         type_code=type_code,
-        number=row.document_number,
+        number=uniform_number(row.document_number),
         issue_date=issue_date,
         issue_time=issue_time,
         document_date=row.document_date,
@@ -141,6 +164,7 @@ def _document(row, type_code: int, lines, payments, *, customer_vat: str = '',
         amount_after_discount=after,
         vat_amount=vat,
         total_amount=row.total_amount,
+        withholding_tax=withholding,
         linked_document_type=linked_type,
         linked_document_number=linked_number,
         lines=tuple(lines),
@@ -162,13 +186,14 @@ def _one_line(row, vat_rate: Decimal, description: str) -> UniformLine:
 def _linked(number: str, formal_types: dict) -> tuple:
     """(type, number) of the document a credit note names — or nothing, rather than a guess."""
     number = (number or '').strip()
-    if not number or len(number) > LINK_WIDTH:
+    written = uniform_number(number)
+    if not number or len(written) > LINK_WIDTH:
         return None, ''
     code = _RUN_TYPES.get(series_of(number))
     if code is None and number in formal_types:
         # A document numbered in the closed shared run: its own record says what it is.
         code = DOCUMENT_TYPE_CODES.get(formal_types[number])
-    return (code, number) if code is not None else (None, '')
+    return (code, written) if code is not None else (None, '')
 
 
 def _manual(row, doc, formal_types: dict) -> UniformDocument:
@@ -198,7 +223,8 @@ def _manual(row, doc, formal_types: dict) -> UniformDocument:
     if type_code in PAYMENT_DOCUMENT_TYPES:
         for payment in doc.payments.all():
             payments.append(_paid(
-                payment.payment_method, Decimal(payment.amount), row.document_date,
+                # A card's date is the day it was charged, when the office gave one.
+                payment.payment_method, Decimal(payment.amount), payment.paid_on or row.document_date,
                 installments=payment.card_installments or 1,
                 due_date=payment.check_date,
                 bank_number=_digits(payment.check_bank),
@@ -218,7 +244,10 @@ def _manual(row, doc, formal_types: dict) -> UniformDocument:
         # and a private family has none.
         customer_vat=_digits(customer.company_number or customer.id_number) if customer else '',
         linked=linked,
-        produced_at=doc.created_at,
+        # Issued, not typed: an approved draft was produced when it took its number.
+        produced_at=doc.issued_at or doc.created_at,
+        # 1224: ניכוי במקור, on a document that is a receipt.
+        withholding=(doc.withholding_amount or ZERO) if type_code in PAYMENT_DOCUMENT_TYPES else ZERO,
     )
 
 

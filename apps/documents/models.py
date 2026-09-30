@@ -254,6 +254,11 @@ class FormalDocument(models.Model):
     customer_name = models.CharField(max_length=200, null=True, blank=True, verbose_name="שם לקוח")
     # For drafts: the document type it becomes when approved.
     draft_target_type = models.CharField(max_length=30, blank=True, verbose_name="סוג מסמך לאחר אישור")
+    # A draft receipt's or invoice-receipt's chosen settlements ([{invoice_id,
+    # invoice_number, amount}]): recorded as DocumentSettlement rows only when
+    # it is approved, checked then against the balances of that moment. Never
+    # a settlement before — a draft pays nothing. Cleared on approval.
+    draft_settlements = models.JSONField(null=True, blank=True, verbose_name="סגירות שייכתבו באישור הטיוטה")
 
     # Income tagging: explicit, or inherited from the business customer.
     business = models.ForeignKey(
@@ -294,6 +299,23 @@ class FormalDocument(models.Model):
         on_delete=models.SET_NULL,
         verbose_name="סניף",
     )
+    # When and by whom the document was issued — for a draft, when it was
+    # approved, not when it was typed. What the page's "תאריך ושעה" and the
+    # uniform file's issue time read; created_at stays the row's birth.
+    issued_at = models.DateTimeField(null=True, blank=True, verbose_name="מועד ההנפקה")
+    issued_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+', verbose_name="הונפק על ידי",
+    )
+    # הוראה 23א(3): a credit note reduces VAT only once the customer confirms
+    # receiving it (a signature on the copy, registered mail, an e-signed reply).
+    customer_ack_at = models.DateTimeField(null=True, blank=True, verbose_name="הלקוח אישר את קבלת הזיכוי")
+    customer_ack_note = models.CharField(max_length=300, null=True, blank=True, verbose_name="איך אושרה הקבלה")
+    # ניכוי במקור the customer withheld from this payment (it reduces what was paid, not the invoice).
+    withholding_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True, verbose_name="ניכוי במקור",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
@@ -362,6 +384,10 @@ class DocumentPayment(models.Model):
     card_last_four = models.CharField(max_length=4, blank=True, verbose_name="4 ספרות אחרונות")
     card_expiry = models.CharField(max_length=7, blank=True, verbose_name="תוקף")
     card_installments = models.PositiveSmallIntegerField(default=1, verbose_name="מספר תשלומים")
+    card_brand = models.CharField(max_length=30, null=True, blank=True, verbose_name="סוג כרטיס")
+
+    # The day the money moved — a bank transfer's value date; a check's due date stays check_date.
+    paid_on = models.DateField(null=True, blank=True, verbose_name="תאריך התשלום")
 
     class Meta:
         db_table = 'document_payments'
@@ -432,6 +458,14 @@ class CashPlan(models.Model):
     created_by = models.ForeignKey(
         'auth.User', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='cash_plans_created', verbose_name="נרשם על ידי",
+    )
+    # NULL: the original design — a receipt now, a document each month. 'upfront':
+    # one tax invoice-receipt for the whole sum when the cash is received (VAT on
+    # services falls due on receipt, חוק מע"מ ס' 24, 29).
+    mode = models.CharField(max_length=20, null=True, blank=True, verbose_name="אופן ההפקה")
+    cancelled_at = models.DateTimeField(null=True, blank=True, verbose_name="בוטל")
+    cancelled_by = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+', verbose_name="בוטל על ידי",
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
@@ -523,6 +557,10 @@ class CheckPlan(models.Model):
         related_name='check_plans',
         verbose_name="סניף",
     )
+    cancelled_at = models.DateTimeField(null=True, blank=True, verbose_name="בוטל")
+    cancelled_by = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+', verbose_name="בוטל על ידי",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 
@@ -568,6 +606,15 @@ class CheckItem(models.Model):
         verbose_name="חשבונית מס",
     )
     invoiced_at = models.DateTimeField(null=True, blank=True, verbose_name="תאריך הפקת חשבונית")
+    # A check that came back unpaid: when, the check that replaced it, and the
+    # credit note that cancelled its tax invoice (if one was issued).
+    bounced_at = models.DateTimeField(null=True, blank=True, verbose_name="חזר")
+    replaced_by = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='replaces', verbose_name="הוחלף בצ'ק",
+    )
+    credit_note = models.ForeignKey(
+        FormalDocument, on_delete=models.SET_NULL, null=True, blank=True, related_name='+', verbose_name="זיכוי",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
 
     class Meta:
@@ -649,12 +696,15 @@ class SignedOriginal(models.Model):
         (DELIVERY_NONE, 'לא נשלח'),
     ]
 
-    # How kogo itself sends the document, when it does; '' for a document that
-    # only goes into the archive (a hand-issued invoice, a till sale).
+    # How kogo mails the original. Since 25.9.2026 every original has one — the
+    # caller's, or its kind's own (signing/sources.Source.default_channel) — and
+    # '' is left only on an archive copy and on rows written before then
+    # (the reroute_undelivered command gives those theirs).
     CHANNEL_IR = 'ir'
     CHANNEL_STORE = 'store'
     CHANNEL_CREDIT_NOTE = 'credit_note'
     CHANNEL_RENTAL = 'rental'
+    CHANNEL_FORMAL = 'formal'
     CHANNEL_MICHAL = 'michal'
     CHANNEL_CHOICES = [
         ('', 'לא נשלח על ידי המערכת'),
@@ -662,6 +712,7 @@ class SignedOriginal(models.Model):
         (CHANNEL_STORE, 'מייל חנות האתר'),
         (CHANNEL_CREDIT_NOTE, 'מייל הודעת זיכוי'),
         (CHANNEL_RENTAL, 'מייל קבלת שכירות'),
+        (CHANNEL_FORMAL, 'מייל מסמך מהמשרד'),
         (CHANNEL_MICHAL, 'מייל חשבונית מיכל קגן'),
     ]
 
@@ -842,3 +893,56 @@ class SignedFileAccess(models.Model):
 
     def __str__(self) -> str:
         return f'{self.original_id} {self.action} {self.at:%Y-%m-%d %H:%M}'
+
+
+class DocumentSettlement(models.Model):
+    """
+    A payment document settling (part of) an invoice's open balance.
+
+    A receipt paying a tax invoice, a combined invoice-receipt closing a
+    transaction invoice, a credit note reducing what is owed. The invoice is a
+    FormalDocument when it is one; a lesson receipt, a store sale or a document
+    from the previous software is named by its number (invoice_number,
+    invoice_kind). A settlement is never deleted — a mistake is voided, and the
+    voided row stays.
+    """
+    KIND_FORMAL = 'formal'
+    KIND_IR = 'ir'
+    KIND_STORE = 'store'
+    KIND_LEGACY = 'legacy'
+    KIND_CHOICES = [
+        (KIND_FORMAL, 'מסמך'),
+        (KIND_IR, 'קבלת חוג'),
+        (KIND_STORE, 'מכירת חנות'),
+        (KIND_LEGACY, 'מסמך מהתוכנה הקודמת'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payer = models.ForeignKey(
+        FormalDocument, on_delete=models.PROTECT, related_name='settles',
+        verbose_name="המסמך המשלם",
+    )
+    invoice = models.ForeignKey(
+        FormalDocument, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='settlements', verbose_name="החשבונית שנסגרת",
+    )
+    invoice_number = models.CharField(max_length=40, blank=True, default='', verbose_name="מספר החשבונית")
+    invoice_kind = models.CharField(max_length=10, choices=KIND_CHOICES, default=KIND_FORMAL, verbose_name="סוג החשבונית")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="סכום")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="נוצר")
+    created_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='+', verbose_name="נוצר על ידי",
+    )
+    voided_at = models.DateTimeField(null=True, blank=True, verbose_name="בוטל")
+    voided_by = models.ForeignKey(
+        'auth.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='+', verbose_name="בוטל על ידי",
+    )
+
+    class Meta:
+        db_table = 'document_settlements'
+        verbose_name = "סגירת חשבונית"
+        verbose_name_plural = "סגירות חשבוניות"
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['invoice_kind', 'invoice_number'], name='settlement_invoice_no_idx'),
+        ]

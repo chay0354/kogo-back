@@ -57,14 +57,57 @@ def object_name(row: SignedOriginal) -> str:
     return f'{purpose}/{year}/{row.kind}/{number}.pdf'
 
 
-def _multipart(metadata: dict, pdf: bytes) -> tuple[bytes, str]:
+def _multipart(metadata: dict, payload: bytes, content_type: str = 'application/pdf') -> tuple[bytes, str]:
     boundary = f'kogo-{uuid.uuid4().hex}'
     head = (
         f'--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
         f'{json.dumps(metadata, ensure_ascii=False)}\r\n'
-        f'--{boundary}\r\nContent-Type: application/pdf\r\n\r\n'
+        f'--{boundary}\r\nContent-Type: {content_type}\r\n\r\n'
     ).encode('utf-8')
-    return head + pdf + f'\r\n--{boundary}--\r\n'.encode('ascii'), boundary
+    return head + payload + f'\r\n--{boundary}--\r\n'.encode('ascii'), boundary
+
+
+def create_object(bucket_name: str, name: str, payload: bytes, *, content_type: str,
+                  metadata: dict, timeout=TIMEOUT) -> bool:
+    """
+    Write one object to a bucket, only if the name is free. True when written, False when it was there already.
+
+    One multipart upload carrying the payload's MD5, so Google refuses a copy
+    that arrived damaged; ifGenerationMatch=0, so nothing is ever overwritten
+    (a 412 answer: the name is taken). SigningUnavailable when the bucket cannot
+    be reached with our credentials; any other refusal is a RuntimeError with
+    Google's status, never a token. Shared by the signed-file copy below and
+    the quarterly backup (apps/documents/quarterly_backup.py).
+    """
+    from apps.documents.signing.kms import _google_error, access_token
+
+    body, boundary = _multipart({
+        'name': name,
+        'contentType': content_type,
+        'md5Hash': base64.b64encode(hashlib.md5(payload).digest()).decode('ascii'),
+        'metadata': metadata,
+    }, payload, content_type)
+    try:
+        response = requests.post(
+            UPLOAD_URL.format(bucket=bucket_name),
+            params={'uploadType': 'multipart', 'ifGenerationMatch': '0'},
+            headers={
+                'Authorization': f'Bearer {access_token()}',
+                'Content-Type': f'multipart/related; boundary={boundary}',
+            },
+            data=body,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise SigningUnavailable(f'backup upload: {type(exc).__name__}') from exc
+    if response.status_code in (200, 201):
+        return True
+    if response.status_code == 412:
+        return False
+    detail = _google_error(response)
+    if response.status_code in (401, 403, 404):
+        raise SigningUnavailable(f'backup upload refused ({detail})')
+    raise RuntimeError(f'backup upload refused ({detail})')
 
 
 def upload(row: SignedOriginal) -> bool:
@@ -75,8 +118,6 @@ def upload(row: SignedOriginal) -> bool:
     (the caller stops: every further row would fail the same way); any other
     refusal raises RuntimeError with Google's status, never a token.
     """
-    from apps.documents.signing.kms import _google_error, access_token
-
     name = bucket()
     if not name:
         raise SigningUnavailable('SIGNING_BACKUP_BUCKET is not set')
@@ -87,44 +128,19 @@ def upload(row: SignedOriginal) -> bool:
         # The database copy no longer matches its own record: never spread it.
         raise RuntimeError('The stored bytes do not match their SHA-256')
 
-    metadata = {
-        'name': object_name(row),
-        'contentType': 'application/pdf',
-        'md5Hash': base64.b64encode(hashlib.md5(pdf).digest()).decode('ascii'),
-        'metadata': {
-            'number': row.number,
-            'kind': row.kind,
-            'purpose': row.purpose or SignedOriginal.PURPOSE_ORIGINAL,
-            'sha256': row.sha256,
-            'signed_at': row.signed_at.isoformat(),
-            'cert_fingerprint': row.cert_fingerprint,
-            'key_id': row.key_id,
-        },
-    }
-    body, boundary = _multipart(metadata, pdf)
-    try:
-        response = requests.post(
-            UPLOAD_URL.format(bucket=name),
-            params={'uploadType': 'multipart', 'ifGenerationMatch': '0'},
-            headers={
-                'Authorization': f'Bearer {access_token()}',
-                'Content-Type': f'multipart/related; boundary={boundary}',
-            },
-            data=body,
-            timeout=TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        raise SigningUnavailable(f'backup upload: {type(exc).__name__}') from exc
-    if response.status_code in (200, 201):
-        return True
-    if response.status_code == 412:
-        # The name is taken: the copy was written before (only this code writes
-        # there, and the retention policy keeps anything from replacing it).
-        return True
-    detail = _google_error(response)
-    if response.status_code in (401, 403, 404):
-        raise SigningUnavailable(f'backup upload refused ({detail})')
-    raise RuntimeError(f'backup upload refused ({detail})')
+    # A taken name (False) counts as copied: the copy was written before (only
+    # this code writes there, and the retention policy keeps anything from
+    # replacing it).
+    create_object(name, object_name(row), pdf, content_type='application/pdf', metadata={
+        'number': row.number,
+        'kind': row.kind,
+        'purpose': row.purpose or SignedOriginal.PURPOSE_ORIGINAL,
+        'sha256': row.sha256,
+        'signed_at': row.signed_at.isoformat(),
+        'cert_fingerprint': row.cert_fingerprint,
+        'key_id': row.key_id,
+    })
+    return True
 
 
 def backup_pending(*, limit: int = DEFAULT_LIMIT, time_budget_seconds: float = DEFAULT_TIME_BUDGET) -> dict:

@@ -25,6 +25,7 @@ from apps.documents.issuer import COPY_MARK, ORIGINAL_MARK
 from apps.documents.models import DocumentLineItem, DocumentPayment, FormalDocument
 from apps.documents.serializers import FormalDocumentListSerializer
 from apps.documents.tests.test_register import RegisterFixture
+from apps.documents.uniform_export import uniform_number
 from apps.store.invoice_pdf import build_store_invoice_layout
 
 CREATE = '/api/v1/documents/documents/create-document/'
@@ -79,7 +80,9 @@ class CreditNoteNamesTheOriginalTests(RegisterFixture, APITestCase):
     def test_a_store_sale_credited_by_hand_prints_its_date(self, _mail):
         sale = self.store_sale(day=10)
 
-        self.assertEqual(self.credit(linked_invoice_id=sale.invoice_number).status_code, 201)
+        # ₪49.00 is ₪41.53 before VAT — a credit may not pass it (WS-2, item I).
+        response = self.credit(linked_invoice_id=sale.invoice_number, credit_amount_before_vat='41.53')
+        self.assertEqual(response.status_code, 201, response.data)
 
         self.assertEqual(
             FormalDocument.objects.get(document_type='credit_invoice').linked_document_date, date(2026, 8, 10),
@@ -161,16 +164,17 @@ class EveryRunReachesTheUniformFilesTests(RegisterFixture, APITestCase):
         inner = zipfile.ZipFile(io.BytesIO(outer.read(next(n for n in outer.namelist() if n.endswith('BKMVDATA.zip')))))
         records = inner.read('BKMVDATA.TXT').decode('iso-8859-8').splitlines()
         headers = {line[25:45].strip(): line[22:25] for line in records if line.startswith('C100')}
+        # 2.4(ד): the series part at most five positions — 'IR-2026-000001' is written 'IR26000001'.
         self.assertEqual(headers, {
-            'IR-2026-000001': '320',
-            sale.invoice_number: '320',
-            on_account.invoice_number: '300',
-            'RT-2026-000001': '320',
-            'TI-2026-000001': '305',
-            'IRM-2026-000001': '320',
-            'RC-2026-000001': '400',
-            'TX-2026-000001': '300',
-            'CR-2026-000001': '330',
+            'IR26000001': '320',
+            uniform_number(sale.invoice_number): '320',
+            uniform_number(on_account.invoice_number): '300',
+            'RT26000001': '320',
+            'TI26000001': '305',
+            'IRM26000001': '320',
+            'RC26000001': '400',
+            'TX26000001': '300',
+            'CR26000001': '330',
         })
 
 

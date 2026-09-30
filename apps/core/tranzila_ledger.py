@@ -206,7 +206,7 @@ def normalize_tranzila_transaction(row: dict) -> dict:
     }
 
 
-def _local_formal_rows(start: date, end: date) -> list[dict]:
+def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.documents.models import FormalDocument
 
     docs = (
@@ -215,6 +215,18 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
         .filter(document_date__gte=start, document_date__lte=end)
         .order_by('-document_date', '-created_at')
     )
+    if branch_ids is not None:
+        # A partner's branches, by the rule the period report files documents under.
+        from apps.documents.partner_scope import document_branch_q
+
+        docs = docs.filter(document_branch_q(branch_ids)).distinct() if branch_ids else docs.none()
+    docs = list(docs)
+    # What each invoice still owes, and how much of each receipt paid an
+    # invoice already on the list (apps/documents/settlement.py).
+    from apps.documents.settlement import applied_amounts, balances
+
+    owed = balances(docs)
+    applied = applied_amounts(docs)
     rows = []
     for doc in docs:
         if doc.child_id:
@@ -231,6 +243,17 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'refunded' if is_credit else ('completed' if is_receipt or doc.tranzila_issued else 'pending')
         )
         paid = amount if status == 'completed' else 0.0
+        open_balance = 0.0 if is_credit or status in ('completed', 'draft') else amount
+        credited = 0.0
+        balance = owed.get(doc.pk)
+        if balance is not None and not doc.tranzila_issued:
+            # A tax or transaction invoice: open until receipts and credit notes close it.
+            paid = _parse_amount(balance.paid)
+            credited = _parse_amount(balance.credited)
+            open_balance = _parse_amount(balance.open)
+            status = {
+                'paid': 'completed', 'partial': 'partially_paid', 'credited': 'refunded', 'open': 'pending',
+            }[balance.status]
         rows.append({
             'id': str(doc.id),
             'document_number': doc.document_number,
@@ -241,7 +264,12 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'total_amount': amount,
             'amount_paid': paid,
             # A credit note is money going back, never a debt to chase.
-            'open_balance': 0.0 if is_credit or status in ('completed', 'draft') else amount,
+            'open_balance': open_balance,
+            # What credit notes took off an invoice (0 for anything else).
+            'credited_amount': credited,
+            # The part of a receipt that paid an invoice listed on its own
+            # row: counted there, so a total must not count it again.
+            'applied_amount': _parse_amount(applied.get(doc.pk, 0)) if is_receipt else 0.0,
             'is_credit': is_credit,
             'status': status,
             'pdf_url': doc.pdf_url or (
@@ -255,6 +283,12 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'source': 'tranzila' if doc.tranzila_issued else 'local',
             'tranzila_issued': doc.tranzila_issued,
             'is_draft': doc.document_type == 'draft',
+            # What a draft becomes when approved (a receipt, an invoice-receipt…).
+            'draft_target_type': (doc.draft_target_type or 'tax_invoice') if is_draft else '',
+            # A credit note counts for VAT once the customer confirmed it (הוראה 23א(3)).
+            'customer_ack_at': doc.customer_ack_at.isoformat() if is_credit and doc.customer_ack_at else None,
+            # The private customer, so a credit note can be opened from the row (the business one is below).
+            'child_id': str(doc.child_id) if doc.child_id else None,
             # מספר הקצאה: the number itself, and whether this row is one that
             # needs one. The threshold lives in one place; the screen reads the
             # answer rather than recomputing it.
@@ -262,6 +296,8 @@ def _local_formal_rows(start: date, end: date) -> list[dict]:
             'allocation_required': _allocation_required(doc),
             'origin': ORIGIN_MANUAL,
             'origin_label': ORIGIN_LABELS[ORIGIN_MANUAL],
+            # The business customer's card opens from the row (…/business-customers/{id}/summary/).
+            'business_customer_id': str(doc.business_customer_id) if doc.business_customer_id else None,
             **row_dimensions(branch=doc.branch, business=doc.business),
             'branch': doc.branch.name if doc.branch_id else '',
             'branch_id': str(doc.branch_id) if doc.branch_id else None,
@@ -291,7 +327,7 @@ def _late_issue(invoice) -> dict:
     return {'issued_late': False, 'paid_at': _iso_date(paid_at) if paid_at else ''}
 
 
-def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
+def _local_crm_invoice_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.customers.financial_models import Invoice
 
     invoices = (
@@ -304,6 +340,10 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
         .filter(invoice_date__date__gte=start, invoice_date__date__lte=end)
         .order_by('-invoice_date')
     )
+    if branch_ids is not None:
+        from apps.documents.partner_scope import lesson_receipt_branch_q
+
+        invoices = invoices.filter(lesson_receipt_branch_q(branch_ids)) if branch_ids else invoices.none()
     rows = []
     for inv in invoices:
         amount = _parse_amount(inv.amount)
@@ -329,6 +369,10 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
             'open_balance': 0.0 if status == 'completed' or inv.status in ('cancelled', 'credit') else amount,
             'status': status,
             'pdf_url': inv.pdf_url or '',
+            # The receipt's own id (added 30.9.2026): the documents tab downloads
+            # a copy through /customers/invoices/<id>/pdf/?copy=1, which applies
+            # the same partner branch rule as this list.
+            'lesson_invoice_id': str(inv.id),
             'tranzila_doc_id': inv.tranzila_transaction_id,
             'source': 'crm',
             'origin': ORIGIN_SUBSCRIPTION,
@@ -343,7 +387,7 @@ def _local_crm_invoice_rows(start: date, end: date) -> list[dict]:
     return rows
 
 
-def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
+def _local_store_invoice_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.store.models import StoreInvoice
 
     # Every store invoice in the range belongs here. The old filter demanded a
@@ -356,6 +400,8 @@ def _local_store_invoice_rows(start: date, end: date) -> list[dict]:
         .filter(issue_date__date__gte=start, issue_date__date__lte=end)
         .order_by('-issue_date')
     )
+    if branch_ids is not None:
+        invoices = invoices.filter(branch_id__in=branch_ids)
     rows = []
     for inv in invoices:
         amount = _parse_amount(inv.total_amount)
@@ -431,6 +477,10 @@ def _merge_documents(*groups: list[dict]) -> list[dict]:
                         existing['pdf_url'] = row['pdf_url']
                     if not existing.get('store_invoice_id') and row.get('store_invoice_id'):
                         existing['store_invoice_id'] = row['store_invoice_id']
+                    if not existing.get('business_customer_id') and row.get('business_customer_id'):
+                        existing['business_customer_id'] = row['business_customer_id']
+                    if not existing.get('lesson_invoice_id') and row.get('lesson_invoice_id'):
+                        existing['lesson_invoice_id'] = row['lesson_invoice_id']
                 continue
             for key in keys:
                 if key:
@@ -444,13 +494,18 @@ def list_ledger_documents(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     local_only: bool = False,
+    branch_ids=None,
 ) -> dict:
+    """
+    The documents page's rows. `branch_ids` (a partner's branches; None = all)
+    narrows the local rows and skips Tranzila, whose list carries no branch.
+    """
     start, end = _default_range(start_date, end_date)
     tranzila_rows = []
     source = 'local'
     error = None
-    local_formal = _local_formal_rows(start, end)
-    if not local_only:
+    local_formal = _local_formal_rows(start, end, branch_ids)
+    if not local_only and branch_ids is None:
         try:
             service = _tranzila_client()
             result = service.list_documents(start, end)
@@ -478,8 +533,8 @@ def list_ledger_documents(
     documents = _merge_documents(
         tranzila_rows,
         local_formal,
-        _local_crm_invoice_rows(start, end),
-        _local_store_invoice_rows(start, end),
+        _local_crm_invoice_rows(start, end, branch_ids),
+        _local_store_invoice_rows(start, end, branch_ids),
     )
     return {
         'documents': documents,

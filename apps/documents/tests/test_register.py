@@ -218,7 +218,9 @@ class ChannelsInTheReportTests(RegisterFixture, TestCase):
 
 class RegisterExportTests(RegisterFixture, APITestCase):
     def table(self, response):
-        header, *body = list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
+        """The documents section: every line up to the blank one before the income without a document."""
+        lines = list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
+        header, *body = lines[:lines.index([])] if [] in lines else lines
         return header, {line[1].lstrip("'"): dict(zip(header, line)) for line in body}
 
     def test_the_accountant_gets_one_row_per_document(self):

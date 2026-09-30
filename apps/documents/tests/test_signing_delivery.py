@@ -8,6 +8,7 @@ unmarked check send the original on paper. 18ב(ג): consent, reported or
 enforced. And the five mail exits: lesson receipt (IR), website sale (ST),
 manual credit note, refund credit note, rental receipt (RT).
 """
+import base64
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -36,7 +37,7 @@ from apps.documents.models import FormalDocument, SignedOriginal
 from apps.documents.signing import SigningUnavailable
 from apps.documents.signing.backends import LocalKeyBackend
 from apps.documents.signing.service import (
-    ALREADY_MAILED, ALREADY_PRINTED, NOT_SIGNED_YET, REASON_ARCHIVE, REASON_NO_CONSENT,
+    ALREADY_MAILED, ALREADY_PRINTED, NOT_SIGNED_YET, REASON_NO_CONSENT,
     REASON_NO_CONSENT_REPORTED, REASON_PENDING, REASON_PRINTED, REASON_SENT, STORED_FILE_BROKEN,
     claim_email, clear_inline_budget, delivery_decision, reset_inline_budget, sign_pending,
 )
@@ -73,6 +74,11 @@ class ReceiptsMixin(RegisterFixture):
         super().setUp()
         self.family.email = 'parent@example.com'
         self.family.save(update_fields=['email'])
+        # Since 25.9.2026 a hand-issued document is mailed right after it is
+        # signed (apps/documents/document_email.py): never for real in a test.
+        patcher = patch('apps.documents.document_email.send_resend_email', return_value='msg-id')
+        self.formal_mail = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def receipt(self, method, **details):
         amounts = {'מזומן': 'cash_amount', 'אשראי': 'card_amount', 'העברה בנקאית': 'bank_amount'}
@@ -118,14 +124,16 @@ class PaymentMeansTests(ReceiptsMixin, APITestCase):
     def test_a_crossed_check_a_card_and_a_transfer_may_be_mailed_the_stored_bytes(self):
         docs = [self.check_receipt(True), self.receipt('אשראי'), self.receipt('העברה בנקאית')]
         self.assertTrue(docs[0].payments.get().check_crossed)
-        for doc in docs:
+        self.assertEqual(self.formal_mail.call_count, 3)
+        for doc, call in zip(docs, self.formal_mail.call_args_list):
             row = self.row(doc)
-            # kogo does not mail a receipt issued by hand: its original is archived …
-            self.assertEqual((row.delivery, row.delivery_reason), (SignedOriginal.DELIVERY_NONE, REASON_ARCHIVE))
-            # … and were it mailed, the mail would carry exactly the stored original.
-            self.assertEqual(delivery_decision(FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL)[0], 'email')
-            claim = claim_email(FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL, email_to='p@example.com')
-            self.assertEqual(claim.pdf, bytes(SignedOriginal.objects.get(pk=row.pk).pdf))
+            # A receipt issued by hand is mailed now (until 25.9.2026 it was
+            # archived and never delivered) — exactly the stored original, once.
+            self.assertEqual((row.channel, row.delivery), (SignedOriginal.CHANNEL_FORMAL, 'email'))
+            self.assertIsNotNone(row.sent_at)
+            self.assertEqual(call.kwargs['to'], ['parent@example.com'])
+            self.assertEqual(base64.b64decode(call.kwargs['attachments'][0]['content']), bytes(row.pdf))
+            self.assertIsNone(claim_email(FORMAL, doc, channel=SignedOriginal.CHANNEL_FORMAL, email_to='p@example.com'))
 
     def test_a_combined_document_paid_by_a_crossed_check(self):
         payload = {
@@ -140,21 +148,40 @@ class PaymentMeansTests(ReceiptsMixin, APITestCase):
         self.assertTrue(doc.payments.get().check_crossed)
         self.assertEqual(delivery_decision(FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL)[0], 'email')
 
-    def test_a_cash_plans_monthly_document_counts_as_cash(self):
+    def test_a_cash_plans_invoice_receipt_counts_as_cash(self):
+        # D1 (WS-3): one חשבונית מס/קבלה for the whole sum, its cash on one payment line.
         with self.captureOnCommitCallbacks(execute=True):
             plan = register_cash_plan(
                 child_id=str(self.kid.id), total_amount='480.00', monthly_amount='240.00',
                 start_month=timezone.localdate().replace(day=1),
             )
-        month = plan.months.filter(status='invoiced').first()
+        self.assertEqual(list(plan.receipt.payments.values_list('payment_method', flat=True)), ['cash'])
+        self.assertEqual((self.row(plan.receipt).delivery, self.row(plan.receipt).delivery_reason),
+                         (SignedOriginal.DELIVERY_PAPER, REASON_CASH_PLAN))
+
+    def test_an_older_cash_plans_monthly_invoice_counts_as_cash(self):
+        from apps.documents.cash_plans import issue_due_cash_documents
+        from apps.documents.models import CashPlan, CashPlanMonth
+
+        with self.captureOnCommitCallbacks(execute=True):
+            receipt = service.create_receipt({
+                'client_type': 'existing', 'child_id': str(self.kid.id),
+                'receipt_details': {'payment_method': 'מזומן', 'cash_amount': '240.00'},
+            })
+            plan = CashPlan.objects.create(child=self.kid, total_amount=Decimal('240.00'),
+                                           monthly_amount=Decimal('240.00'), receipt=receipt)
+            month = CashPlanMonth.objects.create(plan=plan, due_date=timezone.localdate().replace(day=1),
+                                                 amount=Decimal('240.00'))
+            issue_due_cash_documents(plan_id=plan.id)
+        month.refresh_from_db()
         self.assertEqual(month.document.payments.count(), 0)  # no payment line on it
         self.assertEqual((self.row(month.document).delivery, self.row(month.document).delivery_reason),
                          (SignedOriginal.DELIVERY_PAPER, REASON_CASH_PLAN))
-        self.assertEqual(self.row(plan.receipt).delivery_reason, REASON_CASH)
+        self.assertEqual(self.row(receipt).delivery_reason, REASON_CASH)
 
     def test_a_check_plans_monthly_invoice_follows_its_checks(self):
         today = timezone.localdate()
-        for crossed, expected in ((False, SignedOriginal.DELIVERY_PAPER), (True, SignedOriginal.DELIVERY_NONE)):
+        for crossed, expected in ((False, SignedOriginal.DELIVERY_PAPER), (True, SignedOriginal.DELIVERY_EMAIL)):
             with self.captureOnCommitCallbacks(execute=True):
                 plan = register_check_plan(child_id=str(self.kid.id), checks=[
                     {'date': str(today), 'amount': '240', 'check_number': '1', 'check_crossed': crossed},
@@ -230,8 +257,9 @@ class PaymentMeansTests(ReceiptsMixin, APITestCase):
     def test_the_dialogs_receipt_with_every_check_crossed(self):
         body = self.post_document(self.dialog_receipt([self.dialog_check('000200', 236, True)]))
         doc = FormalDocument.objects.get(pk=body['id'])
-        # … and with every check crossed it may go by mail (kogo archives a hand-issued receipt).
-        self.assertEqual(self.row(doc).delivery, SignedOriginal.DELIVERY_NONE)
+        # … and with every check crossed it goes by mail (since 25.9.2026 kogo mails a hand-issued receipt).
+        self.assertEqual(self.row(doc).delivery, SignedOriginal.DELIVERY_EMAIL)
+        self.assertIsNotNone(self.row(doc).sent_at)
         self.assertEqual(delivery_decision(FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL)[0], 'email')
 
     def test_the_dialogs_receipt_with_signing_off_is_issued_as_before(self):
@@ -360,11 +388,16 @@ class LessonReceiptMailTests(LessonPaymentMixin, TestCase):
         self.assertEqual(SignedOriginal.objects.get(number=invoice.invoice_number).delivery_reason,
                          REASON_UNKNOWN_METHOD)
 
-    def test_a_receipt_issued_without_mail_is_archived(self, resend):
+    def test_a_receipt_issued_without_mail_is_mailed_by_the_signing_service(self, resend):
+        # A late receipt (the missing-receipts screen issues with send_email=False)
+        # used to be archived and never delivered; since 25.9.2026 it takes the
+        # IR channel and is mailed right after it is signed, once.
         invoice = self.lesson_receipt(send_email=False)
-        resend.assert_not_called()
+        resend.assert_called_once()
         row = SignedOriginal.objects.get(number=invoice.invoice_number)
-        self.assertEqual((row.channel, row.delivery), ('', 'none'))
+        self.assertEqual((row.channel, row.delivery), ('ir', 'email'))
+        self.assertIsNotNone(row.sent_at)
+        self.assertEqual(attachment_bytes(resend), bytes(row.pdf))
 
 
 @signing_on(CRON_TOKEN='cron-secret')
@@ -438,14 +471,15 @@ class WebsiteSaleMailTests(TestCase):
         self.assertEqual(attachment_bytes(resend), bytes(row.pdf))
         self.assertIsNotNone(StoreInvoice.objects.get(pk=invoice.pk).invoice_email_sent_at)
 
-    def test_a_till_sale_is_archived_and_a_pending_one_not_recorded(self, resend):
+    def test_a_cash_till_sale_goes_on_paper_and_a_pending_one_not_recorded(self, resend):
         till = self.sale(website_order_number=None, customer_email='', payment_method='cash')
         pending = self.sale(website_order_number=None, payment_status='pending')
         with self.captureOnCommitCallbacks(execute=True):
             _sign_store_sale(till)
             _sign_store_sale(pending)
         row = SignedOriginal.objects.get(number=till.invoice_number)
-        self.assertEqual((row.channel, row.delivery, row.delivery_reason), ('', 'paper', REASON_CASH))
+        # The store channel since 25.9.2026 (a card till sale is mailed — test_delivery_never_final.py).
+        self.assertEqual((row.channel, row.delivery, row.delivery_reason), ('store', 'paper', REASON_CASH))
         self.assertFalse(SignedOriginal.objects.filter(number=pending.invoice_number).exists())
         resend.assert_not_called()
 
@@ -642,12 +676,25 @@ class PrintOriginalTests(ReceiptsMixin, APITestCase):
         self.assertEqual(ALREADY_PRINTED, 'המקור כבר הודפס — כל הדפסה נוספת היא העתק')
 
     def test_an_original_printed_is_never_mailed_after(self):
+        # Paid by card, but the card has no address yet: on the hand-delivery
+        # list (since 25.9.2026 a hand-issued card receipt is mailed at issue).
+        self.family.email = ''
+        self.family.save(update_fields=['email'])
         doc = self.receipt('אשראי')
         row = self.row(doc)
         self.client.post(print_url(row))
         row.refresh_from_db()
-        self.assertEqual((row.delivery, row.delivery_reason), ('paper', REASON_PRINTED))
+        # Printed; why it went on paper stays (as for cash).
+        self.assertEqual(row.delivery, 'paper')
+        self.assertIsNotNone(row.paper_original_printed_at)
+        self.assertEqual(delivery_decision(FORMAL, doc), ('paper', REASON_PRINTED))
+        # An address appears later: neither an exit nor the cron mails the printed original.
+        self.family.email = 'parent@example.com'
+        self.family.save(update_fields=['email'])
         self.assertIsNone(claim_email(FORMAL, doc, channel=SignedOriginal.CHANNEL_RENTAL, email_to='p@example.com'))
+        past_the_grace_period()
+        sign_pending()
+        self.formal_mail.assert_not_called()
 
     def test_unsigned_mailed_and_broken_originals_are_refused(self):
         with patch.object(LocalKeyBackend, 'sign_digest', side_effect=SigningUnavailable('down')):
@@ -659,7 +706,11 @@ class PrintOriginalTests(ReceiptsMixin, APITestCase):
         response = self.client.post(print_url(mailed))
         self.assertEqual((response.status_code, response.json()), (409, {'error': ALREADY_MAILED}))
 
+        # Its mail failed at issue, so it is signed, mailable and still unsent.
+        self.formal_mail.side_effect = RuntimeError('Resend failed (500)')
         broken = self.row(self.receipt('אשראי'))
+        self.formal_mail.side_effect = None
+        self.assertIsNone(broken.sent_at)
         from django.db import connection
         with connection.cursor() as cursor:
             cursor.execute('UPDATE signed_originals SET pdf = %s WHERE id = %s', [b'%PDF-broken', broken.pk])
@@ -683,6 +734,8 @@ class PrintOriginalTests(ReceiptsMixin, APITestCase):
             'delivery', 'delivery_reason', 'signed_at', 'sent_at', 'paper_original_printed_at',
             # Added with the signed archive (test_signed_archive.py); the fields above are unchanged.
             'purpose', 'sha256', 'size',
+            # Added 25.9.2026 for "שלח / שלח שוב" and the allocation number (test_delivery_never_final.py).
+            'source_id', 'channel', 'awaiting_allocation',
         })
         self.assertEqual(item['purpose'], 'original')
         self.assertEqual((item['number'], item['kind'], item['document_type_label'], item['total']),
@@ -705,13 +758,20 @@ class PrintOriginalTests(ReceiptsMixin, APITestCase):
         self.assertEqual(set(body), {
             'enabled', 'consent_enforced', 'backend', 'key_id', 'cert_fingerprint', 'cert_subject',
             'last_signed_at', 'counts',
+            # 30.9.2026 (audit M1): why documents without an original cannot be counted ('' when they can).
+            'missing_original_blocked',
         })
         self.assertEqual((body['enabled'], body['consent_enforced'], body['backend']), (True, False, 'local'))
         self.assertTrue(body['key_id'].startswith('local:'))
         self.assertEqual(len(body['cert_fingerprint']), 64)
         self.assertIn('516504412', body['cert_subject'])
         self.assertIsNotNone(body['last_signed_at'])
-        self.assertEqual(body['counts'], {'held': 0, 'paper_pending': 1, 'signed_today': 2})
+        self.assertEqual(body['counts'], {
+            'held': 0, 'paper_pending': 1, 'signed_today': 2, 'awaiting_allocation': 0,
+            'missing_original': 0, 'found_late': 0,
+        })
+        # No SIGNING_ARCHIVE_ISSUED_BEFORE here: the safety net does not guess where signing began.
+        self.assertTrue(body['missing_original_blocked'])
 
 
 class SigningPermissionsTests(RegisterFixture, APITestCase):
