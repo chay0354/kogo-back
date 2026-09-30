@@ -1,4 +1,10 @@
-"""Preview and commit of an export from the previous software.
+"""Preview and commit of an export from the previous software — or from any other.
+
+The file is read by its format (sources.py): the previous software's .xls
+(parser.py), any software's table with the office's column mapping
+(columns.py), or any software's מבנה אחיד files (uniform_reader.py). All three
+produce the same rows, so from here on a source is only the `source_system`
+every document is keyed under.
 
 Preview reads the file, stores its normalised rows with a LegacyImport, and
 says what a commit would do: the numbering per document type, the customers it
@@ -13,7 +19,7 @@ Commit writes, in one transaction and from the stored rows only:
   first, and its blanks filled; the newest name wins;
 * every document, as a LegacyDocument, linked to its customer's card.
 
-Both are idempotent. A document is keyed by (type, number); a customer by the
+Both are idempotent. A document is keyed by (software, type, number); a customer by the
 card their documents were linked to last time, then by ח"פ/ת"ז, email, and
 phone with name. Committing the same file again finds everything it wrote and
 changes nothing; committing a newer export updates what changed.
@@ -31,11 +37,13 @@ from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, Max, Min, Q
+from django.db.models import Count, Max, Q
 from django.utils import timezone
 
+from apps.legacy_import import columns as table_columns
 from apps.legacy_import import mapping as place_mapping
-from apps.legacy_import.models import LegacyDocument, LegacyImport
+from apps.legacy_import import sources
+from apps.legacy_import.models import SOURCE_TAZMAN, LegacyDocument, LegacyImport
 from apps.legacy_import.parser import (
     REASON_LABELS,
     TYPE_LABELS,
@@ -61,6 +69,13 @@ logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 4_300_000
 
 NOTE_PREFIX = 'יובא מהתוכנה הקודמת:'
+
+
+def note_prefix(source_system: str = SOURCE_TAZMAN) -> str:
+    """The card's note line for one software. Each software's line replaces only its own."""
+    if source_system == SOURCE_TAZMAN:
+        return NOTE_PREFIX
+    return f'יובא מתוכנה אחרת ({sources.source_label(source_system)}):'
 PREVIEW_LIST_LIMIT = 500
 
 
@@ -173,7 +188,7 @@ def _latest_order(customer: Customer):
     return (customer.latest['date'], customer.latest['number'])
 
 
-def build_summary(rows: list, skipped: list) -> dict:
+def build_summary(rows: list, skipped: list, source_system: str = SOURCE_TAZMAN) -> dict:
     """Everything the preview shows, resolved against the database as it is now."""
     customers = customers_from_rows(rows)
     businesses, categories, branches = place_mapping.load_options()
@@ -218,8 +233,12 @@ def build_summary(rows: list, skipped: list) -> dict:
                 counts['parents_matching_family'] += 1
 
     keyed = sum(1 for row in rows if row['customer_key'])
+    # Only this software's: another software's document with the same number is a different document.
     already = sum(
-        LegacyDocument.objects.filter(doc_type=doc_type, number__in=[r['number'] for r in rows if r['doc_type'] == doc_type]).count()
+        LegacyDocument.objects.filter(
+            source_system=source_system, doc_type=doc_type,
+            number__in=[r['number'] for r in rows if r['doc_type'] == doc_type],
+        ).count()
         for doc_type in TYPE_ORDER
     )
     dates = [row['date'] for row in rows]
@@ -251,31 +270,127 @@ def build_summary(rows: list, skipped: list) -> dict:
     }
 
 
-def create_preview(upload, user) -> LegacyImport:
-    """Read the uploaded file and keep what the preview needs. Raises ImportFileError."""
+def _read_upload(upload) -> bytes:
     size = getattr(upload, 'size', None)
     if size is not None and size > MAX_UPLOAD_BYTES:
         raise ImportFileError(
             f'הקובץ גדול מדי ({size / 1_000_000:.1f}MB). הגבול הוא 4.3MB — '
-            'ייצאו מהתוכנה הקודמת טווח תאריכים קצר יותר, והעלו כל חלק בנפרד.'
+            'ייצאו טווח תאריכים קצר יותר, והעלו כל חלק בנפרד.'
         )
     content = upload.read()
     if len(content) > MAX_UPLOAD_BYTES:
         raise ImportFileError('הקובץ גדול מדי. הגבול הוא 4.3MB.')
-    rows, skipped = read_rows(content)
+    return content
+
+
+def describe_columns(upload) -> dict:
+    """The mapping step of a table file: its columns, a few values of each, and the suggestion. Writes nothing."""
+    from apps.legacy_import.tables import file_kind, read_table
+
+    content = _read_upload(upload)
+    sheet = read_table(content, getattr(upload, 'name', '') or '')
+    if not sheet.rows:
+        raise ImportFileError('בקובץ אין שורות מתחת לכותרות')
+    return {**table_columns.describe(sheet), 'file_kind': file_kind(content)}
+
+
+def _json_arg(value, label):
+    """A multipart field that carries JSON (the mapping), or the dict itself."""
+    import json
+
+    if value in (None, ''):
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise ImportFileError(f'{label} אינו תקין') from exc
+
+
+def _read_by_format(content, file_name, fmt, source_system, column_mapping, type_values, fixed_doc_type):
+    """(rows, skipped, source details for the summary)."""
+    if fmt == sources.FORMAT_TAZMAN:
+        rows, skipped = read_rows(content)
+        return rows, skipped, {}
+    if fmt == sources.FORMAT_TABLE:
+        from apps.legacy_import.tables import file_kind, read_table
+
+        sheet = read_table(content, file_name)
+        mapping = table_columns.clean_mapping(_json_arg(column_mapping, 'מיפוי העמודות'), sheet.headers)
+        values = _json_arg(type_values, 'מיפוי סוגי המסמכים') or {}
+        if not isinstance(values, dict):
+            raise ImportFileError('מיפוי סוגי המסמכים אינו תקין')
+        fixed = fixed_doc_type if fixed_doc_type in TYPE_LABELS else ''
+        rows, skipped, unknown = table_columns.parse_table(
+            sheet, mapping, source_system=source_system, type_values=values, fixed_doc_type=fixed,
+        )
+        return rows, skipped, {
+            'file_kind': file_kind(content),
+            'columns': {
+                'headers': sheet.headers,
+                'mapping': mapping,
+                'type_values': {str(k): v for k, v in values.items() if v in TYPE_LABELS},
+                'fixed_doc_type': fixed,
+            },
+            'unknown_types': unknown,
+        }
+    from apps.legacy_import.uniform_reader import read_uniform
+
+    result = read_uniform(content, source_system=source_system)
+    return result.rows, result.skipped, {'uniform': result.info}
+
+
+def uniform_source_system(content: bytes) -> str:
+    """The software a מבנה אחיד upload names in its INI.TXT (field 1007), normalised — or ''."""
+    from apps.legacy_import.uniform_reader import find_files, read_ini
+
+    found = find_files(content)
+    for payload in found.ini.values():
+        name = read_ini(payload).get('software', '')
+        if name:
+            return sources.normalise_source_system(name)
+    return ''
+
+
+def create_preview(upload, user, *, fmt: str = sources.FORMAT_TAZMAN, source_system: str = '',
+                   column_mapping=None, type_values=None, fixed_doc_type: str = '') -> LegacyImport:
+    """Read the uploaded file and keep what the preview needs. Raises ImportFileError."""
+    if fmt not in sources.FORMATS:
+        raise ImportFileError('סוג הקובץ שנבחר אינו מוכר')
+    content = _read_upload(upload)
+    file_name = (getattr(upload, 'name', '') or '')[:255]
+    if fmt == sources.FORMAT_UNIFORM and not sources.normalise_source_system(source_system):
+        source_system = uniform_source_system(content)
+    source_system = sources.require_source_system(source_system, fmt=fmt)
+    rows, skipped, details = _read_by_format(
+        content, file_name, fmt, source_system, column_mapping, type_values, fixed_doc_type,
+    )
     if not rows:
-        raise ImportFileError('לא נמצאו בקובץ מסמכים לייבוא')
-    summary = build_summary(rows, skipped)
+        reasons = Counter(s['reason'] for s in skipped).most_common(3)
+        hint = ' (' + ' · '.join(f'{reason}: {count}' for reason, count in reasons) + ')' if reasons else ''
+        raise ImportFileError('לא נמצאו בקובץ מסמכים לייבוא' + hint)
+    summary = build_summary(rows, skipped, source_system)
+    summary['source'] = {
+        'format': fmt,
+        'system': source_system,
+        'label': sources.source_label(source_system),
+        'file_kind': details.get('file_kind', 'xls' if fmt == sources.FORMAT_TAZMAN else 'txt'),
+        'columns': details.get('columns'),
+        'uniform': details.get('uniform'),
+    }
+    summary['unknown_types'] = details.get('unknown_types', [])
     fields = {
-        'file_name': (getattr(upload, 'name', '') or 'export.xls')[:255],
+        'source_system': source_system,
+        'file_name': file_name or 'export.xls',
         'row_count': len(rows),
         'rows': rows,
         'summary': summary,
         'uploaded_by': user if getattr(user, 'is_authenticated', False) else None,
     }
     sha256 = hashlib.sha256(content).hexdigest()
-    # The same file uploaded again for another look is the same preview, with
-    # its summary read afresh: the rows are megabytes, and one copy is enough.
+    # The same file uploaded again for another look (or another mapping) is the
+    # same preview, with its summary read afresh: the rows are megabytes, and one copy is enough.
     legacy_import = LegacyImport.objects.filter(sha256=sha256, status=LegacyImport.STATUS_PREVIEW).first()
     if legacy_import is None:
         legacy_import = LegacyImport.objects.create(sha256=sha256, **fields)
@@ -284,8 +399,8 @@ def create_preview(upload, user) -> LegacyImport:
             setattr(legacy_import, name, value)
         legacy_import.save(update_fields=list(fields))
     logger.info(
-        'Legacy import %s previewed: %s documents, %s skipped, %s customers',
-        legacy_import.pk, len(rows), len(skipped), summary['customers']['total'],
+        'Legacy import %s previewed (%s, %s): %s documents, %s skipped, %s customers',
+        legacy_import.pk, fmt, source_system, len(rows), len(skipped), summary['customers']['total'],
     )
     return legacy_import
 
@@ -361,15 +476,19 @@ def split_name(first: str, last: str) -> tuple:
     return first[:100], last[:100]
 
 
-def import_note(customer: Customer) -> str:
+def import_note(customer: Customer, source_system: str = SOURCE_TAZMAN) -> str:
     latest = customer.latest
     when = date.fromisoformat(latest['date']).strftime('%d/%m/%Y')
-    return f"{NOTE_PREFIX} {customer.documents} מסמכים, אחרון {latest['type_label']} {latest['number']} מ-{when}"
+    return (
+        f"{note_prefix(source_system)} {customer.documents} מסמכים, "
+        f"אחרון {latest['type_label']} {latest['number']} מ-{when}"
+    )
 
 
-def _notes_with(existing: str, line: str) -> str:
-    """The card's notes with this import's line — replacing an earlier import's, never repeated."""
-    kept = [part for part in (existing or '').split('\n') if not part.startswith(NOTE_PREFIX)]
+def _notes_with(existing: str, line: str, source_system: str = SOURCE_TAZMAN) -> str:
+    """The card's notes with this import's line — replacing the same software's earlier one, never repeated."""
+    prefix = note_prefix(source_system)
+    kept = [part for part in (existing or '').split('\n') if not part.startswith(prefix)]
     while kept and not kept[-1].strip():
         kept.pop()
     return '\n'.join(kept + [line]) if kept else line
@@ -399,7 +518,7 @@ def _card_state(card) -> tuple:
     return tuple(getattr(card, field) for field in CARD_FIELDS)
 
 
-def _update_card(card, customer: Customer, target: Target | None) -> None:
+def _update_card(card, customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN) -> None:
     """Fill the card's blanks, give it the newest name, and file it where the newest document was."""
     card.first_name, card.last_name = split_name(customer.first_name, customer.last_name)
     if not card.email and customer.email:
@@ -416,15 +535,19 @@ def _update_card(card, customer: Customer, target: Target | None) -> None:
     notes = card.notes or ''
     if not notes.strip() and customer.customer_notes:
         notes = customer.customer_notes
-    card.notes = _notes_with(notes, import_note(customer))
+    card.notes = _notes_with(notes, import_note(customer, source_system), source_system)
 
 
-def _new_card(customer: Customer, target: Target | None):
+def _new_card(customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN):
     from apps.customers.models import BusinessCustomer
 
     card = BusinessCustomer(first_name='', last_name='', notes='')
-    _update_card(card, customer, target)
+    _update_card(card, customer, target, source_system)
     return card
+
+
+def _optional_amount(value):
+    return None if value in (None, '') else Decimal(str(value))
 
 
 def _document_values(row: dict, card, target: Target | None) -> dict:
@@ -446,6 +569,12 @@ def _document_values(row: dict, card, target: Target | None) -> dict:
         'customer_name': f"{row['first_name']} {row['last_name']}".strip()[:300],
         'customer_email': row['email'][:254],
         'customer_phone': row['phone'][:30],
+        # Only other softwares' rows have these; the previous software's export says none of them.
+        'original_number': (row.get('original_number') or '')[:40],
+        'amount_before_vat': _optional_amount(row.get('amount_before_vat')),
+        'vat_amount': _optional_amount(row.get('vat_amount')),
+        'allocation_number': (row.get('allocation_number') or '')[:40],
+        'linked_document': (row.get('linked_document') or '')[:60],
         'business_customer_id': card.pk if card is not None else None,
         'business_id': target.business.pk if target and target.business else None,
         'business_category_id': target.category.pk if target and target.category else None,
@@ -461,17 +590,26 @@ DOCUMENT_UPDATE_FIELDS = [
     'original_type', 'document_date', 'invoice_total', 'receipt_total', 'credit_total',
     'withholding_amount', 'total_before_withholding', 'original_status', 'payment_type',
     'card_last_four', 'location', 'details', 'remark', 'customer_key', 'customer_name',
-    'customer_email', 'customer_phone', 'business_customer', 'business', 'business_category', 'branch',
+    'customer_email', 'customer_phone', 'original_number', 'amount_before_vat', 'vat_amount',
+    'allocation_number', 'linked_document', 'business_customer', 'business', 'business_category', 'branch',
 ]
 
 
-def commit(import_id, mapping_payload, include_subscription_parents: bool, user) -> dict:
-    """Write the import. Returns what was done; raises CommitInputError, LegacyImport.DoesNotExist."""
+def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
+           create_customers: bool = True) -> dict:
+    """
+    Write the import. Returns what was done; raises CommitInputError, LegacyImport.DoesNotExist.
+
+    create_customers=False keeps the documents as history only: no card is
+    opened or changed, and a document is linked to a card only when it is the
+    same person (a card linked before, or the same ח"פ/ת"ז).
+    """
     from apps.customers.models import BusinessCustomer
 
     with transaction.atomic():
         # Two clicks on "import" wait for each other instead of creating each card twice.
         legacy_import = LegacyImport.objects.select_for_update().get(pk=import_id)
+        source_system = legacy_import.source_system or SOURCE_TAZMAN
         mapping = resolve_mapping(mapping_payload)
         rows = legacy_import.rows or []
         customers = customers_from_rows(rows)
@@ -486,7 +624,7 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
         # has no future, so no card is created or changed for them.
         upserted = [
             c for c in ordered
-            if (c.kind == 'business' or include_subscription_parents) and not c.deleted
+            if create_customers and (c.kind == 'business' or include_subscription_parents) and not c.deleted
         ]
         upserted_keys = {c.key for c in upserted}
         # Oldest customer first: when two of the file's customers are one card
@@ -495,14 +633,14 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
             card, _how = _find_card(customer, linked, index)
             target = mapping.get(customer.latest['location'])
             if card is None:
-                card = _new_card(customer, target)
+                card = _new_card(customer, target, source_system)
                 created.append(card)
                 index.add(card)
             else:
                 # Compared against the card as it was before this commit, so a
                 # card two customers share is "changed" only if it ends up different.
                 initial.setdefault(card.pk, _card_state(card))
-                _update_card(card, customer, target)
+                _update_card(card, customer, target, source_system)
             cards_by_key[customer.key] = card
 
         # A customer who is not being made a card (a parent left out, or one
@@ -515,12 +653,17 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
         for customer in ordered:
             if customer.key in upserted_keys:
                 continue
-            if customer.deleted and (customer.kind == 'business' or include_subscription_parents):
+            if create_customers and customer.deleted and (customer.kind == 'business' or include_subscription_parents):
                 counts['skipped_deleted'] += 1
             card, how = _find_card(customer, linked, index)
             if card is not None and how in ('linked', 'id'):
                 cards_by_key[customer.key] = card
-                counts['parents_linked' if customer.kind == 'parent' else 'deleted_linked'] += 1
+                if customer.kind == 'parent':
+                    counts['parents_linked'] += 1
+                elif customer.deleted:
+                    counts['deleted_linked'] += 1
+                else:
+                    counts['history_linked'] += 1
 
         now = timezone.now()
         created_pks = {card.pk for card in created}
@@ -533,12 +676,15 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
             card.updated_at = now
         BusinessCustomer.objects.bulk_update(updated, fields=CARD_UPDATE_FIELDS, batch_size=500)
 
-        # Documents, keyed by (type, number).
+        # Documents, keyed by (software, type, number): another software's
+        # document with the same type and number is a different document.
         existing = {}
         for doc_type in TYPE_ORDER:
             numbers = [row['number'] for row in rows if row['doc_type'] == doc_type]
             if numbers:
-                for doc in LegacyDocument.objects.filter(doc_type=doc_type, number__in=numbers):
+                for doc in LegacyDocument.objects.filter(
+                    source_system=source_system, doc_type=doc_type, number__in=numbers,
+                ):
                     existing[(doc.doc_type, doc.number)] = doc
         new_docs, changed_docs, changed_fields = [], [], set()
         doc_counts = Counter()
@@ -548,7 +694,8 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
             doc = existing.get((row['doc_type'], row['number']))
             if doc is None:
                 new_docs.append(LegacyDocument(
-                    source_import=legacy_import, doc_type=row['doc_type'], number=row['number'], **values,
+                    source_import=legacy_import, source_system=source_system,
+                    doc_type=row['doc_type'], number=row['number'], **values,
                 ))
                 doc_counts['created'] += 1
             elif any(getattr(doc, field) != value for field, value in values.items()):
@@ -579,7 +726,10 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
                 'skipped_deleted': counts['skipped_deleted'],
                 'deleted_linked_to_existing_cards': counts['deleted_linked'],
                 'parents_included': bool(include_subscription_parents),
+                'cards_opened_or_updated': bool(create_customers),
                 'parents_linked_to_existing_cards': counts['parents_linked'],
+                # create_customers=False: business customers whose documents found their card anyway.
+                'linked_without_changing_cards': counts['history_linked'],
             },
             'documents': {
                 'created': doc_counts['created'],
@@ -607,13 +757,14 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user)
 # --------------------------------------------------------------------------
 
 def search_documents(queryset, term: str):
-    """?q= — a name, email, phone, document number, ת"ז, or words from the details."""
+    """?q= — a name, email, phone, document number (as printed, too), ת"ז, or words from the details."""
     term = (term or '').strip()
     if not term:
         return queryset
     condition = (
         Q(customer_name__icontains=term) | Q(customer_email__icontains=term)
         | Q(details__icontains=term) | Q(location__icontains=term)
+        | Q(original_number__iexact=term) | Q(allocation_number=term)
     )
     digits = ''.join(ch for ch in term if ch.isdigit())
     if digits and digits == term.replace('-', '').replace(' ', ''):
@@ -625,27 +776,37 @@ def search_documents(queryset, term: str):
 
 def series_summary() -> list:
     """
-    Per document type: the last number (and its date) of everything committed
-    from the old software. It is the last number the files showed, not
-    necessarily the old software's last — see parser.type_table.
+    Per software and document type: the last number (and its date) of
+    everything committed. It is the last number the files showed, not
+    necessarily the software's last — see parser.type_table. The previous
+    software (Tazman) comes first; each software's runs are its own.
     """
+    systems = sorted(
+        set(LegacyDocument.objects.values_list('source_system', flat=True).distinct()),
+        key=lambda slug: (slug != SOURCE_TAZMAN, slug),
+    )
     summary = []
-    for doc_type in TYPE_ORDER:
-        qs = LegacyDocument.objects.filter(doc_type=doc_type)
-        agg = qs.aggregate(count=Count('id'), first=Min('number'), last=Max('number'), latest=Max('document_date'))
-        if not agg['count']:
-            continue
-        last_doc = qs.order_by('-number').values('number', 'document_date').first()
-        first_doc = qs.order_by('number').values('number', 'document_date').first()
-        summary.append({
-            'doc_type': doc_type,
-            'label': TYPE_LABELS[doc_type],
-            'original_labels': sorted(set(qs.values_list('original_type', flat=True).distinct())),
-            'count': agg['count'],
-            'first_number': first_doc['number'],
-            'first_date': first_doc['document_date'].isoformat(),
-            'last_number': last_doc['number'],
-            'last_date': last_doc['document_date'].isoformat(),
-            'latest_date': agg['latest'].isoformat(),
-        })
+    for source_system in systems:
+        for doc_type in TYPE_ORDER:
+            qs = LegacyDocument.objects.filter(source_system=source_system, doc_type=doc_type)
+            agg = qs.aggregate(count=Count('id'), latest=Max('document_date'))
+            if not agg['count']:
+                continue
+            last_doc = qs.order_by('-number').values('number', 'original_number', 'document_date').first()
+            first_doc = qs.order_by('number').values('number', 'original_number', 'document_date').first()
+            summary.append({
+                'source_system': source_system,
+                'source_label': sources.source_label(source_system),
+                'doc_type': doc_type,
+                'label': TYPE_LABELS[doc_type],
+                'original_labels': sorted(set(qs.values_list('original_type', flat=True).distinct())),
+                'count': agg['count'],
+                'first_number': first_doc['number'],
+                'first_printed': first_doc['original_number'],
+                'first_date': first_doc['document_date'].isoformat(),
+                'last_number': last_doc['number'],
+                'last_printed': last_doc['original_number'],
+                'last_date': last_doc['document_date'].isoformat(),
+                'latest_date': agg['latest'].isoformat(),
+            })
     return summary
