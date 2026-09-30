@@ -4,8 +4,8 @@ The signing screens' API, the public certificate, and the sign-pending cron.
   GET  /api/v1/documents/signing/status/                      manager
   GET  /api/v1/documents/signing/originals/?purpose=&kind=&q=&date_from=&date_to=&delivery=&printed=&limit=&offset=
                                                               manager
-  GET  /api/v1/documents/signing/originals/{id}/file/         manager — a copy of an original (?original=1:
-                                                              the stored bytes, logged); an archive copy's bytes
+  GET  /api/v1/documents/signing/originals/{id}/file/         manager — the stored signed file, logged (?copy=1: a copy of an
+                                                              original, drawn now); an archive copy's bytes
   GET  /api/v1/documents/signing/originals/export/?<the same filters>&offset=&limit=
                                                               manager — a zip of stored files, logged
   POST /api/v1/documents/signing/originals/{id}/print-original/                 manager
@@ -266,8 +266,8 @@ FILE_BROKEN = 'הקובץ השמור אינו תואם לטביעת האצבע �
 COPY_FAILED = 'לא ניתן היה להפיק העתק של המסמך. יש לפנות לתמיכה'
 
 
-def _wants_stored_original(params) -> bool:
-    return str(params.get('original') or '').strip().lower() in ('1', 'true', 'yes')
+def _wants_copy(params) -> bool:
+    return str(params.get('copy') or '').strip().lower() in ('1', 'true', 'yes')
 
 
 @api_view(['GET'])
@@ -276,18 +276,22 @@ def original_file(request, original_id):
     """
     A signed document's file, for the office.
 
-    - An original: a copy — "העתק", drawn again now (the owner's decision D5,
-      נספח ה'(א)(4)): the office downloads to print or to forward, and what
-      leaves the office after the original must never say "מקור". Nothing on
-      the row changes and nothing is added to the file log, since the stored
-      file did not leave; the download is written to the log file.
-    - An original with ?original=1: the stored signed bytes, exactly as they
-      were signed, with X-Content-SHA256 — for checking the signature, as the
-      accountant's export (originals/export/) hands them out. Logged
+    - By default: the stored signed bytes, exactly as they were signed, with
+      X-Content-SHA256 — for checking the signature, as the accountant's
+      export (originals/export/) hands them out, and as this endpoint always
+      answered (the archive tab checks the header against the row). Logged
       (SignedFileAccess) before the bytes go. It is not "הדפס מקור": the
       original's one print and its delivery do not change.
-    - An archive copy: its stored bytes, as before — the file already says
+    - An original with ?copy=1: a copy — "העתק", drawn again now (the owner's
+      decision D5, נספח ה'(א)(4)), for printing or forwarding, carrying what
+      was added after signing (an allocation number). Nothing on the row
+      changes and nothing is added to the file log, since the stored file did
+      not leave; the download is written to the log file.
+    - An archive copy: always its stored bytes — the file already says
       "העתק לארכיון", and it is logged.
+
+    The copy is asked for, not the default, so a screen built before the copy
+    existed keeps getting the file it checks (?original=1 is still accepted).
 
     404 while the row is not signed (nothing to copy from yet — the office's
     own document download serves the unsigned document); 500 when the stored
@@ -296,7 +300,7 @@ def original_file(request, original_id):
     row = SignedOriginal.objects.filter(pk=original_id).first()
     if row is None or not row.is_signed or row.pdf is None:
         return Response({'error': FILE_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
-    if not row.is_archive_copy and not _wants_stored_original(request.query_params):
+    if not row.is_archive_copy and _wants_copy(request.query_params):
         from apps.documents.signing.sources import load_source
 
         try:

@@ -338,7 +338,7 @@ class AllocationGateTests(GateMixin, APITestCase):
         self.assertNotIn(NUMBER, pdf_text(bytes(after.pdf)))
         self.mail.assert_called_once()
         # The office's copy carries it.
-        copy = self.client.get(f'{ORIGINALS}{row.pk}/file/')
+        copy = self.client.get(f'{ORIGINALS}{row.pk}/file/', {'copy': '1'})
         self.assertIn(NUMBER, pdf_text(copy.content))
 
     def test_signing_off_keeps_the_endpoint_as_before(self):

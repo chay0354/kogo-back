@@ -662,10 +662,9 @@ class FileDownloadTests(ArchiveApiMixin, APITestCase):
         with signing_on():
             doc = self.receipt('מזומן')
         row = SignedOriginal.objects.get(number=doc.document_number)
-        # The stored bytes on request (?original=1, as the accountant's export
-        # hands them out); by default the office gets a copy (the owner's
-        # decision D5, 25.9.2026 — test_delivery_never_final.py).
-        response = self.client.get(file_url(row), {'original': '1'})
+        # The stored bytes, as the accountant's export hands them out; a copy
+        # only on request (?copy=1, the owner's decision D5 — test_delivery_never_final.py).
+        response = self.client.get(file_url(row))
         self.assertEqual(response.content, bytes(row.pdf))
         self.assertEqual(response['X-Content-SHA256'], row.sha256)
         self.assertIsNone(SignedOriginal.objects.get(pk=row.pk).paper_original_printed_at)

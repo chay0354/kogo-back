@@ -430,9 +430,9 @@ class OfficeFileIsACopyTests(DeliveryMixin, APITestCase):
         super().setUp()
         self.client.force_authenticate(self.manager)
 
-    def test_an_original_downloads_as_a_copy_and_the_stored_bytes_only_on_request(self):
+    def test_a_copy_of_an_original_on_request_and_the_stored_bytes_by_default(self):
         row = self.row(self.receipt('מזומן'))
-        response = self.client.get(file_url(row))
+        response = self.client.get(file_url(row), {'copy': '1'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response['Content-Type'], 'application/pdf')
         self.assertNotEqual(response.content, bytes(row.pdf))
@@ -441,10 +441,12 @@ class OfficeFileIsACopyTests(DeliveryMixin, APITestCase):
         self.assertFalse(response.has_header('X-Content-SHA256'))
         self.assertFalse(SignedFileAccess.objects.exists())  # the stored file did not leave
 
-        stored = self.client.get(file_url(row), {'original': '1'})
-        self.assertEqual(stored.content, bytes(row.pdf))
-        self.assertEqual(stored['X-Content-SHA256'], row.sha256)
-        self.assertEqual(SignedFileAccess.objects.get().original_id, row.pk)
+        # By default (a screen built before copies existed asks nothing) and with ?original=1.
+        for params in ({}, {'original': '1'}):
+            stored = self.client.get(file_url(row), params)
+            self.assertEqual(stored.content, bytes(row.pdf))
+            self.assertEqual(stored['X-Content-SHA256'], row.sha256)
+        self.assertEqual(set(SignedFileAccess.objects.values_list('original_id', flat=True)), {row.pk})
         # Neither is the original's one print.
         self.assertIsNone(SignedOriginal.objects.get(pk=row.pk).paper_original_printed_at)
 
