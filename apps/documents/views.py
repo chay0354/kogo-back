@@ -149,15 +149,27 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             permission_classes=[IsAuthenticated, IsManager])
     def customer_ack(self, request, pk=None):
         """
-        POST /api/v1/documents/documents/{id}/customer-ack/  {note}
+        POST /api/v1/documents/documents/{id}/customer-ack/  {note, date?}
 
         הוראה 23א(3): a credit note reduces the VAT once the customer confirms
         receiving it. Records when, and how (`note`: a signature on the copy,
-        registered mail, a signed reply). Once — a second answer is 409.
+        registered mail, a signed reply). `date` (YYYY-MM-DD, optional) is the
+        day the confirmation arrived when it is recorded later — not in the
+        future, not before the credit note; without it, now. Once — a second
+        answer is 409.
         """
+        from datetime import date as date_cls
+
         doc = self.get_object()
+        raw_date = str(request.data.get('date') or '').strip()
+        on = None
+        if raw_date:
+            try:
+                on = date_cls.fromisoformat(raw_date)
+            except ValueError:
+                return Response({'error': 'תאריך האישור אינו תקין'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            doc = service.record_customer_ack(doc, request.data.get('note') or '')
+            doc = service.record_customer_ack(doc, request.data.get('note') or '', on=on)
         except service.AlreadyAcknowledged as exc:
             return Response(
                 {'error': f'אישור הלקוח כבר נרשם ({timezone.localtime(exc.at):%d/%m/%Y %H:%M})'},
@@ -507,6 +519,32 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             'results': rows,
             'open_total': str(sum((money(row['open']) for row in rows), money(0))),
         })
+
+    @action(detail=False, methods=['get'], url_path='credit-room')
+    def credit_room(self, request):
+        """
+        GET /api/v1/documents/documents/credit-room/?number=TI-2026-000012
+
+        "נותר לזכות" for the new-credit-note form: how much of the document
+        `number` is left to credit, before VAT — its amount less the credit
+        notes already issued against it (service.credit_room, the rule the
+        credit note is checked by). Read-only.
+
+        200 {number, known, kind, document_type, document_type_label,
+        document_date, creditable, refusal, net, credited, left, child_id,
+        business_customer_id}. `known` false: a number kogo never issued (the
+        previous software's) — its amount is not known here. 400 without a
+        number; 403 for a partner when the document is another branch's.
+        """
+        from apps.documents.partner_scope import LINKED_NOT_YOURS, _linked_elsewhere
+
+        number = (request.query_params.get('number') or '').strip()
+        if not number:
+            return Response({'error': 'יש לציין מספר מסמך'}, status=status.HTTP_400_BAD_REQUEST)
+        branch_ids = partner_branches(request.user)
+        if branch_ids is not None and (not branch_ids or _linked_elsewhere(number, request.user, branch_ids)):
+            return Response({'error': LINKED_NOT_YOURS}, status=status.HTTP_403_FORBIDDEN)
+        return Response(service.credit_room(number).as_dict())
 
     @action(detail=True, methods=['post'], url_path='send-reminder')
     def send_reminder(self, request, pk=None):
