@@ -166,3 +166,60 @@ class BusinessChargeTests(TestCase):
         ))
         self.assertIn('/cogolive/', response.data['iframe_url'])
         self.assertEqual(iframe.return_value.create_payment_request.call_args.kwargs['customer_name'], self.customer.full_name)
+
+    @override_settings(
+        CRM_API_BASE_URL='https://api.example.test',
+        TRANZILA_HOSTED_PAGE_ENABLED=True,
+        TRANZILA_TERMINAL='general-hosted',
+        BUSINESS_CHARGE_TRANZILA_TERMINAL='cogolive',
+        TRANZILA_PUBLIC_KEY='pk-business-charge',
+        TRANZILA_SECRET_KEY='sk-business-charge',
+    )
+    def test_the_payment_is_confirmed_on_the_terminal_it_was_taken_on(self):
+        """
+        The page opens on cogolive while the general hosted terminal is another
+        one. The notify must be checked against cogolive's report — against the
+        general terminal it was never found, and every business payment sat in
+        review with no document (30.9.2026).
+        """
+        from zoneinfo import ZoneInfo
+
+        from django.utils import timezone
+
+        link = self.create_link()
+        public = APIClient()
+        with patch(
+            'apps.core.tranzila_service.TranzilaService.create_payment_request',
+            return_value='https://direct.tranzila.com/cogolive/iframenew.php',
+        ):
+            start = public.post(
+                f'/api/v1/payment-links/public/{link.slug}/start/',
+                {'option_id': str(link.options.get().id)}, format='json',
+            )
+        self.assertEqual(start.status_code, 200, start.data)
+        row = PaymentLinkPayment.objects.get(link=link)
+        self.assertEqual(row.tranzila_terminal, 'cogolive')
+
+        asked = []
+
+        def report(service, index):
+            asked.append(service.terminal)
+            local = timezone.now().astimezone(ZoneInfo('Asia/Jerusalem'))
+            return {'success': True, 'transaction': {
+                'index': '555', 'amount': '11800', 'processor_response_code': '000', 'tranmode': 'A',
+                'authorization_number': '0000123',
+                'transaction_date': local.strftime('%Y-%m-%d'), 'transaction_time': local.strftime('%H:%M:%S'),
+            }}
+
+        with patch('apps.core.tranzila_service.TranzilaService.find_transaction', autospec=True, side_effect=report), \
+                self.captureOnCommitCallbacks(execute=True):
+            res = public.post('/api/v1/payment-links/public/callback/', {
+                'Response': '000', 'sum': '118.00', 'index': '555', 'ConfirmationCode': '0000123',
+                'ccno': '4580', 'cardtype': '2', 'pdesc': str(row.id).replace('-', ''),
+            })
+        self.assertEqual(res.status_code, 200, res.content)
+        row.refresh_from_db()
+        self.assertEqual(asked, ['cogolive'])
+        self.assertEqual(row.status, PaymentLinkPayment.STATUS_COMPLETED, row.review_reason)
+        self.assertEqual(row.tranzila_terminal, 'cogolive')
+        self.assertEqual(row.formal_document.document_type, 'combined')

@@ -180,6 +180,10 @@ class PublicPaymentStartView(_PublicView):
                 payer_phone=payer_phone,
                 payer_email=payer_email,
                 ip_address=ip,
+                # The notify and the report lookup must go to this same
+                # terminal: a business charge runs on its own (cogolive). A
+                # general link keeps learning it from the notify, as before.
+                tranzila_terminal=(tranzila.terminal or '')[:40] if business_charge else '',
             )
 
         front = link.public_url()
@@ -276,7 +280,7 @@ TRANSACTION_CLOCK_SKEW = timedelta(minutes=10)
 
 
 def verify_transaction_with_tranzila(
-    row, txn_index: str, *, confirmation_code,
+    row, txn_index: str, *, confirmation_code, service: TranzilaService | None = None,
 ) -> tuple[str, dict | None]:
     """
     Ask Tranzila whether this transaction really paid for this row.
@@ -300,7 +304,9 @@ def verify_transaction_with_tranzila(
     if not txn_index.isdigit():
         return 'unverified', None
     try:
-        service = TranzilaService.iframe()
+        # The terminal the row was paid on (a payment link passes its own);
+        # numbers repeat across terminals, so another one's report proves nothing.
+        service = service or TranzilaService.iframe()
         if service.credential_error():
             return 'unavailable', None
         found = service.find_transaction(txn_index)
@@ -379,6 +385,13 @@ def payment_link_callback(request):
             logger.warning('payment link callback: unknown pdesc %s', row_id)
             return Response({'success': False, 'error': 'unknown payment'})
 
+        # The page this row was opened on. A business charge runs on its own
+        # terminal (BUSINESS_CHARGE_TRANZILA_TERMINAL); reading the notify
+        # against the general one sent every such payment to review.
+        if row.tranzila_terminal:
+            tranzila = TranzilaService.iframe(terminal=row.tranzila_terminal)
+            terminal = (tranzila.terminal or '')[:40]
+
         txn_index = str(parsed.get('transaction_id') or '').strip()
         idempotency_key = f'paylink_{row.id}_{txn_index or "noindex"}'[:255]
 
@@ -452,7 +465,7 @@ def payment_link_callback(request):
         else:
             # The POST is unauthenticated; only Tranzila's own ledger makes it income.
             verdict, _txn_row = verify_transaction_with_tranzila(
-                row, txn_index, confirmation_code=parsed.get('confirmation_code'),
+                row, txn_index, confirmation_code=parsed.get('confirmation_code'), service=tranzila,
             )
             if verdict == 'verified':
                 row.status = PaymentLinkPayment.STATUS_COMPLETED
