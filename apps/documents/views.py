@@ -613,6 +613,11 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
             result = cancel_check_plan(plan.pk, user=request.user, reason=str(request.data.get('reason') or ''))
         except CheckPlanError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not result['already_cancelled']:
+            # The owner, 30.9.2026: the money stopped, so the status is worked out now, not next morning.
+            from apps.customers.child_status import recheck_after_money_stopped
+
+            recheck_after_money_stopped(plan.child, reason='תוכנית הצ׳קים בוטלה', changed_by=request.user)
         plan = self.get_queryset().get(pk=plan.pk)
         return Response({
             **CheckPlanSerializer(plan).data,
@@ -915,6 +920,11 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except (CashPlanError, CheckPlanError, ArithmeticError) as exc:
             return Response({'error': str(exc) or 'סכום ההחזר אינו תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        if not result.get('already_cancelled'):
+            # The owner, 30.9.2026: the money stopped, so the status is worked out now, not next morning.
+            from apps.customers.child_status import recheck_after_money_stopped
+
+            recheck_after_money_stopped(plan.child, reason='תוכנית המזומן בוטלה', changed_by=request.user)
         plan = self.get_queryset().get(pk=plan.pk)
         return Response({
             **CashPlanSerializer(plan).data,

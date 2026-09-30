@@ -660,12 +660,40 @@ class ChildViewSet(viewsets.ModelViewSet):
         - POST /api/v1/customers/children/{id}/update_status/
         Also used by Django admin action
         """
+        from apps.customers.child_status import refresh_child_status
+
+        # Through the rule every other path uses, with a history line. It used
+        # to go by the subscription dates alone (Child.calculate_status), which
+        # put a child paying by cheque with an old start date on בעיה באשראי.
         child = self.get_object()
-        child.update_status()
+        refresh_child_status(child, reason='חושב מחדש לפי הרישומים', changed_by=request.user)
         return Response({
             'status': child.status,
             'message': f'Status updated to: {child.status}'
         }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='status-history')
+    def status_history(self, request, pk=None):
+        """Every recorded status change of the child, newest first: when, from, to, why, and who."""
+        from apps.customers.child_status import status_label
+
+        child = self.get_object()
+        rows = child.status_history.select_related('changed_by').order_by('-changed_at')
+        return Response([
+            {
+                'id': str(row.id),
+                'changed_at': row.changed_at,
+                'previous_status': row.previous_status,
+                'previous_label': status_label(row.previous_status),
+                'new_status': row.new_status,
+                'new_label': status_label(row.new_status),
+                'reason': row.reason,
+                'changed_by_name': (
+                    (row.changed_by.get_full_name() or row.changed_by.username) if row.changed_by else None
+                ),
+            }
+            for row in rows
+        ])
     
     @action(detail=True, methods=['get'])
     def absence_history(self, request, pk=None):

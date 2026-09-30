@@ -94,6 +94,7 @@ _RUN_TYPES = {
     'ST': DOCUMENT_TYPE_CODES['combined'],
     'RT': DOCUMENT_TYPE_CODES['combined'],
     'IRM': DOCUMENT_TYPE_CODES['combined'],
+    'MK': DOCUMENT_TYPE_CODES['combined'],
     'SD': DOCUMENT_TYPE_CODES['transaction_invoice'],
     'TX': DOCUMENT_TYPE_CODES['transaction_invoice'],
     'TI': DOCUMENT_TYPE_CODES['tax_invoice'],

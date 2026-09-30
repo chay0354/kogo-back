@@ -277,7 +277,8 @@ class OverviewTests(IssuingMixin, TestCase):
     def test_every_run_of_this_year_and_the_next(self):
         overview = series_overview()
         self.assertEqual(overview['years'], [self.year, self.year + 1])
-        self.assertEqual(len(overview['runs']), 18)
+        # Ten runs (IR ST SD RT MK TI IRM RC TX CR), for each of the two years.
+        self.assertEqual(len(overview['runs']), 20)
         ti = next(run for run in overview['runs'] if run['name'] == f'TI-{self.year}')
         self.assertEqual(
             (ti['issued'], ti['start'], ti['next_number'], ti['can_open'], ti['opening']),
@@ -306,7 +307,7 @@ class OverviewTests(IssuingMixin, TestCase):
         )
         types = {row['label']: row for row in series_overview()['previous_types']}
         self.assertEqual(types['חשבונית מס קבלה']['suggested'], {str(self.year): 'IRM', str(self.year + 1): 'IR'})
-        self.assertEqual(types['חשבונית מס קבלה']['series_options'], ['IR', 'ST', 'RT', 'IRM'])
+        self.assertEqual(types['חשבונית מס קבלה']['series_options'], ['IR', 'ST', 'RT', 'MK', 'IRM'])
 
     def test_an_opened_run_carries_its_record_and_its_siblings_are_closed_to_that_old_run(self):
         open_run('IRM', 'חשבונית מס קבלה', 121882, note='אומת מול הייצוא')

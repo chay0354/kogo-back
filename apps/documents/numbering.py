@@ -7,6 +7,8 @@ the accountant and a tax inspector can each check a run on its own:
     ST  — חשבונית מס / קבלה for store sales paid on the spot (card or cash)
     SD  — חשבונית עסקה for store sales put on monthly billing (not yet paid)
     RT  — חשבונית מס / קבלה for studio rentals (the tenants' standing orders)
+    MK  — חשבונית מס / קבלה for Michal Kagan's sessions, asked for by her site
+          (a business line of the company: apps/documents/michal)
     TI  — חשבונית מס issued by hand
     IRM — חשבונית מס / קבלה issued by hand
     RC  — קבלה issued by hand (the office's check plans too)
@@ -38,6 +40,7 @@ SERIES_SUBSCRIPTION = 'IR'
 SERIES_STORE = 'ST'
 SERIES_STORE_TRANSACTION = 'SD'
 SERIES_RENTAL = 'RT'
+SERIES_MICHAL = 'MK'
 SERIES_TAX_INVOICE = 'TI'
 SERIES_MANUAL_INVOICE_RECEIPT = 'IRM'
 SERIES_RECEIPT = 'RC'
@@ -60,6 +63,7 @@ SERIES_LABELS = {
     SERIES_STORE: 'חשבונית מס/קבלה · חנות',
     SERIES_STORE_TRANSACTION: 'חשבונית עסקה · חנות',
     SERIES_RENTAL: 'חשבונית מס/קבלה · שכירויות',
+    SERIES_MICHAL: 'חשבונית מס/קבלה · מיכל קגן',
     SERIES_TAX_INVOICE: 'חשבונית מס · ידני',
     SERIES_MANUAL_INVOICE_RECEIPT: 'חשבונית מס/קבלה · ידני',
     SERIES_RECEIPT: 'קבלה · ידני',
@@ -245,6 +249,7 @@ def _series_sources() -> dict:
         SERIES_STORE: store,
         SERIES_STORE_TRANSACTION: store,
         SERIES_RENTAL: formal,
+        SERIES_MICHAL: formal,
         SERIES_TAX_INVOICE: formal,
         SERIES_MANUAL_INVOICE_RECEIPT: formal,
         SERIES_RECEIPT: formal,

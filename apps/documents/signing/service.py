@@ -480,6 +480,11 @@ def _send_by_channel(row: SignedOriginal, *, email: str = '') -> bool:
         from apps.documents.document_email import send_formal_document_email
 
         return bool(send_formal_document_email(row, email=email))
+    if channel == SignedOriginal.CHANNEL_MICHAL:
+        # Michal Kagan's customers get her own mail; an address typed by the office is not used for them.
+        from apps.documents.michal.email import send_michal_document_email
+
+        return bool(send_michal_document_email(row.source_id))
     return False
 
 

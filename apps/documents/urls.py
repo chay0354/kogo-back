@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from apps.documents.backup_views import cron_daily_backup, cron_quarterly_backup
+from apps.documents.michal import views as michal_views
 from apps.documents.signing import views as signing_views
 from apps.documents.views import (
     CashPlanViewSet,
@@ -38,5 +39,9 @@ urlpatterns = [
     # The books to Israel: daily (vercel.json, 00:30 UTC) and quarterly (25(ו)(2), run by hand).
     path('cron/daily-backup/', cron_daily_backup, name='documents-cron-daily-backup'),
     path('cron/quarterly-backup/', cron_quarterly_backup, name='documents-cron-quarterly-backup'),
+    # Michal Kagan's site asks for her documents with a key of its own (apps/documents/michal).
+    path('integrations/michal/documents/', michal_views.MichalDocumentsView.as_view(), name='michal-documents'),
+    path('integrations/michal/documents/<str:number>/pdf/', michal_views.MichalDocumentPdfView.as_view(),
+         name='michal-document-pdf'),
     path('', include(router.urls)),
 ]

@@ -384,7 +384,15 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
         summary['charged'] += 1
         try:
             child.status = 'active'
-            child.paid_until_date = _paid_until(charge_month)
+            # Never backwards: a second standing order catching up an older
+            # month must not undo a later month another one already paid.
+            # Read fresh: another standing order of the same child may have
+            # moved it since this row was loaded.
+            child.paid_until_date = type(child).objects.filter(pk=child.pk).values_list(
+                'paid_until_date', flat=True,
+            ).first()
+            paid_until = _paid_until(charge_month)
+            child.paid_until_date = max(child.paid_until_date, paid_until) if child.paid_until_date else paid_until
             child.save(update_fields=['status', 'paid_until_date', 'updated_at'])
         except Exception as exc:
             logger.exception('Child status not updated after recurring charge %s (the charge is recorded)', recurring.id)

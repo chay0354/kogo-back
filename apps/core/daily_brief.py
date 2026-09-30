@@ -19,6 +19,7 @@ Rules the checks follow:
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
 from decimal import Decimal
@@ -111,6 +112,14 @@ def _progress_so_far(key: str, today: date) -> dict:
 # --- the checks ------------------------------------------------------------
 
 
+# Why the morning left a child for a person (morning_fixes.LEFT_*).
+NEEDS_PERSON_WHY = {
+    'not_automatic': 'שינוי כזה לא נעשה אוטומטית',
+    'still_charged': 'עדיין גובים ממנו — לבדוק לפני שמעבירים',
+    'set_by_hand': 'נקבע ביד במשרד, עם סיבה — הבוקר לא משנה החלטה של אדם',
+}
+
+
 def check_fix_child_statuses(today: date) -> BriefItem:
     """Morning fix: children on a status their own records contradict."""
     from apps.core.morning_fixes import MAX_STATUS_FIXES_PER_MORNING, fix_child_statuses
@@ -123,27 +132,37 @@ def check_fix_child_statuses(today: date) -> BriefItem:
         already_applied=len(earlier),
     )
     applied = earlier + result['applied']
+    needs_person = list(so_far.get('needs_person') or []) + result['needs_person']
     waiting = int(so_far.get('waiting') or 0) + result['waiting']
     item = BriefItem(
         key='fix_child_statuses',
         title='תוקן אוטומטית: סטטוסים של ילדים',
         severity=GREEN,
-        count=len(applied),
+        count=len(applied) + len(needs_person),
         action='כל שינוי נרשם בהיסטוריית הסטטוסים של הילד, ואפשר להחזיר אותו משם.',
     )
+    # What waits for a person goes first: the changes already made are only news.
+    for left in needs_person[:MAX_ROWS]:
+        item.rows.append(_row(
+            left['name'],
+            f"רשום {left['from']} · לפי הרישומים {left['to']} · {NEEDS_PERSON_WHY.get(left['why'], '')}",
+            _child_href(left['child_id']),
+        ))
     for change in applied[:MAX_ROWS]:
         item.rows.append(_row(change['name'], f"{change['from']} ← {change['to']}", _child_href(change['child_id'])))
     if not result['finished']:
         item.severity = YELLOW
         item.continues = True
-        item.progress = {'after_id': result['last_id'], 'applied': applied, 'waiting': waiting}
+        item.progress = {
+            'after_id': result['last_id'], 'applied': applied, 'needs_person': needs_person, 'waiting': waiting,
+        }
         item.summary = (
             f'עדיין עובר על הילדים — {len(applied)} תוקנו עד עכשיו. '
             'ממשיך מאותה נקודה בסבב הבא של שגרת הבוקר.'
         )
         return item
-    if not applied and not waiting:
-        item.summary = 'לא היה סטטוס לתקן הבוקר.'
+    if not applied and not waiting and not needs_person:
+        item.summary = 'לא היה סטטוס לתקן הבוקר, ואין ילד שהסטטוס שלו סותר את הרישומים.'
         return item
     item.summary = f'{len(applied)} ילדים עברו לסטטוס שהרישומים שלהם מראים.'
     if waiting:
@@ -151,6 +170,20 @@ def check_fix_child_statuses(today: date) -> BriefItem:
         item.summary += (
             f' עוד {waiting} ממתינים — עד {MAX_STATUS_FIXES_PER_MORNING} בבוקר, '
             'כדי שטעות בכלל לא תשנה את כל הרשימה בבת אחת.'
+        )
+    if needs_person:
+        item.severity = YELLOW
+        # Only MAX_ROWS names fit; the count of each kind says how many there are in all.
+        kinds = Counter(f"{left['from']} ← {left['to']}" for left in needs_person)
+        item.summary += (
+            f' {len(needs_person)} ילדים בסטטוס שהרישומים שלהם סותרים, ושגרת הבוקר לא משנה לבד — '
+            'צריך שמישהו יחליט. הם ראשונים ברשימה ('
+            + ' · '.join(f'{kind}: {count}' for kind, count in kinds.most_common())
+            + ').'
+        )
+        item.action = (
+            'לפתוח את כרטיס הילד, לבדוק ולעדכן את הסטטוס ביד. '
+            + item.action
         )
     return item
 
@@ -659,62 +692,6 @@ def check_expiring_cards(today: date) -> BriefItem:
             recurring.child.full_name if recurring.child else str(recurring.id),
             f'תוקף {recurring.card_expire_month:02d}/{recurring.card_expire_year}',
             _child_href(recurring.child_id),
-        ))
-    return item
-
-
-def check_status_mismatch(today: date) -> BriefItem:
-    """
-    Children being charged, or sitting in a lesson, who are still marked as a trial.
-
-    Statuses drift for all sorts of reasons and a list of every disagreement is
-    too long to act on — `manage.py audit_child_statuses` exists for that. This
-    is the half the office can do something about this morning: money is coming
-    in, or a place is taken, and the child still reads as "ניסיון" on every
-    screen.
-    """
-    from apps.customers.child_status import canonical_status, resolve_child_status, status_label
-    from apps.customers.models import Child, RecurringPayment
-
-    paying = set(
-        RecurringPayment.objects.filter(status='active').values_list('child_id', flat=True)
-    )
-    base = Child.objects.exclude(status='ghost')
-    total_children = base.count()
-    children = (
-        base
-        .filter(status__in=('trial_signed', 'trial_completed', 'pending'))
-        .select_related('family')
-        .prefetch_related('lesson_enrollments', 'payments')
-        .order_by('-updated_at')[:MAX_CHILDREN_SCANNED]
-    )
-    mismatched = []
-    for child in children.iterator(chunk_size=500):
-        should_be = resolve_child_status(child)
-        if not should_be or canonical_status(child.status) == should_be:
-            continue
-        if should_be == 'active' or child.id in paying:
-            mismatched.append((child, should_be))
-
-    item = BriefItem(
-        key='status_mismatch',
-        title='ילדים שרשומים כניסיון אבל כבר לומדים',
-        severity=YELLOW if mismatched else GREEN,
-        count=len(mismatched),
-        action='לפתוח את כרטיס הילד ולעדכן את הסטטוס לפעיל.',
-    )
-    if not mismatched:
-        item.summary = f'אין ילד שנשאר בסטטוס ניסיון אחרי שנרשם או שילם (מתוך {total_children} ילדים).'
-        return item
-    item.summary = (
-        f'{len(mismatched)} ילדים שהסטטוס שלהם עדיין ניסיון או ממתין, למרות שיש להם הוראת קבע פעילה '
-        'או רישום לחוג.'
-    )
-    for child, should_be in mismatched[:MAX_ROWS]:
-        item.rows.append(_row(
-            child.full_name,
-            f'רשום {status_label(child.status)} · אמור להיות {status_label(should_be)}',
-            _child_href(child.id),
         ))
     return item
 
@@ -1588,7 +1565,6 @@ CHECKS = (
     check_active_without_standing_order,
     check_ended_standing_orders,
     check_overdue_instalments,
-    check_status_mismatch,
     check_missing_receipts,
     check_business_categories,
     check_document_numbering,
@@ -1639,7 +1615,6 @@ def check_catalogue() -> list[dict]:
         'active_without_standing_order': 'ילדים פעילים בלי הוראת קבע',
         'ended_standing_orders': 'הוראות קבע שהסתיימו',
         'overdue_instalments': 'מזומן וצ׳קים בלי מסמך',
-        'status_mismatch': 'ילדים שרשומים כניסיון אבל כבר לומדים',
         'missing_receipts': 'תשלומים ללא חשבונית',
         'business_categories': 'עסקים בלי קטגוריה',
         'document_numbering': 'מספור מסמכים',

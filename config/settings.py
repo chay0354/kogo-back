@@ -372,6 +372,15 @@ RENTAL_BILLING_ENABLED = config('RENTAL_BILLING_ENABLED', default=False, cast=bo
 # Seeded by apps/core/migrations/0018_seed_businesses.py; when it is missing,
 # charging is refused rather than the business being created on the fly.
 RENTAL_BILLING_BUSINESS_NAME = config('RENTAL_BILLING_BUSINESS_NAME', default='סוחרים')
+# Michal Kagan's site (a business line of the company, apps/documents/michal)
+# asks kogo for the חשבונית מס/קבלה of each payment it takes, and a credit note
+# for each refund. The key is hers alone — never WEBSITE_INTEGRATION_API_KEY,
+# which carries the store's rights. Empty (the default) refuses every request.
+MICHAL_INTEGRATION_API_KEY = config('MICHAL_INTEGRATION_API_KEY', default='')
+# The Business her documents and her clients (business customers, never
+# families) are tagged to, found by name. A manager creates it in Settings →
+# כספים → עסקים; while it is missing, documents are refused, not filed elsewhere.
+MICHAL_BUSINESS_NAME = config('MICHAL_BUSINESS_NAME', default='מיכל קגן')
 # The Tranzila terminal set tenant billing charges on. Each is empty by default
 # and then falls back to its TRANZILA_PROD_* value — the terminals the courses'
 # standing orders, card links and widget use. Set them to point tenant billing

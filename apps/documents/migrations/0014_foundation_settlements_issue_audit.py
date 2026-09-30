@@ -26,7 +26,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('documents', '0012_signed_archive'),
+        ('documents', '0013_signedoriginal_channel_michal'),
     ]
 
     operations = [
@@ -108,7 +108,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='signedoriginal',
             name='channel',
-            field=models.CharField(blank=True, choices=[('', 'לא נשלח על ידי המערכת'), ('ir', 'מייל קבלת חוג'), ('store', 'מייל חנות האתר'), ('credit_note', 'מייל הודעת זיכוי'), ('rental', 'מייל קבלת שכירות'), ('formal', 'מייל מסמך מהמשרד')], default='', max_length=20, verbose_name='ערוץ שליחה'),
+            field=models.CharField(blank=True, choices=[('', 'לא נשלח על ידי המערכת'), ('ir', 'מייל קבלת חוג'), ('store', 'מייל חנות האתר'), ('credit_note', 'מייל הודעת זיכוי'), ('rental', 'מייל קבלת שכירות'), ('formal', 'מייל מסמך מהמשרד'), ('michal', 'מייל חשבונית מיכל קגן')], default='', max_length=20, verbose_name='ערוץ שליחה'),
         ),
         migrations.CreateModel(
             name='DocumentSettlement',

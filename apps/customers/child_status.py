@@ -41,6 +41,10 @@ STATUS_PAYMENT_PROBLEM = 'payment_problem'
 STATUS_INACTIVE = 'inactive'
 STATUS_GHOST = 'ghost'
 
+# Owner, 30.9.2026: a status changed by hand says why. Its history row starts
+# with this, and the morning fix leaves a status set this way for a person.
+MANUAL_REASON_PREFIX = 'שינוי ידני'
+
 CHILD_STATUS_CHOICES = [
     (STATUS_ACTIVE, 'פעיל'),
     (STATUS_TRIAL_SIGNED, 'נרשם לניסיון'),
@@ -211,8 +215,8 @@ def _card_failed_on_a_course(child) -> bool:
     ).exists()
 
 
-def _trial_dates(child):
-    """(has a trial still ahead, has had a trial already)."""
+def _trial_dates(child, *, held_after=None):
+    """(has a trial still ahead, has had a trial already — after `held_after`, when given)."""
     from django.db.models import F, Q
 
     today = date.today()
@@ -224,8 +228,11 @@ def _trial_dates(child):
     # repeat_trial uses. The cancel path ends the row on the day it is dropped
     # and writes no outcome; the cron that retires a trial that did happen
     # ends it on the trial's own date and records what became of it.
+    held_rows = child.lesson_enrollments.filter(trial_held_on__lt=today)
+    if held_after:
+        held_rows = held_rows.filter(trial_held_on__gt=held_after)
     held = (
-        child.lesson_enrollments.filter(trial_held_on__lt=today)
+        held_rows
         .exclude(
             Q(status='inactive') & Q(trial_outcome='')
             & Q(end_date__isnull=False) & Q(end_date__lt=F('trial_held_on'))
@@ -260,8 +267,21 @@ def resolve_child_status(child) -> str:
     # turns inactive the moment it passes. One still on a lesson with nothing
     # paid is not a quiet ex-customer: somebody has to chase the payment.
     if child.paid_until_date and child.paid_until_date < date.today():
-        if child.lesson_enrollments.filter(status__in=LIVE_ENROLLMENT_STATUSES).exists():
+        # Only a regular place counts as still in the class — the same line
+        # _card_failed_on_a_course draws. A former student who books a trial
+        # has a live row too, and reading it as a course went unpaid turned
+        # them into בעיה באשראי (30.9.2026).
+        if child.lesson_enrollments.filter(
+            status__in=LIVE_ENROLLMENT_STATUSES, trial_lesson_date__isnull=True,
+        ).exists():
             return STATUS_PAYMENT_PROBLEM
+        # A trial booked ahead means they are back, whatever they were before;
+        # one held after the paid period ended is the trial they came back for.
+        trial_ahead, held_since = _trial_dates(child, held_after=child.paid_until_date)
+        if trial_ahead:
+            return STATUS_TRIAL_SIGNED
+        if held_since:
+            return STATUS_TRIAL_COMPLETED
         return STATUS_INACTIVE
 
     # The card failed and no money has come in since, so the problem stands.
@@ -353,6 +373,25 @@ def mark_trial_signed(child_id) -> bool:
     )
 
 
+def recheck_after_money_stopped(child, *, reason: str, changed_by=None) -> None:
+    """
+    Money for this child just stopped — a standing order cancelled, a cheque
+    plan cancelled, a payment refunded — so work the status out now.
+
+    Owner, 30.9.2026: at that moment, not the next morning. The status is a
+    consequence of the money, never a condition of it: a failure here is
+    logged and the cancellation or refund stands.
+    """
+    import logging
+
+    if child is None or child.status == STATUS_GHOST:
+        return
+    try:
+        refresh_child_status(child, reason=reason, changed_by=changed_by)
+    except Exception:
+        logging.getLogger(__name__).exception('Status recheck after "%s" failed for child %s', reason, child.pk)
+
+
 def refresh_child_status(child, *, reason: str, changed_by=None) -> str:
     """
     Work the child's status out again, and save it with a history line if it moved.
@@ -363,9 +402,9 @@ def refresh_child_status(child, *, reason: str, changed_by=None) -> str:
     record, like the office registering a cash or cheque plan. Returns the
     status the child holds afterwards.
 
-    Its callers add money, so the move is up to פעיל. A move off פעיל would
-    also get the post_save signal's own history line (fix_child_statuses has
-    the same two).
+    Most callers add money, so the move is up to פעיל;
+    recheck_after_money_stopped is the other way. Either way the one history
+    line is this one — the post_save signal stands aside for it.
     """
     from django.db import transaction
 
