@@ -73,8 +73,13 @@ def build_rental_receipt_email(doc: FormalDocument, charge: TenantCharge) -> tup
     return subject, text, html
 
 
-def send_rental_receipt_email(doc_id) -> bool:
-    """Send the receipt to the tenant. True when sent now or before."""
+def send_rental_receipt_email(doc_id, *, email: str = '') -> bool:
+    """
+    Send the receipt to the tenant. True when sent now or before.
+
+    `email` is an address the office typed for this one send (the signing
+    service's send endpoint); otherwise the tenant's own.
+    """
     from apps.documents.document_pdf import generate_document_pdf
 
     doc = FormalDocument.objects.select_related('business_customer').get(pk=doc_id)
@@ -83,8 +88,7 @@ def send_rental_receipt_email(doc_id) -> bool:
         return False
     if charge.receipt_emailed_at:
         return True
-    email = (doc.business_customer.email if doc.business_customer_id else '') or ''
-    email = email.strip()
+    email = (email or (doc.business_customer.email if doc.business_customer_id else '') or '').strip()
     if not email:
         logger.info('Rental receipt %s not e-mailed: the tenant has no e-mail', doc.document_number)
         return False

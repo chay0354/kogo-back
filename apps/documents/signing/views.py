@@ -4,10 +4,12 @@ The signing screens' API, the public certificate, and the sign-pending cron.
   GET  /api/v1/documents/signing/status/                      manager
   GET  /api/v1/documents/signing/originals/?purpose=&kind=&q=&date_from=&date_to=&delivery=&printed=&limit=&offset=
                                                               manager
-  GET  /api/v1/documents/signing/originals/{id}/file/         manager — the stored bytes, logged
+  GET  /api/v1/documents/signing/originals/{id}/file/         manager — a copy of an original (?original=1:
+                                                              the stored bytes, logged); an archive copy's bytes
   GET  /api/v1/documents/signing/originals/export/?<the same filters>&offset=&limit=
                                                               manager — a zip of stored files, logged
   POST /api/v1/documents/signing/originals/{id}/print-original/                 manager
+  POST /api/v1/documents/signing/originals/{id}/send/         manager — "שלח / שלח שוב": the original once, then copies
   GET  /api/v1/documents/signing/archive/status/              manager
   POST /api/v1/documents/signing/archive/run/                 manager
   GET  /api/v1/documents/signing/certificate/                 public
@@ -83,8 +85,19 @@ def signing_status(request):
                 delivery=SignedOriginal.DELIVERY_PAPER, paper_original_printed_at__isnull=True,
             ).count(),
             'signed_today': originals.filter(signed_at__gte=today_start).count(),
+            # Part of `held`: tax invoices that wait, unsigned, for their allocation number.
+            'awaiting_allocation': originals.filter(
+                signed_at__isnull=True, delivery=SignedOriginal.DELIVERY_HELD,
+                delivery_reason=_reason_awaiting_allocation(),
+            ).count(),
         },
     })
+
+
+def _reason_awaiting_allocation() -> str:
+    from apps.documents.signing.service import REASON_AWAITING_ALLOCATION
+
+    return REASON_AWAITING_ALLOCATION
 
 
 def _int(raw, default: int, low: int, high: int) -> int:
@@ -161,7 +174,18 @@ def _filtered_originals(params):
 LIST_FIELDS = (
     'id', 'number', 'kind', 'purpose', 'document_type_label', 'customer_name', 'document_date', 'total',
     'delivery', 'delivery_reason', 'signed_at', 'sent_at', 'paper_original_printed_at', 'sha256', 'size',
+    'source_id', 'channel',
 )
+
+
+def _awaiting_allocation(row: SignedOriginal) -> bool:
+    """Held, unsigned, until its allocation number is entered (the office types it on the document)."""
+    from apps.documents.signing.service import REASON_AWAITING_ALLOCATION
+
+    return (
+        row.signed_at is None and row.kind == SignedOriginal.KIND_FORMAL
+        and row.delivery == SignedOriginal.DELIVERY_HELD and row.delivery_reason == REASON_AWAITING_ALLOCATION
+    )
 
 
 def _purpose(row: SignedOriginal) -> str:
@@ -205,6 +229,12 @@ def signed_originals(request):
                 'paper_original_printed_at': row.paper_original_printed_at,
                 'sha256': row.sha256,
                 'size': row.size,
+                # Added 25.9.2026 for "שלח / שלח שוב" and the allocation number:
+                # the issuing row's id (a FormalDocument's, for allocation-number/),
+                # the mail channel, and whether it waits for its allocation number.
+                'source_id': row.source_id,
+                'channel': row.channel,
+                'awaiting_allocation': _awaiting_allocation(row),
             }
             for row in rows
         ],
@@ -233,21 +263,51 @@ def _log_access(request, row: SignedOriginal, action: str) -> None:
 
 FILE_NOT_FOUND = 'הקובץ החתום לא נמצא'
 FILE_BROKEN = 'הקובץ השמור אינו תואם לטביעת האצבע שלו ולכן לא הורד. יש לפנות לתמיכה'
+COPY_FAILED = 'לא ניתן היה להפיק העתק של המסמך. יש לפנות לתמיכה'
+
+
+def _wants_stored_original(params) -> bool:
+    return str(params.get('original') or '').strip().lower() in ('1', 'true', 'yes')
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, IsManager])
 def original_file(request, original_id):
     """
-    The stored signed file, exactly as it was signed — an original or an archive copy.
+    A signed document's file, for the office.
 
-    Not "הדפס מקור": nothing about the original's one print or its delivery
-    changes. The download is logged (SignedFileAccess) before the bytes go.
-    X-Content-SHA256 is the fingerprint taken when it was signed.
+    - An original: a copy — "העתק", drawn again now (the owner's decision D5,
+      נספח ה'(א)(4)): the office downloads to print or to forward, and what
+      leaves the office after the original must never say "מקור". Nothing on
+      the row changes and nothing is added to the file log, since the stored
+      file did not leave; the download is written to the log file.
+    - An original with ?original=1: the stored signed bytes, exactly as they
+      were signed, with X-Content-SHA256 — for checking the signature, as the
+      accountant's export (originals/export/) hands them out. Logged
+      (SignedFileAccess) before the bytes go. It is not "הדפס מקור": the
+      original's one print and its delivery do not change.
+    - An archive copy: its stored bytes, as before — the file already says
+      "העתק לארכיון", and it is logged.
+
+    404 while the row is not signed (nothing to copy from yet — the office's
+    own document download serves the unsigned document); 500 when the stored
+    bytes no longer match their fingerprint.
     """
     row = SignedOriginal.objects.filter(pk=original_id).first()
     if row is None or not row.is_signed or row.pdf is None:
         return Response({'error': FILE_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
+    if not row.is_archive_copy and not _wants_stored_original(request.query_params):
+        from apps.documents.signing.sources import load_source
+
+        try:
+            pdf = load_source(row.kind, row.source_id).render_copy()
+        except Exception:
+            logger.exception('Signing: a copy of %s could not be drawn', row.number)
+            return Response({'error': COPY_FAILED}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        logger.info('Signing: a copy of %s downloaded by user %s', row.number, request.user.pk)
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{_file_name(row.number)}"'
+        return response
     if not row.pdf_intact():
         logger.error('Signing: %s — the stored file does not match its SHA-256; not handed out', row.number)
         return Response({'error': FILE_BROKEN}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -347,6 +407,55 @@ def print_original(request, original_id):
     response = HttpResponse(bytes(row.pdf), content_type='application/pdf')
     response['Content-Disposition'] = f'attachment; filename="{row.number}.pdf"'
     return response
+
+
+SEND_FAILED = 'השליחה נכשלה — נסו שוב בעוד כמה דקות'
+BAD_EMAIL = 'כתובת המייל אינה תקינה'
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsManager])
+def send_original(request, original_id):
+    """
+    "שלח / שלח שוב": mail the customer their document (signing.service.send_to_customer).
+
+    Body: {email?: string} — an address for this send, when the card has none
+    or the customer asked for another. 200 {sent: 'original'|'copy', email,
+    number, delivery, delivery_reason}: 'original' the first time (the stored
+    signed original, once), 'copy' once the original left — mailed or printed —
+    or for an archive copy. 400 without an address or with an invalid one; 409
+    when the original may not go by mail (the row's reason: paper by 18ב(ד),
+    held, waiting for its allocation number); 503 with no mail provider; 502
+    when the provider refused (the original is given back to the cron).
+    """
+    from django.core.exceptions import ValidationError
+    from django.core.validators import validate_email
+
+    from apps.documents.signing.service import SendRefused, send_to_customer
+
+    data = request.data if isinstance(request.data, dict) else {}
+    email = str(data.get('email') or '').strip()
+    if email:
+        try:
+            validate_email(email)
+        except ValidationError:
+            return Response({'error': BAD_EMAIL}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        result = send_to_customer(original_id, email=email, user=request.user)
+    except SignedOriginal.DoesNotExist:
+        return Response({'error': 'המקור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    except SendRefused as refused:
+        return Response({'error': str(refused)}, status=refused.status)
+    except Exception:
+        logger.exception('Signing: the office send of %s failed', original_id)
+        return Response({'error': SEND_FAILED}, status=status.HTTP_502_BAD_GATEWAY)
+    return Response({
+        'sent': result.sent,
+        'email': result.email,
+        'number': result.number,
+        'delivery': result.delivery,
+        'delivery_reason': result.delivery_reason,
+    })
 
 
 ARCHIVE_DISABLED = 'העתקי הארכיון כבויים — יש להפעיל את SIGNING_ARCHIVE_ENABLED'

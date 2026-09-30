@@ -1323,6 +1323,53 @@ def check_document_numbering(today: date) -> BriefItem:
     return item
 
 
+# An allocation number is fetched by hand from the Tax Authority's portal, so a
+# day is normal; past that the customer is still waiting for their invoice.
+ALLOCATION_WAIT = timedelta(hours=24)
+
+
+def check_awaiting_allocation(today: date) -> BriefItem:
+    """
+    Tax invoices held for more than a day waiting for their allocation number.
+
+    A tax invoice to a business above the threshold is not signed — and so not
+    delivered — until its מספר הקצאה is entered (apps/documents/signing,
+    FormalDocumentSource.awaiting_allocation). Nothing reminds anyone of it but
+    this line: the invoice exists, has a number, and the customer has nothing.
+    """
+    from apps.documents.models import SignedOriginal
+    from apps.documents.signing.service import REASON_AWAITING_ALLOCATION
+
+    waiting = (
+        SignedOriginal.objects.exclude(purpose=SignedOriginal.PURPOSE_ARCHIVE)
+        .filter(
+            signed_at__isnull=True, delivery=SignedOriginal.DELIVERY_HELD,
+            delivery_reason=REASON_AWAITING_ALLOCATION, created_at__lte=timezone.now() - ALLOCATION_WAIT,
+        )
+        .order_by('created_at')
+    )
+    count = waiting.count()
+    item = BriefItem(
+        key='awaiting_allocation',
+        title='חשבוניות שממתינות למספר הקצאה',
+        severity=YELLOW if count else GREEN,
+        count=count,
+        action='לבקש מספר הקצאה באתר רשות המסים ולהזין אותו בחשבוניות ← למסירה ידנית. '
+               'עם ההזנה המקור נחתם ונשלח ללקוח.',
+    )
+    if not count:
+        item.summary = 'אין חשבונית שממתינה למספר הקצאה יותר מיום.'
+        return item
+    item.summary = f'{count} חשבוניות לעסקים ממתינות יותר מיום למספר הקצאה, ולכן לא נמסרו ללקוח.'
+    for row in waiting[:MAX_ROWS]:
+        item.rows.append(_row(
+            f'{row.number} · {row.customer_name or "—"}',
+            f'{_money(row.total) if row.total is not None else ""} · מאז {timezone.localtime(row.created_at):%d/%m}',
+            '/invoices',
+        ))
+    return item
+
+
 # What each readiness check means for the office, in its own words. Two of them
 # read as alarms and are not: the document terminal falls back to the payment
 # terminal, and the environment label is not used by anything that charges.
@@ -1545,6 +1592,7 @@ CHECKS = (
     check_missing_receipts,
     check_business_categories,
     check_document_numbering,
+    check_awaiting_allocation,
     check_monthly_finalization,
     check_weekly_audit,
     check_tranzila_health,
@@ -1595,6 +1643,7 @@ def check_catalogue() -> list[dict]:
         'missing_receipts': 'תשלומים ללא חשבונית',
         'business_categories': 'עסקים בלי קטגוריה',
         'document_numbering': 'מספור מסמכים',
+        'awaiting_allocation': 'חשבוניות שממתינות למספר הקצאה',
         'weekly_audit': 'בדיקת עומק יומית',
         'tranzila_health': 'תקינות הסליקה',
         'manychat_health': 'תקינות WhatsApp',

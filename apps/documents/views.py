@@ -42,11 +42,28 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         There is no API integration yet, so the number arrives through a person.
         It is still checked: nine digits, and only on a document type that can
         carry one. Clearing it is allowed — a number entered on the wrong row
-        has to be removable.
+        has to be removable — until the original is signed.
+
+        The number belongs on the original (the Tax Authority's "חשבוניות
+        ישראל" FAQ, question 10), so a document that needs one is held unsigned
+        until it arrives (signing/sources.FormalDocumentSource.awaiting_allocation).
+        Entering it signs the original — with the number on it — and mails it
+        after the commit when it goes by mail. Once the original is signed its
+        number is fixed: changing or clearing it is 409. An original signed
+        before any number was entered (issued before this gate) may still take
+        one: it goes on the copies only, and the answer says so.
+
+        200 {id, allocation_number, allocation_entered_at, copy_only, delivery,
+        delivery_reason, signed}; 400 on a bad number or a document type that
+        carries none; 409 when the signed original already carries another.
         """
+        from django.db import transaction
         from django.utils import timezone
 
         from apps.documents.document_pdf import TAX_DOCUMENT_TYPES
+        from apps.documents.signing.service import (
+            ALLOCATION_COPY_ONLY, ALLOCATION_ON_ORIGINAL, release_allocation_hold, signed_original_of,
+        )
 
         doc = self.get_object()
         if doc.document_type not in TAX_DOCUMENT_TYPES:
@@ -63,22 +80,60 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        doc.allocation_number = digits
-        doc.allocation_entered_at = timezone.now() if digits else None
-        doc.allocation_entered_by = request.user if digits else None
-        doc.save(update_fields=[
-            'allocation_number', 'allocation_entered_at', 'allocation_entered_by', 'updated_at',
-        ])
+        copy_only = False
+        with transaction.atomic():
+            # The original's row first, then the document — the order signing
+            # takes them in (sign_original locks the row, then reads the
+            # document): an original is never signed between this check and
+            # the write, and never signed without a number written here.
+            row = signed_original_of(doc.document_number, lock=True)
+            doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
+            current = (doc.allocation_number or '').strip()
+            if row is not None and row.is_signed:
+                if digits == current:
+                    return Response(self._allocation_answer(doc, row))
+                if current:
+                    return Response(
+                        {'error': ALLOCATION_ON_ORIGINAL.format(number=current)},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                copy_only = True
+            doc.allocation_number = digits
+            doc.allocation_entered_at = timezone.now() if digits else None
+            doc.allocation_entered_by = request.user if digits else None
+            doc.save(update_fields=[
+                'allocation_number', 'allocation_entered_at', 'allocation_entered_by', 'updated_at',
+            ])
+        if digits and row is not None and not row.is_signed:
+            # Its original waited unsigned: signed now, with the number on it,
+            # and mailed after the commit. A document with no original row
+            # (issued before signing, or with signing off) is left as it was —
+            # signing it now would draw a second "מקור".
+            release_allocation_hold(doc.pk)
         logger.info(
-            'Allocation number %s on %s by %s',
+            'Allocation number %s on %s by %s%s',
             'set' if digits else 'cleared', doc.document_number,
             getattr(request.user, 'email', request.user),
+            ' (copies only — the original was signed before it)' if copy_only else '',
         )
-        return Response({
+        answer = self._allocation_answer(doc, signed_original_of(doc.document_number))
+        if copy_only:
+            answer['message'] = ALLOCATION_COPY_ONLY
+        answer['copy_only'] = copy_only
+        return Response(answer)
+
+    @staticmethod
+    def _allocation_answer(doc, row) -> dict:
+        return {
             'id': str(doc.id),
             'allocation_number': doc.allocation_number,
             'allocation_entered_at': doc.allocation_entered_at,
-        })
+            'copy_only': False,
+            # The original's state after the entry: signed, and where it went.
+            'signed': bool(row is not None and row.is_signed),
+            'delivery': row.delivery if row is not None else None,
+            'delivery_reason': row.delivery_reason if row is not None else '',
+        }
 
     @action(detail=True, methods=['post'], url_path='customer-ack',
             permission_classes=[IsAuthenticated, IsManager])

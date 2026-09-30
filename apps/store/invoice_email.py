@@ -1,5 +1,9 @@
 """
 Send store invoice / receipt emails to website customers after successful payment.
+
+Since 25.9.2026 the same exit also mails a till sale's signed original, when the
+signing service asks for it (`any_sale`): every original reaches its customer
+(the owner's decision D5), and a till sale used to reach nobody.
 """
 from __future__ import annotations
 
@@ -28,9 +32,15 @@ def _email_configured() -> bool:
 def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
     """Return (subject, plain_text, html) for a completed store invoice."""
     customer = (invoice.customer_name or 'לקוח/ה').strip()
+    if customer == 'לקוח/ה' and invoice.child_id:
+        customer = invoice.child.full_name or customer
     order_ref = invoice.website_order_number or invoice.invoice_number
     doc_ref = invoice.invoice_number
-    subject = f'{DOCUMENT_TITLE} {doc_ref} — הזמנה {order_ref}'
+    # A till sale has no website order to name, and a sale put on the monthly
+    # standing order is a חשבונית עסקה (StoreSaleSource.type_label), not a receipt.
+    title = 'חשבונית עסקה' if invoice.payment_method == 'monthly_billing' else DOCUMENT_TITLE
+    subject = (f'{title} {doc_ref} — הזמנה {order_ref}' if invoice.website_order_number
+               else f'{title} {doc_ref} — קוגומלו')
 
     lines = []
     html_rows = []
@@ -59,11 +69,12 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
     txn_line = f'\nאישור תשלום: {txn}' if txn else ''
     before_vat, vat_amount, gross = split_vat_inclusive(invoice.total_amount)
 
+    order_line = f'מספר הזמנה: {order_ref}\n' if invoice.website_order_number else ''
     text = (
         f'שלום {customer},\n\n'
         f'תודה על הרכישה בחנות קוגומלו!\n\n'
-        f'מספר {DOCUMENT_TITLE}: {doc_ref}\n'
-        f'מספר הזמנה: {order_ref}\n'
+        f'מספר {title}: {doc_ref}\n'
+        f'{order_line}'
         f'תאריך: {issue}\n'
         f'{txn_line}\n'
         f'המסמך מצורף למייל בקובץ PDF.\n\n'
@@ -77,8 +88,8 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
 
     html = f'''
 <div dir="rtl" style="font-family:Arial,sans-serif;color:#25326a;max-width:620px;margin:auto">
-  <h2 style="color:#303094">{DOCUMENT_TITLE} {doc_ref}</h2>
-  <p style="color:#888;margin:0 0 16px">הזמנה {order_ref} · {issue}</p>
+  <h2 style="color:#303094">{title} {doc_ref}</h2>
+  <p style="color:#888;margin:0 0 16px">{f"הזמנה {order_ref} · " if invoice.website_order_number else ""}{issue}</p>
   <p style="line-height:1.7">שלום <b>{customer}</b>,<br>תודה על הרכישה בחנות קוגומלו!</p>
   {"<p><b>אישור תשלום:</b> " + txn + "</p>" if txn else ""}
   <p style="margin-top:12px;color:#303094;font-weight:bold">המסמך מצורף למייל בקובץ PDF.</p>
@@ -103,21 +114,36 @@ def build_store_invoice_email(invoice: StoreInvoice) -> tuple[str, str, str]:
     return subject, text, html
 
 
-def send_store_invoice_email(invoice: StoreInvoice) -> bool:
+def send_store_invoice_email(invoice: StoreInvoice, *, email: str = '', any_sale: bool = False) -> bool:
     """
     Email the customer their invoice after a successful website store purchase.
     Idempotent — skips if already sent or email is missing.
+
+    `any_sale` is the signing service's call (signing.service._send_by_channel):
+    a till sale is mailed too, and so is a sale refunded after it was issued —
+    its original is still owed — to `email` when the office typed one, else the
+    buyer's address, else the child's family's. Without it, as before: a paid
+    website order, to the address it was placed with.
     """
     if invoice.invoice_email_sent_at:
         return True
 
-    if invoice.payment_status != 'completed':
-        return False
+    if any_sale:
+        from apps.documents.signing.sources import StoreSaleSource
 
-    if not invoice.website_order_number:
-        return False
+        if not StoreSaleSource(invoice).issued():
+            return False
+    else:
+        if invoice.payment_status != 'completed':
+            return False
+        if not invoice.website_order_number:
+            return False
 
-    email = (invoice.customer_email or '').strip()
+    email = (email or invoice.customer_email or '').strip()
+    if not email and any_sale:
+        from apps.documents.signing.sources import StoreSaleSource
+
+        email = StoreSaleSource(invoice).default_email
     if not email:
         logger.info('Skipping invoice email for %s: no customer_email', invoice.invoice_number)
         return False
@@ -132,6 +158,7 @@ def send_store_invoice_email(invoice: StoreInvoice) -> bool:
 
     invoice = (
         StoreInvoice.objects
+        .select_related('child')
         .prefetch_related('line_items__product')
         .get(pk=invoice.pk)
     )
