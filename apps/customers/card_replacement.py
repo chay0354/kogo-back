@@ -341,7 +341,15 @@ def _charge_one_month(
             locked.save(update_fields=['last_charge_date', 'next_billing_date', 'updated_at'])
 
             child.status = 'active'
-            child.paid_until_date = _paid_until(row.month)
+            # Never backwards, as in card_update: a month of debt paid now must
+            # not undo a later month another standing order already paid.
+            # Read fresh: another standing order of the same child may have
+            # moved it since this row was loaded.
+            child.paid_until_date = type(child).objects.filter(pk=child.pk).values_list(
+                'paid_until_date', flat=True,
+            ).first()
+            paid_until = _paid_until(row.month)
+            child.paid_until_date = max(child.paid_until_date, paid_until) if child.paid_until_date else paid_until
             child.save(update_fields=['status', 'paid_until_date', 'updated_at'])
 
             if row.override_id:

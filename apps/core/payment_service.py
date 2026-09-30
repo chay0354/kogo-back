@@ -1887,9 +1887,15 @@ class PaymentService:
     def cancel_subscription(
         self,
         recurring_payment_id: str,
-        cancellation_reason: str = ''
+        cancellation_reason: str = '',
+        recheck_status: bool = True,
     ) -> Dict:
-        """Cancel a recurring subscription locally and on Tranzila (/sto/update)."""
+        """
+        Cancel a recurring subscription locally and on Tranzila (/sto/update).
+
+        The child's status is worked out again at once, unless the caller does
+        that itself after more changes (`recheck_status=False`, change_course).
+        """
         try:
             recurring_payment = RecurringPayment.objects.select_related('child').get(
                 id=recurring_payment_id
@@ -1925,6 +1931,11 @@ class PaymentService:
         if cancellation_reason:
             recurring_payment.cancellation_reason = cancellation_reason
         recurring_payment.save(update_fields=['status', 'cancelled_at', 'cancellation_reason'])
+
+        from apps.customers.child_status import recheck_after_money_stopped
+
+        if recheck_status:
+            recheck_after_money_stopped(recurring_payment.child, reason='הוראת הקבע בוטלה')
 
         logger.info(f"Recurring payment {recurring_payment.id} cancelled")
         return {
@@ -2916,6 +2927,10 @@ class PaymentService:
                 _settle_refund_claim(claim, result)
                 payment.status = 'refunded'
                 payment.save()
+
+            from apps.customers.child_status import recheck_after_money_stopped
+
+            recheck_after_money_stopped(payment.child, reason='התשלום זוכה')
             
             log_payment_operation(
                 "REFUND_PAYMENT_SUCCESS",

@@ -85,7 +85,8 @@ class ChildAdmin(admin.ModelAdmin):
     ]
     list_filter = ['gender', 'status', 'absent_irregularly', 'subscription_start_date']
     search_fields = ['first_name', 'last_name', 'id_number', 'family__name']
-    readonly_fields = ['age', 'full_name', 'created_at', 'updated_at']
+    # The status is changed in the CRM, which asks why and records who (30.9.2026).
+    readonly_fields = ['age', 'full_name', 'status', 'created_at', 'updated_at']
     inlines = [EnrollmentInline, ChildStatusHistoryInline]
 
     def has_delete_permission(self, request, obj=None):
@@ -102,7 +103,7 @@ class ChildAdmin(admin.ModelAdmin):
         }),
         ('סטטוס ומנוי', {
             'fields': ('status', 'subscription_start_date', 'subscription_end_date', 'paid_until_date', 'trial_classes_attended'),
-            'description': 'הסטטוס מתעדכן אוטומטית על סמך התאריכים. שינויי סטטוס נרשמים אוטומטית להיסטוריה.'
+            'description': 'הסטטוס משתנה ביד רק במערכת, עם סיבה. כל שינוי נרשם בהיסטוריה.'
         }),
         ('נוכחות', {
             'fields': ('absent_irregularly',),
@@ -121,9 +122,11 @@ class ChildAdmin(admin.ModelAdmin):
     
     def update_status_action(self, request, queryset):
         """עדכן סטטוס עבור ילדים נבחרים"""
+        from apps.customers.child_status import refresh_child_status
+
         count = 0
         for child in queryset:
-            child.update_status()
+            refresh_child_status(child, reason='חושב מחדש לפי הרישומים (ממשק הניהול)', changed_by=request.user)
             count += 1
         self.message_user(request, f'סטטוס עודכן עבור {count} ילדים')
     update_status_action.short_description = 'עדכן סטטוס אוטומטית'

@@ -431,6 +431,10 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
         plan.status = 'cancelled'
         plan.save(update_fields=['status', 'updated_at'])
         plan.items.filter(status='pending').update(status='cancelled')
+
+        from apps.customers.child_status import recheck_after_money_stopped
+
+        recheck_after_money_stopped(plan.child, reason='תוכנית הצ׳קים בוטלה', changed_by=request.user)
         plan = self.get_queryset().get(pk=plan.pk)
         return Response(CheckPlanSerializer(plan).data)
 

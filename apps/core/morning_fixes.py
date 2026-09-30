@@ -56,8 +56,27 @@ AUTO_TRANSITIONS = {
 
 FIX_REASON = 'תוקן אוטומטית בשגרת הבוקר'
 
+# Why a child the rule disagrees with was left for a person to decide.
+LEFT_NOT_AUTOMATIC = 'not_automatic'
+LEFT_STILL_CHARGED = 'still_charged'
+LEFT_SET_BY_HAND = 'set_by_hand'
 
-def status_fix_candidates(*, after_id=None, budget_seconds=None, progress: dict | None = None) -> list[tuple]:
+
+def _set_by_hand(child) -> bool:
+    """Is the child's current status one the office set by hand, with a reason?"""
+    from apps.customers.child_status import MANUAL_REASON_PREFIX
+
+    latest = child.status_history.order_by('-changed_at').values('new_status', 'reason').first()
+    return bool(
+        latest and latest['new_status'] == child.status
+        and (latest['reason'] or '').startswith(MANUAL_REASON_PREFIX)
+    )
+
+
+def status_fix_candidates(
+    *, after_id=None, budget_seconds=None, progress: dict | None = None,
+    left_for_a_person: list | None = None,
+) -> list[tuple]:
     """
     (child, from, to) for every child the rule says is on the wrong status.
 
@@ -67,6 +86,11 @@ def status_fix_candidates(*, after_id=None, budget_seconds=None, progress: dict 
     morning routine was cut off right here. With a `budget_seconds` the walk
     stops when the time is up; `progress` is then filled with `last_id` (carry
     on after this child) and `finished`.
+
+    A child the rule disagrees with but the routine may not move — a
+    transition not in AUTO_TRANSITIONS, or someone still charging them — used
+    to be passed over without a word, so nobody ever saw it (30.9.2026). With
+    `left_for_a_person` each of those is added there as (child, from, to, why).
     """
     from apps.customers.child_status import (
         CHILD_STATUSES,
@@ -101,10 +125,26 @@ def status_fix_candidates(*, after_id=None, budget_seconds=None, progress: dict 
         target = resolve_child_status(child)
         if not target or target == current:
             continue
+        if target == 'payment_problem' and child.id in still_paying:
+            # A charge not made yet is not a problem: a standing order with a
+            # card is still live, and billing flags a decline by itself. On the
+            # first days of every month each paying child reads this way until
+            # its charge lands — listing them would bury the real ones.
+            continue
+        if _set_by_hand(child):
+            # Someone in the office chose this status and wrote why. The morning
+            # does not overrule a person; it names the child for one to look at.
+            if left_for_a_person is not None:
+                left_for_a_person.append((child, child.status, target, LEFT_SET_BY_HAND))
+            continue
         retired = child.status not in CHILD_STATUSES
         if not retired and (current, target) not in AUTO_TRANSITIONS:
+            if left_for_a_person is not None:
+                left_for_a_person.append((child, child.status, target, LEFT_NOT_AUTOMATIC))
             continue
         if target == 'inactive' and child.id in still_paying:
+            if left_for_a_person is not None:
+                left_for_a_person.append((child, child.status, target, LEFT_STILL_CHARGED))
             continue
         found.append((child, child.status, target))
 
@@ -121,12 +161,17 @@ def fix_child_statuses(*, after_id=None, budget_seconds=None, already_applied: i
     Called once with no arguments it does the whole list. The morning routine
     calls it in slices instead — `after_id` where the last slice stopped, and
     `already_applied` so the ceiling covers the whole morning, not each slice.
+    `needs_person` names the children the rule disagrees with that it may not
+    move by itself, so the brief can show them instead of passing them over.
     """
     from apps.customers.child_status import status_label
     from apps.customers.status_history_models import ChildStatusHistory
 
     progress: dict = {}
-    candidates = status_fix_candidates(after_id=after_id, budget_seconds=budget_seconds, progress=progress)
+    left: list = []
+    candidates = status_fix_candidates(
+        after_id=after_id, budget_seconds=budget_seconds, progress=progress, left_for_a_person=left,
+    )
     room = max(0, MAX_STATUS_FIXES_PER_MORNING - already_applied)
     applied = []
     for child, was, target in candidates[:room]:
@@ -150,6 +195,16 @@ def fix_child_statuses(*, after_id=None, budget_seconds=None, already_applied: i
         })
     return {
         'applied': applied,
+        'needs_person': [
+            {
+                'child_id': str(child.id),
+                'name': child.full_name,
+                'from': status_label(was),
+                'to': status_label(target),
+                'why': why,
+            }
+            for child, was, target, why in left
+        ],
         'waiting': max(0, len(candidates) - room),
         'last_id': progress.get('last_id'),
         'finished': progress.get('finished', True),
