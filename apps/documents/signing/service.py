@@ -565,19 +565,12 @@ def _hand_to_office(row_id) -> bool:
         row = SignedOriginal.objects.select_for_update().filter(pk=row_id).first()
         if row is None or row.is_archive_copy or not row.is_signed or row.sent_at or row.paper_original_printed_at:
             return False
-        if row.delivery == PAPER and row.delivery_reason not in (REASON_NO_EMAIL, REASON_MAIL_FAILED):
+        if row.delivery == PAPER and row.delivery_reason != REASON_NO_EMAIL:
+            # Already on the list for a reason of its own: 18ב(ד), a mail that kept failing.
             return False
         row.delivery, row.delivery_reason = PAPER, REASON_FOUND_LATE
         row.save(update_fields=['delivery', 'delivery_reason', 'updated_at'])
     logger.warning('Signing: %s was recorded late — on the hand-delivery list, not mailed', row.number)
-    return True
-
-
-def _late_to_office(row: SignedOriginal) -> bool:
-    """For the cron's mail passes: True (and on the office's list) when the row was recorded late."""
-    if not _recorded_late(row, load_source(row.kind, row.source_id)):
-        return False
-    _hand_to_office(row.pk)
     return True
 
 
@@ -669,7 +662,7 @@ def _give_original(kind: str, obj, summary: dict) -> None:
     original, through its channel's exit and claim_email (so never twice);
     found later it goes on the hand-delivery list (REASON_FOUND_LATE). An
     original that cannot be signed now stays held with the reason, and the
-    passes above sign it — and, through _late_to_office, keep a late one off
+    passes above sign it — and, through _recorded_late, keep a late one off
     the customer's mailbox.
     """
     source = source_for(kind, obj)
@@ -783,8 +776,10 @@ def sign_pending(*, limit: int = 25) -> dict:
     due = unsent.filter(delivery__in=(HELD, EMAIL)).order_by('updated_at')
     for row in due[:limit]:
         try:
-            if _late_to_office(row):
-                summary['late_to_office'] += 1
+            if _recorded_late(row, load_source(row.kind, row.source_id)):
+                # Found late: the office's list, never the customer's mailbox by itself.
+                if _hand_to_office(row.pk):
+                    summary['late_to_office'] += 1
                 continue
             if _send_by_channel(row):
                 summary['sent'] += 1
