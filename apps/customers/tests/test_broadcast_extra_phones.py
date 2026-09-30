@@ -127,11 +127,22 @@ class ExtraPhonesBroadcastTest(_Studio):
         self.assertEqual((extra['status'], extra['reason']), ('skipped', 'not_mobile'))
         self.assertNotIn('97235551234', res.data['phones'])
 
-    def test_another_familys_own_phone_is_not_used_up_as_an_extra(self):
-        # The grandmother is Levi's parent too: Tom's own message is hers, and
-        # Noa's family's copy must not take its place.
+    def test_parents_go_first_so_an_extra_never_takes_another_familys_own_message(self):
+        # The grandmother is Levi's parent too. Noa comes first in the list,
+        # yet Tom's own message is the one that reaches her; Noa's extra copy
+        # is the duplicate.
         Parent.objects.filter(pk=self.grandma.pk).update(phone='0502222222')
         res = self._post(child_ids=[str(self.noa.id), str(self.tom.id)])
         by_name = {r['child_name']: r for r in res.data['results']}
-        self.assertEqual(by_name['Noa Cohen']['extra_phones'][0]['reason'], 'other_family_phone')
         self.assertEqual(by_name['Tom Levi']['status'], 'preview')
+        self.assertEqual(by_name['Noa Cohen']['extra_phones'][0]['reason'], 'duplicate_phone')
+        # Without Tom in the send, she gets Noa's message as the extra phone she is.
+        res = self._post(child_ids=[str(self.noa.id)])
+        self.assertEqual(res.data['results'][0]['extra_phones'][0]['status'], 'preview')
+
+    def test_a_real_send_goes_to_every_parent_before_any_extra(self):
+        with CONFIGURED, patch('apps.customers.broadcast.ManyChatService.notify_registration',
+                               return_value={'sent': True}) as send:
+            self._post(child_ids=[str(self.noa.id), str(self.tom.id)], dry_run=False)
+        self.assertEqual([c.kwargs['phone'] for c in send.call_args_list],
+                         ['0501111111', '0502222222', '052-555-6666'])
