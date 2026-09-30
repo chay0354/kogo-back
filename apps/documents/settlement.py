@@ -321,6 +321,17 @@ def _actor(user):
     return user if getattr(user, 'is_authenticated', False) else None
 
 
+def _wanted(rows) -> list[tuple[str, Decimal]]:
+    """[(invoice id, amount)] from [{invoice_id, amount}] — every amount above zero."""
+    wanted = []
+    for row in rows or []:
+        amount = money(row.get('amount'))
+        if amount <= 0:
+            raise SettlementError('הסכום שנסגר בכל חשבונית חייב להיות גדול מאפס')
+        wanted.append((str(row.get('invoice_id') or ''), amount))
+    return wanted
+
+
 @transaction.atomic
 def record_settlements(payer: FormalDocument, rows, *, user=None) -> list[DocumentSettlement]:
     """
@@ -335,14 +346,64 @@ def record_settlements(payer: FormalDocument, rows, *, user=None) -> list[Docume
     with the reason; the caller's transaction then rolls the payer back too,
     number and all.
     """
-    wanted = []
-    for row in rows or []:
-        amount = money(row.get('amount'))
-        if amount <= 0:
-            raise SettlementError('הסכום שנסגר בכל חשבונית חייב להיות גדול מאפס')
-        wanted.append((str(row.get('invoice_id') or ''), amount))
+    wanted = _wanted(rows)
     if not wanted:
         return []
+    payer, invoices = _checked(payer, wanted)
+    return [
+        DocumentSettlement.objects.create(
+            payer=payer,
+            invoice=invoices[invoice_id],
+            invoice_number=invoices[invoice_id].document_number,
+            invoice_kind=DocumentSettlement.KIND_FORMAL,
+            amount=amount,
+            created_by=_actor(user),
+        )
+        for invoice_id, amount in wanted
+    ]
+
+
+def check_draft_settlements(draft: FormalDocument, target_type: str, rows) -> list[dict]:
+    """
+    The settlements a draft receipt or invoice-receipt will record when it is
+    approved ([{invoice_id, invoice_number, amount}]), checked now by the rules
+    of record_settlements as if it were already a `target_type` — so the
+    office hears at once that an invoice is closed, or another customer's.
+
+    Nothing is written: a draft pays nothing, and an invoice it names stays
+    open (and open to other receipts) until it is approved. The approval
+    checks them again, against the balances of that moment
+    (service.finalize_draft → settle_on_issue).
+    """
+    wanted = _wanted(rows)
+    if not wanted:
+        return []
+    # The draft as the document it will become: its type, customer and what it
+    # can settle, as saved (the caller's copy may hold ids as it was given
+    # them). Unsaved — never a row, never a payer in any balance.
+    saved = FormalDocument.objects.get(pk=draft.pk)
+    probe = FormalDocument(
+        pk=saved.pk,
+        document_number=saved.document_number,
+        document_type=target_type,
+        child_id=saved.child_id,
+        business_customer_id=saved.business_customer_id,
+        total_amount=saved.total_amount,
+        withholding_amount=saved.withholding_amount,
+    )
+    _, invoices = _checked(probe, wanted, lock_payer=False)
+    return [
+        {'invoice_id': invoice_id, 'invoice_number': invoices[invoice_id].document_number, 'amount': str(amount)}
+        for invoice_id, amount in wanted
+    ]
+
+
+def _checked(payer: FormalDocument, wanted, *, lock_payer: bool = True):
+    """
+    record_settlements' checks, under the invoices' row locks (then the
+    payer's). Returns (payer as read under its lock, {invoice id: invoice});
+    raises SettlementError with the reason.
+    """
     allowed = PAYER_FOR.get(payer.document_type)
     if allowed is None:
         raise SettlementError('חשבונית נסגרת בקבלה או בחשבונית מס/קבלה בלבד')
@@ -354,7 +415,8 @@ def record_settlements(payer: FormalDocument, rows, *, user=None) -> list[Docume
         str(doc.pk): doc
         for doc in FormalDocument.objects.select_for_update().filter(pk__in=ids).order_by('pk')
     }
-    payer = FormalDocument.objects.select_for_update().get(pk=payer.pk)
+    if lock_payer:
+        payer = FormalDocument.objects.select_for_update().get(pk=payer.pk)
     for invoice_id, _ in wanted:
         invoice = invoices.get(invoice_id)
         if invoice is None:
@@ -389,18 +451,7 @@ def record_settlements(payer: FormalDocument, rows, *, user=None) -> list[Docume
             f'{payer.get_document_type_display()} ({money_text(capacity)}). '
             'מסמך סוגר לכל היותר את מה שהתקבל בו.'
         )
-
-    return [
-        DocumentSettlement.objects.create(
-            payer=payer,
-            invoice=invoices[invoice_id],
-            invoice_number=invoices[invoice_id].document_number,
-            invoice_kind=DocumentSettlement.KIND_FORMAL,
-            amount=amount,
-            created_by=_actor(user),
-        )
-        for invoice_id, amount in wanted
-    ]
+    return payer, invoices
 
 
 def settle_on_issue(payer: FormalDocument, data: dict, *, user=None) -> list[DocumentSettlement]:
@@ -424,7 +475,13 @@ def settle_on_issue(payer: FormalDocument, data: dict, *, user=None) -> list[Doc
     invoice = FormalDocument.objects.filter(document_number=number, document_type='tax_invoice').first()
     if invoice is None or not _same_customer(payer, invoice):
         return []
-    left = balance_of(invoice).open
+    # What the invoice owes apart from this receipt: the receipt's own link
+    # already reads as a payment (rule 2) until its row is written — counted,
+    # a receipt of 700 on an invoice of 1,180 recorded 480, and one of 1,180
+    # recorded nothing (the rule _checked measures by).
+    line = balance_of(invoice)
+    own = sum((f.amount for f in line.facts if f.payer_id == payer.pk and f.source == SOURCE_LINKED_RECEIPT), ZERO)
+    left = money(max(ZERO, line.total - (line.paid - own) - line.credited))
     amount = min(left, payer_capacity(payer))
     if amount <= 0:
         return []

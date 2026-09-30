@@ -283,6 +283,12 @@ def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
             'source': 'tranzila' if doc.tranzila_issued else 'local',
             'tranzila_issued': doc.tranzila_issued,
             'is_draft': doc.document_type == 'draft',
+            # What a draft becomes when approved (a receipt, an invoice-receipt…).
+            'draft_target_type': (doc.draft_target_type or 'tax_invoice') if is_draft else '',
+            # A credit note counts for VAT once the customer confirmed it (הוראה 23א(3)).
+            'customer_ack_at': doc.customer_ack_at.isoformat() if is_credit and doc.customer_ack_at else None,
+            # The private customer, so a credit note can be opened from the row (the business one is below).
+            'child_id': str(doc.child_id) if doc.child_id else None,
             # מספר הקצאה: the number itself, and whether this row is one that
             # needs one. The threshold lives in one place; the screen reads the
             # answer rather than recomputing it.

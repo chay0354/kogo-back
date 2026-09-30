@@ -254,6 +254,11 @@ class FormalDocument(models.Model):
     customer_name = models.CharField(max_length=200, null=True, blank=True, verbose_name="שם לקוח")
     # For drafts: the document type it becomes when approved.
     draft_target_type = models.CharField(max_length=30, blank=True, verbose_name="סוג מסמך לאחר אישור")
+    # A draft receipt's or invoice-receipt's chosen settlements ([{invoice_id,
+    # invoice_number, amount}]): recorded as DocumentSettlement rows only when
+    # it is approved, checked then against the balances of that moment. Never
+    # a settlement before — a draft pays nothing. Cleared on approval.
+    draft_settlements = models.JSONField(null=True, blank=True, verbose_name="סגירות שייכתבו באישור הטיוטה")
 
     # Income tagging: explicit, or inherited from the business customer.
     business = models.ForeignKey(
