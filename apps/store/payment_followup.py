@@ -719,6 +719,12 @@ def find_unreported_payment(invoice: StoreInvoice, rows: Optional[list[dict]] = 
         if rows is None:
             return 'unknown', []
     terminal = (TranzilaService.iframe().terminal or '').strip()
+    # A number this order already holds — its own, or one kept beside it in
+    # any state (a person released it, the report ruled it out) — is known,
+    # not a lost payment to be found again.
+    own = {(invoice.tranzila_transaction_id or '').strip()} | {
+        str(entry.get('index')) for entry in invoice.other_transactions or []
+    }
     matches = []
     for row in rows:
         if not is_tranzila_approved(row.get('processor_response_code') or row.get('response_code')):
@@ -731,7 +737,7 @@ def find_unreported_payment(invoice: StoreInvoice, rows: Optional[list[dict]] = 
         if made_at is None or made_at < opened - TRANSACTION_CLOCK_SKEW:
             continue
         index = str(row.get('index') or row.get('transaction_index') or '').strip()
-        if not index.isdigit():
+        if not index.isdigit() or index in own:
             continue
         pdesc = str(row.get('pdesc') or '').strip()
         if pdesc and invoice_id_from_pdesc(pdesc) != str(invoice.pk):

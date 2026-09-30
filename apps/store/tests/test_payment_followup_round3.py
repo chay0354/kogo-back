@@ -317,6 +317,18 @@ class ReleaseToolTest(ReviewBase):
         self.assertEqual((log['action'], log['by'], log['reason']), ('release', user.email, 'נבדק בטרנזילה: אין עסקה כזאת'))
         self.assertTrue(log['at'])
 
+    def test_a_released_charge_is_not_found_again(self):
+        # The manager checked: the report's charge was the other website's.
+        invoice = self.invoice()
+        _opened(invoice, 5)
+        self.day_rows = [paid_row(index='555555')]
+        self.assertEqual(self.initiate().status_code, 409)
+        manager, _user = _manager_client()
+        manager.post(self.url(invoice), {'action': 'release', 'reason': 'שייך לאתר השני'}, format='json')
+        self.assertIn('iframe_url', self.initiate().json())
+        sweep = payment_followup.sweep_stuck_store_payments()
+        self.assertEqual(sweep['unexplained'], [])
+
     def test_complete_after_verification_needs_the_report(self):
         invoice = self.in_review()
         manager, _user = _manager_client()
