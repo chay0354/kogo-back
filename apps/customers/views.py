@@ -416,8 +416,13 @@ class ChildViewSet(viewsets.ModelViewSet):
         Send one ManyChat automation to the parents of the selected children.
 
         Body: {child_ids: [...] (≤ BROADCAST_MAX_CHILDREN), automation_type: 'kind'|'flow',
-               automation_id, dry_run (default true), skip_phones: [...]}.
+               automation_id, dry_run (default true), skip_phones: [...],
+               include_extra_phones (default false)}.
         Manager only. Nothing is sent unless dry_run is explicitly false.
+
+        The family's extra phones get the message only when the request asks
+        (include_extra_phones: true) — the screen that shows and counts them
+        asks; a screen that does not know them never sends more than it showed.
         """
         from apps.customers.broadcast import BROADCAST_MAX_CHILDREN, broadcast_to_children
 
@@ -432,6 +437,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             raw_dry_run is False
             or (isinstance(raw_dry_run, str) and raw_dry_run.strip().lower() in ('false', '0', 'no'))
         )
+        include_extras = request.data.get('include_extra_phones') is True
         lesson_hint = str(request.data.get('lesson_id') or '').strip() or None
         day_hint = request.data.get('day_of_week')
         try:
@@ -488,6 +494,7 @@ class ChildViewSet(viewsets.ModelViewSet):
             service=svc,
             lesson_id=lesson_hint,
             day_of_week=day_hint,
+            include_extra_phones=include_extras,
         )
         payload['automation_label'] = (
             ManyChatService.AUTOMATION_LABELS.get(automation_id) if automation_type == 'kind' else automation_id
@@ -653,12 +660,40 @@ class ChildViewSet(viewsets.ModelViewSet):
         - POST /api/v1/customers/children/{id}/update_status/
         Also used by Django admin action
         """
+        from apps.customers.child_status import refresh_child_status
+
+        # Through the rule every other path uses, with a history line. It used
+        # to go by the subscription dates alone (Child.calculate_status), which
+        # put a child paying by cheque with an old start date on בעיה באשראי.
         child = self.get_object()
-        child.update_status()
+        refresh_child_status(child, reason='חושב מחדש לפי הרישומים', changed_by=request.user)
         return Response({
             'status': child.status,
             'message': f'Status updated to: {child.status}'
         }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='status-history')
+    def status_history(self, request, pk=None):
+        """Every recorded status change of the child, newest first: when, from, to, why, and who."""
+        from apps.customers.child_status import status_label
+
+        child = self.get_object()
+        rows = child.status_history.select_related('changed_by').order_by('-changed_at')
+        return Response([
+            {
+                'id': str(row.id),
+                'changed_at': row.changed_at,
+                'previous_status': row.previous_status,
+                'previous_label': status_label(row.previous_status),
+                'new_status': row.new_status,
+                'new_label': status_label(row.new_status),
+                'reason': row.reason,
+                'changed_by_name': (
+                    (row.changed_by.get_full_name() or row.changed_by.username) if row.changed_by else None
+                ),
+            }
+            for row in rows
+        ])
     
     @action(detail=True, methods=['get'])
     def absence_history(self, request, pk=None):
@@ -842,6 +877,46 @@ class ChildViewSet(viewsets.ModelViewSet):
             },
             'message': 'תלמיד רפאים נוצר בהצלחה'
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch'], url_path='details')
+    def details(self, request, pk=None):
+        """
+        PATCH /api/v1/customers/children/{id}/details/ — the office edits the
+        customer from the child's card: the child, the primary parent, the family
+        and the extra phones, in one transaction (customers/customer_details.py).
+
+        400 {'errors': {path: reason}} — nothing saved.
+        409 {'duplicates': [...]} — a phone or parent ID of another family;
+            nothing saved until the request is sent again with confirm_duplicates.
+        200 {'child': <the card's row, or null if it is gone>, 'changes': [...]}.
+        """
+        from apps.customers.customer_details import (
+            CustomerDetailsDuplicate, CustomerDetailsError, update_customer_details,
+        )
+
+        child = self.get_object()
+        try:
+            changes = update_customer_details(
+                child,
+                request.data,
+                user=request.user,
+                # A partner is not told the names of families outside their branches.
+                reveal_names=not is_scoped_partner(request.user),
+            )
+        except CustomerDetailsError as exc:
+            return Response({'errors': exc.errors}, status=status.HTTP_400_BAD_REQUEST)
+        except CustomerDetailsDuplicate as exc:
+            return Response({'duplicates': exc.duplicates}, status=status.HTTP_409_CONFLICT)
+
+        # Read back through the list's queryset and serializer, so the card gets
+        # the same row the table does. The save may have folded a duplicate of
+        # this child into another record (signals.py), in which case it is gone.
+        fresh = self.get_queryset().filter(pk=child.pk).first()
+        row = (
+            ChildWithDetailsSerializer(fresh, context=self.get_serializer_context()).data
+            if fresh is not None else None
+        )
+        return Response({'child': row, 'changes': changes})
 
     @action(detail=True, methods=['get'], url_path='documents')
     def documents(self, request, pk=None):

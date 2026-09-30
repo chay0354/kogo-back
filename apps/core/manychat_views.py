@@ -13,6 +13,7 @@ from apps.core.manychat_contact_index import (
     SCOPE_STATUSES,
     contact_index_csv,
     contact_index_phones,
+    contact_index_rows,
 )
 from apps.core.manychat_service import ContactLinkError, ManyChatError, ManyChatService, manychat_error_detail
 from apps.core.permissions import IsManager
@@ -225,7 +226,7 @@ class WhatsAppViewSet(viewsets.ViewSet):
         scope = (request.query_params.get('scope') or SCOPE_CURRENT).strip()
         if scope not in SCOPE_STATUSES:
             return Response({'error': 'scope לא מוכר'}, status=status.HTTP_400_BAD_REQUEST)
-        response = HttpResponse(contact_index_csv(contact_index_phones(scope)), content_type='text/csv; charset=utf-8')
+        response = HttpResponse(contact_index_csv(contact_index_rows(scope)), content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = f'attachment; filename="manychat-contacts-{scope}.csv"'
         return response
 

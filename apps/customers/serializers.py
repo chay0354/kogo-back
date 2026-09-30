@@ -289,6 +289,14 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     family_email = serializers.CharField(source='family.email', read_only=True)
     family_address = serializers.CharField(source='family.address', read_only=True)
     parent_email = serializers.SerializerMethodField()
+    # What the card's edit form starts from (customers/customer_details.py).
+    parent_first_name = serializers.SerializerMethodField()
+    parent_last_name = serializers.SerializerMethodField()
+    family_notes = serializers.CharField(source='family.notes', read_only=True)
+    # Every other parent on the family — the phones that also get group messages.
+    extra_phones = serializers.SerializerMethodField()
+    # False for a walk-in: its family is a placeholder, not a household to edit.
+    family_editable = serializers.SerializerMethodField()
     # Brothers and sisters on the same family, so the office can move between the
     # children of one household without going back through the search.
     siblings = serializers.SerializerMethodField()
@@ -323,6 +331,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'family_id', 'family_name', 'family_phone',
             'branch_id', 'branch_name',
             'parent_name', 'parent_phone', 'parent_id', 'parent_id_number', 'parent_email', 'family_email', 'family_address',
+            'parent_first_name', 'parent_last_name', 'family_notes', 'extra_phones', 'family_editable', 'notes',
             # NEW status fields
             'status', 'paid_until_date', 'trial_classes_attended',
             'absent_irregularly', 'is_ghost_visible',
@@ -402,6 +411,22 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         if parent and parent.email:
             return parent.email
         return obj.family.email or None
+
+    def get_parent_first_name(self, obj):
+        parent = self._primary_parent(obj)
+        return parent.first_name if parent else None
+
+    def get_parent_last_name(self, obj):
+        parent = self._primary_parent(obj)
+        return parent.last_name if parent else None
+
+    def get_extra_phones(self, obj):
+        from apps.customers.customer_details import extra_phones_of
+        return extra_phones_of(obj.family.parents.all())
+
+    def get_family_editable(self, obj):
+        from apps.customers.customer_details import family_is_shared
+        return obj.status != 'ghost' and not family_is_shared(obj.family)
 
     def get_parent_id(self, obj):
         """
@@ -534,14 +559,49 @@ class ChildCreateSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSeriali
 
 class ChildUpdateSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSerializer):
     """עדכון ילד"""
+    # Owner, 30.9.2026: a status changed by hand says why, and the change is
+    # kept in the child's history with who made it.
+    status_reason = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=500)
+
     class Meta:
         model = Child
         fields = [
             'first_name', 'last_name', 'birth_date', 'gender',
             'id_number', 'phone_number', 'status', 'subscription_start_date',
             'subscription_end_date', 'paid_until_date', 'trial_classes_attended', 
-            'absent_irregularly', 'notes'
+            'absent_irregularly', 'notes', 'status_reason',
         ]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        new_status = attrs.get('status')
+        if self.instance is not None and new_status is not None and new_status != self.instance.status:
+            if len((attrs.get('status_reason') or '').strip()) < 2:
+                raise serializers.ValidationError({'status_reason': 'חובה לכתוב למה הסטטוס משתנה.'})
+        return attrs
+
+    def update(self, instance, validated_data):
+        from django.db import transaction
+
+        from apps.customers.child_status import MANUAL_REASON_PREFIX
+        from apps.customers.status_history_models import ChildStatusHistory
+
+        reason = (validated_data.pop('status_reason', '') or '').strip()
+        was = instance.status
+        new_status = validated_data.get('status', was)
+        if new_status == was:
+            return super().update(instance, validated_data)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        with transaction.atomic():
+            instance._status_history_written = True  # the row below, with who and why
+            instance = super().update(instance, validated_data)
+            ChildStatusHistory.objects.create(
+                child=instance, previous_status=was, new_status=new_status,
+                reason=f'{MANUAL_REASON_PREFIX}: {reason}',
+                changed_by=user if getattr(user, 'is_authenticated', False) else None,
+            )
+        return instance
 
 
 # Store serializers moved to apps.store.serializers

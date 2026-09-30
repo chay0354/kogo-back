@@ -41,6 +41,11 @@ PROBE_SUM = Decimal('1.00')
 PROBE_DESCRIPTION = 'בדיקת כרטיס שמור'
 # Page modes that make a token: J2 check (NK), J5 check (VK), token only (K).
 PAGE_TRANMODES = ('NK', 'VK', 'K')
+# How such a page shows in the report: an NK page came back as tranmode 'N',
+# txn_type J2, approval number 0000000 (cogolive, 29.9.2026) — the K is not
+# kept. A row of these modes is a card check; it saved a card when it carries
+# a token.
+CHECK_ROW_TRANMODES = frozenset({'N', 'V', 'K', 'NK', 'VK'})
 REPORT_TZ = ZoneInfo('Asia/Jerusalem')
 _SKEW = timedelta(minutes=10)
 
@@ -78,6 +83,11 @@ def _describe(row: dict) -> dict:
         'made_at': made_at.isoformat() if made_at else None,
         'has_token': bool(str(row.get('credit_card_token') or '').strip()),
         'has_expiry': bool(row.get('expiration_month') and row.get('expiration_year')),
+        'txn_type': str(row.get('txn_type') or ''),
+        'authorization_number': str(row.get('authorization_number') or ''),
+        # Which fields the report carries for a check (names only): what can
+        # tie a row to the order that opened its page.
+        'fields': sorted(str(key) for key in row.keys()),
     }
 
 
@@ -107,7 +117,7 @@ def find_rows(*, since: Optional[datetime] = None) -> dict:
     rows = []
     for row in response.get('transactions') or []:
         mode = str(row.get('tranmode') or '').strip().upper()
-        if not mode.endswith('K') or mode == 'AK':
+        if mode not in CHECK_ROW_TRANMODES:
             continue
         made_at = _report_time(row)
         if since is not None and made_at is not None and made_at < since - _SKEW:
@@ -128,8 +138,8 @@ def _page_row(index: str) -> dict:
     if not row:
         raise ProbeError('העסקה לא נמצאה בדוח של המסוף')
     mode = str(row.get('tranmode') or '').strip().upper()
-    if not mode.endswith('K') or mode == 'AK':
-        raise ProbeError(f'העסקה הזאת לא נוצרה בעמוד ששומר כרטיס (tranmode {mode})')
+    if mode not in CHECK_ROW_TRANMODES:
+        raise ProbeError(f'העסקה הזאת אינה בדיקת כרטיס (tranmode {mode})')
     if not is_tranzila_approved(row.get('processor_response_code')):
         raise ProbeError('העסקה לא אושרה')
     if not str(row.get('credit_card_token') or '').strip():

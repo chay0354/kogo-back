@@ -4,16 +4,29 @@ Store Serializers - API Serialization for Store Models
 import uuid
 
 from django.db import transaction, IntegrityError
-from rest_framework import serializers
+from rest_framework import serializers, status
+from rest_framework.exceptions import APIException
 from apps.store.models import StoreProduct, StoreProductSize, StoreInvoice, StoreSale, InventoryAdjustment
 from apps.core.models import Branch
 from apps.customers.models import Child
+
+
+class StockChangedSinceOpened(APIException):
+    """The stock the office changed moved under it (a sale, an update) since the form was opened."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_code = 'stock_changed'
 
 
 class StoreProductSizeSerializer(serializers.ModelSerializer):
     """Serializer for per-size stock rows."""
 
     branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
+    # An empty size is a real row: a product without sizes keeping its stock
+    # per location (see _normalize_size_stocks). The model field has no
+    # blank=True, so the nested serializer refused "" before the normalizer
+    # that accepts it ever ran.
+    size = serializers.CharField(max_length=20, allow_blank=True, required=False, default='')
 
     class Meta:
         model = StoreProductSize
@@ -125,6 +138,56 @@ def _normalize_size_stocks(value):
     return sorted(cleaned.values(), key=lambda e: (e['sort_order'], e['size'], e['branch'] or ''))
 
 
+def _row_key(size, branch) -> tuple:
+    branch_id = _coerce_branch_pk_string(branch)
+    return ((size or '').strip(), branch_id)
+
+
+def _row_label(key: tuple) -> str:
+    size, branch_id = key
+    place = 'משלוח'
+    if branch_id:
+        place = Branch.objects.filter(pk=branch_id).values_list('name', flat=True).first() or 'סניף'
+    return f'{size} · {place}' if size else place
+
+
+def _record_recount(product, row, delta: int, label: str, user) -> None:
+    if not delta:
+        return
+    InventoryAdjustment.objects.create(
+        product=product,
+        size_stock=row if row is not None and row.pk else None,
+        quantity_delta=int(delta),
+        reason='recount',
+        note=f'עדכון בחלון עריכת מוצר — {label}',
+        adjusted_by=user,
+    )
+
+
+def _read_expected(expected):
+    """({(size, branch): qty} or None, flat qty or None) from the form's stock_expected."""
+    if not isinstance(expected, dict):
+        return None, None
+    rows = None
+    if isinstance(expected.get('rows'), list):
+        rows = {}
+        for entry in expected['rows']:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                qty = int(entry.get('stock_quantity') or 0)
+            except (TypeError, ValueError):
+                continue
+            key = _row_key(entry.get('size'), entry.get('branch'))
+            rows[key] = rows.get(key, 0) + qty
+    flat = expected.get('stock_quantity')
+    try:
+        flat = int(flat) if flat is not None else None
+    except (TypeError, ValueError):
+        flat = None
+    return rows, flat
+
+
 class StoreProductSerializer(serializers.ModelSerializer):
     """Serializer for StoreProduct model."""
 
@@ -132,6 +195,9 @@ class StoreProductSerializer(serializers.ModelSerializer):
     is_low_stock = serializers.BooleanField(read_only=True)
     profit_margin = serializers.DecimalField(max_digits=5, decimal_places=2, read_only=True)
     size_stocks = StoreProductSizeSerializer(many=True, required=False)
+    # What the edit form loaded, so the save changes only what the office
+    # changed: {"rows": [{size, branch, stock_quantity}], "stock_quantity": n}.
+    stock_expected = serializers.JSONField(write_only=True, required=False)
     # B2C sync often stores site-relative paths (/images/...) — not strict URLs.
     image_url = serializers.CharField(required=False, allow_blank=True, max_length=500)
     # The model has a default but no blank=True, so DRF rejected ''. Both product
@@ -150,7 +216,7 @@ class StoreProductSerializer(serializers.ModelSerializer):
             'image_url', 'notes', 'is_active',
             'website_legacy_id', 'branch_only',
             'profit_margin',
-            'size_stocks',
+            'size_stocks', 'stock_expected',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -197,45 +263,153 @@ class StoreProductSerializer(serializers.ModelSerializer):
             return ''
         return str(value).strip()
 
-    def _sync_size_stocks(self, product, size_stocks):
+    def _sync_size_stocks(self, product, size_stocks, *, expected_rows=None, record=True):
         """
-        Replace the product's size rows with the provided list and keep the
-        derived `size` (CSV) and `stock_quantity` (total) fields in sync.
-        Sets `product.branch` to the first row's branch when any row has a branch.
-        """
-        try:
-            product.size_stocks.all().delete()
-            for entry in size_stocks:
-                StoreProductSize.objects.create(
-                    product=product,
-                    size=entry['size'],
-                    stock_quantity=entry['stock_quantity'],
-                    sort_order=entry['sort_order'],
-                    branch_id=entry.get('branch'),
-                )
+        Bring the product's stock rows to the list the office saved, keyed by
+        (size, location): rows that are there are updated in place, new ones
+        added, missing ones removed. Keeps the derived `size` (CSV),
+        `stock_quantity` (total) and `branch` (first row's) in step.
 
-            if size_stocks:
-                product.size = ','.join(dict.fromkeys(entry['size'] for entry in size_stocks))
-                product.stock_quantity = sum(entry['stock_quantity'] for entry in size_stocks)
-                first_branch = None
-                for entry in size_stocks:
-                    if entry.get('branch'):
-                        first_branch = entry['branch']
-                        break
-                product.branch_id = first_branch
+        The rows keep their ids. The till's cart, a pending website order and
+        the write-off history all point at a row by id; deleting and
+        re-creating every row on each save broke all three.
+
+        With `expected_rows` — {(size, branch): qty} as the form loaded them —
+        a row the office did not change keeps what it holds now (a sale since
+        the form opened is not undone), and a row the office did change must
+        still hold what the form loaded, or the save is refused. Every change
+        in quantity is written to the stock history as a recount.
+        """
+        rows = list(StoreProductSize.objects.select_for_update().filter(product=product).order_by('sort_order', 'size'))
+        current: dict[tuple, list] = {}
+        for row in rows:
+            current.setdefault(_row_key(row.size, row.branch_id), []).append(row)
+
+        def held(key) -> int:
+            return sum(int(r.stock_quantity or 0) for r in current.get(key, []))
+
+        wanted = {_row_key(e['size'], e.get('branch')): e for e in size_stocks}
+        conflicts: list[str] = []
+
+        # Rows the office removed.
+        removed = []
+        for key, found in current.items():
+            if key in wanted:
+                continue
+            if expected_rows is not None and key not in expected_rows:
+                # Added by someone else after the form was opened: not the office's to remove.
+                continue
+            if expected_rows is not None and held(key) != expected_rows[key]:
+                conflicts.append(_row_label(key))
+                continue
+            removed.append((key, found))
+
+        plan: list[tuple] = []  # (key, entry, qty)
+        for key, entry in wanted.items():
+            qty = int(entry['stock_quantity'])
+            if expected_rows is not None and key in expected_rows:
+                if key not in current:
+                    conflicts.append(_row_label(key))
+                    continue
+                if qty == expected_rows[key]:
+                    qty = held(key)                      # untouched: keep what is there now
+                elif held(key) != expected_rows[key]:
+                    conflicts.append(_row_label(key))
+                    continue
+            plan.append((key, entry, qty))
+
+        if conflicts:
+            raise StockChangedSinceOpened(
+                'המלאי השתנה מאז שנפתח החלון (מכירה או עדכון מלאי) בשורות: '
+                + ', '.join(conflicts)
+                + '. סגרו את החלון, פתחו אותו מחדש ועדכנו שוב.'
+            )
+
+        try:
+            for key, found in removed:
+                for row in found:
+                    # The history row outlives the stock row (size_stock → NULL); its note keeps the place.
+                    if row.stock_quantity:
+                        if record:
+                            _record_recount(product, row, -int(row.stock_quantity), _row_label(key), self._user())
+                    row.delete()
+
+            for key, entry, qty in plan:
+                found = current.get(key, [])
+                if found:
+                    row, extra = found[0], found[1:]
+                    before = held(key)
+                    for dup in extra:
+                        # Two rows for one size and place (NULL locations are not unique in
+                        # the database): the saved quantity is the one row's now.
+                        dup.delete()
+                    fields = []
+                    if row.stock_quantity != qty:
+                        row.stock_quantity = qty
+                        fields.append('stock_quantity')
+                    if row.sort_order != entry['sort_order']:
+                        row.sort_order = entry['sort_order']
+                        fields.append('sort_order')
+                    if fields:
+                        row.save(update_fields=[*fields, 'updated_at'])
+                    if record and qty != before:
+                        _record_recount(product, row, qty - before, _row_label(key), self._user())
+                else:
+                    row = StoreProductSize.objects.create(
+                        product=product,
+                        size=entry['size'],
+                        stock_quantity=qty,
+                        sort_order=entry['sort_order'],
+                        branch_id=entry.get('branch'),
+                    )
+                    if record and qty:
+                        _record_recount(product, row, qty, _row_label(key), self._user())
+
+            remaining = list(StoreProductSize.objects.filter(product=product).order_by('sort_order', 'size'))
+            if remaining:
+                product.size = ','.join(dict.fromkeys(r.size for r in remaining if r.size))
+                product.stock_quantity = sum(int(r.stock_quantity or 0) for r in remaining)
+                product.branch_id = next((r.branch_id for r in remaining if r.branch_id), None)
                 product.save(update_fields=['size', 'stock_quantity', 'branch', 'updated_at'])
         except IntegrityError as exc:
             raise serializers.ValidationError(
                 {
                     'size_stocks': [
-                        'שמירת שורות המלאי נכשלה (בדרך כלל בגלל אילוץ במסד הנתונים). '
-                        'אם הוספתם אותה מידה במספר מיקומים, הריצו: python manage.py migrate store '
-                        'ובדקו שאין שתי שורות זהות (אותה מידה ואותו מיקום).'
+                        'שמירת שורות המלאי נכשלה: אותה מידה באותו מיקום מופיעה פעמיים.'
                     ]
                 }
             ) from exc
 
+    def _user(self):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return user if getattr(user, 'is_authenticated', False) else None
+
+    def _apply_flat_stock(self, instance, validated_data, expected):
+        """
+        A product without stock rows keeps one number. When the form says what
+        it loaded, an unchanged number keeps what is there now, and a changed
+        one needs nothing to have moved it meanwhile. The change is recorded.
+        """
+        if 'stock_quantity' not in validated_data or instance.size_stocks.exists():
+            return None
+        new = int(validated_data['stock_quantity'])
+        locked = StoreProduct.objects.select_for_update().get(pk=instance.pk)
+        now = int(locked.stock_quantity or 0)
+        if expected is not None:
+            loaded = int(expected)
+            if new == loaded:
+                validated_data.pop('stock_quantity')
+                return None
+            if now != loaded:
+                raise StockChangedSinceOpened(
+                    f'המלאי השתנה מאז שנפתח החלון (עכשיו {now}, כשנפתח {loaded}). '
+                    'סגרו את החלון, פתחו אותו מחדש ועדכנו שוב.'
+                )
+        return new - now
+
     def create(self, validated_data):
+        validated_data.pop('stock_expected', None)
         size_stocks = validated_data.pop('size_stocks', None)
         with transaction.atomic():
             product = super().create(validated_data)
@@ -247,10 +421,43 @@ class StoreProductSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         size_stocks = validated_data.pop('size_stocks', None)
+        expected = validated_data.pop('stock_expected', None)
+        expected_rows, expected_flat = _read_expected(expected)
         with transaction.atomic():
+            if size_stocks and not StoreProductSize.objects.filter(product=instance).exists():
+                return self._convert_to_rows(instance, validated_data, size_stocks, expected_rows, expected_flat)
+            flat_delta = self._apply_flat_stock(instance, validated_data, expected_flat)
             product = super().update(instance, validated_data)
+            if flat_delta:
+                _record_recount(product, None, flat_delta, 'מלאי כללי', self._user())
             if size_stocks is not None:
-                self._sync_size_stocks(product, size_stocks)
+                self._sync_size_stocks(product, size_stocks, expected_rows=expected_rows)
+        return product
+
+
+    def _convert_to_rows(self, instance, validated_data, size_stocks, expected_rows, expected_flat):
+        """
+        A product that kept one number gets its first rows (a size, or a place).
+
+        Moving that number into rows is not a change in stock, so the history
+        gets only the difference between the rows and what the number held —
+        not every row as if it had just arrived. The edit form carries the old
+        number over as a row of its own, so adding a size adds to the stock;
+        an older form that did not, replaced it, and the difference says so.
+        """
+        locked = StoreProduct.objects.select_for_update().get(pk=instance.pk)
+        before = int(locked.stock_quantity or 0)
+        if expected_flat is not None and before != int(expected_flat):
+            raise StockChangedSinceOpened(
+                f'המלאי השתנה מאז שנפתח החלון (עכשיו {before}, כשנפתח {int(expected_flat)}). '
+                'סגרו את החלון, פתחו אותו מחדש ועדכנו שוב.'
+            )
+        validated_data.pop('stock_quantity', None)
+        instance.stock_quantity = before
+        product = super().update(instance, validated_data)
+        self._sync_size_stocks(product, size_stocks, expected_rows=expected_rows, record=False)
+        product.refresh_from_db(fields=['stock_quantity', 'size', 'branch'])
+        _record_recount(product, None, int(product.stock_quantity or 0) - before, 'מעבר למלאי לפי מידות ומיקומים', self._user())
         return product
 
 

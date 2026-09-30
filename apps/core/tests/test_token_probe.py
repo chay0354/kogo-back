@@ -86,6 +86,19 @@ class ProbeStepsTest(TestCase):
         self.assertNotIn(SECRET_TOKEN, json.dumps(result))
         self.assertTrue(TranzilaTransaction.objects.get(idempotency_key='token_probe_charge_12_cogolivetok').is_successful)
 
+    def test_the_check_row_as_the_report_really_shows_it_is_charged(self):
+        # An NK page comes back as tranmode 'N', J2, approval 0000000 (29.9.2026).
+        row = {**NK_ROW, 'tranmode': 'N', 'txn_type': 'J2', 'authorization_number': '0000000'}
+        with patch.object(TranzilaService, 'list_all_transactions', return_value={'success': True, 'transactions': [row]}):
+            found = token_probe.find_rows()
+        self.assertEqual(found['rows'][0]['tranmode'], 'N')
+        self.assertIn('credit_card_token', found['rows'][0]['fields'])
+        self.assertNotIn(SECRET_TOKEN, json.dumps(found))
+        with _found(row), patch.object(TranzilaService, 'charge_with_token', return_value=dict(CHARGED)) as charge:
+            result = token_probe.charge(index='12', terminal='cogolivetok')
+        self.assertEqual(result['outcome'], 'charged')
+        self.assertEqual(charge.call_args.kwargs['token'], SECRET_TOKEN)
+
     def test_only_the_hosted_pair_and_only_a_row_that_saved_a_card(self):
         with _found(), self.assertRaises(token_probe.ProbeError):
             token_probe.charge(index='12', terminal='fxpmichalwebtok')

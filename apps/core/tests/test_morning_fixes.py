@@ -372,3 +372,100 @@ class StatusHistoryOnceTests(TestCase):
         child.status = 'inactive'
         child.save(update_fields=['status', 'updated_at'])
         self.assertEqual(ChildStatusHistory.objects.filter(child=child, new_status='inactive').count(), 1)
+
+
+class LeftForAPersonTests(TestCase):
+    """
+    A child the rule disagrees with, whom the morning may not move by itself,
+    used to be passed over without a word (30.9.2026). Now the brief names them.
+    """
+
+    def _declined_card_child(self):
+        from apps.enrollments.models import LessonEnrollment
+
+        child = _child('כרטיס נדחה', 'active')
+        lesson = TestDataFactory.create_lesson()
+        LessonEnrollment.objects.create(lesson=lesson, child=child, status='active')
+        Payment.objects.create(
+            child=child, family=child.family, lesson=lesson, status='completed',
+            base_amount=Decimal('225'), final_amount=Decimal('120'), registration_fee=Decimal('120'),
+        )
+        RecurringPayment.objects.create(
+            child=child, amount=Decimal('225'), status='failed', tranzila_token='tok',
+            start_date=TODAY, next_billing_date=TODAY,
+        )
+        return child
+
+    def test_a_move_the_morning_may_not_make_is_named_and_not_made(self):
+        child = self._declined_card_child()
+        result = fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'active')
+        self.assertEqual(result['applied'], [])
+        [left] = result['needs_person']
+        self.assertEqual(left['child_id'], str(child.id))
+        self.assertEqual(left['why'], morning_fixes.LEFT_NOT_AUTOMATIC)
+        self.assertEqual((left['from'], left['to']), ('פעיל', 'בעיה באשראי'))
+
+    def test_a_child_still_being_charged_is_named_not_made_inactive(self):
+        child = _child('עדיין בקבע', 'active', paid_until_date=TODAY - timedelta(days=20))
+        RecurringPayment.objects.create(
+            child=child, amount=Decimal('225'), status='active', tranzila_token='tok',
+            start_date=TODAY - timedelta(days=90), next_billing_date=TODAY,
+        )
+        result = fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'active')
+        [left] = result['needs_person']
+        self.assertEqual(left['why'], morning_fixes.LEFT_STILL_CHARGED)
+
+    def test_a_paying_child_whose_charge_has_not_landed_yet_is_not_named(self):
+        """The 1st of the month: paid up to last month, the standing order not run yet."""
+        from apps.enrollments.models import LessonEnrollment
+
+        child = _child('ממתין לחיוב', 'active', paid_until_date=TODAY.replace(day=1) - timedelta(days=1))
+        lesson = TestDataFactory.create_lesson()
+        LessonEnrollment.objects.create(lesson=lesson, child=child, status='active')
+        _paid(child, lesson=lesson)
+        RecurringPayment.objects.create(
+            child=child, amount=Decimal('225'), status='active', tranzila_token='tok',
+            start_date=TODAY - timedelta(days=90), next_billing_date=TODAY,
+        )
+        result = fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'active')
+        self.assertEqual(result['needs_person'], [])
+
+    def test_a_child_whose_status_agrees_is_not_named(self):
+        child = _child('משלם', 'active')
+        _paid(child)
+        self.assertEqual(fix_child_statuses()['needs_person'], [])
+
+    def test_the_brief_puts_them_first_and_asks_for_a_person(self):
+        from apps.core.daily_brief import check_fix_child_statuses
+
+        left = self._declined_card_child()
+        fixed = _child('שילם', 'pending')
+        _paid(fixed)
+        item = check_fix_child_statuses(TODAY)
+        self.assertEqual(item.severity, 'yellow')
+        self.assertEqual(item.count, 2)
+        self.assertEqual([row['label'] for row in item.rows], [left.full_name, fixed.full_name])
+        self.assertIn('בעיה באשראי', item.rows[0]['detail'])
+        self.assertIn('צריך שמישהו יחליט', item.summary)
+        self.assertIn('פעיל ← בעיה באשראי: 1', item.summary)
+
+    def test_the_names_carry_over_from_this_mornings_earlier_slices(self):
+        from apps.core.daily_brief import check_fix_child_statuses
+        from apps.core.daily_brief_views import merge_into_today
+
+        earlier = {'child_id': 'x', 'name': 'מבוקר מוקדם', 'from': 'פעיל', 'to': 'ממתין', 'why': 'not_automatic'}
+        merge_into_today({
+            'key': 'fix_child_statuses', 'title': '', 'severity': 'yellow', 'count': 0,
+            'summary': '', 'action': '', 'rows': [], 'duration_ms': 0, 'continues': True,
+            'progress': {'after_id': None, 'applied': [], 'needs_person': [earlier], 'waiting': 0},
+        })
+        item = check_fix_child_statuses(TODAY)
+        self.assertFalse(item.continues)
+        self.assertEqual([row['label'] for row in item.rows], ['מבוקר מוקדם'])
+        self.assertEqual(item.severity, 'yellow')

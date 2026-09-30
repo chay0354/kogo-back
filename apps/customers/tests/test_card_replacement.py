@@ -170,6 +170,22 @@ class ReplaceTests(TestCase):
             self.assertEqual(rec.card_expire_year, 2030)
             self.assertEqual(rec.next_billing_date, date(2026, 12, 1))
 
+    def test_paying_old_months_never_moves_paid_until_back(self, _inv):
+        """Another course already paid to the end of December; the debt paid now is October and November."""
+        family = _family()
+        child = TestDataFactory.create_child(family=family)
+        child.paid_until_date = date(2026, 12, 31)
+        child.save(update_fields=['paid_until_date'])
+        _sto(family, child=child, next_billing=date(2026, 10, 1))
+        _sto(family, child=child, status='active', next_billing=date(2027, 1, 1), amount='100.00')
+        with patch('apps.core.tranzila_service.TranzilaService.verify_card', return_value=VERIFY_OK), \
+             patch('apps.core.tranzila_service.TranzilaService.charge_with_token', return_value=CHARGE_OK) as chg:
+            replace_card(family, CARD, today=TODAY)
+
+        self.assertEqual(chg.call_count, 2, 'אוקטובר ונובמבר')
+        child.refresh_from_db()
+        self.assertEqual(child.paid_until_date, date(2026, 12, 31))
+
     def test_a_decline_does_not_take_the_card_away(self, _inv):
         family = _family()
         rec = _sto(family, next_billing=date(2026, 11, 1))
