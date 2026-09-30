@@ -283,6 +283,31 @@ class PaperToEmailTests(DeliveryMixin, TestCase):
         self.assertEqual(self.formal_mail.call_count, 2)
         self.assertIsNotNone(self.row(doc).sent_at)
 
+    def test_a_mail_that_keeps_failing_never_reads_sent_and_ends_on_the_paper_list(self):
+        from apps.documents.signing.service import MAX_SEND_ATTEMPTS, REASON_MAIL_FAILED, REASON_MAIL_RETRY
+
+        self.formal_mail.side_effect = RuntimeError('Resend failed (500)')
+        doc = self.tax_invoice()
+        row = self.row(doc)
+        self.assertEqual((row.delivery, row.delivery_reason, row.sent_at), (EMAIL, REASON_MAIL_RETRY, None))
+        past_the_grace_period()
+        for _ in range(MAX_SEND_ATTEMPTS + 2):
+            sign_pending()
+        row = self.row(doc)
+        self.assertEqual(self.formal_mail.call_count, MAX_SEND_ATTEMPTS)  # then the cron leaves it
+        self.assertEqual((row.delivery, row.delivery_reason, row.sent_at), (PAPER, REASON_MAIL_FAILED, None))
+        self.assertTrue(row.last_error)
+
+        # The office sends it again once the address is fixed.
+        self.formal_mail.side_effect = None
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        client.force_authenticate(self.manager)
+        response = client.post(f'{ORIGINALS}{row.pk}/send/', {}, format='json')
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNotNone(self.row(doc).sent_at)
+
 
 def service_claim(doc):
     from apps.documents.signing.service import KIND_FORMAL, claim_email

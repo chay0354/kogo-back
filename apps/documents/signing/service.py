@@ -75,6 +75,8 @@ REASON_AWAITING_ALLOCATION = 'ממתין למספר הקצאה'
 REASON_ARCHIVE = 'המערכת אינה שולחת מסמך זה במייל — המקור החתום שמור בארכיון'
 REASON_PRINTED = 'המקור הודפס ונמסר על נייר'
 REASON_SENT = 'המקור החתום נשלח במייל'
+REASON_MAIL_RETRY = 'שליחת המייל נכשלה — תנוסה שוב'
+REASON_MAIL_FAILED = 'המייל לא נשלח אחרי כמה ניסיונות — לבדוק את הכתובת ולשלוח שוב, או למסור על נייר'
 REASON_TAMPERED = 'הקובץ השמור אינו תואם לטביעת האצבע שלו — לא נשלח; יש לפנות לתמיכה'
 
 # A mail that failed this many times is left for a person; the row says why.
@@ -383,10 +385,23 @@ class EmailClaim:
         SignedOriginal.objects.filter(pk=self.row_id).update(last_error='', updated_at=timezone.now())
 
     def failed(self, exc: BaseException) -> None:
-        # Given back, so the cron can try again (up to MAX_SEND_ATTEMPTS).
-        SignedOriginal.objects.filter(pk=self.row_id).update(
-            sent_at=None, last_error=f'שליחה נכשלה: {type(exc).__name__}'[:300], updated_at=timezone.now(),
-        )
+        # Given back, so the cron can try again (up to MAX_SEND_ATTEMPTS). The
+        # claim wrote "sent" before the mail went; the row must not keep saying
+        # so. After the last try it goes on the paper list, where the office
+        # sees it and can send it again ("שלח") or hand it over.
+        error = f'שליחה נכשלה: {type(exc).__name__}'[:300]
+        with transaction.atomic():
+            row = SignedOriginal.objects.select_for_update().filter(pk=self.row_id).first()
+            if row is None:
+                return
+            if row.send_attempts >= MAX_SEND_ATTEMPTS:
+                delivery, reason = PAPER, REASON_MAIL_FAILED
+            else:
+                delivery, reason = row.delivery, REASON_MAIL_RETRY
+            SignedOriginal.objects.filter(pk=row.pk).update(
+                sent_at=None, last_error=error, delivery=delivery, delivery_reason=reason,
+                updated_at=timezone.now(),
+            )
 
 
 def claim_email(kind: str, obj, *, channel: str, email_to: str = '') -> EmailClaim | None:
