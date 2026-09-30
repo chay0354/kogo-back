@@ -243,6 +243,9 @@ class ReceiptDetailsInputSerializer(serializers.Serializer):
     bank_reference = serializers.CharField(required=False, allow_blank=True, default='')
     bank_amount = serializers.DecimalField(max_digits=12, decimal_places=2, default=0, min_value=Decimal('0'))
     bank_notes = serializers.CharField(required=False, allow_blank=True, default='')
+    # "חשבונית מס לכל צ'ק": the receipt's checks become a check plan, and each
+    # check's tax invoice is issued on (or after) its date (check_plans.py, D2).
+    invoice_per_check = serializers.BooleanField(required=False, default=False)
 
 
 class SettlementInputSerializer(serializers.Serializer):
@@ -362,6 +365,20 @@ class CreateDocumentSerializer(serializers.Serializer):
             raise serializers.ValidationError({'settlements': [
                 'חשבונית נסגרת בקבלה או בחשבונית מס/קבלה בלבד',
             ]})
+        receipt = attrs.get('receipt_details') or {}
+        if attrs.get('document_type') == 'receipt' and receipt.get('invoice_per_check'):
+            if attrs.get('client_type') != 'existing':
+                raise serializers.ValidationError({'receipt_details': {'invoice_per_check': [
+                    "חשבונית לכל צ'ק מופקת ללקוח פרטי (ילד) בלבד. ללקוח עסקי מפיקים חשבונית מס לכל צ'ק מהטופס.",
+                ]}})
+            if receipt.get('payment_method') != "צ'ק":
+                raise serializers.ValidationError({'receipt_details': {'invoice_per_check': [
+                    "חשבונית לכל צ'ק — רק לקבלה על צ'קים",
+                ]}})
+            if attrs.get('settlements') or (receipt.get('linked_invoice_id') or '').strip():
+                raise serializers.ValidationError({'receipt_details': {'invoice_per_check': [
+                    "קבלה שסוגרת חשבונית קיימת לא מפיקה חשבונית לכל צ'ק — החשבונית כבר הונפקה.",
+                ]}})
         if attrs.get('document_type') == 'combined':
             details = attrs['invoice_details']
             if not details.get('payments'):
@@ -379,12 +396,17 @@ class CreateDocumentSerializer(serializers.Serializer):
 
 class CheckItemSerializer(serializers.ModelSerializer):
     tax_invoice_number = serializers.CharField(source='tax_invoice.document_number', read_only=True, allow_null=True)
+    tax_invoice_date = serializers.DateField(source='tax_invoice.document_date', read_only=True, allow_null=True)
+    # A check that came back (D2): when, the credit note of its invoice, the check that replaced it.
+    credit_note_number = serializers.CharField(source='credit_note.document_number', read_only=True, allow_null=True)
+    replaced_by_plan = serializers.UUIDField(source='replaced_by.plan_id', read_only=True, allow_null=True)
 
     class Meta:
         model = CheckItem
         fields = [
             'id', 'due_date', 'amount', 'bank', 'bank_branch', 'account_number',
-            'check_number', 'status', 'tax_invoice', 'tax_invoice_number', 'invoiced_at',
+            'check_number', 'status', 'tax_invoice', 'tax_invoice_number', 'tax_invoice_date', 'invoiced_at',
+            'bounced_at', 'credit_note', 'credit_note_number', 'replaced_by', 'replaced_by_plan',
         ]
         read_only_fields = fields
 
@@ -404,8 +426,15 @@ class CheckPlanSerializer(serializers.ModelSerializer):
             'id', 'child', 'child_name', 'lesson', 'lesson_name', 'description',
             'status', 'receipt', 'receipt_number', 'branch', 'branch_name',
             'items', 'total_amount', 'next_due_date', 'created_at',
+            'cancelled_at', 'cancelled_by_name',
         ]
         read_only_fields = fields
+
+    cancelled_by_name = serializers.SerializerMethodField()
+
+    def get_cancelled_by_name(self, obj):
+        user = obj.cancelled_by
+        return (user.get_full_name() or user.email or user.username) if user is not None else ''
 
     def get_lesson_name(self, obj):
         if obj.lesson_id and obj.lesson:

@@ -383,6 +383,7 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': refusal[1]}, status=refusal[0])
 
         user = request.user
+        check_plan = None
         if doc_type not in ('tax_invoice', 'transaction_invoice', 'combined', 'receipt', 'credit_invoice', 'draft'):
             return Response({'error': f'סוג מסמך לא נתמך: {doc_type}'}, status=status.HTTP_400_BAD_REQUEST)
         try:
@@ -397,13 +398,20 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
                 elif doc_type == 'receipt':
                     doc = service.create_receipt(data, issued_by=user)
                     settle_on_issue(doc, data, user=user)
+                    if (data.get('receipt_details') or {}).get('invoice_per_check'):
+                        # "חשבונית מס לכל צ'ק": the checks become a plan (D2).
+                        from apps.documents.check_plans import plan_for_receipt
+
+                        check_plan = plan_for_receipt(doc)
                 elif doc_type == 'credit_invoice':
                     doc = service.create_credit_invoice(data, issued_by=user)
                 else:
                     doc = service.create_draft(data)
 
-            out = FormalDocumentSerializer(doc)
-            return Response(out.data, status=status.HTTP_201_CREATED)
+            out = dict(FormalDocumentSerializer(doc).data)
+            if check_plan is not None:
+                out['check_plan_id'] = str(check_plan.pk)
+            return Response(out, status=status.HTTP_201_CREATED)
 
         except ValueError as exc:
             # The service's refusals (a date its run refuses, a payment that
@@ -545,8 +553,8 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
             # Everything the ledger dimensions read (CheckPlanSerializer): the
             # lesson's course, type, business, city and instructor, and the
             # plan branch's city.
-            .select_related('child', 'branch', 'branch__city', 'receipt', *lesson_paths('lesson'))
-            .prefetch_related('items', 'items__tax_invoice')
+            .select_related('child', 'branch', 'branch__city', 'receipt', 'cancelled_by', *lesson_paths('lesson'))
+            .prefetch_related('items', 'items__tax_invoice', 'items__credit_note', 'items__replaced_by')
         )
         status_filter = self.request.query_params.get('status')
         if status_filter:
@@ -591,14 +599,69 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel(self, request, pk=None):
+        """
+        POST /api/v1/documents/check-plans/{id}/cancel/  {reason?}
+
+        Pending checks are cancelled (no invoice); an issued invoice nothing
+        paid is credited (check_plans.cancel_check_plan). Repeating it does
+        nothing again. 200 {...plan, credit_notes: [numbers]}.
+        """
+        from apps.documents.check_plans import CheckPlanError, cancel_check_plan
+
         plan = self.get_object()
-        if plan.status == 'cancelled':
-            return Response(CheckPlanSerializer(plan).data)
-        plan.status = 'cancelled'
-        plan.save(update_fields=['status', 'updated_at'])
-        plan.items.filter(status='pending').update(status='cancelled')
+        try:
+            result = cancel_check_plan(plan.pk, user=request.user, reason=str(request.data.get('reason') or ''))
+        except CheckPlanError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         plan = self.get_queryset().get(pk=plan.pk)
-        return Response(CheckPlanSerializer(plan).data)
+        return Response({
+            **CheckPlanSerializer(plan).data,
+            'credit_notes': [doc.document_number for doc in result['credit_notes']],
+        })
+
+    @action(detail=True, methods=['post'], url_path='bounce')
+    def bounce(self, request, pk=None):
+        """
+        POST /api/v1/documents/check-plans/{id}/bounce/
+             {item_id, reason?, replacement?: {date, amount, bank, branch, account_number, check_number, check_crossed}}
+
+        A check that came back unpaid (check_plans.bounce_check): marked, its
+        invoice credited if one was issued, and a replacement check registered
+        as a plan of its own. 200 {plan, item, credit_note_number,
+        replacement_plan}; 404 for another plan's check; 409 when it is marked
+        bounced already; 400 with the reason otherwise.
+        """
+        from apps.documents.check_plans import CheckAlreadyBounced, CheckPlanError, bounce_check
+        from apps.documents.models import CheckItem
+
+        plan = self.get_object()
+        item_id = request.data.get('item_id')
+        if not item_id:
+            return Response({'error': "יש לבחור את הצ'ק שחזר"}, status=status.HTTP_400_BAD_REQUEST)
+        replacement = request.data.get('replacement') or None
+        if replacement is not None and not isinstance(replacement, dict):
+            return Response({'error': "פרטי הצ'ק החלופי אינם תקינים"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = bounce_check(
+                plan.pk, item_id, user=request.user,
+                reason=str(request.data.get('reason') or ''), replacement=replacement,
+            )
+        except (CheckItem.DoesNotExist, DjangoValidationError):
+            return Response({'error': "הצ'ק לא נמצא בתוכנית הזאת"}, status=status.HTTP_404_NOT_FOUND)
+        except CheckAlreadyBounced as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        except CheckPlanError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        replacement_plan = result['replacement_plan']
+        return Response({
+            'plan': CheckPlanSerializer(self.get_queryset().get(pk=plan.pk)).data,
+            'item_id': str(result['item'].pk),
+            'credit_note_number': result['credit_note'].document_number if result['credit_note'] else None,
+            'replacement_plan': (
+                CheckPlanSerializer(self.get_queryset().get(pk=replacement_plan.pk)).data
+                if replacement_plan is not None else None
+            ),
+        })
 
 
 class MissingReceiptsViewSet(viewsets.ViewSet):
