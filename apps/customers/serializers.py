@@ -559,14 +559,49 @@ class ChildCreateSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSeriali
 
 class ChildUpdateSerializer(GhostIsInstructorOnlyMixin, serializers.ModelSerializer):
     """עדכון ילד"""
+    # Owner, 30.9.2026: a status changed by hand says why, and the change is
+    # kept in the child's history with who made it.
+    status_reason = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=500)
+
     class Meta:
         model = Child
         fields = [
             'first_name', 'last_name', 'birth_date', 'gender',
             'id_number', 'phone_number', 'status', 'subscription_start_date',
             'subscription_end_date', 'paid_until_date', 'trial_classes_attended', 
-            'absent_irregularly', 'notes'
+            'absent_irregularly', 'notes', 'status_reason',
         ]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        new_status = attrs.get('status')
+        if self.instance is not None and new_status is not None and new_status != self.instance.status:
+            if len((attrs.get('status_reason') or '').strip()) < 2:
+                raise serializers.ValidationError({'status_reason': 'חובה לכתוב למה הסטטוס משתנה.'})
+        return attrs
+
+    def update(self, instance, validated_data):
+        from django.db import transaction
+
+        from apps.customers.child_status import MANUAL_REASON_PREFIX
+        from apps.customers.status_history_models import ChildStatusHistory
+
+        reason = (validated_data.pop('status_reason', '') or '').strip()
+        was = instance.status
+        new_status = validated_data.get('status', was)
+        if new_status == was:
+            return super().update(instance, validated_data)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        with transaction.atomic():
+            instance._status_history_written = True  # the row below, with who and why
+            instance = super().update(instance, validated_data)
+            ChildStatusHistory.objects.create(
+                child=instance, previous_status=was, new_status=new_status,
+                reason=f'{MANUAL_REASON_PREFIX}: {reason}',
+                changed_by=user if getattr(user, 'is_authenticated', False) else None,
+            )
+        return instance
 
 
 # Store serializers moved to apps.store.serializers

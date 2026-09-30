@@ -59,6 +59,18 @@ FIX_REASON = 'תוקן אוטומטית בשגרת הבוקר'
 # Why a child the rule disagrees with was left for a person to decide.
 LEFT_NOT_AUTOMATIC = 'not_automatic'
 LEFT_STILL_CHARGED = 'still_charged'
+LEFT_SET_BY_HAND = 'set_by_hand'
+
+
+def _set_by_hand(child) -> bool:
+    """Is the child's current status one the office set by hand, with a reason?"""
+    from apps.customers.child_status import MANUAL_REASON_PREFIX
+
+    latest = child.status_history.order_by('-changed_at').values('new_status', 'reason').first()
+    return bool(
+        latest and latest['new_status'] == child.status
+        and (latest['reason'] or '').startswith(MANUAL_REASON_PREFIX)
+    )
 
 
 def status_fix_candidates(
@@ -112,6 +124,18 @@ def status_fix_candidates(
         current = canonical_status(child.status)
         target = resolve_child_status(child)
         if not target or target == current:
+            continue
+        if target == 'payment_problem' and child.id in still_paying:
+            # A charge not made yet is not a problem: a standing order with a
+            # card is still live, and billing flags a decline by itself. On the
+            # first days of every month each paying child reads this way until
+            # its charge lands — listing them would bury the real ones.
+            continue
+        if _set_by_hand(child):
+            # Someone in the office chose this status and wrote why. The morning
+            # does not overrule a person; it names the child for one to look at.
+            if left_for_a_person is not None:
+                left_for_a_person.append((child, child.status, target, LEFT_SET_BY_HAND))
             continue
         retired = child.status not in CHILD_STATUSES
         if not retired and (current, target) not in AUTO_TRANSITIONS:

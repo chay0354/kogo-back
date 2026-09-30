@@ -116,6 +116,7 @@ def _progress_so_far(key: str, today: date) -> dict:
 NEEDS_PERSON_WHY = {
     'not_automatic': 'שינוי כזה לא נעשה אוטומטית',
     'still_charged': 'עדיין גובים ממנו — לבדוק לפני שמעבירים',
+    'set_by_hand': 'נקבע ביד במשרד, עם סיבה — הבוקר לא משנה החלטה של אדם',
 }
 
 

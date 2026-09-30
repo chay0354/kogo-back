@@ -419,6 +419,23 @@ class LeftForAPersonTests(TestCase):
         [left] = result['needs_person']
         self.assertEqual(left['why'], morning_fixes.LEFT_STILL_CHARGED)
 
+    def test_a_paying_child_whose_charge_has_not_landed_yet_is_not_named(self):
+        """The 1st of the month: paid up to last month, the standing order not run yet."""
+        from apps.enrollments.models import LessonEnrollment
+
+        child = _child('ממתין לחיוב', 'active', paid_until_date=TODAY.replace(day=1) - timedelta(days=1))
+        lesson = TestDataFactory.create_lesson()
+        LessonEnrollment.objects.create(lesson=lesson, child=child, status='active')
+        _paid(child, lesson=lesson)
+        RecurringPayment.objects.create(
+            child=child, amount=Decimal('225'), status='active', tranzila_token='tok',
+            start_date=TODAY - timedelta(days=90), next_billing_date=TODAY,
+        )
+        result = fix_child_statuses()
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'active')
+        self.assertEqual(result['needs_person'], [])
+
     def test_a_child_whose_status_agrees_is_not_named(self):
         child = _child('משלם', 'active')
         _paid(child)

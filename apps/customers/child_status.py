@@ -41,6 +41,10 @@ STATUS_PAYMENT_PROBLEM = 'payment_problem'
 STATUS_INACTIVE = 'inactive'
 STATUS_GHOST = 'ghost'
 
+# Owner, 30.9.2026: a status changed by hand says why. Its history row starts
+# with this, and the morning fix leaves a status set this way for a person.
+MANUAL_REASON_PREFIX = 'שינוי ידני'
+
 CHILD_STATUS_CHOICES = [
     (STATUS_ACTIVE, 'פעיל'),
     (STATUS_TRIAL_SIGNED, 'נרשם לניסיון'),
@@ -369,6 +373,25 @@ def mark_trial_signed(child_id) -> bool:
     )
 
 
+def recheck_after_money_stopped(child, *, reason: str, changed_by=None) -> None:
+    """
+    Money for this child just stopped — a standing order cancelled, a cheque
+    plan cancelled, a payment refunded — so work the status out now.
+
+    Owner, 30.9.2026: at that moment, not the next morning. The status is a
+    consequence of the money, never a condition of it: a failure here is
+    logged and the cancellation or refund stands.
+    """
+    import logging
+
+    if child is None or child.status == STATUS_GHOST:
+        return
+    try:
+        refresh_child_status(child, reason=reason, changed_by=changed_by)
+    except Exception:
+        logging.getLogger(__name__).exception('Status recheck after "%s" failed for child %s', reason, child.pk)
+
+
 def refresh_child_status(child, *, reason: str, changed_by=None) -> str:
     """
     Work the child's status out again, and save it with a history line if it moved.
@@ -379,9 +402,9 @@ def refresh_child_status(child, *, reason: str, changed_by=None) -> str:
     record, like the office registering a cash or cheque plan. Returns the
     status the child holds afterwards.
 
-    Its callers add money, so the move is up to פעיל. A move off פעיל would
-    also get the post_save signal's own history line (fix_child_statuses has
-    the same two).
+    Most callers add money, so the move is up to פעיל;
+    recheck_after_money_stopped is the other way. Either way the one history
+    line is this one — the post_save signal stands aside for it.
     """
     from django.db import transaction
 

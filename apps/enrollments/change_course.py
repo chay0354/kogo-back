@@ -316,6 +316,8 @@ def drop_course_unit(*, enrollment: LessonEnrollment, cancellation_reason: str =
         result = payment_service.cancel_subscription(
             recurring_payment_id=str(sto.id),
             cancellation_reason=reason,
+            # Worked out below, once the rows are gone too.
+            recheck_status=False,
         )
         if result.get('success'):
             cancelled_ids.append(str(sto.id))
