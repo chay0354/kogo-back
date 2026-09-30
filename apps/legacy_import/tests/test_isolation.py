@@ -18,7 +18,6 @@ from apps.documents.models import DocumentSeries, FormalDocument
 from apps.documents.numbering import continuity
 from apps.documents.register import channel_documents
 from apps.documents.tests.test_register import AUGUST, RegisterFixture
-from apps.documents.uniform_export import uniform_number
 from apps.legacy_import.models import LegacyDocument
 
 UNIFORM = '/api/v1/documents/documents/uniform-export/'
@@ -81,8 +80,8 @@ class ExportIsolationTests(LegacyDocumentsFixture, APITestCase):
         inner = zipfile.ZipFile(io.BytesIO(outer.read(inner_name)))
         records = inner.read('BKMVDATA.TXT').decode('iso-8859-8').splitlines()
         headers = [line for line in records if line.startswith('C100')]
-        # The file writes kogo's number in its compact form (uniform_export.uniform_number).
-        self.assertEqual([line[25:45].strip() for line in headers], [uniform_number('TI-2026-000001')])
+        # Kogo's numbers in the uniform form (uniform_export.uniform_number, 2.4(ד)).
+        self.assertEqual([line[25:45].strip() for line in headers], ['TI26000001'])
 
     def test_the_register_export(self):
         self.client.force_authenticate(self.manager)
