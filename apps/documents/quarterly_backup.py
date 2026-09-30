@@ -5,11 +5,13 @@ A computerised accounting system keeps "a backup in the first week of every
 quarter", in a place the assessing officer was told of in writing, other than
 where the system itself is kept, and — for a business with income in Israel —
 in Israel. This builds that backup and writes it to a Google Cloud Storage
-bucket in me-west1 (Tel Aviv) under a retention policy, named by
-SIGNING_QUARTERLY_BACKUP_BUCKET. With no bucket it writes the same files to a
-local directory instead (``--out``), for a copy kept by hand.
+bucket in me-west1 (Tel Aviv) under a retention policy: the one named by
+SIGNING_QUARTERLY_BACKUP_BUCKET, else the signed files' own locked bucket
+(SIGNING_BACKUP_BUCKET), always under ``books/``. With no bucket it writes the
+same files to a local directory instead (``--out``), for a copy kept by hand.
+run_daily_backup, at the end, copies the fiscal data there once a day as well.
 
-One run is one folder, ``<YYYY>-Q<n>/<YYYYMMDDTHHMMSS>/``, holding:
+One run is one folder, ``books/quarterly/<YYYY>-Q<n>/<YYYYMMDDTHHMMSS>/``, holding:
 
 * ``fiscal-data.jsonl.gz`` — every fiscal table, whole, as of the run: the
   documents module (documents, lines, payments, settlements, number runs and
@@ -131,8 +133,21 @@ class BackupNotConfigured(Exception):
     """Neither a bucket nor a local directory to write to."""
 
 
+# Every backup of the books sits under this prefix, so it can share a bucket
+# with the signed files (whose names start with their purpose).
+BOOKS_PREFIX = 'books'
+
+
 def quarterly_bucket() -> str:
-    return (getattr(settings, 'SIGNING_QUARTERLY_BACKUP_BUCKET', '') or '').strip()
+    """
+    Where the books go: SIGNING_QUARTERLY_BACKUP_BUCKET, else the signed files' bucket.
+
+    The signed files' bucket (SIGNING_BACKUP_BUCKET) is already in Tel Aviv,
+    locked for ten years, and writable by the signing account, so the backups
+    need no bucket of their own.
+    """
+    own = (getattr(settings, 'SIGNING_QUARTERLY_BACKUP_BUCKET', '') or '').strip()
+    return own or (getattr(settings, 'SIGNING_BACKUP_BUCKET', '') or '').strip()
 
 
 # ── the quarter ─────────────────────────────────────────────────────────────
@@ -334,6 +349,33 @@ def _upload(bucket_name: str, prefix: str, part: Part, meta: dict) -> None:
         raise RuntimeError(f'{prefix}/{part.name} already exists in the bucket')
 
 
+def _upload_folder(bucket_name: str, prefix: str, parts: list, manifest_part: Part, meta: dict,
+                   errors: list) -> list:
+    """Every part, then the manifest over a complete folder. The names uploaded; failures go to `errors`."""
+    from apps.documents.signing import SigningUnavailable
+
+    uploaded = []
+    for part in parts:
+        try:
+            _upload(bucket_name, prefix, part, meta)
+        except SigningUnavailable as exc:
+            # The bucket is out of reach: every further part would fail the same way.
+            errors.append(f'upload stopped at {part.name}: {exc}'[:300])
+            break
+        except Exception as exc:
+            errors.append(f'upload of {part.name} failed: {type(exc).__name__}: {exc}'[:300])
+        else:
+            uploaded.append(part.name)
+    if len(uploaded) == len(parts):
+        # Last, and only over a complete folder: its presence says the run finished.
+        try:
+            _upload(bucket_name, prefix, manifest_part, meta)
+            uploaded.append(manifest_part.name)
+        except Exception as exc:
+            errors.append(f'upload of {MANIFEST} failed: {type(exc).__name__}: {exc}'[:300])
+    return uploaded
+
+
 def run_quarterly_backup(quarter: str | None = None, *, out_dir: str | None = None,
                          bucket_name: str | None = None, now=None) -> dict:
     """
@@ -343,19 +385,18 @@ def run_quarterly_backup(quarter: str | None = None, *, out_dir: str | None = No
     BackupInputError for a quarter that cannot be backed up; BackupNotConfigured
     when there is neither a bucket nor a directory.
     """
-    from apps.documents.signing import SigningUnavailable
-
     now = now or timezone.now()
     today = timezone.localtime(now).date()
     year, number = parse_quarter(quarter, today)
     start, end = quarter_bounds(year, number)
     bucket_name = quarterly_bucket() if bucket_name is None else bucket_name.strip()
     if not bucket_name and not out_dir:
-        raise BackupNotConfigured('SIGNING_QUARTERLY_BACKUP_BUCKET is not set and no --out directory was given')
+        raise BackupNotConfigured('No backup bucket is set (SIGNING_QUARTERLY_BACKUP_BUCKET / SIGNING_BACKUP_BUCKET) '
+                                  'and no --out directory was given')
 
     label = f'{year}-Q{number}'
     local = timezone.localtime(now)
-    prefix = f'{label}/{local:%Y%m%dT%H%M%S}'
+    prefix = f'{BOOKS_PREFIX}/quarterly/{label}/{local:%Y%m%dT%H%M%S}'
     generated_at = local.isoformat()
     commit = app_commit()
 
@@ -397,25 +438,8 @@ def run_quarterly_backup(quarter: str | None = None, *, out_dir: str | None = No
         )
 
         if bucket_name:
-            meta = {'quarter': label, 'generated_at': generated_at}
-            for part in parts:
-                try:
-                    _upload(bucket_name, prefix, part, meta)
-                except SigningUnavailable as exc:
-                    # The bucket is out of reach: every further part would fail the same way.
-                    errors.append(f'upload stopped at {part.name}: {exc}'[:300])
-                    break
-                except Exception as exc:
-                    errors.append(f'upload of {part.name} failed: {type(exc).__name__}: {exc}'[:300])
-                else:
-                    uploaded.append(part.name)
-            if len(uploaded) == len(parts):
-                # Last, and only over a complete folder: its presence says the run finished.
-                try:
-                    _upload(bucket_name, prefix, manifest_part, meta)
-                    uploaded.append(manifest_part.name)
-                except Exception as exc:
-                    errors.append(f'upload of {MANIFEST} failed: {type(exc).__name__}: {exc}'[:300])
+            uploaded = _upload_folder(bucket_name, prefix, parts, manifest_part,
+                                      {'quarter': label, 'generated_at': generated_at}, errors)
         all_parts = parts + [manifest_part]
     finally:
         if temporary:
@@ -433,4 +457,112 @@ def run_quarterly_backup(quarter: str | None = None, *, out_dir: str | None = No
     }
     log = logger.info if summary['ok'] else logger.warning
     log('Quarterly backup %s: %s parts, %s uploaded, %s errors', prefix, len(all_parts), len(uploaded), len(errors))
+    return summary
+
+
+# ── the daily copy ──────────────────────────────────────────────────────────
+#
+# The live books are on a server abroad (the owner's decision, 27.9.2026: the
+# database stays where it is). Once a day every fiscal table goes to Israel as
+# well, so what is kept here is never more than a day behind. One folder a day,
+# ``books/daily/YYYY-MM-DD/<HHMMSS>/``: the whole fiscal data (the same file the
+# quarter holds), a README and the manifest, written last. The quarter's
+# registers and uniform files stay in the quarterly run.
+
+DAILY_README_TEXT = """עותק יומי של ספרי החשבונות — Kogo
+
+המערכת עצמה רצה על שרת בחו"ל. פעם ביום נשמר כאן, בישראל, עותק מלא של כל נתוני
+המסמכים והכספים, כך שהעותק בישראל לעולם אינו מפגר ביותר מיום.
+
+תאריך: {day}
+הופק: {generated_at}
+קוד המערכת (commit): {commit}
+
+- fiscal-data.jsonl.gz — כל טבלאות המסמכים והכספים במלואן נכון לרגע ההפקה, באותו מבנה
+  כמו בגיבוי הרבעוני (gzip של JSON Lines, שורה לכל רשומה: {{"model", "pk", "fields"}}).
+- manifest.json — ספירת רשומות לכל טבלה, SHA-256 וגודל של כל קובץ, ומשך הריצה.
+
+מרשמי החודשים וקובצי המבנה האחיד נמצאים בגיבוי הרבעוני (books/quarterly/).
+קובצי ה-PDF החתומים עצמם שמורים בדלי הנעול {signed_bucket}.
+תיקייה בלי manifest.json היא ריצה שלא הושלמה.
+"""
+
+
+def run_daily_backup(*, out_dir: str | None = None, bucket_name: str | None = None, now=None) -> dict:
+    """
+    Copy every fiscal table to the bucket in Israel (or `out_dir`). Returns a summary.
+
+    {day, prefix, bucket, local_dir, parts, uploaded, errors, seconds, ok}.
+    BackupNotConfigured when there is neither a bucket nor a directory. Every run
+    makes its own folder (the second it started is in the name), so a second
+    run on one day adds a second copy and never touches the first.
+    """
+    import time
+
+    started = time.monotonic()
+    now = now or timezone.now()
+    local = timezone.localtime(now)
+    bucket_name = quarterly_bucket() if bucket_name is None else bucket_name.strip()
+    if not bucket_name and not out_dir:
+        raise BackupNotConfigured('No backup bucket is set (SIGNING_QUARTERLY_BACKUP_BUCKET / SIGNING_BACKUP_BUCKET) '
+                                  'and no directory was given')
+
+    day = local.date().isoformat()
+    prefix = f'{BOOKS_PREFIX}/daily/{day}/{local:%H%M%S}'
+    generated_at = local.isoformat()
+    commit = app_commit()
+
+    temporary = None
+    if out_dir:
+        directory = os.path.join(out_dir, *prefix.split('/'))
+        os.makedirs(directory, exist_ok=False)
+    else:
+        temporary = tempfile.mkdtemp(prefix='kogo-daily-')
+        directory = temporary
+
+    errors: list = []
+    uploaded: list = []
+    try:
+        parts = [write_fiscal_data(directory)]
+        signed = (getattr(settings, 'SIGNING_BACKUP_BUCKET', '') or '').strip() or '(לא מוגדר)'
+        readme = DAILY_README_TEXT.format(day=day, generated_at=generated_at, commit=commit or 'לא ידוע',
+                                          signed_bucket=signed)
+        parts.append(_write_bytes(directory, README, readme.encode('utf-8'), 'text/plain; charset=utf-8'))
+        manifest = {
+            'kind': 'kogo-daily-backup',
+            'version': 1,
+            'day': day,
+            'generated_at': generated_at,
+            'app_commit': commit,
+            'prefix': prefix,
+            'signed_files_bucket': (getattr(settings, 'SIGNING_BACKUP_BUCKET', '') or '').strip(),
+            'build_seconds': round(time.monotonic() - started, 2),
+            'parts': [part.describe() for part in parts],
+        }
+        manifest_part = _write_bytes(
+            directory, MANIFEST,
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8'), 'application/json',
+        )
+        if bucket_name:
+            uploaded = _upload_folder(bucket_name, prefix, parts, manifest_part,
+                                      {'day': day, 'generated_at': generated_at}, errors)
+        all_parts = parts + [manifest_part]
+    finally:
+        if temporary:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+    summary = {
+        'day': day,
+        'prefix': prefix,
+        'bucket': bucket_name,
+        'local_dir': directory if out_dir else '',
+        'parts': [part.describe() for part in all_parts],
+        'uploaded': uploaded,
+        'errors': errors,
+        'seconds': round(time.monotonic() - started, 2),
+        'ok': not errors and (not bucket_name or len(uploaded) == len(all_parts)),
+    }
+    log = logger.info if summary['ok'] else logger.warning
+    log('Daily backup %s: %s parts, %s uploaded, %s errors, %ss',
+        prefix, len(all_parts), len(uploaded), len(errors), summary['seconds'])
     return summary

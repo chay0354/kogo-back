@@ -27,6 +27,8 @@ from apps.documents.quarterly_backup import (
     parse_quarter,
     previous_quarter,
     quarter_bounds,
+    quarterly_bucket,
+    run_daily_backup,
     run_quarterly_backup,
 )
 from apps.documents.tests.test_register import RegisterFixture
@@ -36,6 +38,7 @@ NOW = datetime(2026, 10, 1, 7, 30, tzinfo=dt_timezone.utc)  # 10:30 in Israel, t
 POST = 'apps.documents.signing.backup.requests.post'
 TOKEN = 'apps.documents.signing.kms.access_token'
 CRON = '/api/v1/documents/cron/quarterly-backup/'
+DAILY_CRON = '/api/v1/documents/cron/daily-backup/'
 
 
 def google(status_code, body=None):
@@ -94,7 +97,7 @@ class LocalBackupTests(BackupFixture, TestCase):
         result = run_quarterly_backup('2026-Q3', out_dir=self.out, bucket_name='', now=NOW)
 
         self.assertTrue(result['ok'], result['errors'])
-        self.assertEqual(result['prefix'], '2026-Q3/20261001T103000')
+        self.assertEqual(result['prefix'], 'books/quarterly/2026-Q3/20261001T103000')
         folder = result['local_dir']
         names = sorted(os.listdir(folder))
         self.assertEqual(names, sorted([
@@ -156,14 +159,16 @@ class LocalBackupTests(BackupFixture, TestCase):
     def test_neither_a_bucket_nor_a_directory_is_refused(self):
         with self.assertRaises(BackupNotConfigured):
             run_quarterly_backup('2026-Q3', bucket_name='', now=NOW)
-        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET=''), self.assertRaises(CommandError):
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET=''), \
+                self.assertRaises(CommandError):
             call_command('quarterly_backup', '--quarter', '2026-Q3')
 
     def test_the_command_writes_the_folder(self):
-        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET=''):
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET=''):
             call_command('quarterly_backup', '--quarter', '2026-Q3', '--out', self.out, stdout=open(os.devnull, 'w'))
-        (folder,) = os.listdir(os.path.join(self.out, '2026-Q3'))
-        self.assertIn(MANIFEST, os.listdir(os.path.join(self.out, '2026-Q3', folder)))
+        quarter = os.path.join(self.out, 'books', 'quarterly', '2026-Q3')
+        (folder,) = os.listdir(quarter)
+        self.assertIn(MANIFEST, os.listdir(os.path.join(quarter, folder)))
 
 
 @patch(TOKEN, return_value='test-access-token')
@@ -186,9 +191,10 @@ class BucketBackupTests(BackupFixture, TestCase):
             self.assertEqual(metadata['metadata']['sha256'], hashlib.sha256(payload).hexdigest())
             self.assertEqual(metadata['metadata']['quarter'], '2026-Q3')
             names.append(metadata['name'])
-        self.assertTrue(all(name.startswith('2026-Q3/20261001T103000/') for name in names))
-        self.assertEqual(names[0], f'2026-Q3/20261001T103000/{FISCAL_DATA}')
-        self.assertEqual(names[-1], f'2026-Q3/20261001T103000/{MANIFEST}')
+        folder = 'books/quarterly/2026-Q3/20261001T103000'
+        self.assertTrue(all(name.startswith(f'{folder}/') for name in names))
+        self.assertEqual(names[0], f'{folder}/{FISCAL_DATA}')
+        self.assertEqual(names[-1], f'{folder}/{MANIFEST}')
         # The fiscal part goes up as gzip, not as a PDF.
         self.assertEqual(uploaded_metadata(post.call_args_list[0])['contentType'], 'application/gzip')
 
@@ -218,7 +224,7 @@ class CronEndpointTests(BackupFixture, APITestCase):
             self.assertEqual(self.client.get(CRON, {'token': 'wrong'}).status_code, 401)
 
     def test_without_a_bucket_it_answers_409(self, _token):
-        with override_settings(CRON_TOKEN='cron-secret', SIGNING_QUARTERLY_BACKUP_BUCKET=''):
+        with override_settings(CRON_TOKEN='cron-secret', SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET=''):
             res = self.client.get(CRON, HTTP_X_CRON_TOKEN='cron-secret')
         self.assertEqual(res.status_code, 409)
 
@@ -235,3 +241,97 @@ class CronEndpointTests(BackupFixture, APITestCase):
         with override_settings(CRON_TOKEN='cron-secret', SIGNING_QUARTERLY_BACKUP_BUCKET='kogo-quarterly-test'):
             res = self.client.get(CRON, {'quarter': 'Q9', 'token': 'cron-secret'})
         self.assertEqual(res.status_code, 400)
+
+
+class BucketChoiceTests(TestCase):
+    def test_its_own_bucket_else_the_signed_files_bucket(self):
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='books-only', SIGNING_BACKUP_BUCKET='signed'):
+            self.assertEqual(quarterly_bucket(), 'books-only')
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET='signed'):
+            self.assertEqual(quarterly_bucket(), 'signed')
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET=''):
+            self.assertEqual(quarterly_bucket(), '')
+
+
+class DailyBackupTests(BackupFixture, TestCase):
+    def test_the_daily_folder_holds_the_whole_fiscal_data(self):
+        result = run_daily_backup(out_dir=self.out, bucket_name='', now=NOW)
+
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertEqual(result['day'], '2026-10-01')
+        self.assertEqual(result['prefix'], 'books/daily/2026-10-01/103000')
+        folder = result['local_dir']
+        self.assertEqual(sorted(os.listdir(folder)), sorted([FISCAL_DATA, MANIFEST, 'README.txt']))
+        with open(os.path.join(folder, MANIFEST), encoding='utf-8') as handle:
+            manifest = json.load(handle)
+        self.assertEqual(manifest['kind'], 'kogo-daily-backup')
+        self.assertEqual(manifest['day'], '2026-10-01')
+        tables = manifest['parts'][0]['tables']
+        self.assertEqual(tables['documents.formaldocument'], 1)
+        self.assertEqual(tables['customers.invoice'], 1)
+        records = self.records(os.path.join(folder, FISCAL_DATA))
+        self.assertEqual(sum(tables.values()), len(records))
+        by_model = {record['model']: record['fields'] for record in records}
+        # The same leave-outs as the quarter: no PDF bytes, no raw import file.
+        self.assertNotIn('pdf', by_model['documents.signedoriginal'])
+        self.assertNotIn('rows', by_model['legacy_import.legacyimport'])
+
+    def test_neither_a_bucket_nor_a_directory_is_refused(self):
+        with self.assertRaises(BackupNotConfigured):
+            run_daily_backup(bucket_name='', now=NOW)
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET=''), \
+                self.assertRaises(CommandError):
+            call_command('daily_backup')
+
+    @patch(TOKEN, return_value='test-access-token')
+    def test_to_the_signed_files_bucket_under_books_manifest_last(self, _token):
+        with override_settings(SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET='kogomelo-signed-test'), \
+                patch(POST, return_value=google(200)) as post:
+            result = run_daily_backup(now=NOW)
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertEqual(result['bucket'], 'kogomelo-signed-test')
+        names = [uploaded_metadata(call)['name'] for call in post.call_args_list]
+        self.assertEqual(names, [
+            f'books/daily/2026-10-01/103000/{FISCAL_DATA}',
+            'books/daily/2026-10-01/103000/README.txt',
+            f'books/daily/2026-10-01/103000/{MANIFEST}',
+        ])
+        for call in post.call_args_list:
+            self.assertIn('/b/kogomelo-signed-test/o', call.args[0])
+            self.assertEqual(call.kwargs['params'], {'uploadType': 'multipart', 'ifGenerationMatch': '0'})
+
+    @patch(TOKEN, return_value='test-access-token')
+    def test_a_refused_upload_leaves_no_manifest(self, _token):
+        with patch(POST, return_value=google(403, {'error': {'status': 'PERMISSION_DENIED'}})) as post:
+            result = run_daily_backup(bucket_name='kogomelo-signed-test', now=NOW)
+        self.assertEqual(post.call_count, 1)
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['uploaded'], [])
+
+
+@patch(TOKEN, return_value='test-access-token')
+class DailyCronEndpointTests(BackupFixture, APITestCase):
+    def test_without_the_token_it_answers_401(self, _token):
+        with override_settings(CRON_TOKEN='cron-secret', SIGNING_BACKUP_BUCKET='kogomelo-signed-test'):
+            self.assertEqual(self.client.get(DAILY_CRON).status_code, 401)
+
+    def test_without_a_bucket_it_answers_409(self, _token):
+        with override_settings(CRON_TOKEN='cron-secret', SIGNING_QUARTERLY_BACKUP_BUCKET='', SIGNING_BACKUP_BUCKET=''):
+            res = self.client.get(DAILY_CRON, HTTP_X_CRON_TOKEN='cron-secret')
+        self.assertEqual(res.status_code, 409)
+
+    def test_with_the_token_it_copies_the_books(self, _token):
+        with override_settings(CRON_TOKEN='cron-secret', SIGNING_QUARTERLY_BACKUP_BUCKET='',
+                               SIGNING_BACKUP_BUCKET='kogomelo-signed-test'), \
+                patch(POST, return_value=google(200)) as post:
+            res = self.client.get(DAILY_CRON, HTTP_AUTHORIZATION='Bearer cron-secret')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data['ok'])
+        self.assertEqual(post.call_count, 3)
+
+    def test_a_failed_upload_is_a_502(self, _token):
+        with override_settings(CRON_TOKEN='cron-secret', SIGNING_BACKUP_BUCKET='kogomelo-signed-test'), \
+                patch(POST, return_value=google(500)):
+            res = self.client.get(DAILY_CRON, HTTP_X_CRON_TOKEN='cron-secret')
+        self.assertEqual(res.status_code, 502)
+        self.assertFalse(res.data['ok'])
