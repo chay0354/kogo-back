@@ -19,6 +19,7 @@ Rules the checks follow:
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
 from decimal import Decimal
@@ -171,9 +172,13 @@ def check_fix_child_statuses(today: date) -> BriefItem:
         )
     if needs_person:
         item.severity = YELLOW
+        # Only MAX_ROWS names fit; the count of each kind says how many there are in all.
+        kinds = Counter(f"{left['from']} ← {left['to']}" for left in needs_person)
         item.summary += (
             f' {len(needs_person)} ילדים בסטטוס שהרישומים שלהם סותרים, ושגרת הבוקר לא משנה לבד — '
-            'צריך שמישהו יחליט. הם ראשונים ברשימה.'
+            'צריך שמישהו יחליט. הם ראשונים ברשימה ('
+            + ' · '.join(f'{kind}: {count}' for kind, count in kinds.most_common())
+            + ').'
         )
         item.action = (
             'לפתוח את כרטיס הילד, לבדוק ולעדכן את הסטטוס ביד. '

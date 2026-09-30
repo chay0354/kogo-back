@@ -436,6 +436,7 @@ class LeftForAPersonTests(TestCase):
         self.assertEqual([row['label'] for row in item.rows], [left.full_name, fixed.full_name])
         self.assertIn('בעיה באשראי', item.rows[0]['detail'])
         self.assertIn('צריך שמישהו יחליט', item.summary)
+        self.assertIn('פעיל ← בעיה באשראי: 1', item.summary)
 
     def test_the_names_carry_over_from_this_mornings_earlier_slices(self):
         from apps.core.daily_brief import check_fix_child_statuses
