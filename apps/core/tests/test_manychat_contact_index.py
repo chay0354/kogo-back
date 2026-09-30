@@ -26,6 +26,7 @@ from apps.core.manychat_contact_index import (
     contact_index_csv,
     contact_index_phones,
     contact_index_rows,
+    current_recipients,
 )
 from apps.core.manychat_service import (
     CONTACT_UNFINDABLE_MESSAGE,
@@ -70,14 +71,21 @@ class ContactIndexPhonesTests(NoNetworkMixin, TestCase):
         )
         child = family.children.first()
         sent_to = ManyChatService.normalize_phone_e164(build_enrollment_whatsapp_context(child=child)['phone'])
-        self.assertEqual(contact_index_phones(SCOPE_CURRENT), [sent_to])
         self.assertEqual(sent_to, '972543333333')
+        by_phone = {r.phone: r for r in current_recipients(SCOPE_CURRENT)}
+        # The family's own number, and the other parent's mobile that broadcasts
+        # also reach. The family's landline-less own phone is not a recipient.
+        self.assertEqual(sorted(by_phone), ['972542222222', '972543333333'])
+        self.assertTrue(by_phone[sent_to].primary)
+        self.assertFalse(by_phone['972542222222'].primary)
+        self.assertEqual(by_phone['972542222222'].first_name, 'אבא')
 
     def test_no_primary_parent_means_the_first_parent_as_the_sender_picks(self):
         family = make_family(self.branch, parents=[('תמר', '0544444444', False), ('אורי', '0545555555', False)])
         child = family.children.first()
         sent_to = ManyChatService.normalize_phone_e164(build_enrollment_whatsapp_context(child=child)['phone'])
-        self.assertEqual(contact_index_phones(SCOPE_CURRENT), [sent_to])
+        primaries = [r.phone for r in current_recipients(SCOPE_CURRENT) if r.primary]
+        self.assertEqual(primaries, [sent_to])
 
     def test_a_parent_without_a_phone_falls_back_to_the_family_phone(self):
         make_family(self.branch, family_phone='0526666666', parents=[('רות', '', True)])
@@ -125,8 +133,34 @@ class ContactIndexPhonesTests(NoNetworkMixin, TestCase):
         )
         Parent.objects.filter(family=family, first_name='נעמה').update(last_name='שלמה')
         ctx = build_enrollment_whatsapp_context(child=family.children.first())
-        self.assertEqual(contact_index_rows(SCOPE_CURRENT), [('972543333333', 'נעמה', 'שלמה')])
+        self.assertEqual(contact_index_rows(SCOPE_CURRENT), [
+            ('972542222222', 'אבא', 'x'), ('972543333333', 'נעמה', 'שלמה'),
+        ])
         self.assertEqual(ctx['parent_name'], 'נעמה שלמה')
+
+    def test_other_parents_come_in_as_mobiles_only_and_once(self):
+        make_family(self.branch, parents=[
+            ('ראשי', '0541000001', True),
+            ('נייח', '03-5551234', False),     # not a mobile: broadcasts skip it too
+            ('אותו', '054-1000001', False),    # the family's own number again
+            ('שני', '0521000002', False),
+        ])
+        rows = current_recipients(SCOPE_CURRENT)
+        self.assertEqual([(r.phone, r.primary) for r in rows], [('972521000002', False), ('972541000001', True)])
+
+    def test_a_family_s_own_number_beats_another_family_s_extra_parent(self):
+        make_family(self.branch, parents=[('אחר', '0541111111', True), ('משותף', '0542222222', False)])
+        make_family(self.branch, parents=[('בעלים', '0542222222', True)])
+        shared = next(r for r in current_recipients(SCOPE_CURRENT) if r.phone == '972542222222')
+        self.assertTrue(shared.primary)
+        self.assertEqual(shared.first_name, 'בעלים')
+
+    def test_each_recipient_points_at_a_current_child(self):
+        family = make_family(self.branch, parents=[('הורה', '0541234567', True)], statuses=('inactive', 'active'))
+        active = family.children.get(status='active')
+        recipient = current_recipients(SCOPE_CURRENT)[0]
+        self.assertEqual(recipient.child_id, str(active.id))
+        self.assertEqual(recipient.child_name, f'{active.first_name} {active.last_name}')
 
     def test_a_parent_without_a_phone_still_gives_their_name(self):
         make_family(self.branch, family_phone='0526666666', parents=[('רות', '', True)])

@@ -973,6 +973,7 @@ class ManyChatService:
         trial_date: str = '',
         location: str = '',
         extra_fields: dict[str, str] | None = None,
+        alert_office: bool = True,
     ) -> dict:
         """
         Send a course-registration / trial confirmation to the parent on WhatsApp.
@@ -984,7 +985,28 @@ class ManyChatService:
              arrives with empty branch/date/time).
           4. If fields were written and a flow ns is configured → trigger it.
              Otherwise fall back to free-text so the parent still gets details.
+
+        A message that does not go out — or goes out as free text, which
+        WhatsApp delivers only inside the 24-hour window — raises an office
+        alert (apps/core/whatsapp_alerts.py); ``alert_office=False`` is for a
+        test send, whose result the person testing is already looking at.
         """
+        label = self.AUTOMATION_LABELS.get(kind, kind)
+
+        def failed(result: dict) -> dict:
+            if alert_office:
+                from apps.core.whatsapp_alerts import alert_send_failure
+
+                alert_send_failure(
+                    phone=phone,
+                    where=f'הודעת "{label}" ללקוח',
+                    parent_name=parent_name,
+                    child_name=child_name,
+                    reason=result.get('reason', ''),
+                    error=result.get('error', ''),
+                )
+            return result
+
         # A link only a developer's machine can open must never reach a parent.
         # The failure message once went out as http://localhost:3000/update-card/…
         # on a deployment without CRM_FRONTEND_URL: the parent tapped it, got
@@ -997,10 +1019,10 @@ class ManyChatService:
         ]
         if dead_links and not getattr(settings, 'DEBUG', False):
             logger.error('ManyChat %s not sent to %s: link host is not configured (%s)', kind, phone, ', '.join(dead_links))
-            return {'sent': False, 'reason': 'link_host_not_configured', 'fields': dead_links}
+            return failed({'sent': False, 'reason': 'link_host_not_configured', 'fields': dead_links})
 
         if not self.is_configured:
-            return {'sent': False, 'reason': 'manychat_not_configured'}
+            return failed({'sent': False, 'reason': 'manychat_not_configured'})
 
         config_entry = self._REGISTRATION_KINDS.get(kind, self._REGISTRATION_KINDS[self.REGISTRATION_KIND_SUBSCRIPTION])
 
@@ -1009,11 +1031,11 @@ class ManyChatService:
         except ManyChatError as exc:
             # The detail, not just ManyChat's headline — see manychat_error_detail.
             reason = 'contact_unfindable' if isinstance(exc, ManyChatContactUnfindable) else 'lookup_failed'
-            return {'sent': False, 'reason': reason, 'error': f'איש הקשר: {manychat_error_detail(exc)}'}
+            return failed({'sent': False, 'reason': reason, 'error': f'איש הקשר: {manychat_error_detail(exc)}'})
 
         sid = resolved.get('subscriber_id')
         if not sid:
-            return {'sent': False, 'reason': 'no_subscriber_id'}
+            return failed({'sent': False, 'reason': 'no_subscriber_id'})
 
         whatsapp_phone = phone
         try:
@@ -1060,12 +1082,12 @@ class ManyChatService:
                 }
             except ManyChatError as exc:
                 logger.exception('ManyChat sendFlow (%s) failed for %s', kind, sid)
-                return {
+                return failed({
                     'sent': False,
                     'reason': 'send_flow_failed',
                     'error': f'האוטומציה ({flow_ns}): {manychat_error_detail(exc)}',
                     'subscriber_id': sid,
-                }
+                })
         if flow_ns and not fields_ok:
             logger.warning(
                 'ManyChat skipping flow %s for %s: custom fields were not set; '
@@ -1097,15 +1119,19 @@ class ManyChatService:
         ))
         try:
             self.send_whatsapp_text(sid, text)
+            if alert_office:
+                from apps.core.whatsapp_alerts import alert_free_text
+
+                alert_free_text(label=label, flow_setting=config_entry['flow_setting'])
             return {'sent': True, 'method': 'text', 'kind': kind, 'subscriber_id': sid, 'phone': phone, 'whatsapp_phone': whatsapp_phone, 'parent_name': parent_name, 'child_name': child_name}
         except ManyChatError as exc:
             logger.exception('ManyChat send_whatsapp_text (%s) failed for %s', kind, sid)
-            return {
+            return failed({
                 'sent': False,
                 'reason': 'send_text_failed',
                 'error': f'שליחת הטקסט: {manychat_error_detail(exc)}',
                 'subscriber_id': sid,
-            }
+            })
 
     def _set_custom_fields_with_retry(self, subscriber_id: int | str, fields: dict[str, str]) -> bool:
         last_error: ManyChatError | None = None
@@ -1384,6 +1410,67 @@ class ManyChatService:
             remember_contact(phone, sub.get('id'), ManyChatContact.SOURCE_FOUND)
             return sub
         return None
+
+    # What `reach` found.
+    REACH_REMEMBERED = 'remembered'
+    REACH_FOUND = 'found'
+    REACH_CREATED = 'created'
+    REACH_UNFINDABLE = 'unfindable'
+    REACH_NOT_ON_WHATSAPP = 'not_on_whatsapp'
+
+    def reach(self, phone: str, first_name: str = '', last_name: str = '') -> dict:
+        """
+        Make sure a message to this phone would reach a contact, sending nothing.
+
+        The contact already remembered, or found and remembered, or — when
+        ManyChat has no contact for the number — created, as the first message
+        would create it. What it cannot fix it names: a contact ManyChat has but
+        will not find ('unfindable'), or a number that is not on WhatsApp.
+
+        Unlike ``lookup_or_create`` it writes nothing to a contact it finds
+        (no phone mirror, no SMS opt-in): it runs over every customer each
+        morning, and a check must not become a bulk edit. The phone User Field
+        is searched first — that is where the imported contacts are found — and
+        the slower searches only after it.
+
+        Returns {'state': REACH_*, 'subscriber_id': id or None}. Raises
+        ManyChatError for anything else (network, rate limit): "could not
+        check" is not "unreachable".
+        """
+        from apps.core.models import ManyChatContact
+
+        remembered = self._remembered_subscriber(phone)
+        if remembered:
+            return {'state': self.REACH_REMEMBERED, 'subscriber_id': remembered.get('id')}
+
+        name = f'{first_name} {last_name}'.strip()
+        finders = [
+            self.find_by_custom_phone_field,
+            self._find_by_whatsapp_phone,
+            self.find_by_phone,
+            lambda p: self.find_by_name_for_phone(p, name) if name else [],
+        ]
+        for finder in finders:
+            sub = self._pick_best_subscriber(finder(phone), phone)
+            if sub and sub.get('id'):
+                remember_contact(phone, sub.get('id'), ManyChatContact.SOURCE_FOUND)
+                return {'state': self.REACH_FOUND, 'subscriber_id': sub.get('id')}
+
+        try:
+            created = self.create_whatsapp_subscriber(phone, first_name or 'Kogo', last_name)
+        except ManyChatError as exc:
+            text = _manychat_error_text(exc)
+            # Same order as lookup_or_create: "is not a valid whatsapp id" also
+            # contains "whatsapp id".
+            if 'not a valid whatsapp id' in text:
+                return {'state': self.REACH_NOT_ON_WHATSAPP, 'subscriber_id': None}
+            if 'already exists' in text or 'whatsapp id' in text:
+                return {'state': self.REACH_UNFINDABLE, 'subscriber_id': None}
+            raise
+        sid = created.get('id')
+        if sid:
+            remember_contact(phone, sid, ManyChatContact.SOURCE_CREATED)
+        return {'state': self.REACH_CREATED, 'subscriber_id': sid}
 
     def lookup_or_create(self, phone: str, name: str = '', lookup_names: list[str] | None = None) -> dict:
         """Find by phone or create a WhatsApp subscriber for any valid number."""

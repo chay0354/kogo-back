@@ -52,11 +52,12 @@ TIME_BUDGET_SECONDS = 40
 # beyond this many children the check says how far it got instead of running on.
 MAX_CHILDREN_SCANNED = 3000
 
-# The two morning fixes are too long for one request on the hosting (300
-# seconds), so each call does this much and the next call carries on. An item
-# that is not finished says so with `continues`, and keeps in `progress` what
-# the next slice needs.
-RESUMABLE_CHECKS = ('fix_child_statuses', 'refresh_dashboard')
+# The two morning fixes, and the WhatsApp check's first pass over every
+# customer's phone, are too long for one request on the hosting (300 seconds),
+# so each call does this much and the next call carries on. An item that is not
+# finished says so with `continues`, and keeps in `progress` what the next
+# slice needs.
+RESUMABLE_CHECKS = ('fix_child_statuses', 'refresh_dashboard', 'whatsapp_reachability')
 RESUMABLE_SLICE_SECONDS = 60
 
 
@@ -614,7 +615,12 @@ def check_office_alerts(today: date) -> BriefItem:
             ' · '.join(part for part in (
                 alert.where, alert.customer, alert.action,
                 f'{timezone.localtime(alert.created_at):%d/%m %H:%M}',
-                '' if alert.status == OfficeAlert.STATUS_SENT else alert.get_status_display(),
+                '' if alert.status == OfficeAlert.STATUS_SENT else (
+                    # Held on purpose (one message for many): the note says so,
+                    # where "waiting to be sent" would not be true.
+                    alert.error if alert.status == OfficeAlert.STATUS_PENDING and alert.error
+                    else alert.get_status_display()
+                ),
             ) if part)[:400],
             # The brief's links are the CRM's own paths.
             alert.link[len(crm_base):] if crm_base and alert.link.startswith(crm_base) else alert.link,
@@ -1383,6 +1389,171 @@ def check_manychat_health(today: date) -> BriefItem:
         item.rows.append(_row('ManyChat', str(exc), '/settings/whatsapp'))
         return item
     item.summary = f'ManyChat מחובר · {len(flows or [])} אוטומציות זמינות.'
+    # A message type with no automation goes out as free text, which WhatsApp
+    # delivers only to someone who wrote to the business in the last 24 hours:
+    # Kogo marks it sent and most parents never get it.
+    free_text = [
+        (service.AUTOMATION_LABELS.get(kind, kind), entry['flow_setting'])
+        for kind, entry in service._REGISTRATION_KINDS.items()
+        if not service.resolve_flow_for(entry)
+    ]
+    if free_text:
+        item.severity = RED
+        item.count = len(free_text)
+        item.summary += (
+            f' {len(free_text)} סוגי הודעות בלי אוטומציה — הם יוצאים כטקסט חופשי, '
+            'ומגיעים רק למי שכתב לעסק ב-24 השעות האחרונות.'
+        )
+        item.action = 'ליצור ב-ManyChat אוטומציה עם תבנית לכל הודעה ברשימה, ולהגדיר אותה בשרת.'
+        for label, setting in free_text:
+            item.rows.append(_row(label, f'אין אוטומציה ({setting}) — יוצאת כטקסט חופשי', '/settings/whatsapp'))
+    return item
+
+
+# One slice of the WhatsApp check. A phone already remembered costs nothing; a
+# new one costs a few ManyChat searches, and ManyChat allows ten a second.
+REACH_SLICE_SECONDS = 50
+# Problems kept between slices; the count stays exact.
+MAX_REACH_PROBLEMS_KEPT = 200
+REACH_STATES = ('remembered', 'found', 'created', 'unfindable', 'not_on_whatsapp', 'error')
+REACH_PROBLEMS = {
+    'unfindable': 'קיים ב-ManyChat, וקוגו לא מוצאת אותו',
+    'not_on_whatsapp': 'המספר לא רשום בוואטסאפ',
+    'error': 'ManyChat לא ענה — ייבדק שוב מחר',
+}
+
+
+def check_whatsapp_reachability(today: date) -> BriefItem:
+    """
+    Every current customer's phone, made sure of before a message needs it.
+
+    A broadcast used to discover a parent it could not reach only when it
+    failed on them. Each morning this goes over every phone Kogo sends to —
+    each family's own number and its other parents' mobiles — and for each one
+    not yet remembered, finds its ManyChat contact and remembers it, or creates
+    it when ManyChat has none (as the first message would), sending nothing
+    (ManyChatService.reach). What cannot be fixed that way — a contact ManyChat
+    has but will not find, a number not on WhatsApp — is listed here and sent
+    to the office as one alert. A new customer is covered the morning after
+    they join; their first message, if it fails before then, alerts on its own
+    (apps/core/whatsapp_alerts.py).
+
+    Resumable: the first pass over a thousand phones takes several slices.
+    """
+    import time as _time
+
+    from apps.core.manychat_contact_index import current_recipients
+    from apps.core.manychat_service import ManyChatError, ManyChatService, manychat_error_detail
+    from apps.core.models import ManyChatContact
+
+    item = BriefItem(
+        key='whatsapp_reachability',
+        title='לקוחות שלא יקבלו וואטסאפ',
+        severity=GREEN,
+        action='קיים ב-ManyChat ולא נמצא: הגדרות › הודעות › "אנשי קשר ש-ManyChat לא מוצא" — '
+               'להוריד את הקובץ ולייבא אותו ב-ManyChat. מספר שלא רשום בוואטסאפ: לתקן בכרטיס הלקוח.',
+    )
+    service = ManyChatService()
+    if not service.is_configured:
+        item.severity = RED
+        item.count = 1
+        item.summary = 'ManyChat אינו מוגדר בשרת — אף לקוח לא יקבל הודעה.'
+        return item
+
+    so_far = _progress_so_far('whatsapp_reachability', today)
+    after = so_far.get('after_phone') or ''
+    tally = {state: int((so_far.get('tally') or {}).get(state) or 0) for state in REACH_STATES}
+    problems = list(so_far.get('problems') or [])
+    problem_count = int(so_far.get('problem_count') or len(problems))
+
+    recipients = current_recipients()
+    remembered = set(
+        ManyChatContact.objects.filter(phone__in=[r.phone for r in recipients]).values_list('phone', flat=True)
+    )
+
+    started = _time.monotonic()
+    finished = True
+    last = after
+    for recipient in recipients:
+        if recipient.phone <= after:
+            continue
+        if _time.monotonic() - started > REACH_SLICE_SECONDS:
+            finished = False
+            break
+        last = recipient.phone
+        if recipient.phone in remembered:
+            tally['remembered'] += 1
+            continue
+        error = ''
+        try:
+            state = service.reach(recipient.phone, recipient.first_name, recipient.last_name)['state']
+        except ManyChatError as exc:
+            state, error = 'error', manychat_error_detail(exc)
+        tally[state] += 1
+        if state in REACH_PROBLEMS:
+            problem_count += 1
+            if len(problems) < MAX_REACH_PROBLEMS_KEPT:
+                problems.append({
+                    'phone': recipient.phone,
+                    'name': recipient.name,
+                    'child_id': recipient.child_id,
+                    'child_name': recipient.child_name,
+                    'primary': recipient.primary,
+                    'state': state,
+                    'error': error[:200],
+                })
+
+    checked = sum(tally.values())
+    item.count = problem_count
+    if not finished:
+        item.severity = YELLOW
+        item.continues = True
+        item.progress = {'after_phone': last, 'tally': tally, 'problems': problems, 'problem_count': problem_count}
+        item.summary = (
+            f'עובר על הטלפונים של הלקוחות — {checked} מתוך {len(recipients)} נבדקו עד עכשיו. '
+            'ממשיך מאותה נקודה בסבב הבא.'
+        )
+        return item
+
+    reachable = tally['remembered'] + tally['found'] + tally['created']
+    unreachable = tally['unfindable'] + tally['not_on_whatsapp']
+    item.severity = RED if unreachable else (YELLOW if tally['error'] else GREEN)
+    parts = [f'{len(recipients)} טלפונים של לקוחות נוכחיים, כולל הורים נוספים', f'{reachable} מהם יקבלו הודעות']
+    if tally['created']:
+        parts.append(f'{tally["created"]} נוספו עכשיו ל-ManyChat')
+    if tally['unfindable']:
+        parts.append(f'{tally["unfindable"]} קיימים ב-ManyChat וקוגו לא מוצאת אותם')
+    if tally['not_on_whatsapp']:
+        parts.append(f'{tally["not_on_whatsapp"]} לא רשומים בוואטסאפ')
+    if tally['error']:
+        parts.append(f'{tally["error"]} לא נבדקו כי ManyChat לא ענה')
+    item.summary = ' · '.join(parts) + '.'
+    # What a person must fix first; "could not check" last.
+    problems.sort(key=lambda p: (p['state'] == 'error', p['state'], p['name']))
+    for problem in problems[:MAX_ROWS]:
+        who = problem['name'] or problem['phone']
+        if problem.get('child_name'):
+            who += f' · {problem["child_name"]}'
+        detail = f'{problem["phone"]} · {REACH_PROBLEMS[problem["state"]]}'
+        if not problem.get('primary'):
+            detail += ' · הורה נוסף'
+        item.rows.append(_row(who, detail, _child_href(problem['child_id']) if problem.get('child_id') else ''))
+
+    if unreachable:
+        from apps.core.office_alerts import raise_office_alert
+        from apps.core.whatsapp_alerts import KIND_UNREACHABLE
+
+        names = [p['name'] or p['phone'] for p in problems if p['state'] != 'error']
+        raise_office_alert(
+            kind=KIND_UNREACHABLE,
+            dedup_key=f'{KIND_UNREACHABLE}:{today.isoformat()}',
+            title=f'{unreachable} לקוחות לא יקבלו הודעות וואטסאפ',
+            where='בדיקת הבוקר של הטלפונים (בריף יומי)',
+            what=item.summary,
+            why='קוגו לא יכולה לשלוח אליהם: איש הקשר קיים ב-ManyChat ולא נמצא, או שהמספר לא רשום בוואטסאפ.',
+            customer=', '.join(names[:5]) + (f' ועוד {len(names) - 5}' if len(names) > 5 else ''),
+            action=item.action,
+        )
     return item
 
 
@@ -1525,11 +1696,12 @@ CHECKS = (
     check_weekly_audit,
     check_tranzila_health,
     check_manychat_health,
+    check_whatsapp_reachability,
     check_tranzila_reconciliation,
 )
 
 # Checks that call an outside service, so a quick brief can leave them out.
-EXTERNAL_CHECKS = {'tranzila_health', 'manychat_health', 'tranzila_reconciliation'}
+EXTERNAL_CHECKS = {'tranzila_health', 'manychat_health', 'whatsapp_reachability', 'tranzila_reconciliation'}
 
 
 def check_key(check) -> str:
@@ -1573,6 +1745,7 @@ def check_catalogue() -> list[dict]:
         'weekly_audit': 'בדיקת עומק יומית',
         'tranzila_health': 'תקינות הסליקה',
         'manychat_health': 'תקינות WhatsApp',
+        'whatsapp_reachability': 'לקוחות שלא יקבלו וואטסאפ',
         'tranzila_reconciliation': 'התאמה מול טרנזילה',
     }
     return [

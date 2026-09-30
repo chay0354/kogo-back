@@ -10,9 +10,10 @@ already exists" (``ManyChatContactUnfindable``).
 
 ManyChat's own CSV import does what the API cannot: a row whose WhatsApp ID
 matches an existing contact updates that contact, custom fields included. This
-module writes that file — one row per phone Kogo sends to, the number twice
-(once to match the contact, once as the value of ``kogo_whatsapp_phone``), and
-the parent's first and last name.
+module writes that file — one row per phone Kogo sends to (each family's own
+number, and the mobiles of its other parents, which broadcasts also reach): the
+number twice (once to match the contact, once as the value of
+``kogo_whatsapp_phone``), and that parent's first and last name.
 
 The names are not optional. The first file (29.9.2026) carried the number
 only, and ManyChat's import blanked First Name and Last Name on each of the 393
@@ -25,6 +26,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from dataclasses import dataclass
 
 from apps.core.manychat_service import ManyChatService
 from apps.customers.child_status import (
@@ -94,22 +96,48 @@ def family_whatsapp_name(family, parents) -> tuple[str, str]:
     return (family.name or '').strip(), ''
 
 
-def contact_index_rows(scope: str = SCOPE_CURRENT) -> list[tuple[str, str, str]]:
+# The other parents' phones a broadcast also writes to (apps/customers/broadcast.py
+# `_extra_recipients`): mobiles only, the same test as there.
+_MOBILE_E164 = re.compile(r'9725\d{8}')
+
+
+@dataclass
+class Recipient:
+    """One phone Kogo writes to, and whose it is."""
+    phone: str
+    first_name: str
+    last_name: str
+    # A current child of the family, for a link to the card; '' when none.
+    child_id: str = ''
+    child_name: str = ''
+    # The family's own number (primary parent, else first, else family phone),
+    # as opposed to another parent's that only broadcasts reach.
+    primary: bool = True
+
+    @property
+    def name(self) -> str:
+        return f'{self.first_name} {self.last_name}'.strip()
+
+
+def current_recipients(scope: str = SCOPE_CURRENT) -> list[Recipient]:
     """
-    (phone, first name, last name) for every distinct, valid E.164 phone Kogo
-    sends to within the scope, sorted by phone. Two families on one phone give
-    one row, named after the fullest name among them (a first name beats a last
-    name alone); on a tie, the first family by id.
+    Every distinct phone Kogo sends to within the scope, sorted by phone: each
+    family's own number, and the mobiles of its other parents.
+
+    One row per phone. A family's own number beats another parent's; between
+    equals the fuller name wins (a first name beats a last name alone), and on
+    a tie the first family by id — so the answer never depends on UUID order.
     """
     from django.db.models import Prefetch
 
-    from apps.customers.models import Family, Parent
+    from apps.customers.models import Child, Family, Parent
 
     if scope not in SCOPE_STATUSES:
         raise ValueError(f'unknown scope: {scope}')
+    statuses = SCOPE_STATUSES[scope]
 
     families = (
-        Family.objects.filter(children__status__in=SCOPE_STATUSES[scope])
+        Family.objects.filter(children__status__in=statuses)
         .distinct()
         .order_by('id')
         .only('id', 'phone', 'name')
@@ -117,20 +145,51 @@ def contact_index_rows(scope: str = SCOPE_CURRENT) -> list[tuple[str, str, str]]
             Prefetch(
                 'parents',
                 queryset=Parent.objects.only('id', 'family_id', 'phone', 'is_primary', 'first_name', 'last_name'),
-            )
+            ),
+            Prefetch(
+                'children',
+                queryset=Child.objects.filter(status__in=statuses).only('id', 'family_id', 'first_name', 'last_name'),
+                to_attr='current_children',
+            ),
         )
     )
 
-    names: dict[str, tuple[str, str]] = {}
+    best: dict[str, Recipient] = {}
+
+    def keep(candidate: Recipient) -> None:
+        held = best.get(candidate.phone)
+        if held is None or _recipient_rank(candidate) > _recipient_rank(held):
+            best[candidate.phone] = candidate
+
     for family in families:
         parents = list(family.parents.all())
-        e164 = ManyChatService.normalize_phone_e164(family_whatsapp_phone(family, parents))
-        if not _VALID_E164.fullmatch(e164):
-            continue
-        name = family_whatsapp_name(family, parents)
-        if e164 not in names or _name_rank(name) > _name_rank(names[e164]):
-            names[e164] = name
-    return [(phone, *names[phone]) for phone in sorted(names)]
+        children = sorted(family.current_children, key=lambda c: (c.first_name or '', str(c.id)))
+        child = children[0] if children else None
+        child_id = str(child.id) if child else ''
+        child_name = f'{child.first_name} {child.last_name}'.strip() if child else ''
+
+        own = ManyChatService.normalize_phone_e164(family_whatsapp_phone(family, parents))
+        if _VALID_E164.fullmatch(own):
+            first, last = family_whatsapp_name(family, parents)
+            keep(Recipient(own, first, last, child_id, child_name, primary=True))
+        for parent in parents:
+            other = ManyChatService.normalize_phone_e164(parent.phone or '')
+            if not other or other == own or not _MOBILE_E164.fullmatch(other):
+                continue
+            keep(Recipient(
+                other, (parent.first_name or '').strip(), (parent.last_name or '').strip(),
+                child_id, child_name, primary=False,
+            ))
+    return [best[phone] for phone in sorted(best)]
+
+
+def _recipient_rank(recipient: Recipient) -> tuple[bool, bool, bool]:
+    return (recipient.primary, *_name_rank((recipient.first_name, recipient.last_name)))
+
+
+def contact_index_rows(scope: str = SCOPE_CURRENT) -> list[tuple[str, str, str]]:
+    """(phone, first name, last name) for every recipient in the scope, sorted by phone."""
+    return [(r.phone, r.first_name, r.last_name) for r in current_recipients(scope)]
 
 
 def _name_rank(name: tuple[str, str]) -> tuple[bool, bool]:

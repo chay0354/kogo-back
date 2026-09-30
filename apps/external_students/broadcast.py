@@ -18,7 +18,8 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
-from apps.core.manychat_service import ManyChatError, ManyChatService
+from apps.core.manychat_service import ManyChatContactUnfindable, ManyChatError, ManyChatService
+from apps.core.whatsapp_alerts import alert_send_failure
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,8 @@ def broadcast_to_external_students(
             )
         except ManyChatError as exc:
             outcome = {'sent': False, 'error': str(exc)}
+            if isinstance(exc, ManyChatContactUnfindable):
+                outcome['reason'] = 'contact_unfindable'
 
         if outcome.get('sent'):
             # Only a message that actually went out covers the second student on
@@ -107,6 +110,13 @@ def broadcast_to_external_students(
             row['error'] = outcome.get('error') or outcome.get('reason') or 'unknown'
             counts['failed'] += 1
             logger.warning('External broadcast to %s failed: %s', student.id, row['error'])
+            alert_send_failure(
+                phone=student.phone,
+                where='תפוצה לתלמידים חיצוניים',
+                parent_name=student.full_name,
+                reason=outcome.get('reason') or '',
+                error=row['error'],
+            )
         results.append(row)
 
     return {
