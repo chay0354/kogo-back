@@ -26,6 +26,22 @@ class InventoryError(Exception):
         super().__init__(message)
 
 
+def _row_id(value: str | None, *, what: str) -> str:
+    """A stock-row id as sent, or an error the office can read — a malformed one used to be a 500."""
+    import uuid
+
+    value = (value or '').strip()
+    if not value:
+        return ''
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise InventoryError(f'{what} לא תקינה — רעננו את הדף ונסו שוב')
+
+
+ROW_GONE = 'שורת המלאי לא נמצאה — ייתכן שהמוצר עודכן בינתיים. רעננו את הדף ונסו שוב'
+
+
 def reload_product(product: StoreProduct) -> StoreProduct:
     return (
         StoreProduct.objects
@@ -104,13 +120,22 @@ def adjust_product_stock(
     """Add or subtract stock with an InventoryAdjustment audit row."""
     valid_reasons = {r[0] for r in InventoryAdjustment.REASON_CHOICES}
     if reason not in valid_reasons:
-        raise InventoryError(f'Invalid reason. Must be one of: {", ".join(sorted(valid_reasons))}')
+        raise InventoryError('בחרו סיבה לעדכון המלאי')
+    if not quantity_delta:
+        raise InventoryError('הכמות חייבת להיות גדולה מ-0')
 
-    size_stock_id = (size_stock_id or '').strip()
+    size_stock_id = _row_id(size_stock_id, what='שורת המלאי')
 
     with transaction.atomic():
+        # The product first, then its row — the order a sale and a product edit
+        # take — so two of them never wait on each other. It also serialises
+        # the one-number stock of a product without rows, which was read and
+        # written unlocked.
+        product = StoreProduct.objects.select_for_update().get(pk=product.pk)
         size_row = None
-        if size_stock_id and product.has_per_size_stock():
+        if product.has_per_size_stock():
+            if not size_stock_id:
+                raise InventoryError('בחרו מידה ומיקום לעדכון')
             size_row = (
                 StoreProductSize.objects
                 .select_for_update()
@@ -118,7 +143,7 @@ def adjust_product_stock(
                 .first()
             )
             if size_row is None:
-                raise InventoryError('Size stock row not found for this product')
+                raise InventoryError(ROW_GONE)
 
         if size_row is not None:
             new_qty = max(0, size_row.stock_quantity + quantity_delta)
@@ -157,16 +182,17 @@ def transfer_product_stock(
 ) -> StoreProduct:
     """Move units between two size/location rows of the same product."""
     if quantity <= 0:
-        raise InventoryError('quantity must be greater than 0')
+        raise InventoryError('הכמות להעברה חייבת להיות גדולה מ-0')
 
-    from_id = (from_size_stock_id or '').strip()
-    to_id = (to_size_stock_id or '').strip()
+    from_id = _row_id(from_size_stock_id, what='שורת המקור')
+    to_id = _row_id(to_size_stock_id, what='שורת היעד')
     if not from_id or not to_id:
-        raise InventoryError('from_size_stock_id and to_size_stock_id are required')
+        raise InventoryError('בחרו מאיפה ולאן להעביר')
     if from_id == to_id:
-        raise InventoryError('Source and destination cannot be the same row')
+        raise InventoryError('המקור והיעד הם אותה שורה')
 
     with transaction.atomic():
+        product = StoreProduct.objects.select_for_update().get(pk=product.pk)
         rows = (
             StoreProductSize.objects
             .select_for_update()
@@ -174,10 +200,8 @@ def transfer_product_stock(
         )
         row_map = {str(r.pk): r for r in rows}
 
-        if from_id not in row_map:
-            raise InventoryError('Source size stock row not found')
-        if to_id not in row_map:
-            raise InventoryError('Destination size stock row not found')
+        if from_id not in row_map or to_id not in row_map:
+            raise InventoryError(ROW_GONE)
 
         from_row = row_map[from_id]
         to_row = row_map[to_id]
@@ -219,7 +243,7 @@ def save_product_inventory(product: StoreProduct, payload: dict) -> StoreProduct
         allowed['branch'] = None if branch in ('', 'delivery', None) else branch
 
     if not allowed:
-        raise InventoryError('No inventory fields to update')
+        raise InventoryError('אין שדות מלאי לעדכון')
 
     ser = StoreProductSerializer(product, data=allowed, partial=True)
     if not ser.is_valid():
