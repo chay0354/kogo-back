@@ -201,6 +201,24 @@ class ReceiptPaysInvoiceTests(SettlementFixture, APITestCase):
         self.assertEqual(DocumentSettlement.objects.get().amount, Decimal('500.00'))
         self.assertEqual(settlement.balance_of(self.ti).open, Decimal('680.00'))
 
+    def test_the_older_forms_linked_invoice_records_all_the_receipt_paid(self, _mail):
+        # The receipt's own link is not counted against it (it read as a payment
+        # before its row was written): 700 of 1,180 is recorded as 700, not 480.
+        res = self.client.post(CREATE, receipt_payload(
+            self.kid, '700.00', day=self.today, linked=self.ti.document_number,
+        ), format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(DocumentSettlement.objects.get().amount, Decimal('700.00'))
+        self.assertEqual(settlement.balance_of(self.ti).open, Decimal('480.00'))
+
+    def test_the_older_forms_linked_invoice_paid_in_full_is_recorded(self, _mail):
+        res = self.client.post(CREATE, receipt_payload(
+            self.kid, '1180.00', day=self.today, linked=self.ti.document_number,
+        ), format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(DocumentSettlement.objects.get().amount, Decimal('1180.00'))
+        self.assertEqual(settlement.balance_of(self.ti).open, Decimal('0.00'))
+
     def test_a_linked_number_kogo_does_not_know_stays_text(self, _mail):
         res = self.client.post(CREATE, receipt_payload(self.kid, '500.00', day=self.today, linked='40413'),
                                format='json')

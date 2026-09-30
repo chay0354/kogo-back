@@ -473,7 +473,13 @@ def settle_on_issue(payer: FormalDocument, data: dict, *, user=None) -> list[Doc
     invoice = FormalDocument.objects.filter(document_number=number, document_type='tax_invoice').first()
     if invoice is None or not _same_customer(payer, invoice):
         return []
-    left = balance_of(invoice).open
+    # What the invoice owes apart from this receipt: the receipt's own link
+    # already reads as a payment (rule 2) until its row is written — counted,
+    # a receipt of 700 on an invoice of 1,180 recorded 480, and one of 1,180
+    # recorded nothing (the rule _checked measures by).
+    line = balance_of(invoice)
+    own = sum((f.amount for f in line.facts if f.payer_id == payer.pk and f.source == SOURCE_LINKED_RECEIPT), ZERO)
+    left = money(max(ZERO, line.total - (line.paid - own) - line.credited))
     amount = min(left, payer_capacity(payer))
     if amount <= 0:
         return []
