@@ -145,12 +145,23 @@ def _attach_delivery(rows: list[dict]) -> None:
 
 
 class InvoicePdfView(APIView):
-    """GET /api/v1/customers/invoices/{id}/pdf/ — a lesson receipt by its own id."""
+    """
+    GET /api/v1/customers/invoices/{id}/pdf/ — a lesson receipt by its own id.
+
+    ?copy=1 (added 30.9.2026, the invoices page's documents tab): always a copy,
+    "העתק" — never the original, whatever the signing switch says and whether
+    or not the original left. Without it, as before: the original the first
+    time it has not left the system, a copy after (reproduce_subscription_invoice_pdf).
+    A partner reaches only a receipt of their own branches, as on the page.
+    """
 
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def get(self, request, invoice_id):
-        from apps.customers.subscription_invoice_pdf import reproduce_subscription_invoice_pdf
+        from apps.customers.subscription_invoice_pdf import (
+            generate_subscription_invoice_pdf,
+            reproduce_subscription_invoice_pdf,
+        )
 
         invoice = Invoice.objects.select_related('family').filter(id=invoice_id).first()
         if invoice is None:
@@ -161,8 +172,11 @@ class InvoicePdfView(APIView):
             if str(branch_id) not in allowed:
                 return Response({'error': 'החשבונית לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
 
-        response = HttpResponse(
-            reproduce_subscription_invoice_pdf(invoice, user=request.user), content_type='application/pdf',
+        wants_copy = str(request.query_params.get('copy') or '').strip().lower() in ('1', 'true', 'yes')
+        pdf = (
+            generate_subscription_invoice_pdf(invoice, copy=True) if wants_copy
+            else reproduce_subscription_invoice_pdf(invoice, user=request.user)
         )
+        response = HttpResponse(pdf, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{invoice.invoice_number}.pdf"'
         return response

@@ -363,6 +363,10 @@ def _local_crm_invoice_rows(start: date, end: date, branch_ids=None) -> list[dic
             'open_balance': 0.0 if status == 'completed' or inv.status in ('cancelled', 'credit') else amount,
             'status': status,
             'pdf_url': inv.pdf_url or '',
+            # The receipt's own id (added 30.9.2026): the documents tab downloads
+            # a copy through /customers/invoices/<id>/pdf/?copy=1, which applies
+            # the same partner branch rule as this list.
+            'lesson_invoice_id': str(inv.id),
             'tranzila_doc_id': inv.tranzila_transaction_id,
             'source': 'crm',
             'origin': ORIGIN_SUBSCRIPTION,
@@ -469,6 +473,8 @@ def _merge_documents(*groups: list[dict]) -> list[dict]:
                         existing['store_invoice_id'] = row['store_invoice_id']
                     if not existing.get('business_customer_id') and row.get('business_customer_id'):
                         existing['business_customer_id'] = row['business_customer_id']
+                    if not existing.get('lesson_invoice_id') and row.get('lesson_invoice_id'):
+                        existing['lesson_invoice_id'] = row['lesson_invoice_id']
                 continue
             for key in keys:
                 if key:
