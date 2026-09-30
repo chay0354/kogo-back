@@ -182,6 +182,15 @@ WEBSITE_INTEGRATION_API_KEY = config('WEBSITE_INTEGRATION_API_KEY', default='')
 # only once TRANZILA_TERMINAL is a terminal of the business and a real 1 ₪
 # purchase has gone through end to end.
 STORE_WEBSITE_CARD_PAYMENTS_ENABLED = config('STORE_WEBSITE_CARD_PAYMENTS_ENABLED', default=False, cast=bool)
+# Whether the morning sweep of stuck store payments (apps/store/payment_followup.py,
+# brief item "תשלומים שנתקעו בחנות", and a manager's "בדוק עכשיו") may complete
+# a sale Tranzila's report now confirms. Completing issues the document and
+# emails the customer, which the owner's morning rule (23.9.2026) keeps away
+# from automatic fixes — so it is off until he says otherwise. Off, the sweep
+# reads the report, lists and tells the office. The site's own status poll
+# and Tranzila's notify complete as always; so do website and till invoices
+# on Tranzila's page alike.
+STORE_SWEEP_COMPLETES_PAYMENTS = config('STORE_SWEEP_COMPLETES_PAYMENTS', default=False, cast=bool)
 
 # CORS Settings
 CORS_ALLOWED_ORIGINS = [

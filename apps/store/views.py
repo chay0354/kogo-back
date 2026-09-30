@@ -954,9 +954,8 @@ def payment_callback(request):
     This endpoint is public (no authentication required) since it's called
     by Tranzila's servers.
     """
+    # Never the POST itself: it may carry the card's token (TranzilaTK).
     logger.info("[STORE WEBHOOK] received: method=%s content_type=%s", request.method, request.content_type)
-    logger.debug("[STORE WEBHOOK] data=%s GET=%s POST=%s",
-                 getattr(request, 'data', None), dict(request.GET), dict(request.POST))
 
     payment_service = PaymentService()
 
@@ -973,7 +972,10 @@ def payment_callback(request):
         from apps.core.tranzila_service import invoice_id_from_pdesc
         invoice_id = invoice_id_from_pdesc(request.data.get('pdesc', ''))
 
-        logger.info("[STORE WEBHOOK] parsed invoice_id=%s response=%s", invoice_id, parsed_response)
+        logger.info(
+            "[STORE WEBHOOK] invoice_id=%s response=%s index=%s",
+            invoice_id, parsed_response.get('response_code'), str(request.data.get('index') or '')[:20],
+        )
 
         result = payment_service.complete_store_purchase_from_webhook(
             invoice_id=invoice_id,

@@ -462,6 +462,35 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="בדיקת תשלום אחרונה",
     )
+    # When Tranzila's notify first reported a payment (a transaction number)
+    # for this invoice — the payment's own time, as near as the CRM knows it.
+    # The office's ten minutes count from here, not from when the order was
+    # opened. Empty on invoices no notify reported a number for, and on every
+    # invoice from before 29.9.2026.
+    payment_reported_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="מועד דיווח התשלום",
+    )
+    # When the CRM last handed the website a Tranzila page for this order. A
+    # retry within half an hour first looks for a payment whose notify never
+    # came (apps/store/payment_followup.find_unreported_payment).
+    payment_page_opened_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="עמוד תשלום נפתח",
+    )
+    # Every further transaction number Tranzila reported for this invoice,
+    # beyond tranzila_transaction_id: a second tab, a page paid twice, a
+    # number the report has not answered for yet. None is ever dropped; each
+    # is [{"index", "code", "terminal", "reported_at", "state"}] with state
+    # open (not settled), second_charge (a real second payment, for a refund)
+    # or rejected (the report says it did not pay for this order).
+    other_transactions = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="מספרי עסקה נוספים שדווחו",
+    )
 
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")

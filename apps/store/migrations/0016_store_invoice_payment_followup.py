@@ -5,17 +5,19 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     """
-    Two timestamps on a store invoice, for following a hosted-page payment up
+    What a store invoice keeps for following a hosted-page payment up
     (apps/store/payment_followup.py): when the website acknowledged "paid",
-    and when the CRM last followed the payment up by itself.
+    when the CRM last followed the payment up by itself, when Tranzila first
+    reported a payment, when the last payment page was handed out, and every
+    further transaction number Tranzila reported.
 
     A branch push runs `migrate` on the production database before its code
     reaches main (vercel_build.py), so for a while the running code does not
-    know these columns. Unlike 0015 there is nothing to keep here: both
-    columns are NULL-able, Django adds them without a default and without
-    NOT NULL, and an insert from the old code lands as NULL — "not
-    acknowledged / never followed up", which is exactly what an invoice the
-    old code wrote is. No row is rewritten.
+    know these columns. Unlike 0015 there is nothing to keep here: every
+    column is NULL-able, Django adds them without a default and without NOT
+    NULL, and an insert from the old code lands as NULL — "nothing reported,
+    nothing acknowledged, never followed up", which is exactly what an
+    invoice the old code wrote is. No row is rewritten.
     """
 
     dependencies = [
@@ -32,5 +34,20 @@ class Migration(migrations.Migration):
             model_name='storeinvoice',
             name='payment_followup_at',
             field=models.DateTimeField(blank=True, null=True, verbose_name='בדיקת תשלום אחרונה'),
+        ),
+        migrations.AddField(
+            model_name='storeinvoice',
+            name='payment_reported_at',
+            field=models.DateTimeField(blank=True, null=True, verbose_name='מועד דיווח התשלום'),
+        ),
+        migrations.AddField(
+            model_name='storeinvoice',
+            name='payment_page_opened_at',
+            field=models.DateTimeField(blank=True, null=True, verbose_name='עמוד תשלום נפתח'),
+        ),
+        migrations.AddField(
+            model_name='storeinvoice',
+            name='other_transactions',
+            field=models.JSONField(blank=True, null=True, verbose_name='מספרי עסקה נוספים שדווחו'),
         ),
     ]

@@ -2346,281 +2346,476 @@ class PaymentService:
         signature: Optional[str] = None
     ) -> Dict:
         """
-        Complete a store purchase after Tranzila iframe webhook callback.
-        
+        Tranzila's notify for a store invoice paid on the hosted page (website or till).
+
+        The notify POST is public and unsigned: anyone who knows an invoice id
+        can send `Response=000`. Only Tranzila's own report — an approved
+        charge with this number, this sum and this approval number, made after
+        the invoice, the same check the payment links make — turns it into a
+        sale (apps/store/payment_followup.report_answer).
+
+        A number the report does not confirm yet is kept and the invoice is in
+        review (29.9.2026): pending whatever it read before, followed up by the
+        site's poll and the morning sweep, and never failed by a later
+        "declined" unless the report itself says no. A second number for the
+        same order is kept too, never written over the first.
+
         Args:
             invoice_id: UUID of StoreInvoice
             tranzila_response: Parsed webhook response
             signature: Optional webhook signature for verification
-            
+
         Returns:
             Dict with completion result
         """
-        from apps.store.models import StoreInvoice, StoreProduct, StoreSale
+        from apps.store import payment_followup as followup
+        from apps.store.models import StoreInvoice
 
         # Verify webhook signature for security
         if signature and not self.tranzila_service.verify_webhook_signature(tranzila_response, signature):
             logger.error(f"Invalid webhook signature for store invoice {invoice_id}")
             return {'success': False, 'error': 'Invalid signature'}
-        
+
         try:
             invoice = StoreInvoice.objects.get(id=invoice_id)
-        except StoreInvoice.DoesNotExist:
+        except (StoreInvoice.DoesNotExist, ValidationError, ValueError):
             logger.error(f"Invoice not found: {invoice_id}")
             return {'success': False, 'error': 'Invoice not found'}
 
-        if invoice.payment_status == 'completed':
-            # Never sold again and never downgraded, whatever a repeated or
-            # late notify says: Tranzila retries, and a second call used to
-            # create the sales, take the stock and issue the document again.
-            # A *different* approved transaction is another matter: the same
-            # order paid twice (two tabs, a page opened twice). It is recorded
-            # and flagged for a refund, never swallowed.
-            self._record_second_store_charge(invoice, tranzila_response)
+        # Tranzila's `index` only — parse_webhook_response falls back to the
+        # card's token, which must never be kept as a transaction number.
+        index = followup.notify_index(tranzila_response)
+        code = str(tranzila_response.get('confirmation_code') or '').strip()[:100]
+
+        if not tranzila_response.get('is_successful'):
+            return self._store_notify_declined(invoice, index, tranzila_response)
+
+        if not index:
+            # "Approved" without a number proves nothing and leaves nothing to
+            # ask the report about. Nothing is recorded; a number the invoice
+            # already holds stays.
+            logger.error('Store webhook for invoice %s: approved notify without a transaction number', invoice.invoice_number)
+            return {'success': False, 'error': 'התשלום לא אומת מול טרנזילה',
+                    'status': invoice.payment_status, 'verdict': 'unverified'}
+
+        if invoice.payment_status in followup.PAID_STATUSES and (
+            index == (invoice.tranzila_transaction_id or '').strip()
+            or followup.other_state(invoice, index) in (followup.OTHER_SECOND_CHARGE, followup.OTHER_REJECTED)
+        ):
+            # Tranzila repeating itself, or a number already settled: never
+            # sold again, and nothing new to ask the report.
             logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
             return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
-        
-        if tranzila_response['is_successful']:
-            from types import SimpleNamespace
-            from apps.payment_links.public_views import verify_transaction_with_tranzila
 
-            with transaction.atomic():
-                # Locked for the whole completion, so two notifies arriving
-                # together cannot both sell the cart.
-                invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
-                if invoice.payment_status == 'completed':
-                    self._record_second_store_charge(invoice, tranzila_response)
-                    logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
-                    return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+        number = followup.number_for(invoice, index, code, (self.iframe_tranzila_service.terminal or '').strip())
+        # Asked before the row is locked: the report may take up to 30 seconds,
+        # and the lock would hold every other notify and poll of this order.
+        answer, row, why = followup.report_answer(invoice, number)
 
-                # The notify POST is public and unsigned: anyone who knows an
-                # invoice id can send `Response=000`. Only Tranzila's own ledger
-                # — an approved charge with this index, this sum and this
-                # approval number, made after the invoice, the same check the
-                # payment links make — turns it into a sale. The helper reads
-                # `id`, `amount` and `created_at` off the row it is handed.
-                txn_index = str(tranzila_response.get('transaction_id') or '').strip()
-                verdict, _txn_row = verify_transaction_with_tranzila(
-                    SimpleNamespace(id=invoice.id, amount=invoice.total_amount, created_at=invoice.created_at),
-                    txn_index,
-                    confirmation_code=tranzila_response.get('confirmation_code'),
+        sold = None
+        with transaction.atomic():
+            # Locked for the whole decision, so two notifies arriving together
+            # cannot both sell the cart.
+            invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
+            if invoice.payment_status in followup.PAID_STATUSES:
+                # Never sold again and never downgraded. A *different* number
+                # is the same order paid twice (two tabs, a page opened twice):
+                # kept and told, never swallowed.
+                self._record_second_store_charge(invoice, number, answer, row)
+                logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
+                return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+
+            if answer == followup.ANSWER_VERIFIED:
+                sold = self._sell_store_invoice(invoice, number)
+            elif followup.other_state(invoice, index) == followup.OTHER_REJECTED:
+                # The report already ruled this number out for this order, and
+                # still does not confirm it: a repeat changes nothing.
+                logger.error("Store webhook for invoice %s: number %s already ruled out (%s)",
+                             invoice.invoice_number, index, answer)
+            else:
+                # Nothing sold, no stock moved, no document. The number is kept
+                # — as the invoice's own, or beside it — and the invoice is in
+                # review; apps/store/payment_followup.py asks the report again.
+                own = self._keep_reported_number(invoice, number)
+                logger.error(
+                    "Store webhook for invoice %s not confirmed by Tranzila (%s: %s); in review",
+                    invoice.invoice_number, answer, why,
                 )
-                if verdict != 'verified':
-                    # Stays pending — nothing sold, no stock moved, no document —
-                    # with what was reported kept so a person can check the terminal.
-                    # The number kept is what apps/store/payment_followup.py asks
-                    # the report about again (the site's status poll, the morning
-                    # sweep); the time is when the report was last asked.
-                    from apps.store.payment_followup import alert_if_stuck, alert_payment_unverified
+                # The report's own "no" goes to the office at once; a report
+                # that cannot answer, or does not list the number yet, after
+                # ten minutes from the payment. After commit, once per invoice.
+                # A further number was told as a possible double charge already.
+                if own and answer == followup.ANSWER_REJECTED:
+                    followup.alert_payment_unverified(invoice, row, why)
+                elif own:
+                    followup.alert_if_stuck(invoice, why=why)
+            if sold is None:
+                return {
+                    'success': False,
+                    'error': 'התשלום לא אומת מול טרנזילה',
+                    'status': invoice.payment_status,
+                    'verdict': answer,
+                }
 
-                    invoice.tranzila_transaction_id = txn_index[:100]
-                    invoice.tranzila_confirmation_code = str(tranzila_response.get('confirmation_code') or '')[:100]
-                    invoice.tranzila_terminal = self.iframe_tranzila_service.terminal
-                    invoice.payment_followup_at = timezone.now()
-                    invoice.save(update_fields=[
-                        'tranzila_transaction_id', 'tranzila_confirmation_code', 'tranzila_terminal',
-                        'payment_followup_at',
-                    ])
-                    logger.error(
-                        "Store webhook for invoice %s not confirmed by Tranzila (%s); left pending",
-                        invoice.invoice_number, verdict,
-                    )
-                    # The office hears at once when the report disagrees, and
-                    # after ten minutes when it could not be asked. Both go out
-                    # after this transaction commits, once per invoice.
-                    if verdict == 'unverified' and txn_index:
-                        alert_payment_unverified(invoice, _txn_row)
-                    else:
-                        alert_if_stuck(invoice, why='הדוח של טרנזילה לא ענה כשנבדק התשלום.')
-                    return {
-                        'success': False,
-                        'error': 'התשלום לא אומת מול טרנזילה',
-                        'status': invoice.payment_status,
-                        'verdict': verdict,
-                    }
+        self._after_store_sale(invoice, sold)
+        return {'success': True, 'invoice_id': str(invoice.id)}
 
-                # Parse product items from invoice notes
-                product_items = parse_store_cart_notes(invoice.notes) or []
+    def settle_reported_store_payment(
+        self, invoice_id, *, complete: bool = True, decline: bool = False, site_timeout: Optional[float] = None,
+    ) -> Dict:
+        """
+        Ask the report about every number reported for a store invoice that is
+        not settled, and settle what it allows (apps/store/payment_followup.py).
 
-                # Update invoice
-                invoice.payment_status = 'completed'
-                invoice.tranzila_transaction_id = tranzila_response.get('transaction_id', '')
-                invoice.tranzila_confirmation_code = tranzila_response.get('confirmation_code', '')
-                # The hosted page charges on TRANZILA_TERMINAL — the one the
-                # verification above asked.
-                invoice.tranzila_terminal = self.iframe_tranzila_service.terminal
-                invoice.save()
+        * A confirmed number on an unpaid invoice completes the sale — when
+          `complete` — through the same locked sale the notify makes; any
+          other number stays beside it. Without `complete` (the morning sweep
+          while STORE_SWEEP_COMPLETES_PAYMENTS is off) nothing is sold and the
+          office is told the report confirms it.
+        * On a paid invoice, a further confirmed number is a second charge.
+        * `decline` — a "declined" notify came: the invoice is failed only
+          when the report says no to every number it holds.
+        * Otherwise it stays in review (pending).
 
-                # Create sales and update stock
-                from apps.store.stock_utils import available_stock_for_item as _available_stock_for_item
+        Reads the report before locking the invoice. Never charges.
+        Returns {'outcome': completed | confirmed | paid | declined | in_review | nothing_open, ...}.
+        """
+        from apps.store import payment_followup as followup
+        from apps.store.models import StoreInvoice
 
-                oversold = []
-                for item in product_items:
-                    product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
+        invoice = StoreInvoice.objects.filter(pk=invoice_id).first()
+        if invoice is None:
+            return {'outcome': 'nothing_open'}
+        asked = {n.index: (n, *followup.report_answer(invoice, n)) for n in followup.open_numbers(invoice)}
+        if not asked:
+            return {'outcome': 'nothing_open', 'status': invoice.payment_status}
 
-                    # The shelf was checked when the page opened, not now: the
-                    # customer has paid, so the sale is recorded whatever the
-                    # shelf says (refusing it would hide money that came in).
-                    # A unit sold that was not there is a stock count and a
-                    # customer to call — marked on the line and told to the
-                    # office. A size row cannot go below zero (stock_utils
-                    # stops it at 0), so it is asked before the decrement.
-                    available = _available_stock_for_item(product, item)
-                    short = available < int(item['quantity'])
-                    if short:
-                        oversold.append({
-                            'name': product.name, 'size': item.get('size', ''),
-                            'quantity': int(item['quantity']), 'available': available,
-                        })
-                        logger.error(
-                            "Store invoice %s: %s sold beyond stock (%s ordered, %s on the shelf) — sale kept",
-                            invoice.invoice_number, product.name, item['quantity'], available,
-                        )
+        sold = None
+        with transaction.atomic():
+            invoice = StoreInvoice.objects.select_for_update().get(pk=invoice.pk)
+            # Only numbers still open under the lock: another notify or poll
+            # may have settled some while the report was being read.
+            still_open = {n.index: n for n in followup.open_numbers(invoice)}
+            answers = [(still_open[i], answer, row, why) for i, (_n, answer, row, why) in asked.items() if i in still_open]
 
-                    unit, total = sale_unit_and_total(product, item)
-                    StoreSale.objects.create(
-                        invoice=invoice,
-                        product=product,
-                        child=invoice.child,
-                        quantity=item['quantity'],
-                        unit_price=unit,
-                        total_price=total,
-                        size=item.get('size', ''),
-                        payment_method='credit_card',
-                        branch_id=_store_line_item_branch_id(item, product),
-                        notes=f'נמכר מעבר למלאי (היו {available}) — לבדוק את המלאי' if short else ''
-                    )
+            if invoice.payment_status in followup.PAID_STATUSES:
+                for number, answer, row, _why in answers:
+                    if not number.primary:
+                        self._record_second_store_charge(invoice, number, answer, row, alert=False)
+                return {'outcome': 'paid', 'status': invoice.payment_status}
 
-                    _decrement_product_stock(product, item)
+            for number, answer, row, _why in answers:
+                if answer == followup.ANSWER_REJECTED and not number.primary:
+                    followup.keep_other_transaction(invoice, number, followup.OTHER_REJECTED)
+            confirmed = next((n for n, answer, _row, _why in answers if answer == followup.ANSWER_VERIFIED), None)
 
-                if oversold:
-                    from apps.store.payment_followup import alert_oversold
-                    alert_oversold(invoice, oversold)
-
-            logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
-            _sign_store_sale(invoice)
-
-            if invoice.website_order_number:
-                from apps.store.payment_followup import tell_website_paid
-                from apps.store.website_integration import push_products_batch_to_website
-                from apps.store.invoice_email import send_store_invoice_email
-                # One call now; when the site does not acknowledge it, the
-                # site's status poll and the morning sweep repeat it
-                # (apps/store/payment_followup.py) and the office is told.
-                try:
-                    tell_website_paid(invoice)
-                except Exception:
-                    logger.exception('Telling the site about %s failed (non-fatal)', invoice.invoice_number)
-                sold_products = list(
-                    StoreProduct.objects.filter(
-                        id__in=[item['product_id'] for item in product_items]
-                    )
-                )
-                # One call for the whole order, not one per line item.
-                push_products_batch_to_website(sold_products)
-                try:
-                    from apps.store.tranzila_store_invoice import issue_store_tranzila_document
-                    issue_store_tranzila_document(invoice)
-                except Exception:
-                    logger.exception(
-                        'Tranzila store document failed for %s (non-fatal)',
-                        invoice.invoice_number,
-                    )
-                try:
-                    send_store_invoice_email(invoice)
-                except Exception:
-                    logger.exception(
-                        'Store invoice email failed for %s (non-fatal)',
-                        invoice.invoice_number,
-                    )
-
-            return {'success': True, 'invoice_id': str(invoice.id)}
-        else:
-            # Locked and read again: a decline from one tab that arrives while
-            # (or after) another tab's payment completes must not turn a paid
-            # order into a failed one.
-            with transaction.atomic():
-                invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
-                if invoice.payment_status == 'completed':
-                    logger.info(
-                        "Store webhook decline for invoice %s ignored — already paid", invoice.invoice_number,
-                    )
-                    return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
-                # Keep cart JSON in notes so the customer can retry the same order.
+            if confirmed is not None and complete:
+                sold = self._sell_store_invoice(invoice, confirmed)
+            elif confirmed is not None:
+                invoice.save(update_fields=['other_transactions'])
+                followup.alert_payment_confirmed(invoice, confirmed.index)
+                return {'outcome': 'confirmed', 'status': invoice.payment_status, 'index': confirmed.index}
+            elif decline and answers and all(answer == followup.ANSWER_REJECTED for _n, answer, _r, _w in answers):
+                # The report says none of the numbers paid for this order, and
+                # Tranzila says the attempt was declined: the decline stands.
+                # The numbers are kept, marked, beside the invoice.
+                for number, _answer, _row, _why in answers:
+                    if number.primary:
+                        followup.keep_other_transaction(invoice, number, followup.OTHER_REJECTED)
+                invoice.tranzila_transaction_id = ''
+                invoice.tranzila_confirmation_code = ''
                 invoice.payment_status = 'failed'
-                invoice.save(update_fields=['payment_status'])
-            logger.warning(
-                "Store iframe payment failed invoice=%s code=%s error=%s",
-                invoice.invoice_number,
-                tranzila_response.get('response_code'),
-                tranzila_response.get('error_message', 'Unknown'),
-            )
+                invoice.save(update_fields=[
+                    'tranzila_transaction_id', 'tranzila_confirmation_code', 'payment_status', 'other_transactions',
+                ])
+                transaction.on_commit(lambda: self._tell_website_failed(invoice))
+                logger.warning('Store invoice %s declined; the report rules out every reported number', invoice.invoice_number)
+                return {'outcome': 'declined', 'status': 'failed'}
+            else:
+                # Still in review: pending, whatever it read before.
+                fields = ['other_transactions']
+                if invoice.payment_status != 'pending':
+                    invoice.payment_status = 'pending'
+                    fields.append('payment_status')
+                invoice.save(update_fields=fields)
+                primary = next(((n, answer, row, why) for n, answer, row, why in answers if n.primary), None)
+                reasons = '; '.join(sorted({why for _n, _a, _r, why in answers if why}))
+                if decline:
+                    followup.alert_decline_conflict(invoice, reasons)
+                elif primary is not None and primary[1] == followup.ANSWER_REJECTED:
+                    followup.alert_payment_unverified(invoice, primary[2], primary[3])
+                else:
+                    followup.alert_if_stuck(invoice, why=reasons)
+                return {'outcome': 'in_review', 'status': 'pending'}
 
-            if invoice.website_order_number:
-                from apps.store.website_integration import notify_website_order_status
-                notify_website_order_status(
-                    website_order_number=invoice.website_order_number,
-                    invoice_number=invoice.invoice_number,
-                    invoice_id=str(invoice.id),
-                    status='failed',
-                    provider_txn_id=tranzila_response.get('transaction_id', ''),
+        self._after_store_sale(invoice, sold, site_timeout=site_timeout)
+        return {'outcome': 'completed', 'status': 'completed'}
+
+    def _store_notify_declined(self, invoice, index: str, tranzila_response: Dict) -> Dict:
+        """
+        A "declined" notify. It says one attempt failed — not that no attempt
+        paid: another tab may have paid first. An invoice that holds a
+        reported number is asked about again, and failed only on the report's
+        own "no" (settle_reported_store_payment); any other is failed as before.
+        """
+        from apps.store import payment_followup as followup
+        from apps.store.models import StoreInvoice
+
+        if invoice.payment_status not in followup.PAID_STATUSES and followup.open_numbers(invoice):
+            result = self.settle_reported_store_payment(invoice.pk, decline=True)
+            if result['outcome'] == 'completed':
+                return {'success': True, 'invoice_id': str(invoice.id)}
+            if result['outcome'] == 'declined':
+                return {'success': False, 'error': tranzila_response.get('error_message', 'Payment failed')}
+            if result['outcome'] != 'nothing_open':
+                return {'success': False, 'in_review': True, 'status': result.get('status', invoice.payment_status),
+                        'error': 'התשלום בבדיקה מול טרנזילה'}
+
+        # Locked and read again: a decline from one tab that arrives while
+        # (or after) another tab's payment completes must not turn a paid
+        # order into a failed one — nor one a payment was just reported for.
+        with transaction.atomic():
+            invoice = StoreInvoice.objects.select_for_update().get(id=invoice.id)
+            if invoice.payment_status in followup.PAID_STATUSES:
+                logger.info(
+                    "Store webhook decline for invoice %s ignored — already paid", invoice.invoice_number,
                 )
-            
-            return {
-                'success': False,
-                'error': tranzila_response.get('error_message', 'Payment failed')
-            }
-    
-    def _record_second_store_charge(self, invoice, tranzila_response: Dict) -> None:
-        """
-        A paid invoice reported paid again under another transaction number.
-
-        Checked against the terminal's report like any notify (it is public).
-        A real one is kept as its own transaction row and shown in the morning
-        brief under "חיובים כפולים", so the office refunds it; a forged one is
-        only logged.
-        """
-        from types import SimpleNamespace
-
-        from apps.payment_links.public_views import verify_transaction_with_tranzila
-
-        txn_index = str(tranzila_response.get('transaction_id') or '').strip()
-        if not tranzila_response.get('is_successful') or not txn_index:
-            return
-        if txn_index == str(invoice.tranzila_transaction_id or '').strip():
-            return  # the same transaction reported again
-        key = f'store_second_{invoice.id}_{txn_index}'[:255]
-        if TranzilaTransaction.objects.filter(idempotency_key=key).exists():
-            return
-        verdict, _txn_row = verify_transaction_with_tranzila(
-            SimpleNamespace(id=invoice.id, amount=invoice.total_amount, created_at=invoice.created_at),
-            txn_index,
-            confirmation_code=tranzila_response.get('confirmation_code'),
+                return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+            if followup.open_numbers(invoice):
+                logger.warning(
+                    "Store webhook decline for invoice %s left for review — a payment was reported meanwhile",
+                    invoice.invoice_number,
+                )
+                return {'success': False, 'in_review': True, 'status': invoice.payment_status,
+                        'error': 'התשלום בבדיקה מול טרנזילה'}
+            # Keep cart JSON in notes so the customer can retry the same order.
+            invoice.payment_status = 'failed'
+            invoice.save(update_fields=['payment_status'])
+        logger.warning(
+            "Store iframe payment failed invoice=%s code=%s error=%s",
+            invoice.invoice_number,
+            tranzila_response.get('response_code'),
+            tranzila_response.get('error_message', 'Unknown'),
         )
-        if verdict != 'verified':
-            logger.error(
-                'Store invoice %s: another transaction %s reported, not confirmed by Tranzila (%s)',
-                invoice.invoice_number, txn_index, verdict,
+        self._tell_website_failed(invoice, provider_txn_id=index)
+        return {
+            'success': False,
+            'error': tranzila_response.get('error_message', 'Payment failed')
+        }
+
+    @staticmethod
+    def _tell_website_failed(invoice, provider_txn_id: str = '') -> None:
+        if not invoice.website_order_number:
+            return
+        from apps.store.website_integration import notify_website_order_status
+
+        notify_website_order_status(
+            website_order_number=invoice.website_order_number,
+            invoice_number=invoice.invoice_number,
+            invoice_id=str(invoice.id),
+            status='failed',
+            provider_txn_id=provider_txn_id,
+        )
+
+    def _keep_reported_number(self, invoice, number) -> bool:
+        """
+        A number the report does not confirm (yet), kept on the locked invoice:
+        as its own when it has none, beside it otherwise — never over it. The
+        invoice is in review, so it reads pending even if it read failed.
+        True when the number is the invoice's own.
+        """
+        from apps.store import payment_followup as followup
+
+        now = timezone.now()
+        if invoice.payment_reported_at is None:
+            invoice.payment_reported_at = now
+        further = False
+        if not followup.is_transaction_number(invoice.tranzila_transaction_id):
+            invoice.tranzila_transaction_id = number.index
+            invoice.tranzila_confirmation_code = number.code
+            invoice.tranzila_terminal = number.terminal
+        elif invoice.tranzila_transaction_id.strip() != number.index:
+            further = followup.keep_other_transaction(invoice, number, followup.OTHER_OPEN)
+        invoice.payment_status = 'pending'
+        invoice.payment_followup_at = now
+        invoice.save(update_fields=[
+            'tranzila_transaction_id', 'tranzila_confirmation_code', 'tranzila_terminal',
+            'payment_reported_at', 'payment_followup_at', 'payment_status', 'other_transactions',
+        ])
+        if further:
+            followup.alert_possible_double_charge(invoice, number.index)
+        return invoice.tranzila_transaction_id.strip() == number.index
+
+    def _sell_store_invoice(self, invoice, number) -> list:
+        """
+        The sale, on the locked invoice, for the number the report confirmed.
+        A number the invoice held before is kept beside it (and told to the
+        office as a possible second charge), never written over. Returns the
+        cart for _after_store_sale.
+        """
+        from apps.store import payment_followup as followup
+        from apps.store.models import StoreProduct, StoreSale
+        from apps.store.stock_utils import available_stock_for_item as _available_stock_for_item
+
+        now = timezone.now()
+        previous = (invoice.tranzila_transaction_id or '').strip()
+        moved_aside = None
+        if followup.is_transaction_number(previous) and previous != number.index:
+            moved_aside = followup.ReportedNumber(
+                previous, (invoice.tranzila_confirmation_code or '').strip(), (invoice.tranzila_terminal or '').strip(),
+                invoice.payment_reported_at or invoice.created_at, False,
             )
-            return
-        TranzilaTransaction.objects.get_or_create(
-            idempotency_key=key,
-            defaults={
-                'transaction_id': txn_index[:100],
-                'confirmation_code': str(tranzila_response.get('confirmation_code') or '')[:100],
-                'transaction_type': 'charge',
-                'response_code': str(tranzila_response.get('response_code') or '')[:10],
-                'response_message': 'second charge on a paid invoice',
-                'request_data': {'invoice_id': str(invoice.id), 'invoice_number': invoice.invoice_number},
-                'response_data': {},
-                'is_successful': True,
-                'response_timestamp': timezone.now(),
-                'tranzila_terminal': (self.iframe_tranzila_service.terminal or '')[:40],
-            },
-        )
-        # Not written into invoice.notes: a hosted-page invoice keeps its cart
-        # there as JSON.
-        logger.error('Store invoice %s paid twice: second transaction %s recorded', invoice.invoice_number, txn_index)
+            followup.keep_other_transaction(invoice, moved_aside, followup.OTHER_OPEN)
+        followup.drop_other_transaction(invoice, number.index)
+
+        # Parse product items from invoice notes
+        product_items = parse_store_cart_notes(invoice.notes) or []
+
+        invoice.payment_status = 'completed'
+        invoice.tranzila_transaction_id = number.index
+        invoice.tranzila_confirmation_code = number.code
+        # The hosted page charges on TRANZILA_TERMINAL — the one the report asked.
+        invoice.tranzila_terminal = number.terminal
+        if invoice.payment_reported_at is None:
+            invoice.payment_reported_at = now
+        invoice.save()
+
+        oversold = []
+        for item in product_items:
+            product = StoreProduct.objects.select_for_update().get(id=item['product_id'])
+
+            # The shelf was checked when the page opened, not now: the
+            # customer has paid, so the sale is recorded whatever the
+            # shelf says (refusing it would hide money that came in).
+            # A unit sold that was not there is a stock count and a
+            # customer to call — marked on the line and told to the
+            # office. A size row cannot go below zero (stock_utils
+            # stops it at 0), so it is asked before the decrement.
+            available = _available_stock_for_item(product, item)
+            short = available < int(item['quantity'])
+            if short:
+                oversold.append({
+                    'name': product.name, 'size': item.get('size', ''),
+                    'quantity': int(item['quantity']), 'available': available,
+                })
+                logger.error(
+                    "Store invoice %s: %s sold beyond stock (%s ordered, %s on the shelf) — sale kept",
+                    invoice.invoice_number, product.name, item['quantity'], available,
+                )
+
+            unit, total = sale_unit_and_total(product, item)
+            StoreSale.objects.create(
+                invoice=invoice,
+                product=product,
+                child=invoice.child,
+                quantity=item['quantity'],
+                unit_price=unit,
+                total_price=total,
+                size=item.get('size', ''),
+                payment_method='credit_card',
+                branch_id=_store_line_item_branch_id(item, product),
+                notes=f'נמכר מעבר למלאי (היו {available}) — לבדוק את המלאי' if short else ''
+            )
+
+            _decrement_product_stock(product, item)
+
+        if oversold:
+            followup.alert_oversold(invoice, oversold)
+        # Every other number still open on this order may be a second charge.
+        for other in followup.open_numbers(invoice):
+            if not other.primary:
+                followup.alert_possible_double_charge(invoice, other.index)
+        logger.info(f"Successfully completed webhook purchase for invoice {invoice.invoice_number}")
+        return product_items
+
+    def _after_store_sale(self, invoice, product_items, *, site_timeout: Optional[float] = None) -> None:
+        """What follows a sale, after its commit: never inside it, so a failure here cannot undo it."""
+        from apps.store.models import StoreProduct
+
+        product_items = product_items or []
+        _sign_store_sale(invoice)
+
+        if invoice.website_order_number:
+            from apps.store.payment_followup import tell_website_paid
+            from apps.store.website_integration import push_products_batch_to_website
+            from apps.store.invoice_email import send_store_invoice_email
+            # One call now; when the site does not acknowledge it, the
+            # site's status poll and the morning sweep repeat it
+            # (apps/store/payment_followup.py) and the office is told. From
+            # the site's own poll the site is waiting: a short leash.
+            try:
+                tell_website_paid(invoice, timeout=site_timeout)
+            except Exception:
+                logger.exception('Telling the site about %s failed (non-fatal)', invoice.invoice_number)
+            sold_products = list(
+                StoreProduct.objects.filter(
+                    id__in=[item['product_id'] for item in product_items]
+                )
+            )
+            # One call for the whole order, not one per line item.
+            push_products_batch_to_website(sold_products)
+            try:
+                from apps.store.tranzila_store_invoice import issue_store_tranzila_document
+                issue_store_tranzila_document(invoice)
+            except Exception:
+                logger.exception(
+                    'Tranzila store document failed for %s (non-fatal)',
+                    invoice.invoice_number,
+                )
+            try:
+                send_store_invoice_email(invoice)
+            except Exception:
+                logger.exception(
+                    'Store invoice email failed for %s (non-fatal)',
+                    invoice.invoice_number,
+                )
+
+    def _record_second_store_charge(self, invoice, number, answer: str, row=None, *, alert: bool = True) -> None:
+        """
+        A paid invoice reported paid again under another transaction number
+        (the caller holds the row lock).
+
+        Every such number is kept on the invoice (other_transactions) and the
+        office is told at once that the order may have been paid twice. One
+        the report confirms is also kept as its own transaction row and shown
+        in the morning brief under "חיובים כפולים", so the office refunds it;
+        one the report has not answered for stays open and is asked again.
+        """
+        from apps.store import payment_followup as followup
+
+        if not number.index or number.index == (invoice.tranzila_transaction_id or '').strip():
+            return  # the same transaction reported again
+        state = {
+            followup.ANSWER_VERIFIED: followup.OTHER_SECOND_CHARGE,
+            followup.ANSWER_REJECTED: followup.OTHER_REJECTED,
+        }.get(answer, followup.OTHER_OPEN)
+        new = followup.keep_other_transaction(invoice, number, state)
+        invoice.save(update_fields=['other_transactions'])
+        if answer == followup.ANSWER_VERIFIED:
+            TranzilaTransaction.objects.get_or_create(
+                idempotency_key=f'store_second_{invoice.id}_{number.index}'[:255],
+                defaults={
+                    'transaction_id': number.index[:100],
+                    'confirmation_code': number.code[:100],
+                    'transaction_type': 'charge',
+                    'response_code': str((row or {}).get('processor_response_code') or '000')[:10],
+                    'response_message': 'second charge on a paid invoice',
+                    'request_data': {'invoice_id': str(invoice.id), 'invoice_number': invoice.invoice_number},
+                    'response_data': {},
+                    'is_successful': True,
+                    'response_timestamp': timezone.now(),
+                    'tranzila_terminal': (number.terminal or '')[:40],
+                },
+            )
+            # Not written into invoice.notes: a hosted-page invoice keeps its cart
+            # there as JSON.
+            logger.error('Store invoice %s paid twice: second transaction %s recorded',
+                         invoice.invoice_number, number.index)
+        else:
+            logger.error('Store invoice %s: another transaction %s reported (%s)',
+                         invoice.invoice_number, number.index, answer)
+        if new and alert:
+            followup.alert_possible_double_charge(invoice, number.index, answer)
 
     def create_cash_invoice(
         self,

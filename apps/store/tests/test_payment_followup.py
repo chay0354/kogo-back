@@ -136,6 +136,10 @@ class FollowupBase(TestCase):
         if age is not None:
             StoreInvoice.objects.filter(pk=invoice.pk).update(created_at=timezone.now() - age)
             invoice.refresh_from_db()
+        if txn:
+            # A number on the invoice came from a notify: reported when the order was paid.
+            StoreInvoice.objects.filter(pk=invoice.pk).update(payment_reported_at=invoice.created_at)
+            invoice.refresh_from_db()
         return invoice
 
     def notify(self, invoice, **overrides):
@@ -217,11 +221,11 @@ class RecheckTest(FollowupBase):
         self.assertIn('realtest', alert.why)
 
     def test_a_till_charge_that_got_no_answer_is_not_touched(self):
-        # The till's own "uncertain" invoices: no hosted page, no number.
+        # The till's own "uncertain" invoices: no hosted page, no number reported.
         from apps.core.payment_service import TILL_CHARGE_UNCERTAIN_MARK
 
         invoice = self.invoice(order=None, code=TILL_CHARGE_UNCERTAIN_MARK)
-        self.assertEqual(payment_followup.recheck_pending_payment(invoice.pk), payment_followup.RECHECK_NOT_ELIGIBLE)
+        self.assertEqual(payment_followup.recheck_pending_payment(invoice.pk), payment_followup.RECHECK_NOT_PENDING)
         self.assertEqual(self.report_calls, [])
 
     def test_an_invoice_without_its_cart_is_not_completed_empty(self):
@@ -256,14 +260,16 @@ class StatusEndpointTest(FollowupBase):
         invoice = self.invoice()
         res = self.poll()
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), {'status': 'pending', 'invoice_number': invoice.invoice_number, 'paid': False})
+        self.assertEqual(res.json(), {'status': 'pending', 'invoice_number': invoice.invoice_number, 'paid': False,
+                                      'payment_reported': False})
         self.assertEqual(self.report_calls, [])
 
     def test_a_reported_payment_is_asked_about_again_and_completes(self):
         invoice = self.invoice(txn='123456', code='0001234')
         self.ledger_rows = [paid_row()]
         res = self.poll()
-        self.assertEqual(res.json(), {'status': 'completed', 'invoice_number': invoice.invoice_number, 'paid': True})
+        self.assertEqual(res.json(), {'status': 'completed', 'invoice_number': invoice.invoice_number, 'paid': True,
+                                      'payment_reported': False})
         self.assertEqual(self.state(invoice), ('completed', 1, 8))
         self.assertIsNotNone(invoice.website_paid_notified_at)
 
@@ -275,7 +281,8 @@ class StatusEndpointTest(FollowupBase):
 
     def test_a_failed_order_reads_failed(self):
         invoice = self.invoice(status='failed')
-        self.assertEqual(self.poll().json(), {'status': 'failed', 'invoice_number': invoice.invoice_number, 'paid': False})
+        self.assertEqual(self.poll().json(), {'status': 'failed', 'invoice_number': invoice.invoice_number, 'paid': False,
+                                              'payment_reported': False})
 
     def test_a_paid_order_the_site_missed_is_told_again_from_the_poll(self):
         invoice = self.invoice(status='completed', txn='123456', code='0001234')
@@ -296,7 +303,8 @@ class StatusEndpointTest(FollowupBase):
         with patch('apps.store.payment_followup.recheck_pending_payment', side_effect=RuntimeError('boom')):
             res = self.poll()
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), {'status': 'pending', 'invoice_number': invoice.invoice_number, 'paid': False})
+        self.assertEqual(res.json(), {'status': 'pending', 'invoice_number': invoice.invoice_number, 'paid': False,
+                                      'payment_reported': True})
 
     def test_is_throttled(self):
         from django.conf import settings
@@ -383,9 +391,11 @@ class AlertsTest(FollowupBase):
             self.notify(fresh)
         self.assertEqual(self.alerts(), [])
 
-        old = self.invoice(order='CG-260929-OLD1', age=timedelta(minutes=11))
+        old = self.invoice(order='CG-260929-OLD1')
+        self.notify(old)  # paid, and the report could not answer...
+        StoreInvoice.objects.filter(pk=old.pk).update(payment_reported_at=timezone.now() - timedelta(minutes=11))
         with self.captureOnCommitCallbacks(execute=True):
-            self.notify(old)
+            self.notify(old)  # ...nor eleven minutes later, when Tranzila repeats itself
             self.notify(old)
         alerts = self.alerts('store_payment_stuck')
         self.assertEqual(len(alerts), 1)
@@ -419,11 +429,15 @@ class AlertsTest(FollowupBase):
                 )
 
 
+@override_settings(STORE_SWEEP_COMPLETES_PAYMENTS=True)
 class SweepTest(FollowupBase):
     def test_settles_what_the_report_now_confirms_and_lists_the_rest(self):
         confirmed = self.invoice(order='CG-A', txn='111', code='0001111', age=timedelta(days=1))
         unconfirmed = self.invoice(order='CG-B', txn='222', code='0002222', age=timedelta(days=2))
+        # From before this follow-up (no report time) and older than three days:
+        # settled by hand, left alone. (A reported one is followed at any age.)
         too_old = self.invoice(order='CG-C', txn='333', code='0003333', age=timedelta(days=4))
+        StoreInvoice.objects.filter(pk=too_old.pk).update(payment_reported_at=None)
         never_paid = self.invoice(order='CG-D', age=timedelta(days=1))
         self.ledger_rows = [paid_row(index='111', approval='0001111'), paid_row(index='333', approval='0003333')]
 
