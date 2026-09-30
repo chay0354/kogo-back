@@ -285,6 +285,9 @@ AUTHENTICATION_BACKENDS = [
 TRANZILA_TERMINAL = config('TRANZILA_TERMINAL', default='mock-terminal')  # Main terminal for iframe payments
 TRANZILA_TOKEN_TERMINAL = config('TRANZILA_TOKEN_TERMINAL', default=TRANZILA_TERMINAL)  # Separate terminal for REST API token charges
 TRANZILA_SUPPLIER = config('TRANZILA_SUPPLIER', default='mock-supplier')
+# Dedicated hosted terminal for one-time business charges. It must not
+# repoint the existing store or general payment-link iframe terminal.
+BUSINESS_CHARGE_TRANZILA_TERMINAL = config('BUSINESS_CHARGE_TRANZILA_TERMINAL', default='')
 
 # RESTful API v1 credentials (required for token-based charges)
 TRANZILA_PUBLIC_KEY = config('TRANZILA_PUBLIC_KEY', default='')  # Goes in X-tranzila-api-app-key header

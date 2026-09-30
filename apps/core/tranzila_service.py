@@ -411,14 +411,14 @@ class TranzilaService:
             logger.warning("TRANZILA_SECRET_KEY not configured - REST API calls will fail")
 
     @classmethod
-    def iframe(cls) -> 'TranzilaService':
+    def iframe(cls, terminal: str | None = None) -> 'TranzilaService':
         """Hosted iframe checkout (B2C store, in-store fallback, widget iframe).
 
-        Uses TRANZILA_TERMINAL. Do not send iframe charges through production() —
+        Uses TRANZILA_TERMINAL unless an explicit terminal is supplied. Do not send iframe charges through production() —
         that REST terminal is not authorized to clear card brands in the iframe
         (Tranzila response 141).
         """
-        return cls()
+        return cls(terminal=terminal)
 
     @classmethod
     def production(cls) -> 'TranzilaService':

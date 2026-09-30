@@ -137,7 +137,11 @@ class PublicPaymentStartView(_PublicView):
             # charged. Refused before a payment row is written.
             return Response({'error': 'הסליקה אינה זמינה כרגע'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        tranzila = TranzilaService.iframe()
+        business_terminal = (
+            getattr(settings, 'BUSINESS_CHARGE_TRANZILA_TERMINAL', '')
+            if business_charge else ''
+        )
+        tranzila = TranzilaService.iframe(terminal=business_terminal or None)
         if business_charge and (tranzila.terminal or '').strip().lower() != 'cogolive':
             logger.error('business charge refused: hosted terminal is not cogolive')
             return Response(
