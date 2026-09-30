@@ -270,43 +270,25 @@ def _pending_checks() -> dict:
 
 def _open_invoices() -> list:
     """
-    Tax invoices and transaction invoices no receipt or settlement was recorded against.
-
-    Closed: a settlement (DocumentSettlement) or a receipt naming the invoice's
-    number covers its total, or a check plan or cash plan issued it against
-    money the plan's receipt already took. What is left is what the records
-    say — the accountant confirms it.
+    Tax invoices and transaction invoices still owing, by the one rule the
+    collections tab uses (apps/documents/settlement.py): a settlement, a
+    receipt that named the invoice's number, the check or cash plan's receipt
+    that paid it, and the credit notes against it. What is left is what the
+    records say — the accountant confirms it.
     """
-    from apps.documents.models import CashPlanMonth, CheckItem, DocumentSettlement, FormalDocument
+    from apps.documents.models import FormalDocument
+    from apps.documents.settlement import balances
 
     invoices = list(
         FormalDocument.objects
         .filter(document_type__in=('tax_invoice', 'transaction_invoice'))
-        .exclude(pk__in=CheckItem.objects.filter(tax_invoice__isnull=False).values('tax_invoice_id'))
-        .exclude(pk__in=CashPlanMonth.objects.filter(document__isnull=False).values('document_id'))
         .select_related('child', 'business_customer')
         .order_by('document_date', 'document_number')
     )
-    numbers = [doc.document_number for doc in invoices]
-    by_receipt: dict = {}
-    for number, total in (
-        FormalDocument.objects
-        .filter(document_type__in=('receipt', 'combined'), linked_document_number__in=numbers)
-        .values_list('linked_document_number', 'total_amount')
-    ):
-        by_receipt[number] = by_receipt.get(number, Decimal('0')) + total
-    settled: dict = {}
-    for invoice_id, amount in (
-        DocumentSettlement.objects
-        .filter(invoice_id__in=[doc.pk for doc in invoices], voided_at__isnull=True)
-        .values_list('invoice_id', 'amount')
-    ):
-        settled[invoice_id] = settled.get(invoice_id, Decimal('0')) + amount
-
+    owed = balances(invoices)
     out = []
     for doc in invoices:
-        paid = by_receipt.get(doc.document_number, Decimal('0')) + settled.get(doc.pk, Decimal('0'))
-        remaining = doc.total_amount - paid
+        remaining = owed[doc.pk].open
         if remaining <= 0:
             continue
         if doc.business_customer_id and doc.business_customer:

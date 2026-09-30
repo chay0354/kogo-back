@@ -220,6 +220,13 @@ def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
         from apps.documents.partner_scope import document_branch_q
 
         docs = docs.filter(document_branch_q(branch_ids)).distinct() if branch_ids else docs.none()
+    docs = list(docs)
+    # What each invoice still owes, and how much of each receipt paid an
+    # invoice already on the list (apps/documents/settlement.py).
+    from apps.documents.settlement import applied_amounts, balances
+
+    owed = balances(docs)
+    applied = applied_amounts(docs)
     rows = []
     for doc in docs:
         if doc.child_id:
@@ -236,6 +243,17 @@ def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
             'refunded' if is_credit else ('completed' if is_receipt or doc.tranzila_issued else 'pending')
         )
         paid = amount if status == 'completed' else 0.0
+        open_balance = 0.0 if is_credit or status in ('completed', 'draft') else amount
+        credited = 0.0
+        balance = owed.get(doc.pk)
+        if balance is not None and not doc.tranzila_issued:
+            # A tax or transaction invoice: open until receipts and credit notes close it.
+            paid = _parse_amount(balance.paid)
+            credited = _parse_amount(balance.credited)
+            open_balance = _parse_amount(balance.open)
+            status = {
+                'paid': 'completed', 'partial': 'partially_paid', 'credited': 'refunded', 'open': 'pending',
+            }[balance.status]
         rows.append({
             'id': str(doc.id),
             'document_number': doc.document_number,
@@ -246,7 +264,12 @@ def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
             'total_amount': amount,
             'amount_paid': paid,
             # A credit note is money going back, never a debt to chase.
-            'open_balance': 0.0 if is_credit or status in ('completed', 'draft') else amount,
+            'open_balance': open_balance,
+            # What credit notes took off an invoice (0 for anything else).
+            'credited_amount': credited,
+            # The part of a receipt that paid an invoice listed on its own
+            # row: counted there, so a total must not count it again.
+            'applied_amount': _parse_amount(applied.get(doc.pk, 0)) if is_receipt else 0.0,
             'is_credit': is_credit,
             'status': status,
             'pdf_url': doc.pdf_url or (

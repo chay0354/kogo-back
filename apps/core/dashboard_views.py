@@ -1447,8 +1447,19 @@ class DashboardViewSet(viewsets.ViewSet):
         by_status = {}
 
         for r in rows:
-            total = money(r.get('total_amount'))
-            paid = money(r.get('amount_paid'))
+            # Receipts against invoices (apps/documents/settlement.py): the
+            # part of a receipt that paid a tax invoice is that invoice's
+            # revenue, already in "invoiced" with it — and the money is the
+            # receipt's, in "collected" with it. An invoice's amount_paid says
+            # which receipts closed it; adding it here would count them twice.
+            applied = money(r.get('applied_amount'))
+            total = money(r.get('total_amount')) - applied
+            settled_invoice = (
+                r.get('origin') == 'manual'
+                and r.get('document_type_code') in ('tax_invoice', 'transaction_invoice')
+                and not r.get('tranzila_issued')
+            )
+            paid = 0.0 if settled_invoice else money(r.get('amount_paid'))
             open_balance = money(r.get('open_balance'))
             status = str(r.get('status') or 'pending')
             src = str(r.get('source') or 'other')

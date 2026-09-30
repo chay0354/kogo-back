@@ -186,6 +186,41 @@ def check_details(payment) -> str:
     return ' · '.join(part for part in parts if part)
 
 
+def _paid_at_issue(doc: FormalDocument) -> list:
+    """A tax or transaction invoice's settlements by a payer issued before it (settlement.paid_at_issue)."""
+    if doc._state.adding or doc.document_type not in ('tax_invoice', 'transaction_invoice'):
+        return []
+    from apps.documents.settlement import paid_at_issue
+
+    return paid_at_issue(doc)
+
+
+def _paid_on_issue(doc: FormalDocument) -> list:
+    """The invoices issued before this receipt that it paid (settlement.paid_on_issue)."""
+    if doc._state.adding or doc.document_type not in ('receipt', 'combined'):
+        return []
+    from apps.documents.settlement import paid_on_issue
+
+    return paid_on_issue(doc)
+
+
+def _settled_fields(doc: FormalDocument, settled: list) -> list[Field]:
+    """
+    An invoice paid when it was issued — a check plan's invoice, paid by the
+    check on the plan's receipt: it says so, and by which document, instead
+    of "ממתין לתשלום". Voided rows stay: the page is what the original said.
+    """
+    paid = sum((row.amount for row in settled), Decimal('0'))
+    fields = [Field('סטטוס', 'שולם' if paid >= doc.total_amount else 'שולם חלקית')]
+    for index, row in enumerate(settled, start=1):
+        suffix = f' ({index})' if len(settled) > 1 else ''
+        payer = row.payer
+        fields.append(Field(f'שולם ב{payer.get_document_type_display()}{suffix}', payer.document_number))
+        fields.append(Field(f'סכום ששולם{suffix}', money(row.amount)))
+    fields.append(Field('יתרה לתשלום', money(max(doc.total_amount - paid, Decimal('0')))))
+    return fields
+
+
 def _payment_fields(doc: FormalDocument) -> list[Field]:
     payments = list(doc.payments.all())
     if doc.document_type == 'draft':
@@ -197,6 +232,9 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
             Field('סה"כ זיכוי', money(doc.total_amount)),
         ]
     if not payments:
+        settled = _paid_at_issue(doc)
+        if settled:
+            return _settled_fields(doc, settled)
         return [
             Field('סטטוס', 'ממתין לתשלום'),
             Field('תנאי תשלום', doc.payment_terms or ''),
@@ -235,6 +273,12 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
                 Field(f'תאריך התשלום{suffix}', date_stamp(paid_on) if paid_on and paid_on != doc.document_date else ''),
             ]
         fields.append(Field(f'סכום ששולם{suffix}', money(payment.amount)))
+    # The invoices this receipt paid, when they were issued before it (the
+    # settlements recorded with it) — "עבור חשבונית".
+    paid_for = _paid_on_issue(doc)
+    for index, row in enumerate(paid_for, start=1):
+        suffix = f' ({index})' if len(paid_for) > 1 else ''
+        fields.append(Field(f'עבור חשבונית{suffix}', f'{row.invoice_number} · {money(row.amount)}'))
     paid = sum((p.amount for p in payments), Decimal('0'))
     # ניכוי במקור the customer withheld is part of what settles the document.
     withheld = doc.withholding_amount or Decimal('0')

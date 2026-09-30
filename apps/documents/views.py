@@ -3,7 +3,9 @@ from rest_framework import viewsets, filters, serializers, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
 from django.db.models import Q
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
 from django.conf import settings
 from django.http import HttpResponse
@@ -23,6 +25,7 @@ from apps.documents.serializers import (
 )
 from apps.documents import service
 from apps.documents.check_plans import register_check_plan
+from apps.documents.settlement import settle_on_issue
 from apps.documents.partner_scope import (
     document_create_refusal,
     partner_branches,
@@ -380,22 +383,35 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': refusal[1]}, status=refusal[0])
 
         user = request.user
+        check_plan = None
+        if doc_type not in ('tax_invoice', 'transaction_invoice', 'combined', 'receipt', 'credit_invoice', 'draft'):
+            return Response({'error': f'סוג מסמך לא נתמך: {doc_type}'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            if doc_type in ('tax_invoice', 'transaction_invoice'):
-                doc = service.create_invoice(data, doc_type, issued_by=user)
-            elif doc_type == 'combined':
-                doc = service.create_combined(data, issued_by=user)
-            elif doc_type == 'receipt':
-                doc = service.create_receipt(data, issued_by=user)
-            elif doc_type == 'credit_invoice':
-                doc = service.create_credit_invoice(data, issued_by=user)
-            elif doc_type == 'draft':
-                doc = service.create_draft(data)
-            else:
-                return Response({'error': f'סוג מסמך לא נתמך: {doc_type}'}, status=status.HTTP_400_BAD_REQUEST)
+            # One transaction for the document and what it settles: a refused
+            # settlement rolls the document back, number and all.
+            with transaction.atomic():
+                if doc_type in ('tax_invoice', 'transaction_invoice'):
+                    doc = service.create_invoice(data, doc_type, issued_by=user)
+                elif doc_type == 'combined':
+                    doc = service.create_combined(data, issued_by=user)
+                    settle_on_issue(doc, data, user=user)
+                elif doc_type == 'receipt':
+                    doc = service.create_receipt(data, issued_by=user)
+                    settle_on_issue(doc, data, user=user)
+                    if (data.get('receipt_details') or {}).get('invoice_per_check'):
+                        # "חשבונית מס לכל צ'ק": the checks become a plan (D2).
+                        from apps.documents.check_plans import plan_for_receipt
 
-            out = FormalDocumentSerializer(doc)
-            return Response(out.data, status=status.HTTP_201_CREATED)
+                        check_plan = plan_for_receipt(doc)
+                elif doc_type == 'credit_invoice':
+                    doc = service.create_credit_invoice(data, issued_by=user)
+                else:
+                    doc = service.create_draft(data)
+
+            out = dict(FormalDocumentSerializer(doc, context={'request': request}).data)
+            if check_plan is not None:
+                out['check_plan_id'] = str(check_plan.pk)
+            return Response(out, status=status.HTTP_201_CREATED)
 
         except ValueError as exc:
             # The service's refusals (a date its run refuses, a payment that
@@ -436,6 +452,38 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         response = HttpResponse(pdf_bytes, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{doc.document_number}.pdf"'
         return response
+
+    @action(detail=False, methods=['get'], url_path='open-invoices')
+    def open_invoices(self, request):
+        """
+        GET /api/v1/documents/documents/open-invoices/?child_id=… | business_customer_id=…
+            [&payer_type=receipt|combined]
+
+        The picker of the receipt form: the customer's invoices a document of
+        `payer_type` can close that still owe something, oldest first. A
+        receipt closes tax invoices, an invoice-receipt transaction invoices
+        (settlement.PAYER_FOR). A partner sees their branches' invoices only.
+        """
+        from apps.documents.settlement import PAYER_FOR, money, open_invoices
+
+        payer_type = (request.query_params.get('payer_type') or 'receipt').strip()
+        if payer_type not in PAYER_FOR:
+            return Response({'error': 'payer_type הוא receipt או combined'}, status=status.HTTP_400_BAD_REQUEST)
+        child_id = request.query_params.get('child_id')
+        customer_id = request.query_params.get('business_customer_id')
+        if not child_id and not customer_id:
+            return Response({'error': 'יש לבחור לקוח'}, status=status.HTTP_400_BAD_REQUEST)
+        qs = FormalDocument.objects.all()
+        try:
+            qs = qs.filter(child_id=child_id) if child_id else qs.filter(business_customer_id=customer_id)
+            rows = open_invoices(scope_documents(qs, request.user), payer_type=payer_type)
+        except (ValueError, DjangoValidationError):
+            return Response({'error': 'מזהה לקוח לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'payer_type': payer_type,
+            'results': rows,
+            'open_total': str(sum((money(row['open']) for row in rows), money(0))),
+        })
 
     @action(detail=True, methods=['post'], url_path='send-reminder')
     def send_reminder(self, request, pk=None):
@@ -505,8 +553,8 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
             # Everything the ledger dimensions read (CheckPlanSerializer): the
             # lesson's course, type, business, city and instructor, and the
             # plan branch's city.
-            .select_related('child', 'branch', 'branch__city', 'receipt', *lesson_paths('lesson'))
-            .prefetch_related('items', 'items__tax_invoice')
+            .select_related('child', 'branch', 'branch__city', 'receipt', 'cancelled_by', *lesson_paths('lesson'))
+            .prefetch_related('items', 'items__tax_invoice', 'items__credit_note', 'items__replaced_by')
         )
         status_filter = self.request.query_params.get('status')
         if status_filter:
@@ -551,14 +599,69 @@ class CheckPlanViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel(self, request, pk=None):
+        """
+        POST /api/v1/documents/check-plans/{id}/cancel/  {reason?}
+
+        Pending checks are cancelled (no invoice); an issued invoice nothing
+        paid is credited (check_plans.cancel_check_plan). Repeating it does
+        nothing again. 200 {...plan, credit_notes: [numbers]}.
+        """
+        from apps.documents.check_plans import CheckPlanError, cancel_check_plan
+
         plan = self.get_object()
-        if plan.status == 'cancelled':
-            return Response(CheckPlanSerializer(plan).data)
-        plan.status = 'cancelled'
-        plan.save(update_fields=['status', 'updated_at'])
-        plan.items.filter(status='pending').update(status='cancelled')
+        try:
+            result = cancel_check_plan(plan.pk, user=request.user, reason=str(request.data.get('reason') or ''))
+        except CheckPlanError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         plan = self.get_queryset().get(pk=plan.pk)
-        return Response(CheckPlanSerializer(plan).data)
+        return Response({
+            **CheckPlanSerializer(plan).data,
+            'credit_notes': [doc.document_number for doc in result['credit_notes']],
+        })
+
+    @action(detail=True, methods=['post'], url_path='bounce')
+    def bounce(self, request, pk=None):
+        """
+        POST /api/v1/documents/check-plans/{id}/bounce/
+             {item_id, reason?, replacement?: {date, amount, bank, branch, account_number, check_number, check_crossed}}
+
+        A check that came back unpaid (check_plans.bounce_check): marked, its
+        invoice credited if one was issued, and a replacement check registered
+        as a plan of its own. 200 {plan, item, credit_note_number,
+        replacement_plan}; 404 for another plan's check; 409 when it is marked
+        bounced already; 400 with the reason otherwise.
+        """
+        from apps.documents.check_plans import CheckAlreadyBounced, CheckPlanError, bounce_check
+        from apps.documents.models import CheckItem
+
+        plan = self.get_object()
+        item_id = request.data.get('item_id')
+        if not item_id:
+            return Response({'error': "יש לבחור את הצ'ק שחזר"}, status=status.HTTP_400_BAD_REQUEST)
+        replacement = request.data.get('replacement') or None
+        if replacement is not None and not isinstance(replacement, dict):
+            return Response({'error': "פרטי הצ'ק החלופי אינם תקינים"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = bounce_check(
+                plan.pk, item_id, user=request.user,
+                reason=str(request.data.get('reason') or ''), replacement=replacement,
+            )
+        except (CheckItem.DoesNotExist, DjangoValidationError):
+            return Response({'error': "הצ'ק לא נמצא בתוכנית הזאת"}, status=status.HTTP_404_NOT_FOUND)
+        except CheckAlreadyBounced as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        except CheckPlanError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        replacement_plan = result['replacement_plan']
+        return Response({
+            'plan': CheckPlanSerializer(self.get_queryset().get(pk=plan.pk)).data,
+            'item_id': str(result['item'].pk),
+            'credit_note_number': result['credit_note'].document_number if result['credit_note'] else None,
+            'replacement_plan': (
+                CheckPlanSerializer(self.get_queryset().get(pk=replacement_plan.pk)).data
+                if replacement_plan is not None else None
+            ),
+        })
 
 
 class MissingReceiptsViewSet(viewsets.ViewSet):
@@ -725,7 +828,7 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         qs = (
             CashPlan.objects
-            .select_related('child', 'branch', 'receipt', 'lesson', 'lesson__course')
+            .select_related('child', 'branch', 'receipt', 'lesson', 'lesson__course', 'cancelled_by')
             .prefetch_related('months', 'months__document')
         )
         status_filter = self.request.query_params.get('status')
@@ -788,3 +891,77 @@ class CashPlanViewSet(viewsets.ReadOnlyModelViewSet):
 
         plan.refresh_from_db()
         return Response(CashPlanSerializer(plan).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """
+        POST /api/v1/documents/cash-plans/{id}/cancel/  {reason?, refund_amount?}
+
+        The months not yet begun stop (cash_plans.cancel_cash_plan). A plan
+        registered with one חשבונית מס/קבלה ('upfront') is credited for them,
+        or for refund_amount (0: nothing); an older plan has nothing invoiced
+        for them to credit, and `message` says so. Repeating it does nothing.
+        200 {...plan, credit_note_number, unused_amount, message}.
+        """
+        from apps.documents.cash_plans import CashPlanError, cancel_cash_plan
+        from apps.documents.check_plans import CheckPlanError
+
+        plan = self.get_object()
+        refund = request.data.get('refund_amount')
+        try:
+            result = cancel_cash_plan(
+                plan.pk, user=request.user, reason=str(request.data.get('reason') or ''),
+                refund_amount=refund if refund not in (None, '') else None,
+            )
+        except (CashPlanError, CheckPlanError, ArithmeticError) as exc:
+            return Response({'error': str(exc) or 'סכום ההחזר אינו תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        plan = self.get_queryset().get(pk=plan.pk)
+        return Response({
+            **CashPlanSerializer(plan).data,
+            'credit_note_number': result['credit_note'].document_number if result['credit_note'] else None,
+            'unused_amount': str(result['unused_amount']),
+            'message': result['message'],
+        })
+
+
+class SettlementViewSet(viewsets.GenericViewSet):
+    """
+    Receipts against invoices (apps/documents/settlement.py).
+
+    POST /api/v1/documents/settlements/{id}/void/  {reason}
+
+    Managers only. A settlement is never deleted: voiding keeps the row, with
+    who voided it and when, and opens the invoice again by its amount.
+    """
+
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get_queryset(self):
+        from apps.documents.models import DocumentSettlement
+
+        return DocumentSettlement.objects.select_related('payer', 'invoice')
+
+    @action(detail=True, methods=['post'], url_path='void')
+    def void(self, request, pk=None):
+        from apps.documents.settlement import SettlementVoided, balance_of, void_settlement
+
+        row = self.get_object()
+        reason = str(request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'error': 'יש לציין למה הסגירה מבוטלת'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            row = void_settlement(row.pk, user=request.user, reason=reason)
+        except SettlementVoided as exc:
+            return Response(
+                {'error': f'הסגירה כבר בוטלה ({timezone.localtime(exc.at):%d/%m/%Y %H:%M})'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        balance = balance_of(row.invoice) if row.invoice_id else None
+        return Response({
+            'id': str(row.pk),
+            'payer_number': row.payer.document_number,
+            'invoice_number': row.invoice_number,
+            'amount': str(row.amount),
+            'voided_at': row.voided_at,
+            'invoice_balance': balance.as_dict() if balance is not None else None,
+        })

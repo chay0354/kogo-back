@@ -110,7 +110,15 @@ class BusinessCustomerSummaryTests(APITestCase):
             [(line['document_type'], line['count']) for line in totals['by_type']],
             [('tax_invoice', 1), ('receipt', 1), ('combined', 1), ('credit_invoice', 1)],
         )
-        self.assertIsNone(res.data['balance'])
+        # The balance (settlement.py): the TI less the credit note naming it.
+        # The receipt names no invoice, so it pays none of it.
+        balance = res.data['balance']
+        self.assertEqual((balance['open_total'], balance['open_count']), ('490.00', 1))
+        self.assertEqual(balance['credited_total'], '100.00')
+        self.assertEqual(
+            [(row['document_number'], row['open'], row['status']) for row in balance['open_invoices']],
+            [('TI-2026-000001', '490.00', 'partial')],
+        )
 
     def test_identity_and_consent_are_the_customers_own(self):
         moment = timezone.now() - timedelta(days=3)
