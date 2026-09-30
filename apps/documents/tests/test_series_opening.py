@@ -375,9 +375,11 @@ class LongNumbersTests(RegisterFixture, APITestCase):
         inner = zipfile.ZipFile(io.BytesIO(outer.read(next(n for n in outer.namelist() if n.endswith('BKMVDATA.zip')))))
         records = inner.read('BKMVDATA.TXT').decode('iso-8859-8').splitlines()
         headers = {line[25:45].strip() for line in records if line.startswith('C100')}
-        self.assertTrue({'IR-2026-1000000', sale.invoice_number, 'CR-2026-1000000'} <= headers)
-        credit_line = next(line for line in records if line.startswith('D110') and 'CR-2026-1000000' in line)
-        self.assertIn('IR-2026-1000000', credit_line)
+        # 2.4(ד): written with a five-position series part, the running number in full.
+        from apps.documents.uniform_export import uniform_number
+        self.assertTrue({'IR261000000', uniform_number(sale.invoice_number), 'CR261000000'} <= headers)
+        credit_line = next(line for line in records if line.startswith('D110') and 'CR261000000' in line)
+        self.assertIn('IR261000000', credit_line)
 
 
 class SeriesEndpointTests(APITestCase):

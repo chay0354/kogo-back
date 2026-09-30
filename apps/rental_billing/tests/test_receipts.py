@@ -19,7 +19,7 @@ from apps.documents.models import DocumentSeries, FormalDocument
 from apps.documents.numbering import SERIES_LABELS, SERIES_RENTAL, continuity, is_rental_number
 from apps.documents.period_report import GROUP_BY_UNIT, build_report, month_bounds
 from apps.documents.register import CHANNEL_LABELS, CHANNEL_RENTALS, register_rows
-from apps.documents.uniform_export import _documents
+from apps.documents.uniform_export import _documents, uniform_number
 from apps.rental_billing.billing import charge_due
 from apps.rental_billing.models import TenantCharge
 from apps.rental_billing.tests.factories import BillingFixture
@@ -142,7 +142,9 @@ class RentalReceiptTests(BillingFixture, APITestCase):
         self.assertEqual(res.status_code, 200)
         lines = list(csv.reader(io.StringIO(res.content.decode('utf-8-sig'))))
         header, body = lines[0], lines[1:]
-        found = [dict(zip(header, line)) for line in body if line[1] == charges[0].receipt.document_number]
+        # The file goes on after the documents (a blank line, then the income without a document).
+        found = [dict(zip(header, line)) for line in body
+                 if len(line) > 1 and line[1] == charges[0].receipt.document_number]
         self.assertEqual(len(found), 1)
         record = found[0]
         self.assertEqual(record['סדרה'], 'RT')
@@ -168,7 +170,7 @@ class RentalReceiptTests(BillingFixture, APITestCase):
         report = build_report(self.manager, *self.month, 'החודש')
         rows = [row for row in register_rows(report) if not row.void]
         documents = {doc.number: doc for doc in _documents(rows)}
-        doc = documents[charges[0].receipt.document_number]
+        doc = documents[uniform_number(charges[0].receipt.document_number)]
         self.assertEqual(doc.type_code, 320)
         self.assertEqual((doc.amount_after_discount, doc.vat_amount, doc.total_amount),
                          (Decimal('1234.56'), Decimal('222.22'), Decimal('1456.78')))

@@ -4,7 +4,8 @@
 linked to their documents. The office gets exactly that on the child's card:
 every lesson receipt, store sale and manual document — credit notes included —
 newest first. A receipt used to live only in the mail sent at charge time; this
-is the way back to it.
+is the way back to it. Each row also says how its signed original reached the
+family (delivery_status, document_delivery.py), or None when none is stored.
 """
 from __future__ import annotations
 
@@ -17,8 +18,9 @@ from django.http import HttpResponse
 
 from apps.core.permissions import IsManagerOrPartner
 from apps.core.scoping import is_scoped_partner, partner_branch_ids
+from apps.customers.document_delivery import delivery_lookup
 from apps.customers.financial_models import Invoice
-from apps.documents.models import FormalDocument
+from apps.documents.models import FormalDocument, SignedOriginal
 from apps.store.models import StoreInvoice
 
 
@@ -117,17 +119,49 @@ def child_documents(child) -> list[dict]:
             'download_url': f'/documents/documents/{doc.id}/pdf/',
         })
 
+    _attach_delivery(rows)
     rows.sort(key=lambda row: (row['date'], row['document_number']), reverse=True)
     return rows
 
 
+# The card's kind of row, as the signed originals name the issuing table.
+_SIGNED_KIND = {
+    'receipt': SignedOriginal.KIND_IR,
+    'store': SignedOriginal.KIND_STORE,
+    'formal': SignedOriginal.KIND_FORMAL,
+}
+
+
+def _attach_delivery(rows: list[dict]) -> None:
+    """
+    Each row's delivery_status: how its signed original reached the family —
+    mailed, handed over on paper, held, or an archive copy — or None for a
+    document with no stored original (issued before signing). One query.
+    """
+    keys = [(_SIGNED_KIND[row['kind']], row['id'], row['document_number']) for row in rows]
+    found = delivery_lookup(keys)
+    for row, (kind, source_id, _number) in zip(rows, keys):
+        row['delivery_status'] = found.get((kind, str(source_id)))
+
+
 class InvoicePdfView(APIView):
-    """GET /api/v1/customers/invoices/{id}/pdf/ — a lesson receipt by its own id."""
+    """
+    GET /api/v1/customers/invoices/{id}/pdf/ — a lesson receipt by its own id.
+
+    ?copy=1 (added 30.9.2026, the invoices page's documents tab): always a copy,
+    "העתק" — never the original, whatever the signing switch says and whether
+    or not the original left. Without it, as before: the original the first
+    time it has not left the system, a copy after (reproduce_subscription_invoice_pdf).
+    A partner reaches only a receipt of their own branches, as on the page.
+    """
 
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
 
     def get(self, request, invoice_id):
-        from apps.customers.subscription_invoice_pdf import reproduce_subscription_invoice_pdf
+        from apps.customers.subscription_invoice_pdf import (
+            generate_subscription_invoice_pdf,
+            reproduce_subscription_invoice_pdf,
+        )
 
         invoice = Invoice.objects.select_related('family').filter(id=invoice_id).first()
         if invoice is None:
@@ -138,8 +172,11 @@ class InvoicePdfView(APIView):
             if str(branch_id) not in allowed:
                 return Response({'error': 'החשבונית לא נמצאה'}, status=status.HTTP_404_NOT_FOUND)
 
-        response = HttpResponse(
-            reproduce_subscription_invoice_pdf(invoice, user=request.user), content_type='application/pdf',
+        wants_copy = str(request.query_params.get('copy') or '').strip().lower() in ('1', 'true', 'yes')
+        pdf = (
+            generate_subscription_invoice_pdf(invoice, copy=True) if wants_copy
+            else reproduce_subscription_invoice_pdf(invoice, user=request.user)
         )
+        response = HttpResponse(pdf, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{invoice.invoice_number}.pdf"'
         return response

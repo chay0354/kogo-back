@@ -2,7 +2,9 @@ from decimal import Decimal, InvalidOperation
 
 from rest_framework import serializers
 
-from apps.core.models import Business, BusinessCategory
+from apps.core.models import Branch, Business, BusinessCategory
+from apps.customers.models import BusinessCustomer
+from apps.documents.models import FormalDocument
 from apps.payment_links.models import PaymentLink, PaymentLinkOption, PaymentLinkPayment
 
 
@@ -35,16 +37,21 @@ class PaymentLinkSerializer(serializers.ModelSerializer):
     paid_count = serializers.IntegerField(read_only=True, default=0)
     paid_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True, default=Decimal('0'))
     review_count = serializers.IntegerField(read_only=True, default=0)
+    business_customer_name = serializers.CharField(source='business_customer.full_name', read_only=True, default='')
+    target_invoice_number = serializers.CharField(source='target_invoice.document_number', read_only=True, default='')
 
     class Meta:
         model = PaymentLink
         fields = [
-            'id', 'slug', 'title', 'description', 'business', 'business_name',
+            'id', 'slug', 'title', 'description', 'kind', 'business_customer', 'business_customer_name',
+            'target_invoice', 'target_invoice_number', 'business', 'business_name',
             'business_category', 'business_category_name', 'branch', 'branch_name',
             'is_active', 'expires_at', 'public_url', 'is_open', 'options',
             'paid_count', 'paid_total', 'review_count', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'slug', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'slug', 'kind', 'business_customer', 'target_invoice', 'created_at', 'updated_at',
+        ]
 
     def get_public_url(self, obj):
         return obj.public_url()
@@ -119,7 +126,7 @@ class PaymentLinkPaymentSerializer(serializers.ModelSerializer):
             'id', 'link', 'link_title', 'option', 'option_label', 'amount', 'reported_amount',
             'payer_name', 'payer_phone', 'payer_email', 'status', 'gateway_transaction_id',
             'gateway_confirmation_code', 'card_last4', 'card_type', 'failure_reason', 'failure_code',
-            'review_reason', 'paid_at', 'formal_document', 'created_at',
+            'review_reason', 'paid_at', 'formal_document', 'document_error', 'created_at',
         ]
         read_only_fields = [f for f in fields if f != 'formal_document']
 
@@ -130,10 +137,64 @@ class PublicPaymentLinkSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PaymentLink
-        fields = ['slug', 'title', 'description', 'options']
+        fields = ['slug', 'title', 'description', 'options', 'payer_details_locked']
+
+    payer_details_locked = serializers.SerializerMethodField()
+
+    def get_payer_details_locked(self, obj):
+        return obj.kind == PaymentLink.KIND_BUSINESS_CHARGE
 
     def get_options(self, obj):
         return [
             {'id': str(o.id), 'label': o.label, 'amount': str(o.amount)}
             for o in obj.options.all() if o.is_active
         ]
+
+
+class BusinessChargeCreateSerializer(serializers.Serializer):
+    business_customer_id = serializers.PrimaryKeyRelatedField(
+        source='business_customer', queryset=BusinessCustomer.objects.all(),
+    )
+    business_id = serializers.PrimaryKeyRelatedField(source='business', queryset=Business.objects.all())
+    business_category_id = serializers.PrimaryKeyRelatedField(
+        source='business_category', queryset=BusinessCategory.objects.all(),
+    )
+    branch_id = serializers.PrimaryKeyRelatedField(
+        source='branch', queryset=Branch.objects.filter(is_active=True), required=False, allow_null=True,
+    )
+    target_invoice_id = serializers.PrimaryKeyRelatedField(
+        source='target_invoice', queryset=FormalDocument.objects.all(), required=False, allow_null=True,
+    )
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('1.00'))
+    description = serializers.CharField(max_length=500)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        business = attrs['business']
+        category = attrs['business_category']
+        customer = attrs['business_customer']
+        invoice = attrs.get('target_invoice')
+        if not business.is_active:
+            raise serializers.ValidationError({'business_id': 'העסק אינו פעיל'})
+        if not category.is_active:
+            raise serializers.ValidationError({'business_category_id': 'הקטגוריה אינה פעילה'})
+        if category.business_id != business.id:
+            raise serializers.ValidationError({'business_category_id': 'הקטגוריה אינה שייכת לעסק שנבחר'})
+        if not (customer.company_number or customer.id_number):
+            raise serializers.ValidationError({
+                'business_customer_id': 'לחיוב עסקי נדרש ח.פ, ע.מ או מספר מזהה של הלקוח',
+            })
+        if invoice is not None:
+            if invoice.business_customer_id != customer.id:
+                raise serializers.ValidationError({'target_invoice_id': 'החשבונית שייכת ללקוח עסקי אחר'})
+            if invoice.document_type not in ('tax_invoice', 'transaction_invoice'):
+                raise serializers.ValidationError({'target_invoice_id': 'אפשר לגבות רק חשבונית מס או חשבונית עסקה'})
+            from apps.documents.settlement import balance_of
+
+            line = balance_of(invoice)
+            open_amount = line.open if line is not None else Decimal('0')
+            if open_amount <= 0:
+                raise serializers.ValidationError({'target_invoice_id': 'החשבונית כבר סגורה'})
+            if attrs['amount'] > open_amount:
+                raise serializers.ValidationError({'amount': f'נותרו בחשבונית ₪{open_amount}'})
+        return attrs

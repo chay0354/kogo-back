@@ -587,6 +587,8 @@ class OriginalsListTests(ArchiveApiMixin, APITestCase):
         self.assertEqual(set(row), {
             'id', 'number', 'kind', 'purpose', 'document_type_label', 'customer_name', 'document_date', 'total',
             'delivery', 'delivery_reason', 'signed_at', 'sent_at', 'paper_original_printed_at', 'sha256', 'size',
+            # Added 25.9.2026 (test_delivery_never_final.py); the fields above are unchanged.
+            'source_id', 'channel', 'awaiting_allocation',
         })
         self.assertEqual((row['purpose'], row['kind'], row['sha256'], row['size'], row['delivery']),
                          (ARCHIVE, IR, self.lesson_row.sha256, self.lesson_row.size, 'none'))
@@ -660,8 +662,11 @@ class FileDownloadTests(ArchiveApiMixin, APITestCase):
         with signing_on():
             doc = self.receipt('מזומן')
         row = SignedOriginal.objects.get(number=doc.document_number)
+        # The stored bytes, as the accountant's export hands them out; a copy
+        # only on request (?copy=1, the owner's decision D5 — test_delivery_never_final.py).
         response = self.client.get(file_url(row))
         self.assertEqual(response.content, bytes(row.pdf))
+        self.assertEqual(response['X-Content-SHA256'], row.sha256)
         self.assertIsNone(SignedOriginal.objects.get(pk=row.pk).paper_original_printed_at)
 
     def test_no_signed_bytes_is_404_and_nothing_is_logged(self):

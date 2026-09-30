@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from apps.documents.backup_views import cron_daily_backup, cron_quarterly_backup
 from apps.documents.michal import views as michal_views
 from apps.documents.signing import views as signing_views
 from apps.documents.views import (
@@ -8,6 +9,7 @@ from apps.documents.views import (
     DocumentSeriesViewSet,
     FormalDocumentViewSet,
     MissingReceiptsViewSet,
+    SettlementViewSet,
 )
 
 router = DefaultRouter()
@@ -16,6 +18,7 @@ router.register(r'check-plans', CheckPlanViewSet, basename='check-plan')
 router.register(r'cash-plans', CashPlanViewSet, basename='cash-plan')
 router.register(r'missing-receipts', MissingReceiptsViewSet, basename='missing-receipts')
 router.register(r'series', DocumentSeriesViewSet, basename='document-series')
+router.register(r'settlements', SettlementViewSet, basename='document-settlement')
 
 urlpatterns = [
     # Signed originals (apps/documents/signing).
@@ -25,6 +28,7 @@ urlpatterns = [
     path('signing/originals/<uuid:original_id>/file/', signing_views.original_file, name='signing-original-file'),
     path('signing/originals/<uuid:original_id>/print-original/', signing_views.print_original,
          name='signing-print-original'),
+    path('signing/originals/<uuid:original_id>/send/', signing_views.send_original, name='signing-send-original'),
     # The signed archive of documents issued before signing (apps/documents/signing/archive.py).
     path('signing/archive/status/', signing_views.archive_status, name='signing-archive-status'),
     path('signing/archive/run/', signing_views.archive_run, name='signing-archive-run'),
@@ -32,6 +36,9 @@ urlpatterns = [
     path('signing/certificate/issue/', signing_views.signing_issue_certificate, name='signing-certificate-issue'),
     path('signing/selftest/', signing_views.signing_selftest, name='signing-selftest'),
     path('cron/sign-pending/', signing_views.cron_sign_pending, name='documents-cron-sign-pending'),
+    # The books to Israel: daily (vercel.json, 00:30 UTC) and quarterly (25(ו)(2), run by hand).
+    path('cron/daily-backup/', cron_daily_backup, name='documents-cron-daily-backup'),
+    path('cron/quarterly-backup/', cron_quarterly_backup, name='documents-cron-quarterly-backup'),
     # Michal Kagan's site asks for her documents with a key of its own (apps/documents/michal).
     path('integrations/michal/documents/', michal_views.MichalDocumentsView.as_view(), name='michal-documents'),
     path('integrations/michal/documents/<str:number>/pdf/', michal_views.MichalDocumentPdfView.as_view(),

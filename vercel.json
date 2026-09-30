@@ -32,6 +32,10 @@
     {
       "path": "/api/v1/documents/cron/sign-pending/",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/v1/documents/cron/daily-backup/",
+      "schedule": "30 0 * * *"
     }
   ]
 }

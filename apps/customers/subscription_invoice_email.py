@@ -69,26 +69,34 @@ def build_subscription_invoice_email(invoice: Invoice) -> tuple[str, str, str]:
     return subject, text, html
 
 
-def invoice_recipients(invoice: Invoice) -> list[str]:
+def invoice_recipients(invoice: Invoice, *, email: str = '') -> list[str]:
     """
     The payer's email (as issued, else the family's), then every extra contact's
     email from the child's card — one family, one consent, one message.
+
+    `email` is an address the office typed for this one send (the signing
+    service's send endpoint, for a family whose card has none): it goes first,
+    in place of the payer's.
     """
     from apps.customers.customer_details import extra_invoice_emails
 
-    payer = (invoice.payer_email or '').strip()
+    payer = (email or invoice.payer_email or '').strip()
     if not payer and invoice.family_id:
         payer = (invoice.family.email or '').strip()
     family = invoice.family if invoice.family_id else None
     return [e for e in [payer, *extra_invoice_emails(family, exclude=[payer])] if e]
 
 
-def send_subscription_invoice_email(invoice: Invoice) -> bool:
-    """Send invoice PDF to payer email. Idempotent via invoice.email_sent_at."""
+def send_subscription_invoice_email(invoice: Invoice, *, email: str = '') -> bool:
+    """
+    Send invoice PDF to payer email. Idempotent via invoice.email_sent_at.
+
+    `email` is an address the office typed for this one send; see invoice_recipients.
+    """
     if invoice.email_sent_at:
         return True
 
-    recipients = invoice_recipients(invoice)
+    recipients = invoice_recipients(invoice, email=email)
     if not recipients:
         logger.info('Skipping subscription invoice email for %s: no payer email', invoice.invoice_number)
         return False

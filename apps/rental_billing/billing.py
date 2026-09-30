@@ -4,6 +4,7 @@
     retry_charge(charge, user=)       the office's "retry now" on a failed month
     mark_charged(charge, ...)         the office's decision on a month in review: it went through
     void_charge(charge, ...)          ... or it is not charged
+    (offline.py)                      ... or the tenant paid it at the office: cash, a check, a transfer
     reserve_month / reclaim_failed / call_gateway / record_result
                                       the rails the tenant's card page (card.py) runs on too
 
@@ -89,6 +90,10 @@ OUTCOME_FAILED = 'failed'
 OUTCOME_REVIEW = 'review'
 # The gateway answered after the month was already decided on (the stale sweep, the office).
 OUTCOME_LATE = 'late'
+LATE_CHARGE_NOTE = (
+    'טרנזילה אישרה את החיוב אחרי שהחודש כבר הוכרע — הכרטיס חויב. '
+    'יש לבדוק בטרנזילה ולהחליט: לסמן כחויב (תופק קבלה) או לזכות את השוכר בטרנזילה.'
+)
 
 # A month whose outcome only the office may decide on. While a tenancy has one,
 # nothing else of it is sent to the gateway.
@@ -529,7 +534,22 @@ def record_result(charge_id, result: dict, *, on_charged=None, fail_order: bool 
         if charge.status != Charge.STATUS_RESERVED:
             # Decided on while the gateway was answering. That decision stands;
             # what Tranzila said is kept for whoever looks at it.
+            #
+            # It takes an answer later than STALE_RESERVATION (15 minutes, a
+            # gateway call times out after 30 seconds) for the office to have
+            # decided first, so this is close to never. But a yes that lands on
+            # a month voided or paid at the office is a card charged with no
+            # receipt, or on top of the cash: its transaction is kept, and
+            # offline.late_card_charge names it on the office's screen and in
+            # the audit. Nothing is refunded or charged here — the office
+            # decides (mark it charged, or refund it in Tranzila).
             note = f'תשובת טרנזילה הגיעה אחרי ההכרעה ({outcome}): {result.get("transaction_id") or _error_text(result)}'
+            # A charged month with no transaction of its own was paid at the office.
+            settled_otherwise = charge.status == Charge.STATUS_VOIDED or (
+                charge.status == Charge.STATUS_CHARGED and not charge.transaction_id
+            )
+            if outcome == OUTCOME_CHARGED and settled_otherwise:
+                note = f'{note}\n{LATE_CHARGE_NOTE}'
             charge.error = f'{charge.error}\n{note}'.strip()[:2000]
             if result.get('success') and not charge.transaction_id:
                 charge.transaction_id = str(result.get('transaction_id') or '')[:100]
@@ -852,10 +872,20 @@ def _resolve(charge, user, note: str, now) -> None:
     charge.resolution_note = note
 
 
+def charged_after_void(charge) -> bool:
+    """A voided month Tranzila then said yes to (record_result kept its transaction): the card was charged, no receipt."""
+    return charge.status == Charge.STATUS_VOIDED and bool((charge.transaction_id or '').strip()) and not charge.receipt_id
+
+
 def mark_charged(charge, *, transaction_id: str, confirmation_code: str = '', note: str = '', user=None) -> Charge:
     """
     The office found the charge in Tranzila: the month in review is charged,
     with the transaction id they found. Then its receipt is issued.
+
+    Also a voided month that Tranzila charged after all (charged_after_void):
+    the office, having found the charge, keeps the money and the tenant gets
+    the receipt. The id they type must be the one Tranzila answered with.
+    Refunding it instead is done in Tranzila, never from here.
     """
     transaction_id = str(transaction_id or '').strip()
     if not transaction_id:
@@ -865,15 +895,25 @@ def mark_charged(charge, *, transaction_id: str, confirmation_code: str = '', no
     now = timezone.now()
     with transaction.atomic(durable=True):
         locked = Charge.objects.select_for_update().get(pk=charge.pk)
-        if not is_undecided(locked, now):
+        late = charged_after_void(locked)
+        if late:
+            if transaction_id != locked.transaction_id.strip():
+                raise BillingError(
+                    f'מזהה העסקה שהוזן שונה מזה שטרנזילה החזירה על החודש הזה ({locked.transaction_id})'
+                )
+        elif not is_undecided(locked, now):
             raise BillingError('אפשר לסמן כחויב רק חיוב שנמצא בבדיקה')
         order = Order.objects.select_for_update().get(pk=locked.standing_order_id)
         locked.status = Charge.STATUS_CHARGED
         locked.transaction_id = transaction_id
-        locked.confirmation_code = str(confirmation_code or '').strip()[:50]
+        # A late yes keeps the code Tranzila answered with unless the office typed one.
+        locked.confirmation_code = str(confirmation_code or '').strip()[:50] or (locked.confirmation_code if late else '')
         # The money moved when the attempt was made, not when the office found it.
         locked.charged_at = locked.reserved_at
-        _resolve(locked, user, str(note or '').strip()[:1000], now)
+        note = str(note or '').strip()
+        if late and locked.resolution_note:
+            note = ' · '.join(part for part in (note, f'(החודש בוטל קודם לכן: {locked.resolution_note})') if part)
+        _resolve(locked, user, note[:1000], now)
         locked.save()
         advance(order, locked.period)
         order.save(update_fields=['next_charge_date', 'status', 'updated_at'])

@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 
@@ -86,6 +87,14 @@ RENTAL_RUN_REGEX = r'^RT-[0-9]{4}-[0-9]{6,}$'
 _RENTAL_RUN = re.compile(RENTAL_RUN_REGEX)
 
 
+ISRAEL_TZ = ZoneInfo('Asia/Jerusalem')
+
+
+def israel_today() -> date:
+    """Today on the calendar in Israel — what a document issued now is dated, whatever the server's clock."""
+    return timezone.localdate(timezone=ISRAEL_TZ)
+
+
 def is_rental_number(number) -> bool:
     """True for a number from the RT run."""
     return bool(_RENTAL_RUN.match(number or ''))
@@ -97,6 +106,78 @@ def _tax_year(when: date | datetime | None) -> int:
     if isinstance(when, datetime):
         return (timezone.localtime(when) if timezone.is_aware(when) else when).year
     return when.year
+
+
+class DocumentDateError(ValueError):
+    """A document date its run refuses. Its message is the office's, in Hebrew — the view answers 400 with it."""
+
+
+def _as_date(value) -> date:
+    if isinstance(value, datetime):
+        return (timezone.localtime(value, ISRAEL_TZ) if timezone.is_aware(value) else value).date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        raise DocumentDateError(f'תאריך המסמך אינו תאריך תקין: {value!r}') from None
+
+
+def latest_document_date(series: str, year: int) -> date | None:
+    """The latest date on a document already issued in the run `series` of `year`, or None."""
+    from django.db.models import Max
+
+    from apps.documents.models import FormalDocument
+
+    return (
+        FormalDocument.objects
+        .filter(document_number__startswith=f'{series}-{year}-')
+        .aggregate(latest=Max('document_date'))['latest']
+    )
+
+
+def validate_document_date(series_or_type: str, document_date, issue_date=None) -> date:
+    """
+    The date a document issued by hand may carry — owner decision D3 (25.9.2026).
+
+    1. Not in the future: a document is made "סמוך לביצוע הפעולה" (הוראה 17),
+       never ahead of it.
+    2. In the tax year it is issued in: its number comes from that year's run
+       (numbering is by tax year, סעיף 18(א)(3)), and a date in another year
+       would file it in the wrong year's books.
+    3. Not before the latest date already issued in its run: the run's numbers
+       stay in the order of their dates. The same day is fine.
+
+    `series_or_type` is a run ('TI') or a document type ('tax_invoice');
+    `issue_date` is the day it is issued, today in Israel by default. Returns
+    the document date as a date; raises DocumentDateError with the reason.
+
+    Call it after the run's number is taken (DocumentSeries.next_number holds
+    the run's row lock until the transaction ends): two documents issued at the
+    same moment are then checked one after the other, and a refusal rolls the
+    number back with the rest.
+    """
+    series = FORMAL_SERIES.get(series_or_type, series_or_type)
+    day = _as_date(document_date)
+    issued_on = _as_date(issue_date) if issue_date is not None else israel_today()
+
+    if day > issued_on:
+        raise DocumentDateError(
+            f'תאריך המסמך ({day:%d/%m/%Y}) הוא בעתיד. מסמך מתוארך ביום שבו הוא מופק או לפניו.'
+        )
+    if day.year != issued_on.year:
+        raise DocumentDateError(
+            f'תאריך המסמך ({day:%d/%m/%Y}) אינו בשנת המס {issued_on.year}. '
+            f'מסמך שמופק היום מתוארך בשנת {issued_on.year} בלבד.'
+        )
+    latest = latest_document_date(series, issued_on.year)
+    if latest is not None and day < latest:
+        label = SERIES_LABELS.get(series, series)
+        raise DocumentDateError(
+            f'בסדרה "{label}" כבר הופק מסמך בתאריך {latest:%d/%m/%Y}. '
+            f'כדי שהמספרים יישארו לפי סדר התאריכים, תאריך המסמך לא יכול להיות מוקדם ממנו.'
+        )
+    return day
 
 
 def format_document_number(series: str, year: int, number: int) -> str:
