@@ -110,7 +110,9 @@ def _document_fields(doc: FormalDocument) -> list[Field]:
         # Printed exactly as issued — TI-…, CR-…, or an older shape.
         Field('מספר מסמך', doc.document_number),
         Field('תאריך המסמך', date_stamp(doc.document_date)),
-        Field('תאריך ושעה', issue_stamp(doc.created_at)),
+        # The moment it was issued — for an approved draft, the approval; a
+        # document from before issued_at existed shows when its row was made.
+        Field('תאריך ושעה', issue_stamp(doc.issued_at or doc.created_at)),
         *_customer_fields(doc),
         Field('תאריך פירעון', date_stamp(doc.due_date)),
         Field('פרטים', doc.description or ''),
@@ -222,13 +224,19 @@ def _payment_fields(doc: FormalDocument) -> list[Field]:
             fields.append(Field(f"פרטי הצ'ק{suffix}", check_details(payment)))
         else:
             fields += [
+                Field(f'סוג כרטיס{suffix}', getattr(payment, 'card_brand', '') or ''),
                 Field(f'4 ספרות אחרונות{suffix}', payment.card_last_four or ''),
                 Field(f'מספר תשלומים{suffix}', str(installments) if installments > 1 else ''),
                 Field(f'אסמכתא / אישור{suffix}', payment.reference or ''),
+                Field(f'תאריך התשלום{suffix}', date_stamp(getattr(payment, 'paid_on', None))),
             ]
         fields.append(Field(f'סכום ששולם{suffix}', money(payment.amount)))
     paid = sum((p.amount for p in payments), Decimal('0'))
-    fields.append(Field('יתרה לתשלום', money(max(doc.total_amount - paid, Decimal('0')))))
+    # ניכוי במקור the customer withheld is part of what settles the document.
+    withheld = doc.withholding_amount or Decimal('0')
+    if withheld:
+        fields.append(Field('ניכוי במקור', money(withheld)))
+    fields.append(Field('יתרה לתשלום', money(max(doc.total_amount - paid - withheld, Decimal('0')))))
     return fields
 
 

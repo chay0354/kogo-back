@@ -8,6 +8,7 @@ from apps.documents.models import (
     FormalDocument, DocumentLineItem, DocumentPayment,
     TRANZILA_DOCUMENT_TYPE,
 )
+from apps.documents.numbering import israel_today, validate_document_date
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,65 @@ def _income_tags(data: dict) -> dict:
     return {'business_id': business_id, 'business_category_id': category_id}
 
 
+def _actor(user):
+    """The user a document is recorded as issued by — None for a system run or an anonymous caller."""
+    return user if getattr(user, 'is_authenticated', False) else None
+
+
+def _issued(issued_by) -> dict:
+    """
+    When and by whom a document was issued (FormalDocument.issued_at/issued_by).
+
+    The page's "תאריך ושעה" and the uniform file's 1205/1206 read issued_at:
+    the moment the document took its number, which for an approved draft is the
+    approval, not the day it was typed.
+    """
+    return {'issued_at': timezone.now(), 'issued_by': _actor(issued_by)}
+
+
+def _allocation_at_issue(invoice_data: dict, issued_by) -> dict:
+    """
+    מספר הקצאה typed with the document (B), so the original carries it from
+    the first print — a number added later is only ever on a copy. Checked to
+    nine digits by the serializer; entered by the issuing user, now.
+    """
+    number = (invoice_data.get('allocation_number') or '').strip()
+    if not number:
+        return {}
+    return {
+        'allocation_number': number,
+        'allocation_entered_at': timezone.now(),
+        'allocation_entered_by': _actor(issued_by),
+    }
+
+
 def _generate_document_number(document_type: str) -> str:
     """The next number in the run of the document's type (numbering.FORMAL_SERIES, סעיף 5(ג))."""
     from apps.documents.numbering import formal_document_number
     return formal_document_number(document_type)
+
+
+def _number_and_date(document_type: str, document_date, *, skip_date_rules: bool = False):
+    """
+    (the next number of the type's run, the date the document carries).
+
+    The number is taken first — DocumentSeries.next_number holds the run's row
+    lock until the transaction ends — and the date is checked against the run
+    after it (numbering.validate_document_date: not in the future, in this tax
+    year, not before the run's latest date). Two documents issued at the same
+    moment are so checked one after the other, and a refused date rolls its
+    number back with the rest of the transaction: no gap.
+
+    `skip_date_rules` is for the office's check and cash plans only
+    (check_plans.py, cash_plans.py). They date a month's document on its
+    check's or month's day, which can be earlier than a document already in
+    the run; their dating is being fixed on its own (work stream WS-3). No
+    other caller passes it.
+    """
+    number = _generate_document_number(document_type)
+    if skip_date_rules:
+        return number, document_date
+    return number, validate_document_date(document_type, document_date)
 
 
 def _sign_at_issue(doc: FormalDocument, **delivery) -> None:
@@ -67,9 +123,24 @@ def _sign_at_issue(doc: FormalDocument, **delivery) -> None:
 
 
 def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent: Decimal,
-                    vat_exempt: bool, round_total: bool, prices_include_vat: bool = False) -> dict:
-    subtotal = sum(Decimal(str(i['quantity'])) * Decimal(str(i['price'])) for i in line_items)
-    effective_discount = discount_amount if discount_amount > 0 else (subtotal * discount_percent / 100)
+                    vat_exempt: bool, prices_include_vat: bool = False) -> dict:
+    """
+    Subtotal, discount, VAT and total — each to the agora, half up, as printed
+    and stored (the dialog works them out the same way, utils.computeInvoiceTotals).
+
+    There is no rounding of the total to the shekel any more ("עגל סכום",
+    D6): it moved the total off its net plus VAT.
+    """
+    subtotal = sum(
+        (Decimal(str(i['quantity'])) * Decimal(str(i['price'])) for i in line_items), Decimal('0'),
+    ).quantize(AGORA, rounding=ROUND_HALF_UP)
+    if discount_amount < 0 or discount_percent < 0 or discount_percent > 100:
+        raise ValueError('הנחה בין 0 ל־100 אחוז, ובסכום שאינו שלילי')
+    effective_discount = (
+        discount_amount if discount_amount > 0 else subtotal * discount_percent / 100
+    ).quantize(AGORA, rounding=ROUND_HALF_UP)
+    if effective_discount > subtotal:
+        raise ValueError('ההנחה גדולה מסכום השורות')
     base = subtotal - effective_discount
     if prices_include_vat and not vat_exempt:
         # The prices are gross: the total is what was paid, VAT is taken out of it.
@@ -80,8 +151,6 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
     else:
         vat = Decimal('0') if vat_exempt else (base * VAT_RATE).quantize(AGORA, rounding=ROUND_HALF_UP)
         total = base + vat
-    if round_total:
-        total = total.quantize(Decimal('1'), rounding=ROUND_HALF_UP)
     return {
         'subtotal': subtotal,
         'discount_amount': effective_discount,
@@ -91,30 +160,39 @@ def _compute_totals(line_items: list, discount_amount: Decimal, discount_percent
 
 
 @transaction.atomic
-def create_invoice(data: dict, document_type: str) -> FormalDocument:
-    """Create a tax invoice or transaction invoice."""
+def create_invoice(data: dict, document_type: str, *, issued_by=None,
+                   skip_date_rules: bool = False) -> FormalDocument:
+    """
+    Create a tax invoice or transaction invoice.
+
+    `skip_date_rules=True` only from the check and cash plans (see _number_and_date).
+    """
     invoice_data = data['invoice_details']
-    # A חשבונית עסקה is not a tax document and carries no VAT — the same rule
-    # the draft path applies, so approving a draft and issuing directly agree.
-    vat_exempt = invoice_data.get('vat_exempt', False) or document_type == 'transaction_invoice'
+    # A חשבונית עסקה is a demand for payment: it shows the VAT the tax invoice
+    # issued with the payment will charge, so the customer is asked for the
+    # whole sum. It is VAT-free only when the sale is (Eilat, abroad) — it
+    # used to be forced exempt, and printed "פטור" on a taxable sale.
+    vat_exempt = invoice_data.get('vat_exempt', False)
     totals = _compute_totals(
         invoice_data['line_items'],
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
         vat_exempt,
-        invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
 
+    number, document_date = _number_and_date(
+        document_type, invoice_data['document_date'], skip_date_rules=skip_date_rules,
+    )
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number(document_type),
+        document_number=number,
         document_type=document_type,
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=invoice_data['document_date'],
+        document_date=document_date,
         due_date=invoice_data.get('due_date') or None,
         description=invoice_data.get('description', ''),
         currency=invoice_data.get('currency', 'ILS'),
@@ -125,6 +203,8 @@ def create_invoice(data: dict, document_type: str) -> FormalDocument:
         customer_notes=invoice_data.get('customer_notes', ''),
         internal_notes=invoice_data.get('internal_notes', ''),
         **totals,
+        **_issued(issued_by),
+        **_allocation_at_issue(invoice_data, issued_by),
     )
 
     for item in invoice_data['line_items']:
@@ -148,13 +228,12 @@ def create_draft(data: dict) -> FormalDocument:
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'לא ניתן לשמור טיוטה לסוג {target}')
     invoice_data = data['invoice_details']
-    vat_exempt = invoice_data.get('vat_exempt', False) or target == 'transaction_invoice'
+    vat_exempt = invoice_data.get('vat_exempt', False)
     totals = _compute_totals(
         invoice_data['line_items'],
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
         vat_exempt,
-        invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
     doc = FormalDocument.objects.create(
@@ -190,24 +269,42 @@ def create_draft(data: dict) -> FormalDocument:
 
 
 @transaction.atomic
-def finalize_draft(doc: FormalDocument) -> FormalDocument:
-    """Approve a draft: it becomes its target type and takes the next fiscal number."""
+def finalize_draft(doc: FormalDocument, *, issued_by=None) -> FormalDocument:
+    """
+    Approve a draft: it becomes its target type, takes the next fiscal number,
+    and is dated and stamped the day and moment it is approved.
+
+    The row is locked before it is looked at. Checked first on the caller's
+    copy, two approvals of the same draft both saw a draft: the second waited
+    for the first's lock and then numbered the now-issued document again —
+    leaving its first number a gap in the run and a second signed original.
+    Read under the lock, the second finds a document that is no longer a draft.
+
+    The date is today in Israel, not the day the draft was typed: a document
+    is dated when it is issued (הוראה 17), and a draft kept for a week would
+    otherwise take a number after documents dated later than it.
+    """
+    doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
     if doc.document_type != DRAFT_TYPE:
         raise ValueError('המסמך אינו טיוטה')
     target = doc.draft_target_type or 'tax_invoice'
     if target not in DRAFT_TARGET_TYPES:
         raise ValueError(f'סוג יעד לא נתמך: {target}')
-    doc = FormalDocument.objects.select_for_update().get(pk=doc.pk)
     doc.document_type = target
-    doc.document_number = _generate_document_number(target)
-    doc.save(update_fields=['document_type', 'document_number', 'updated_at'])
+    doc.document_number, doc.document_date = _number_and_date(target, israel_today())
+    issued = _issued(issued_by)
+    doc.issued_at = issued['issued_at']
+    doc.issued_by = issued['issued_by']
+    doc.save(update_fields=[
+        'document_type', 'document_number', 'document_date', 'issued_at', 'issued_by', 'updated_at',
+    ])
     _attempt_tranzila(doc)
     _sign_at_issue(doc)
     return doc
 
 
 @transaction.atomic
-def create_combined(data: dict) -> FormalDocument:
+def create_combined(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a combined tax invoice + receipt."""
     invoice_data = data['invoice_details']
     totals = _compute_totals(
@@ -215,19 +312,19 @@ def create_combined(data: dict) -> FormalDocument:
         Decimal(str(invoice_data.get('discount_amount', 0))),
         Decimal(str(invoice_data.get('discount_percent', 0))),
         invoice_data.get('vat_exempt', False),
-        invoice_data.get('round_total', False),
         invoice_data.get('prices_include_vat', False),
     )
 
+    number, document_date = _number_and_date('combined', invoice_data['document_date'])
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number('combined'),
+        document_number=number,
         document_type='combined',
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=invoice_data['document_date'],
+        document_date=document_date,
         due_date=invoice_data.get('due_date') or None,
         description=invoice_data.get('description', ''),
         currency=invoice_data.get('currency', 'ILS'),
@@ -237,7 +334,10 @@ def create_combined(data: dict) -> FormalDocument:
         vat_percent=Decimal('18'),
         customer_notes=invoice_data.get('customer_notes', ''),
         internal_notes=invoice_data.get('internal_notes', ''),
+        withholding_amount=_withholding(invoice_data.get('withholding_amount')),
         **totals,
+        **_issued(issued_by),
+        **_allocation_at_issue(invoice_data, issued_by),
     )
 
     for item in invoice_data['line_items']:
@@ -249,18 +349,8 @@ def create_combined(data: dict) -> FormalDocument:
             unit_price=Decimal(str(item.get('price', 0))),
         )
 
-    # A combined document names its methods, not its checks: one flag — on the
-    # payload, or in its invoice section — says the check it was paid with is
-    # crossed "לא סחיר" in the customer's name (הוראה 18ב(ד)(2)).
-    crossed = data.get('check_crossed') is True or invoice_data.get('check_crossed') is True
-    for pm in invoice_data.get('payment_methods', []):
-        method = _map_payment_method(pm)
-        DocumentPayment.objects.create(
-            document=doc,
-            payment_method=method,
-            amount=doc.total_amount,
-            check_crossed=crossed if method == 'check' else False,
-        )
+    for row in _combined_payment_rows(data, invoice_data, doc.total_amount):
+        DocumentPayment.objects.create(document=doc, **row)
 
     _attempt_tranzila(doc)
     _sign_at_issue(doc)
@@ -268,21 +358,24 @@ def create_combined(data: dict) -> FormalDocument:
 
 
 @transaction.atomic
-def create_receipt(data: dict) -> FormalDocument:
+def create_receipt(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a standalone receipt."""
     receipt = data['receipt_details']
     method_key = _map_payment_method(receipt['payment_method'])
     amount = _receipt_amount(receipt)
 
+    # Today in Israel when no date is given — the server's UTC date was the
+    # previous day for the first two or three hours of every Israeli morning.
+    number, document_date = _number_and_date('receipt', data.get('document_date') or israel_today())
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number('receipt'),
+        document_number=number,
         document_type='receipt',
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=data.get('document_date', str(timezone.now().date())),
+        document_date=document_date,
         currency='ILS',
         vat_exempt=True,
         vat_percent=Decimal('18'),
@@ -293,6 +386,9 @@ def create_receipt(data: dict) -> FormalDocument:
         total_amount=amount,
         linked_document_number=receipt.get('linked_invoice_id', ''),
         customer_notes=receipt.get('check_notes', '') or receipt.get('cash_notes', '') or receipt.get('bank_notes', '') or receipt.get('card_notes', ''),
+        # ניכוי במקור the customer withheld — it was read and dropped before.
+        withholding_amount=_withholding(receipt.get('withholding')),
+        **_issued(issued_by),
     )
 
     payment_kwargs = dict(
@@ -322,6 +418,7 @@ def create_receipt(data: dict) -> FormalDocument:
             payment_method='credit_card',
             amount=Decimal(str(receipt.get('card_amount', 0))),
             card_last_four=receipt.get('card_last_four', ''),
+            card_brand=(receipt.get('card_brand') or '').strip() or None,
             card_expiry=receipt.get('card_expiry', ''),
             card_installments=receipt.get('card_installments', 1),
             notes=receipt.get('card_notes', ''),
@@ -332,6 +429,7 @@ def create_receipt(data: dict) -> FormalDocument:
             payment_method='bank_transfer',
             amount=Decimal(str(receipt.get('bank_amount', 0))),
             reference=receipt.get('bank_reference', ''),
+            paid_on=receipt.get('bank_date') or None,
             notes=receipt.get('bank_notes', ''),
         )
     else:
@@ -343,7 +441,7 @@ def create_receipt(data: dict) -> FormalDocument:
 
 
 @transaction.atomic
-def create_credit_invoice(data: dict) -> FormalDocument:
+def create_credit_invoice(data: dict, *, issued_by=None) -> FormalDocument:
     """Create a credit note (חשבונית מס זיכוי)."""
     credit = data['credit_invoice_details']
     amount_before_vat = Decimal(str(credit['credit_amount_before_vat']))
@@ -351,27 +449,29 @@ def create_credit_invoice(data: dict) -> FormalDocument:
     vat_amount = Decimal('0') if vat_exempt else (amount_before_vat * VAT_RATE).quantize(AGORA, rounding=ROUND_HALF_UP)
     total = amount_before_vat + vat_amount
 
-    # Try to resolve linked document
-    linked_number = credit.get('linked_invoice_id', '').strip()
-    linked_doc = None
-    if linked_number:
-        try:
-            linked_doc = FormalDocument.objects.get(document_number=linked_number)
-        except FormalDocument.DoesNotExist:
-            pass
-    # The original's date is printed beside its number: from the document when
-    # kogo issued it, else as typed (a number from the previous software).
-    linked_date = credit.get('linked_document_date') or original_document_date(linked_number)
+    if amount_before_vat <= 0:
+        raise ValueError('סכום הזיכוי חייב להיות גדול מאפס')
+    linked_number = (credit.get('linked_invoice_id') or '').strip()
+    # What it credits, when kogo issued it: checked (type, customer, what is
+    # left to credit) under a lock on the original, so two credits at once
+    # cannot together pass its total.
+    linked_doc = _check_creditable(linked_number, data, amount_before_vat)
+    # The original's date is printed beside its number (סעיף 9(ה)(4)): kogo's
+    # own record of it when kogo issued it — a date typed beside a number kogo
+    # knows is not trusted over the document — else as typed (the previous
+    # software's number).
+    linked_date = original_document_date(linked_number) or credit.get('linked_document_date')
 
+    number, document_date = _number_and_date('credit_invoice', credit['document_date'])
     doc = FormalDocument.objects.create(
-        document_number=_generate_document_number('credit_invoice'),
+        document_number=number,
         document_type='credit_invoice',
         client_type=data['client_type'],
         child_id=data.get('child_id'),
         business_customer_id=data.get('business_customer_id'),
         **_income_tags(data),
         branch_id=_branch_for(data),
-        document_date=credit['document_date'],
+        document_date=document_date,
         vat_exempt=vat_exempt,
         vat_percent=Decimal('18'),
         subtotal=amount_before_vat,
@@ -385,6 +485,7 @@ def create_credit_invoice(data: dict) -> FormalDocument:
         credit_reason=credit.get('credit_reason', ''),
         customer_notes=credit.get('customer_notes', ''),
         internal_notes=credit.get('internal_notes', ''),
+        **_issued(issued_by),
     )
 
     _attempt_tranzila(doc)
@@ -414,6 +515,35 @@ def create_credit_invoice(data: dict) -> FormalDocument:
     return doc
 
 
+def record_customer_ack(doc: FormalDocument, note: str) -> FormalDocument:
+    """
+    Record that the customer confirmed receiving a credit note (הוראה 23א(3)):
+    the credit reduces the VAT only once they have. `note` says how — a
+    signature on the copy, registered mail, a signed reply. Recorded once.
+    """
+    note = (note or '').strip()
+    if doc.document_type != 'credit_invoice':
+        raise ValueError('אישור לקוח נרשם על חשבונית זיכוי בלבד')
+    if not note:
+        raise ValueError('יש לציין איך הלקוח אישר את קבלת הזיכוי (חתימה על העתק, דואר רשום, תשובה חתומה)')
+    with transaction.atomic():
+        locked = FormalDocument.objects.select_for_update().get(pk=doc.pk)
+        if locked.customer_ack_at is not None:
+            raise AlreadyAcknowledged(locked.customer_ack_at)
+        locked.customer_ack_at = timezone.now()
+        locked.customer_ack_note = note[:300]
+        locked.save(update_fields=['customer_ack_at', 'customer_ack_note', 'updated_at'])
+    return locked
+
+
+class AlreadyAcknowledged(Exception):
+    """The customer's confirmation of a credit note is on record already — it is not written over."""
+
+    def __init__(self, at):
+        super().__init__(at)
+        self.at = at
+
+
 def _email_credit_note_after_commit(doc_id, *, customer_name: str | None = None, email: str | None = None) -> None:
     """The credit note's mail, after its document committed. Its failure is logged, never raised."""
     doc = FormalDocument.objects.select_related('business_customer', 'child__family', 'linked_document').get(pk=doc_id)
@@ -421,6 +551,73 @@ def _email_credit_note_after_commit(doc_id, *, customer_name: str | None = None,
         _email_credit_note(doc, customer_name=customer_name, email=email)
     except Exception:
         logger.exception('Credit note email failed for %s (non-fatal; the signing cron retries)', doc.document_number)
+
+
+# What a credit note may credit (הוראה 23א, סעיף 9(ה)): a tax invoice, or a
+# tax invoice-receipt. Not a receipt (no VAT was charged on it), not a
+# transaction invoice (a demand for payment, not a tax document), not a draft
+# (no number yet), and not another credit note.
+CREDITABLE_TYPES = ('tax_invoice', 'combined')
+
+
+def _check_creditable(number: str, data: dict, amount_before_vat: Decimal):
+    """
+    The original a credit note credits, checked — or None for a number kogo
+    never issued (the previous software's, which only its date can vouch for).
+
+    A FormalDocument must be a tax invoice or invoice-receipt of the same
+    customer. Whatever kogo issued it through — the office, a lesson receipt
+    (IR) or a store sale (ST) — the credit may not pass what is left of it
+    before VAT: its amount less the credit notes already issued against it.
+    """
+    if not number:
+        return None
+    from django.db.models import Q, Sum
+
+    from apps.core.vat import split_vat_inclusive
+    from apps.customers.financial_models import Invoice
+    from apps.store.models import StoreInvoice
+
+    original = FormalDocument.objects.select_for_update().filter(document_number=number).first()
+    if original is not None:
+        if original.document_type not in CREDITABLE_TYPES:
+            label = original.get_document_type_display()
+            raise ValueError(
+                f'{number} הוא {label}. חשבונית זיכוי מזכה חשבונית מס או חשבונית מס/קבלה בלבד.'
+            )
+        other_child = original.child_id and str(original.child_id) != str(data.get('child_id') or '')
+        other_business = (
+            original.business_customer_id
+            and str(original.business_customer_id) != str(data.get('business_customer_id') or '')
+        )
+        if other_child or other_business:
+            raise ValueError(f'{number} הונפק ללקוח אחר. זיכוי ניתן רק ללקוח שקיבל את המסמך המקורי.')
+        net = original.subtotal - original.discount_amount
+    elif number.startswith('SD-'):
+        raise ValueError(
+            f'{number} הוא חשבונית עסקה של החנות — דרישת תשלום ולא מסמך מס, ואין מה לזכות בה.'
+        )
+    else:
+        lesson = Invoice.objects.select_for_update().filter(invoice_number=number).first()
+        sale = None if lesson else StoreInvoice.objects.select_for_update().filter(invoice_number=number).first()
+        if lesson is None and sale is None:
+            return None
+        if lesson is not None and lesson.status in ('pending', 'failed'):
+            raise ValueError(f'{number} לא הפך למסמך (החיוב לא הושלם), ואין מה לזכות בו.')
+        net = split_vat_inclusive(lesson.amount if lesson else sale.total_amount)[0]
+
+    credited = (
+        FormalDocument.objects.filter(document_type='credit_invoice')
+        .filter(Q(linked_document_number=number) | (Q(linked_document=original) if original else Q(pk__in=[])))
+        .aggregate(total=Sum('subtotal'))['total'] or Decimal('0')
+    )
+    left = net - credited
+    if amount_before_vat > left:
+        raise ValueError(
+            f'אפשר לזכות את {number} עד {_money_text(max(left, Decimal("0")))} לפני מע"מ '
+            f'(סכומו {_money_text(net)}, וכבר זוכו {_money_text(credited)}).'
+        )
+    return original
 
 
 def original_document_date(number: str):
@@ -548,7 +745,9 @@ def issue_refund_credit_note(
             customer_name=(customer_name or '').strip() or None,
             branch_id=branch_id,
             business_id=business_id,
-            document_date=timezone.localdate(),
+            # Dated by the system, today: not put to validate_document_date,
+            # since the money has already gone back and the note must follow it.
+            document_date=israel_today(),
             vat_exempt=False,
             vat_percent=Decimal('18'),
             subtotal=before,
@@ -560,6 +759,7 @@ def issue_refund_credit_note(
             linked_document_date=original_date,
             credit_reason=reason or 'זיכוי',
             internal_notes='הופק אוטומטית עם זיכוי העסקה',
+            **_issued(None),
         )
         from apps.documents import signing
 
@@ -606,6 +806,101 @@ def _map_payment_method(hebrew: str) -> str:
         'אשראי': 'credit_card',
         'העברה בנקאית': 'bank_transfer',
     }.get(hebrew, 'cash')
+
+
+_PAYMENT_KEYS = ('cash', 'check', 'credit_card', 'bank_transfer')
+
+
+def _payment_key(method: str) -> str:
+    """A payment method as stored: the dialog's Hebrew label or the stored key itself."""
+    return method if method in _PAYMENT_KEYS else _map_payment_method(method)
+
+
+def _withholding(value) -> Decimal | None:
+    """ניכוי במקור as stored: None when none was withheld."""
+    amount = Decimal(str(value or 0))
+    if amount < 0:
+        raise ValueError('ניכוי במקור אינו יכול להיות שלילי')
+    return amount if amount > 0 else None
+
+
+def _money_text(amount: Decimal) -> str:
+    return f'{amount:,.2f} ₪'
+
+
+def _combined_payment_rows(data: dict, invoice_data: dict, total: Decimal) -> list[dict]:
+    """
+    The payment rows of a חשבונית מס/קבלה (G) — how much was paid each way.
+
+    Each way it was paid is a row of its own amount, written as a receipt's
+    are, with what identifies it: a check's number, bank, branch, account and
+    due date (הוראה 5(ב)); a card's last four digits, brand and installments;
+    a transfer's reference and value date. Together with any ניכוי במקור they
+    come to the document's total exactly — a receipt for more or less than the
+    invoice is not what was paid.
+
+    Every method used to be written for the whole total, so a document paid
+    half in cash and half by check reported twice its money in the uniform
+    file. The older payload (payment_methods, names only) is still read when it
+    names one method — that method paid it all; naming several is refused,
+    since it cannot say how much each paid.
+    """
+    rows = invoice_data.get('payments') or []
+    withheld = _withholding(invoice_data.get('withholding_amount')) or Decimal('0')
+    due = total - withheld
+    # The older payload's single flag: the check it was paid with is crossed
+    # "לא סחיר" in the customer's name (הוראה 18ב(ד)(2)).
+    legacy_crossed = data.get('check_crossed') is True or invoice_data.get('check_crossed') is True
+
+    if not rows:
+        methods = invoice_data.get('payment_methods') or []
+        if not methods:
+            return []
+        if len(methods) > 1:
+            raise ValueError('חשבונית מס/קבלה בכמה אמצעי תשלום צריכה את הסכום של כל אחד מהם')
+        method = _payment_key(methods[0])
+        return [{
+            'payment_method': method,
+            'amount': due,
+            'check_crossed': legacy_crossed if method == 'check' else False,
+        }]
+
+    out = []
+    for row in rows:
+        method = _payment_key(row['method'])
+        amount = Decimal(str(row['amount']))
+        if amount <= 0:
+            raise ValueError('סכום של אמצעי תשלום חייב להיות גדול מאפס')
+        payment = {'payment_method': method, 'amount': amount, 'notes': row.get('notes', '') or ''}
+        if method == 'check':
+            payment.update(
+                reference=row.get('check_number', '') or '',
+                check_date=row.get('check_date') or None,
+                check_bank=row.get('check_bank', '') or '',
+                check_branch=row.get('check_branch', '') or '',
+                check_account=row.get('check_account', '') or '',
+                check_crossed=row.get('check_crossed') is True or legacy_crossed,
+            )
+        elif method == 'credit_card':
+            payment.update(
+                card_last_four=row.get('card_last_four', '') or '',
+                card_brand=(row.get('card_brand') or '').strip() or None,
+                card_installments=row.get('installments') or 1,
+                reference=row.get('reference', '') or '',
+                paid_on=row.get('paid_on') or None,
+            )
+        else:
+            payment.update(reference=row.get('reference', '') or '', paid_on=row.get('paid_on') or None)
+        out.append(payment)
+
+    paid = sum((row['amount'] for row in out), Decimal('0'))
+    if paid != due:
+        withheld_note = f' פחות ניכוי במקור של {_money_text(withheld)}' if withheld else ''
+        raise ValueError(
+            f'סכומי אמצעי התשלום ({_money_text(paid)}) אינם שווים לסכום החשבונית '
+            f'({_money_text(total)}{withheld_note}). כל שקל שהתקבל נרשם פעם אחת, באמצעי שבו שולם.'
+        )
+    return out
 
 
 def _attempt_tranzila(doc: FormalDocument) -> None:

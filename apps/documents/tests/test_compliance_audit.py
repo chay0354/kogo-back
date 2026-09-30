@@ -79,7 +79,9 @@ class CreditNoteNamesTheOriginalTests(RegisterFixture, APITestCase):
     def test_a_store_sale_credited_by_hand_prints_its_date(self, _mail):
         sale = self.store_sale(day=10)
 
-        self.assertEqual(self.credit(linked_invoice_id=sale.invoice_number).status_code, 201)
+        # ₪49.00 is ₪41.53 before VAT — a credit may not pass it (WS-2, item I).
+        response = self.credit(linked_invoice_id=sale.invoice_number, credit_amount_before_vat='41.53')
+        self.assertEqual(response.status_code, 201, response.data)
 
         self.assertEqual(
             FormalDocument.objects.get(document_type='credit_invoice').linked_document_date, date(2026, 8, 10),
