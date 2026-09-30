@@ -289,6 +289,14 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     family_email = serializers.CharField(source='family.email', read_only=True)
     family_address = serializers.CharField(source='family.address', read_only=True)
     parent_email = serializers.SerializerMethodField()
+    # What the card's edit form starts from (customers/customer_details.py).
+    parent_first_name = serializers.SerializerMethodField()
+    parent_last_name = serializers.SerializerMethodField()
+    family_notes = serializers.CharField(source='family.notes', read_only=True)
+    # Every other parent on the family — the phones that also get group messages.
+    extra_phones = serializers.SerializerMethodField()
+    # False for a walk-in: its family is a placeholder, not a household to edit.
+    family_editable = serializers.SerializerMethodField()
     # Brothers and sisters on the same family, so the office can move between the
     # children of one household without going back through the search.
     siblings = serializers.SerializerMethodField()
@@ -323,6 +331,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'family_id', 'family_name', 'family_phone',
             'branch_id', 'branch_name',
             'parent_name', 'parent_phone', 'parent_id', 'parent_id_number', 'parent_email', 'family_email', 'family_address',
+            'parent_first_name', 'parent_last_name', 'family_notes', 'extra_phones', 'family_editable', 'notes',
             # NEW status fields
             'status', 'paid_until_date', 'trial_classes_attended',
             'absent_irregularly', 'is_ghost_visible',
@@ -402,6 +411,22 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         if parent and parent.email:
             return parent.email
         return obj.family.email or None
+
+    def get_parent_first_name(self, obj):
+        parent = self._primary_parent(obj)
+        return parent.first_name if parent else None
+
+    def get_parent_last_name(self, obj):
+        parent = self._primary_parent(obj)
+        return parent.last_name if parent else None
+
+    def get_extra_phones(self, obj):
+        from apps.customers.customer_details import extra_phones_of
+        return extra_phones_of(obj.family.parents.all())
+
+    def get_family_editable(self, obj):
+        from apps.customers.customer_details import family_is_shared
+        return obj.status != 'ghost' and not family_is_shared(obj.family)
 
     def get_parent_id(self, obj):
         """
