@@ -153,6 +153,16 @@ class CourseCheckoutTest(TestCase):
             other = self._start(ids)
         self.assertEqual(other.json(), {'use_card_form': True})
 
+    def test_the_course_page_opens_by_its_own_switch_while_the_general_one_is_off(self, *_):
+        # 30.9.2026: TRANZILA_HOSTED_PAGE_ENABLED is off (store, till, general links).
+        ids = self._register_cart()
+        with override_settings(TRANZILA_HOSTED_PAGE_ENABLED=False):
+            opened = self._start(ids)
+        self.assertIn('/cogolive/iframenew.php?', opened.json()['url'])
+        with override_settings(TRANZILA_HOSTED_PAGE_ENABLED=False, COURSE_HOSTED_PAGE_ENABLED=False):
+            closed = self._start(ids)
+        self.assertEqual(closed.json(), {'use_card_form': True})
+
     # -- the page ------------------------------------------------------------
 
     def test_the_page_checks_and_saves_the_card_on_cogolive_for_the_cart_sum(self, *_):

@@ -25,7 +25,8 @@ Then, instead of a card form of ours:
      standing orders are opened on the same card and terminal, one receipt is
      issued and one WhatsApp goes to each child's family.
 
-Nothing here runs unless COURSE_HOSTED_PAGE_ENABLED (and the hosted page) is on.
+Nothing here runs unless COURSE_HOSTED_PAGE_ENABLED is on, or the cart is of a
+course listed in COURSE_HOSTED_PAGE_COURSE_IDS.
 """
 from __future__ import annotations
 
@@ -129,9 +130,12 @@ def hosted_checkout_enabled(payment_ids=None) -> bool:
     COURSE_HOSTED_PAGE_ENABLED is on, or — while it is off — when every
     payment is for a course listed in COURSE_HOSTED_PAGE_COURSE_IDS (the
     hidden test course of the real 1 ₪ signup).
+
+    These two are the course page's own switch. The general
+    TRANZILA_HOSTED_PAGE_ENABLED (the store, the till, general payment links)
+    is not read: since 30.9.2026 it is off while single flows open by their
+    own switch.
     """
-    if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
-        return False
     if getattr(settings, 'COURSE_HOSTED_PAGE_ENABLED', False):
         return True
     test_courses = {str(c) for c in getattr(settings, 'COURSE_HOSTED_PAGE_COURSE_IDS', []) or []}
@@ -258,6 +262,8 @@ def start_checkout(payment_ids: list[str]) -> tuple[CourseCheckout, str]:
             callback_url=f'{api_base}/api/v1/customers/widget/checkout/notify/',
             transaction_id=str(checkout.id),
             tranmode=PAGE_TRANMODE,
+            # Opened by the course page's own switch, not the general one.
+            hosted_page_allowed=hosted_checkout_enabled(ids),
         )
     except Exception as exc:
         logger.error('Course checkout %s: the page could not be opened: %s', checkout.id, exc)
