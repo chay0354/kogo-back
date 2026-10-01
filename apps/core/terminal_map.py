@@ -64,7 +64,8 @@ FLOWS = [
         'id': 'store_b2c',
         'title': 'חנות האתר (B2C)',
         'detail': 'הזמנה מהאתר נסלקת בעמוד המתארח של טרנזילה — כאן עובדים Bit ו-Apple Pay. '
-                  'נסגרת רק אחרי שהעסקה נמצאה בדוח של המסוף, בסכום המדויק ובמספר שלא שייך להזמנה אחרת.',
+                  'נסגרת רק אחרי שהעסקה נמצאה בדוח של המסוף, בסכום המדויק ובמספר שלא שייך להזמנה אחרת. '
+                  'נפתחת במתג משלה (STORE_WEBSITE_CARD_PAYMENTS_ENABLED), בלי תלות במתג העמוד המתארח של הקופה.',
         'setting': 'TRANZILA_TERMINAL',
         'method': 'create_payment_request (iframe)',
         'code': 'apps/store/widget_views.py',
