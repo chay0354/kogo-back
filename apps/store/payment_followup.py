@@ -1207,11 +1207,12 @@ def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledge_char
             if answer == ANSWER_VERIFIED:
                 PaymentService()._record_second_store_charge(locked, number, answer, row)
                 seconds.append(number.index)
-            elif (is_no_answer(answer, why) or (answer == ANSWER_UNKNOWN and row is None)
-                  or timezone.now() - number.reported_at < REPORT_SETTLE):
-                waiting.append(number.index)   # no real answer yet: never closed blind
+            elif is_no_answer(answer, why) or (answer == ANSWER_UNKNOWN and row is None):
+                waiting.append(number.index)   # no real answer: never closed blind
             elif shows_charge(row) and not acknowledge_charge:
                 shown.append(number.index)     # the person sees it first
+            elif timezone.now() - number.reported_at < REPORT_SETTLE:
+                waiting.append(number.index)   # reported minutes ago: not yet
             else:
                 extra = {**marks, 'closed_over_charge': True} if shows_charge(row) else marks
                 keep_other_transaction(locked, number, OTHER_CLOSED, **extra)
