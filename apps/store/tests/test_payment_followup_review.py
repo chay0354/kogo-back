@@ -38,6 +38,18 @@ def payload(order=ORDER):
     }
 
 
+def reported_minutes_ago(invoice, minutes):
+    """
+    The invoice's further numbers were reported this long ago. A number the
+    report does not list is "not answered yet" for its first ten minutes
+    (round 6): no second page and no "close" lean on it before that.
+    """
+    entries = StoreInvoice.objects.get(pk=invoice.pk).other_transactions or []
+    when = (timezone.now() - timedelta(minutes=minutes)).isoformat()
+    StoreInvoice.objects.filter(pk=invoice.pk).update(
+        other_transactions=[{**entry, 'reported_at': when} for entry in entries])
+
+
 class ReviewBase(FollowupBase):
     def setUp(self):
         super().setUp()
@@ -246,7 +258,8 @@ class NoNumberIsLostTest(ReviewBase):
 
         self.ledger_down = False
         self.ledger_rows.append(paid_row(index='222222', approval='0002222'))
-        # Recording it is a write: the sweep does it with its switch on (round 3).
+        # The morning comes long after the notify's own look at the report.
+        StoreInvoice.objects.filter(pk=invoice.pk).update(payment_followup_at=None)
         payment_followup.sweep_stuck_store_payments(complete=True)
         self.assertTrue(TranzilaTransaction.objects.filter(
             idempotency_key=f'store_second_{invoice.id}_222222').exists())

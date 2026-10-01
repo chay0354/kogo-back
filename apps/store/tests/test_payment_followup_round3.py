@@ -27,7 +27,7 @@ from apps.customers.models import TranzilaTransaction
 from apps.store import payment_followup
 from apps.store.models import StoreInvoice, StoreSale
 from apps.store.tests.test_payment_followup import KEY, paid_row
-from apps.store.tests.test_payment_followup_review import ORDER, ReviewBase
+from apps.store.tests.test_payment_followup_review import ORDER, ReviewBase, reported_minutes_ago
 
 RETURNED_URL = '/api/v1/store/widget/payment/returned/'
 
@@ -312,6 +312,10 @@ class ReleaseToolTest(ReviewBase):
         invoice.refresh_from_db()
         self.assertEqual(invoice.payment_status, 'failed')
         self.assertFalse(self.poll().json()['payment_reported'])
+        # Round 6: the released number must be really answered about first —
+        # "not listed" is an answer only ten minutes after it was reported.
+        self.assertEqual(self.initiate().status_code, 409)
+        reported_minutes_ago(invoice, 20)
         self.assertIn('iframe_url', self.initiate().json())
         entry = next(e for e in invoice.other_transactions if e['index'] == '999999')
         # Round 4: released, not ruled out — still asked about (test_payment_followup_round4).
@@ -326,6 +330,7 @@ class ReleaseToolTest(ReviewBase):
         invoice = self.invoice()
         _opened(invoice, 15)
         self.day_rows = [paid_row(index='555555')]
+        self.ledger_rows = list(self.day_rows)  # the lookup by number shows the same charge
         self.assertEqual(self.initiate().status_code, 409)
         manager, _user = _manager_client()
         manager.post(self.url(invoice), {'action': 'release', 'reason': 'שייך לאתר השני'}, format='json')

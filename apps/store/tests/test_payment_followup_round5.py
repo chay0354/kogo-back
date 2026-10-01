@@ -29,7 +29,7 @@ from apps.customers.models import TranzilaTransaction
 from apps.store import payment_followup
 from apps.store.models import StoreInvoice, StoreSale
 from apps.store.tests.test_payment_followup import INITIATE_URL, KEY, FollowupBase, paid_row
-from apps.store.tests.test_payment_followup_review import ORDER, ReviewBase, payload
+from apps.store.tests.test_payment_followup_review import ORDER, ReviewBase, payload, reported_minutes_ago
 from apps.store.tests.test_payment_followup_round3 import RETURNED_URL, _manager_client
 from apps.store.tests.test_payment_followup_round4 import _opened, review_url, row_at
 
@@ -427,8 +427,9 @@ class ReleasedNumberTest(Base):
 
     def test_D3_another_numbers_notify_asks_about_the_released_one_too(self):
         invoice = self._released_real_payment()
-        self.ledger_rows = []  # not in the report yet when the customer retries
+        self.ledger_rows = []  # the report answers, and does not list it when the customer retries
         self.day_rows = []
+        reported_minutes_ago(invoice, 20)
         self.assertIn('iframe_url', self.initiate().json())
         self.ledger_rows = [paid_row(index='999999', approval='0009999'), paid_row(index='222222', approval='0002222')]
         unpace(invoice)  # the customer takes more than the follow-up's fifteen seconds to pay
@@ -449,6 +450,7 @@ class ReleasedNumberTest(Base):
         self.notify(invoice, index='999999', ConfirmationCode='0009999')
         self.release(invoice)
         self.ledger_down = False
+        reported_minutes_ago(invoice, 20)
         self.assertIn('iframe_url', self.initiate().json())
         with self.captureOnCommitCallbacks(execute=True):
             self.notify(invoice, Response='033', index='', ConfirmationCode='')
@@ -515,7 +517,9 @@ class SwitchOffSellsNothingTest(Base):
 
     def test_O1_a_till_invoice_is_only_told_and_a_manager_can_complete_it(self):
         invoice = self.invoice(order=None)
-        StoreInvoice.objects.filter(pk=invoice.pk).update(website_order_number=None)
+        # The till's secure page was handed out for it (round 6: only then may a notify pay it).
+        StoreInvoice.objects.filter(pk=invoice.pk).update(
+            website_order_number=None, payment_page_opened_at=timezone.now() - timedelta(minutes=31))
         self.ledger_down = True
         self.notify(invoice)
         self.ledger_down = False
@@ -647,6 +651,7 @@ class FoundChargeIsKeptTest(Base):
         self.ledger_down = False
         self.day_rows = []
         StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=timezone.now() - timedelta(minutes=40))
+        reported_minutes_ago(invoice, 50)
         self.assertIn('iframe_url', self.initiate().json())  # a new page; he pays; notify and return are lost
         charge = row_at('444444', '0004444', 0)
         self.day_rows = [charge]
@@ -764,6 +769,9 @@ class CloseNumberTest(Base):
         invoice = self._paid_with_a_made_up_number()
         self.assertEqual(self.sweep(complete=True)['second_open'], [invoice])
         self.assertEqual(self.review(invoice, 'close', 'ab').status_code, 400, 'a reason is required')
+        # Round 6: not while the report may simply not list it yet (its first ten minutes).
+        self.assertEqual(self.review(invoice, 'close', 'מספר מומצא, אין עסקה כזאת בטרנזילה').status_code, 409)
+        reported_minutes_ago(invoice, 20)
         res = self.review(invoice, 'close', 'מספר מומצא, אין עסקה כזאת בטרנזילה')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(res.json()['outcome'], 'closed')
@@ -821,7 +829,11 @@ class CloseNumberTest(Base):
 
     def test_a_found_charge_on_a_paid_order_closed_as_not_ours(self):
         invoice = self._paid_on_a_second_page_with_a_found_charge()
+        # Round 6: the report shows an approved charge of this sum under the
+        # number, so the manager is shown that first, and closes knowingly.
         res = self.review(invoice, 'close', 'של לקוח של האתר השני')
+        self.assertEqual((res.status_code, res.json()['outcome']), (409, 'charge_shown'))
+        res = self.review(invoice, 'close', 'של לקוח של האתר השני', acknowledge_charge=True)
         self.assertEqual((res.status_code, res.json()['outcome']), (200, 'closed'))
         self.assertEqual(held(invoice)['others'], [('111111', 'closed', '')])
         self.assertEqual(self.sweep()['unexplained'], [], 'decided: no longer listed, and not found again')

@@ -46,6 +46,9 @@ class StoreCallbackGuardTest(TestCase):
             payment_method='credit_card',
             payment_status='pending',
             notes=json.dumps([{'product_id': str(self.product.id), 'quantity': 2, 'size': ''}]),
+            # The till's secure page was handed out for it: only such an
+            # invoice keeps a number a notify reports (1.10.2026).
+            payment_page_opened_at=timezone.now(),
         )
 
     def _notify(self, **overrides):

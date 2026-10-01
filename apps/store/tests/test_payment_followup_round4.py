@@ -17,7 +17,7 @@ from apps.customers.models import TranzilaTransaction
 from apps.store import payment_followup
 from apps.store.models import StoreInvoice, StoreSale
 from apps.store.tests.test_payment_followup import KEY, paid_row, report_clock
-from apps.store.tests.test_payment_followup_review import ORDER, ReviewBase
+from apps.store.tests.test_payment_followup_review import ORDER, ReviewBase, reported_minutes_ago
 from apps.store.tests.test_payment_followup_round3 import RETURNED_URL, _manager_client
 
 ORDER_B = 'CG-260929-BBB2'
@@ -61,6 +61,7 @@ class ReleaseDoesNotBuryTest(ReviewBase):
         invoice.refresh_from_db()
         self.assertEqual(invoice.payment_status, 'failed')
         self.assertEqual(payment_followup.other_state(invoice, '999999'), 'released')
+        reported_minutes_ago(invoice, 20)  # long enough for the report's "not listed" to be an answer
         return invoice
 
     def test_R1_a_released_charge_the_report_later_confirms_is_a_second_charge(self):
