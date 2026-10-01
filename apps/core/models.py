@@ -521,6 +521,53 @@ class DailyBriefSnapshot(models.Model):
         return f'{self.created_at:%Y-%m-%d %H:%M} · {self.red_count} דחופים'
 
 
+class CardPayoutTerminalMonth(models.Model):
+    """
+    One terminal's month as Tranzila's own report has it — the control figure
+    for "money about to come in" (apps/core/card_payouts.py).
+
+    The card company transfers on CARD_PAYOUT_DAY of month M+1 what was charged
+    in month M. Tranzila's API gives no transfer date, so the month's report is
+    read (a manager presses "update from Tranzila"), summed and kept here; the
+    dashboard reads only this row and never calls Tranzila itself.
+
+    `complete` False means the report was not read to its end (a page failed,
+    more pages than were read, an error): the sums are then what was read and
+    never a final figure. Sums are gross, in shekels, before clearing fees.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    terminal = models.CharField(max_length=40, verbose_name="מסוף")
+    # The first day of the month the charges were made in (Israel time).
+    month = models.DateField(verbose_name="חודש הגבייה")
+    charges_total = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="חיובים שאושרו")
+    charges_count = models.PositiveIntegerField(default=0, verbose_name="מספר חיובים")
+    refunds_total = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="זיכויים")
+    refunds_count = models.PositiveIntegerField(default=0, verbose_name="מספר זיכויים")
+    # Charges split into payments (number_of_payments > 1): they do not arrive
+    # whole in one transfer, so they are kept apart — how many, their full sum,
+    # and the sum of their first payments.
+    installments_count = models.PositiveIntegerField(default=0, verbose_name="עסקאות בתשלומים")
+    installments_total = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="סכום העסקאות בתשלומים")
+    installments_first_total = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="סכום התשלומים הראשונים")
+    complete = models.BooleanField(default=False, verbose_name="הדוח נקרא במלואו")
+    error = models.TextField(blank=True, default='', verbose_name="שגיאה בקריאת הדוח")
+    fetched_at = models.DateTimeField(verbose_name="נקרא מטרנזילה ב")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="נוצר בתאריך")
+
+    class Meta:
+        db_table = 'card_payout_terminal_months'
+        verbose_name = "דוח חודשי של מסוף"
+        verbose_name_plural = "דוחות חודשיים של מסופים"
+        ordering = ['-month', 'terminal']
+        constraints = [
+            models.UniqueConstraint(fields=['terminal', 'month'], name='card_payout_one_per_terminal_month'),
+        ]
+
+    def __str__(self):
+        return f'{self.terminal} · {self.month:%Y-%m}'
+
+
 class SystemAuditRun(models.Model):
     """
     One day of the weekly audit: which area, how far it got, what it found.

@@ -269,6 +269,9 @@ REST_FRAMEWORK = {
         'external_broadcast': '30/min',
         # The manager's read-only "check a transaction against Tranzila" tool.
         'tranzila_check': '30/min',
+        # "Update from Tranzila" on the incoming-money screen: one terminal's
+        # month per call, each call a few report pages (apps/core/card_payouts.py).
+        'card_payout_refresh': '20/min',
         'payment_link_view': '60/min',
         'payment_link_start': '30/min',
         'payment_link_status': '120/min',
@@ -455,6 +458,11 @@ BLOCKED_CARD_BRANDS = config('BLOCKED_CARD_BRANDS', default='diners')
 # most M times; after that the row is left for somebody to phone.
 CARD_UPDATE_REMINDER_DAYS = config('CARD_UPDATE_REMINDER_DAYS', default=14, cast=int)
 CARD_UPDATE_REMINDER_MAX = config('CARD_UPDATE_REMINDER_MAX', default=3, cast=int)
+
+# The day of the month the card company transfers the money to the bank: on
+# this day of month M+1 arrives everything charged by card from the 1st to the
+# last day of month M (owner, 1.10.2026). Read by apps/core/card_payouts.py.
+CARD_PAYOUT_DAY = config('CARD_PAYOUT_DAY', default=6, cast=int)
 
 # Registrations made before this date pay only דמי רישום on signup; the monthly
 # subscription itself starts on this date at the full monthly price (no proration for
