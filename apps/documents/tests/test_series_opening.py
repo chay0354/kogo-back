@@ -172,6 +172,37 @@ class OpeningTests(IssuingMixin, TestCase):
         opening = open_run('TI', 'חשבונית מס', '40,413', start='40414')
         self.assertEqual(opening.start, 40414)
 
+    def test_a_run_may_start_further_up_while_the_previous_software_still_issues(self, _mail):
+        opening = open_run('TI', 'חשבונית מס', 40413, start=40600, reserve=True)
+
+        self.assertEqual((opening.start, opening.previous_last_number, opening.reserved), (40600, 40413, (40414, 40599)))
+        self.assertEqual(self.issue('tax_invoice').document_number, f'TI-{self.year}-040600')
+        self.assertEqual(self.issue('tax_invoice').document_number, f'TI-{self.year}-040601')
+        run = next(run for run in continuity(self.year) if run.series == 'TI')
+        # Nothing below the start is looked for: those numbers were never kogo's.
+        self.assertEqual((run.start, run.issued, run.missing, run.reserved), (40600, 2, (), (40414, 40599)))
+        self.assertEqual(
+            run.continues,
+            'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413); המספרים 40414–40599 שמורים לתוכנה הקודמת',
+        )
+        # The transition memo says the same.
+        from apps.documents.cutover_memo import _continues
+        self.assertEqual(_continues(run), 'חשבונית מס · אחרון 40413 · 40414–40599 שמורים לתוכנה הקודמת')
+
+    def test_a_reserved_start_is_asked_for_on_purpose_and_never_overlaps(self, _mail):
+        # A start above last + 1 without saying so is a typo, not a reservation.
+        with self.assertRaises(OpeningRefused):
+            open_run('TI', 'חשבונית מס', 40413, start=40600)
+        for start in (40413, 40000, 0):
+            with self.subTest(start=start), self.assertRaises(OpeningRefused):
+                open_run('TI', 'חשבונית מס', 40413, start=start, reserve=True)
+        with self.assertRaises(OpeningRefused):
+            open_run('TI', 'חשבונית מס', 40413, reserve=True)
+        self.assertFalse(DocumentSeries.objects.exists())
+        # Asking for a reservation and giving last + 1 is the plain opening.
+        opening = open_run('TI', 'חשבונית מס', 40413, start=40414, reserve=True)
+        self.assertEqual((opening.start, opening.reserved), (40414, None))
+
     def test_the_database_refuses_what_passed_the_checks_together(self, _mail):
         """Two requests opening one old run at once: the constraint lets one through, and the loser leaves no trace."""
         with patch.object(DocumentSeriesOpening.objects, 'create', side_effect=IntegrityError('duplicate')):
@@ -186,12 +217,13 @@ class OpeningTests(IssuingMixin, TestCase):
                 series='IR', year=self.year, start=121883, previous_last_number=121882,
                 previous_type_label='חשבונית מס קבלה',
             )
-        # A start that is not the old last number plus one is refused by the database too.
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            DocumentSeriesOpening.objects.create(
-                series='TI', year=self.year, start=5, previous_last_number=121882,
-                previous_type_label='חשבונית מס',
-            )
+        # A start at or below the old last number is refused by the database too.
+        for start in (5, 121882):
+            with self.subTest(start=start), self.assertRaises(IntegrityError), transaction.atomic():
+                DocumentSeriesOpening.objects.create(
+                    series='TI', year=self.year, start=start, previous_last_number=121882,
+                    previous_type_label='חשבונית מס',
+                )
 
     def test_the_record_is_never_edited_or_deleted(self, _mail):
         opening = open_run('TI', 'חשבונית מס', 40413)
@@ -250,6 +282,13 @@ class ContinuityFromTheStartTests(IssuingMixin, TestCase):
         self.assertEqual(lessons['start'], 121883)
         self.assertEqual(lessons['previous_last_number'], 121882)
         self.assertEqual(lessons['continues'], 'ממשיך את הסדרה של התוכנה הקודמת (אחרון 121882)')
+        self.assertEqual((lessons['reserved_from'], lessons['reserved_to']), (None, None))
+
+    def test_the_missing_receipts_screen_carries_a_reserved_range(self, _mail):
+        open_run('RC', 'קבלה', 33403, start=33500, reserve=True)
+        report = missing_receipts_report(self.year)
+        receipts = next(run for run in report['continuity'] if run['series'] == 'RC')
+        self.assertEqual((receipts['start'], receipts['reserved_from'], receipts['reserved_to']), (33500, 33404, 33499))
 
 
 class PeriodReportTests(RegisterFixture, TestCase):
@@ -413,10 +452,25 @@ class SeriesEndpointTests(APITestCase):
         ti = next(run for run in listed.data['runs'] if run['name'] == f'TI-{self.year}')
         self.assertEqual(ti['opening']['continues'], 'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413)')
 
+    def test_a_manager_opens_a_run_above_a_range_left_to_the_previous_software(self):
+        self.client.force_authenticate(self.manager)
+
+        res = self.client.post(OPEN, self.payload(start=40600, reserve=True), format='json')
+
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data['run']['next_number'], f'TI-{self.year}-040600')
+        opening = res.data['run']['opening']
+        self.assertEqual((opening['start'], opening['previous_last_number']), (40600, 40413))
+        self.assertEqual((opening['reserved_from'], opening['reserved_to']), (40414, 40599))
+        self.assertIn('40414–40599 שמורים לתוכנה הקודמת', opening['continues'])
+
     def test_bad_input_is_a_400_and_a_second_opening_a_409(self):
         self.client.force_authenticate(self.manager)
         self.assertEqual(self.client.post(OPEN, self.payload(series='ZZ'), format='json').status_code, 400)
         self.assertEqual(self.client.post(OPEN, self.payload(start=40500), format='json').status_code, 400)
+        self.assertEqual(
+            self.client.post(OPEN, self.payload(start=40413, reserve=True), format='json').status_code, 400,
+        )
         self.assertEqual(self.client.post(OPEN, self.payload(year=self.year + 2), format='json').status_code, 400)
         self.assertEqual(self.client.post(OPEN, self.payload(), format='json').status_code, 201)
         again = self.client.post(OPEN, self.payload(), format='json')

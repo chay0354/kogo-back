@@ -217,6 +217,13 @@ class SeriesRun:
     previous_last_number: int | None = None
 
     @property
+    def reserved(self) -> tuple | None:
+        """(first, last) of the numbers between the old run's last and this run's start, left to the old software."""
+        if self.previous_last_number is None or self.start <= self.previous_last_number + 1:
+            return None
+        return self.previous_last_number + 1, self.start - 1
+
+    @property
     def name(self) -> str:
         return f'{self.series}-{self.year}' if self.series else str(self.year)
 
@@ -229,11 +236,18 @@ class SeriesRun:
         """'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413)', or '' for a run that starts at 1."""
         if self.previous_last_number is None:
             return ''
-        return continuation_note(self.previous_last_number)
+        return continuation_note(self.previous_last_number, self.start)
 
 
-def continuation_note(previous_last_number: int) -> str:
-    return f'ממשיך את הסדרה של התוכנה הקודמת (אחרון {previous_last_number})'
+def continuation_note(previous_last_number: int, start: int | None = None) -> str:
+    """
+    'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413)' — and, when the run starts
+    further up, which numbers were left to the previous software.
+    """
+    note = f'ממשיך את הסדרה של התוכנה הקודמת (אחרון {previous_last_number})'
+    if start is not None and start > previous_last_number + 1:
+        note += f'; המספרים {previous_last_number + 1}–{start - 1} שמורים לתוכנה הקודמת'
+    return note
 
 
 def _series_sources() -> dict:

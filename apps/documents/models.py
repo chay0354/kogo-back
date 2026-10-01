@@ -139,6 +139,11 @@ class DocumentSeriesOpening(models.Model):
     and why. It is written once, beside the run's change, and never edited or
     deleted — a mistake is not fixed by rewriting history.
 
+    While the old program still issues documents to the customers who have not
+    moved yet, the kogo run starts further up, and the numbers between
+    (`previous_last_number` + 1 .. `start` - 1) stay the old program's to give:
+    two programs never hand out the same number.
+
     One old run is continued by one kogo run a tax year: two kogo runs that
     both start at 121883 would be two runs of one type sharing numbers.
     """
@@ -164,14 +169,23 @@ class DocumentSeriesOpening(models.Model):
             models.UniqueConstraint(
                 fields=['year', 'previous_type_label'], name='series_opening_one_run_per_old_run',
             ),
+            # Above the old run's last number: directly after it, or further up
+            # with the numbers between left to the old program.
             models.CheckConstraint(
-                check=models.Q(start=models.F('previous_last_number') + 1),
+                check=models.Q(start__gt=models.F('previous_last_number')),
                 name='series_opening_continues_the_old_run',
             ),
         ]
 
     def __str__(self) -> str:
         return f'{self.series}-{self.year} from {self.start} ({self.previous_type_label} {self.previous_last_number})'
+
+    @property
+    def reserved(self) -> tuple | None:
+        """(first, last) of the numbers left to the old program, or None when the run starts right after it."""
+        if self.start <= self.previous_last_number + 1:
+            return None
+        return self.previous_last_number + 1, self.start - 1
 
     def save(self, *args, **kwargs):
         if not self._state.adding:

@@ -828,7 +828,8 @@ class DocumentSeriesViewSet(viewsets.ViewSet):
 
     GET  /api/v1/documents/series/
     POST /api/v1/documents/series/open/
-         {series, year, start, previous_last_number, previous_type_label, note}
+         {series, year, start, previous_last_number, previous_type_label, note, reserve}
+         `reserve`: start above last + 1, the numbers between left to the previous software.
 
     Managers only: an opening fixes where a run's numbers start, for good.
     """
@@ -850,6 +851,7 @@ class DocumentSeriesViewSet(viewsets.ViewSet):
                 series=data.get('series'),
                 year=data.get('year'),
                 start=data.get('start'),
+                reserve=data.get('reserve') in (True, 'true', 'True', '1', 1),
                 previous_last_number=data.get('previous_last_number'),
                 previous_type_label=data.get('previous_type_label'),
                 note=data.get('note') or '',
