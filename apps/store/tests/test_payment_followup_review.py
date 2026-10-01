@@ -44,11 +44,12 @@ class ReviewBase(FollowupBase):
         # The day's report, for the page whose notify never came (review item 4).
         self.day_rows = []
         self.day_report_down = False
+        self.day_report_partial = False  # a page of the report failed, or there were more pages than read
 
         def list_all(service, start, end=None, max_pages=20):
             if self.day_report_down:
                 return {'success': False, 'error': 'timeout', 'transactions': []}
-            return {'success': True, 'transactions': list(self.day_rows)}
+            return {'success': True, 'transactions': list(self.day_rows), 'complete': not self.day_report_partial}
 
         listing = patch.object(TranzilaService, 'list_all_transactions', autospec=True, side_effect=list_all)
         listing.start()
@@ -295,7 +296,9 @@ class NotifyNeverCameTest(ReviewBase):
         row.update(extra)
         return row
 
-    def opened_page(self, minutes_ago=5):
+    def opened_page(self, minutes_ago=15):
+        # (Round 4: within REPORT_SETTLE of the last page, "not found" is not
+        # enough for a second page — the tests of that rule are in round 4.)
         invoice = self.invoice()
         StoreInvoice.objects.filter(pk=invoice.pk).update(
             website_idempotency_key=f'idemp-{ORDER}',

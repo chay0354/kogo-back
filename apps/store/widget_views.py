@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 WEBSITE_PAYMENTS_PAUSED_MESSAGE = 'התשלום בכרטיס באתר מושהה זמנית. אפשר לפנות אלינו ונשמח להשלים את ההזמנה.'
 WEBSITE_PAYMENT_PAGE_FAILED_MESSAGE = 'התשלום אינו זמין כרגע. נסו שוב בעוד כמה דקות או פנו אלינו.'
+WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE = (
+    'אנחנו מוודאים שהתשלום הקודם על ההזמנה הזאת לא עבר. אל תשלמו שוב — נסו בעוד כמה דקות, '
+    'או פנו אלינו.'
+)
 WEBSITE_PAYMENT_IN_REVIEW_MESSAGE = (
     'התקבל כבר תשלום על ההזמנה הזאת והוא בבדיקה. אל תשלמו שוב — נעדכן אתכם, '
     'ואפשר גם לפנות אלינו.'
@@ -548,7 +552,7 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
                 followup.alert_payment_unreported(invoice, rows)
                 return in_review()
             if found == 'unknown' and timezone.now() - opened < followup.UNREPORTED_WINDOW:
-                logger.error('Website order %s: no second page — the day report could not be asked',
+                logger.error('Website order %s: no second page — the day report could not be asked in full',
                              invoice.website_order_number)
                 followup.alert_payment_unreported(invoice, [])
                 return in_review()
@@ -556,6 +560,19 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             invoice.refresh_from_db()
             if followup.holds_reported_payment(invoice) or invoice.payment_status in followup.PAID_STATUSES:
                 continue
+            if found == 'none' and timezone.now() - opened < followup.REPORT_SETTLE:
+                # The report may not list a payment made on the last page
+                # minutes ago: "not found" is not "not paid" yet. The customer
+                # is asked to wait, not to pay again.
+                wait = int((followup.REPORT_SETTLE - (timezone.now() - opened)).total_seconds()) + 1
+                logger.warning('Website order %s: no second page yet — the last page opened %ss ago',
+                               invoice.website_order_number, int((timezone.now() - opened).total_seconds()))
+                return Response({
+                    'error': WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE,
+                    'payment_in_review': True,
+                    'retry_after': wait,
+                    'invoice_number': invoice.invoice_number,
+                }, status=409)
 
         if invoice.payment_status == 'failed':
             if parse_store_cart_notes(invoice.notes) is None:
@@ -616,7 +633,11 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
         return already_paid()
     if followup.holds_reported_payment(invoice) or invoice.payment_status == 'refunded':
         return in_review()
-    StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=timezone.now())
+    now = timezone.now()
+    StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=now)
+    StoreInvoice.objects.filter(pk=invoice.pk, payment_page_first_opened_at__isnull=True).update(
+        payment_page_first_opened_at=now,
+    )
     return Response({
         'ok': True,
         'iframe_url': iframe_url,
@@ -799,6 +820,10 @@ class WidgetStorePaymentReturnedView(_KeyBeforeThrottle, APIView):
     person. A number that is not this order's payment does not pass, and is
     kept for the office like any other. Call it only for the page's
     success return.
+
+    Refused (409, with the status) for an order whose page the CRM did not
+    hand out in the last two hours; 400 for anything but ASCII digits. At
+    most three undecided numbers are kept per order.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -807,18 +832,21 @@ class WidgetStorePaymentReturnedView(_KeyBeforeThrottle, APIView):
 
     def post(self, request):
         # The key was checked before the throttle (_KeyBeforeThrottle.initial).
+        from apps.store import payment_followup
+
         order = str(request.data.get('order') or '').strip()
         index = str(request.data.get('index') or '').strip()
         code = str(request.data.get('code') or request.data.get('ConfirmationCode') or '').strip()[:100]
         if not order:
             return Response({'error': 'order required'}, status=400)
-        if not index.isdigit():
+        if not payment_followup.is_transaction_number(index):
             return Response({'error': 'index must be the transaction number Tranzila returned'}, status=400)
-        from apps.store.payment_followup import record_returned_number
-
-        payload = record_returned_number(order, index, code)
-        if payload is None:
+        outcome, payload = payment_followup.record_returned_number(order, index, code)
+        if outcome == payment_followup.RETURNED_NO_ORDER:
             return Response({'error': 'order not found'}, status=404)
+        if outcome == payment_followup.RETURNED_NO_RECENT_PAGE:
+            return Response({**payload, 'error': 'no payment page was opened for this order in the last two hours'},
+                            status=409)
         return Response(payload)
 
 

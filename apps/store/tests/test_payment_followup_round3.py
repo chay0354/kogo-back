@@ -252,6 +252,7 @@ class LostNotifyTest(ReviewBase):
 
     def test_the_returned_number_is_reported_like_a_notify(self):
         invoice = self.invoice()
+        _opened(invoice, 5)  # round 4: taken only for an order whose page was opened recently
         self.ledger_down = True
         res = self.client.post(RETURNED_URL, {'order': ORDER, 'index': '123456'}, format='json', **KEY)
         self.assertEqual(res.status_code, 200)
@@ -271,6 +272,7 @@ class LostNotifyTest(ReviewBase):
 
     def test_a_returned_number_of_another_order_is_kept_and_does_not_pass(self):
         invoice = self.invoice()
+        _opened(invoice, 5)
         self.ledger_rows = [paid_row(amount='5000')]  # another sum: not this order's payment
         res = self.client.post(RETURNED_URL, {'order': ORDER, 'index': '123456', 'code': '0001234'}, format='json', **KEY)
         self.assertEqual(res.json()['paid'], False)
@@ -311,7 +313,8 @@ class ReleaseToolTest(ReviewBase):
         self.assertFalse(self.poll().json()['payment_reported'])
         self.assertIn('iframe_url', self.initiate().json())
         entry = next(e for e in invoice.other_transactions if e['index'] == '999999')
-        self.assertEqual(entry['state'], 'rejected')
+        # Round 4: released, not ruled out — still asked about (test_payment_followup_round4).
+        self.assertEqual(entry['state'], 'released')
         self.assertEqual(entry['release_reason'], 'נבדק בטרנזילה: אין עסקה כזאת')
         log = invoice.payment_review_log[-1]
         self.assertEqual((log['action'], log['by'], log['reason']), ('release', user.email, 'נבדק בטרנזילה: אין עסקה כזאת'))
@@ -320,7 +323,7 @@ class ReleaseToolTest(ReviewBase):
     def test_a_released_charge_is_not_found_again(self):
         # The manager checked: the report's charge was the other website's.
         invoice = self.invoice()
-        _opened(invoice, 5)
+        _opened(invoice, 15)
         self.day_rows = [paid_row(index='555555')]
         self.assertEqual(self.initiate().status_code, 409)
         manager, _user = _manager_client()
@@ -350,7 +353,9 @@ class ReleaseToolTest(ReviewBase):
         self.initiate()  # 409, kept as suspected
         self.ledger_rows = [paid_row(index='555555')]
         manager, _user = _manager_client()
-        res = manager.post(self.url(invoice), {'action': 'complete', 'reason': 'נבדק מול טרנזילה — זו העסקה'}, format='json')
+        # Round 4: only with the customer's own evidence — here the approval number.
+        res = manager.post(self.url(invoice), {'action': 'complete', 'reason': 'נבדק מול טרנזילה — זו העסקה',
+                                               'confirmation_code': '0001234'}, format='json')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(self.state(invoice), ('completed', 1, 8))
 

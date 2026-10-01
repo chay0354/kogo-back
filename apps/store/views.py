@@ -433,21 +433,26 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
     def payment_review(self, request, pk=None):
         """
         POST /api/v1/store/invoices/{id}/payment-review/
-        Body: {"action": "complete" | "release", "reason": "...", "confirmation_code": "..."}
+        Body: {"action": "complete" | "release", "reason": "...",
+               "confirmation_code": "<approval number from the customer>", "card_last4": "<4 digits>"}
 
         A manager settles a website/till payment that is in review
         (apps/store/payment_followup.py) — a number Tranzila reported that the
         report neither confirms nor rules out, or a charge found in the report
         whose notify never came:
 
-          complete  "השלם אחרי אימות" — only through the report: the sale
-                    happens on the notify's locked path if the report confirms
-                    one of the numbers (a suspected charge included);
-                    `confirmation_code` is the approval number read in
-                    Tranzila, for a number that came without one. 409 when the
-                    report does not confirm.
-          release   "אין תשלום — שחרר" — after checking Tranzila: the numbers
-                    are marked rejected with the reason, the order is failed
+          complete  "השלם אחרי אימות" — only through the report, with the
+                    customer's own evidence: the approval number, or the
+                    card's last four digits, which the report's row must
+                    match (and which win over any kept code). The sale happens
+                    on the notify's locked path only if the report then
+                    confirms a number. A suspected charge (found in the report
+                    by sum and time) needs that evidence — nothing else ties
+                    it to this order. 409 when the report does not confirm.
+          release   "אין תשלום — שחרר" — only after checking in Tranzila that
+                    there is no charge: the numbers are RELEASED (still asked
+                    about by every notify and sweep — one the report later
+                    confirms is a sale or a second charge), the order is failed
                     (the customer may pay again) and the site is told.
 
         A reason is required; who, when and why are kept on the invoice
@@ -469,16 +474,23 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
             result = payment_followup.complete_reported_payment(
                 invoice.pk, by=by, reason=reason,
                 confirmation_code=str(request.data.get('confirmation_code') or ''),
+                card_last4=str(request.data.get('card_last4') or ''),
             )
         outcome = result.get('outcome')
         invoice.refresh_from_db()
         body = {'outcome': outcome, 'invoice': StoreInvoiceSerializer(invoice).data}
         if outcome == 'not_in_review':
             return Response({**body, 'error': 'החשבונית אינה בבדיקה'}, status=status.HTTP_409_CONFLICT)
+        if action_name == 'complete' and outcome == payment_followup.EVIDENCE_NEEDED:
+            return Response(
+                {**body, 'error': 'כדי להשלים צריך מהלקוח את מספר האישור של העסקה או את 4 ספרות הכרטיס '
+                                  'האחרונות — שום דבר אחר לא קושר את העסקה להזמנה הזאת.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         if action_name == 'complete' and outcome != 'completed':
             return Response(
-                {**body, 'error': 'הדוח של טרנזילה לא מאשר את התשלום, ולכן ההזמנה לא הושלמה. '
-                                  'אם בדקתם ואין תשלום — "אין תשלום — שחרר".'},
+                {**body, 'error': 'הדוח של טרנזילה לא מאשר את התשלום עם מה שהוזן (מספר אישור או 4 ספרות), '
+                                  'ולכן ההזמנה לא הושלמה. אם בדקתם ואין חיוב — "אין תשלום — שחרר".'},
                 status=status.HTTP_409_CONFLICT,
             )
         return Response(body)

@@ -1850,6 +1850,11 @@ class TranzilaService:
         end = end_date or start_date
         collected: list = []
         page = None
+        # `complete` says every row of the range was read: False when a page
+        # failed after others were read, or the range had more pages than
+        # max_pages. A caller that looks for something ("is this charge
+        # there?") must not read a partial list as "no".
+        complete = False
         for page_num in range(1, max_pages + 1):
             response = self.list_transactions(start_date, end, page=page)
             if not isinstance(response, dict) or response.get('success') is False:
@@ -1861,7 +1866,7 @@ class TranzilaService:
                 if collected:
                     logger.error("Tranzila list_transactions page %s failed after partial fetch: %s", page_num, error)
                     break
-                return {'success': False, 'error': error, 'transactions': []}
+                return {'success': False, 'error': error, 'transactions': [], 'complete': False}
             rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
             collected.extend(rows)
             total = response.get('total')
@@ -1870,11 +1875,13 @@ class TranzilaService:
             except (TypeError, ValueError):
                 total_n = None
             if len(rows) < 1000:
+                complete = True
                 break
             if total_n is not None and len(collected) >= total_n:
+                complete = True
                 break
             page = page_num + 1
-        return {'success': True, 'transactions': collected}
+        return {'success': True, 'transactions': collected, 'complete': complete}
 
     def list_documents(self, start_date: date, end_date: date) -> Dict:
         """
