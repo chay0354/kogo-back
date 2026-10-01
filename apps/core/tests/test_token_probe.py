@@ -50,6 +50,20 @@ class ProbeStepsTest(TestCase):
         with self.assertRaises(token_probe.ProbeError):
             token_probe.open_page(tranmode='A')
 
+    @override_settings(TRANZILA_HOSTED_PAGE_ENABLED=False)
+    def test_the_page_opens_while_the_general_hosted_page_switch_is_off(self):
+        # 30.9.2026: only business charges are open; the probe is managers-only
+        # and its page charges nothing, so it has a gate of its own.
+        with patch.object(TranzilaService, 'create_handshake_token', return_value='thtk-1'):
+            page = token_probe.open_page(tranmode='NK')
+        self.assertIn('tranmode=NK', page['url'])
+
+    @override_settings(TRANZILA_HANDSHAKE_ENABLED=True)
+    def test_a_failed_handshake_is_said_plainly(self):
+        with patch.object(TranzilaService, 'create_handshake_token', return_value=None):
+            with self.assertRaises(token_probe.ProbeError):
+                token_probe.open_page(tranmode='NK')
+
     def test_the_report_rows_say_whether_a_token_came_back_but_never_show_it(self):
         rows = [
             {**NK_ROW, 'index': '12'},
