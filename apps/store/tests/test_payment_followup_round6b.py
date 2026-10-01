@@ -8,7 +8,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from apps.core.payment_service import PaymentService
@@ -16,7 +16,7 @@ from apps.core.tranzila_service import TranzilaService
 from apps.payment_links.models import PaymentLink, PaymentLinkOption, PaymentLinkPayment
 from apps.payment_links.public_views import _index_paid_for_something_else
 from apps.store.models import StoreInvoice
-from apps.store.tests.test_payment_followup import FollowupBase, paid_row
+from apps.store.tests.test_payment_followup import SETTINGS, FollowupBase, paid_row
 from apps.store.tests.test_payment_followup_round4 import _opened, row_at
 from apps.store.tests.test_payment_followup_round5 import Base, held, unpace
 
@@ -44,6 +44,12 @@ class CompleteReadTest(FollowupBase):
                           return_value={'error_code': None, 'transactions': [paid_row()]}):
             raw = TranzilaService.iframe().list_all_transactions(today, today, max_pages=3)
         self.assertFalse(raw['success'])
+
+
+
+@override_settings(**SETTINGS)
+class FindTransactionTest(SimpleTestCase):
+    """The real lookup by number (the follow-up's test base replaces it with a fake ledger)."""
 
     def test_P4c_an_error_envelope_with_an_empty_list_is_not_no_such_transaction(self):
         with patch.object(TranzilaService, '_make_api_request',
