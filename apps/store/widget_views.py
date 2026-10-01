@@ -552,7 +552,7 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             # An order in review answers 409 whatever the report says now, so
             # its check keeps the poll's pace; released numbers are asked
             # about right now — the page waits on exactly that.
-            followup.recheck_pending_payment(
+            outcome = followup.recheck_pending_payment(
                 invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS,
                 min_interval=followup.RECHECK_INTERVAL if held else timedelta(0),
             )
@@ -561,7 +561,9 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
                 return already_paid()
             if held or followup.holds_reported_payment(invoice):
                 return in_review()
-            if followup.released_not_asked(invoice):
+            # (An order with no cart kept cannot be asked about or paid again:
+            # it is refused below, with "open a new order".)
+            if outcome != followup.RECHECK_NOT_ELIGIBLE and followup.released_not_asked(invoice):
                 # More released numbers than one check may ask about: the
                 # next retry asks about the next ones.
                 logger.warning('Website order %s: no second page yet — released numbers still to be asked about',

@@ -2513,6 +2513,11 @@ class PaymentService:
         released may be the real payment, and the one just reported the second
         (or the other way round). One report read went to the notify's own
         number; the rest of the per-check limit goes to these, in turns.
+
+        At the follow-up's own pace (RECHECK_INTERVAL per invoice): the notify
+        address is public, and a stream of made-up notifies must not turn
+        into several report reads each. What is skipped here is asked by the
+        site's poll, the next notify, a retry, or the morning.
         """
         from apps.store import payment_followup as followup
         from apps.store.models import StoreInvoice
@@ -2521,6 +2526,8 @@ class PaymentService:
         if invoice is None:
             return
         if not any(n.index != index for n in followup.open_numbers(invoice, include_released=True)):
+            return
+        if not followup._claim_followup(invoice_id, followup.RECHECK_INTERVAL):
             return
         try:
             self.settle_reported_store_payment(

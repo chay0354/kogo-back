@@ -165,6 +165,17 @@ class EveryNumberIsKeptTest(Base):
         self.review(invoice, 'complete', manager=manager, card_last4='4242')
         self.assertFalse(first & set(self.report_calls[before:]), 'the next call asks about the next numbers')
 
+    def test_a_stream_of_made_up_notifies_costs_one_report_read_each(self):
+        invoice = self.invoice()
+        _opened(invoice, 5)
+        for i in range(8):
+            self.notify(invoice, index=str(9000 + i), ConfirmationCode='0000001')
+        self.assertEqual(len(self.report_calls), 8, "the order's other numbers are asked about at the follow-up's pace")
+        unpace(invoice)
+        before = len(self.report_calls)
+        self.poll()
+        self.assertEqual(len(self.report_calls) - before, READS, 'and one check never reads more than its limit')
+
     def test_U1_returned_numbers_for_a_paid_order_are_all_kept_and_told_once(self):
         invoice = self.invoice()
         _opened(invoice, 5)
@@ -420,6 +431,7 @@ class ReleasedNumberTest(Base):
         self.day_rows = []
         self.assertIn('iframe_url', self.initiate().json())
         self.ledger_rows = [paid_row(index='999999', approval='0009999'), paid_row(index='222222', approval='0002222')]
+        unpace(invoice)  # the customer takes more than the follow-up's fifteen seconds to pay
         before = len(self.report_calls)
         with self.captureOnCommitCallbacks(execute=True):
             self.notify(invoice, index='222222', ConfirmationCode='0002222')
