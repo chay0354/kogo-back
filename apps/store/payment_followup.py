@@ -430,6 +430,177 @@ def released_unanswered(invoice: StoreInvoice) -> list[ReportedNumber]:
             if n.released and (n.answered_at is None or n.answered_at < since)]
 
 
+def holds_reported_payment(invoice: StoreInvoice) -> bool:
+    """
+    In review: an undecided number Tranzila reported — or a charge in the
+    report that may be this order's — and the invoice's payment not settled,
+    whatever its status reads. A number a person released does not hold it.
+    """
+    if invoice.payment_status not in UNSETTLED_STATUSES:
+        return False
+    return bool(open_numbers(invoice)) or bool(suspected_numbers(invoice))
+
+
+def number_for(invoice: StoreInvoice, index: str, code: str, terminal: str, *,
+               code_wins: bool = True) -> ReportedNumber:
+    """
+    A number a notify (or the site) reports now. One the invoice already
+    holds keeps the time it was first reported and its state; a new one — or
+    one that takes the place of a number ruled out — starts its own clock now.
+
+    The approval number: a notify's is Tranzila's own and wins over whatever
+    was kept (`code_wins`); the one the site returned only fills a blank — it
+    never writes over a kept one. Neither is believed: the report decides.
+    """
+    def effective(kept) -> str:
+        kept = str(kept or '').strip()
+        return code if code and (code_wins or not kept) else kept
+
+    if index == (invoice.tranzila_transaction_id or '').strip():
+        return ReportedNumber(index, effective(invoice.tranzila_confirmation_code), terminal,
+                              invoice.payment_reported_at or timezone.now(), True)
+    for entry in invoice.other_transactions or []:
+        if str(entry.get('index')) == index and entry.get('state') in UNDECIDED_STATES:
+            return ReportedNumber(index, effective(entry.get('code')), terminal,
+                                  _parse_time(entry.get('reported_at')) or timezone.now(),
+                                  False, str(entry.get('state')))
+    return ReportedNumber(index, code, terminal, timezone.now(), not is_transaction_number(invoice.tranzila_transaction_id))
+
+
+def other_state(invoice: StoreInvoice, index: str) -> str:
+    for entry in invoice.other_transactions or []:
+        if str(entry.get('index')) == str(index):
+            return str(entry.get('state') or '')
+    return ''
+
+
+def keep_other_transaction(invoice: StoreInvoice, number: ReportedNumber, state: str, *,
+                           code_wins: bool = False, **extra) -> bool:
+    """
+    Keep a further number on the invoice (the caller holds the row lock and
+    saves). A number already kept moves on only while undecided (open,
+    suspected, released); a decided one stays as it is. Its approval number
+    fills a blank; it replaces a kept one only with `code_wins` (a notify's
+    own). True when new.
+    """
+    entries = [dict(entry) for entry in (invoice.other_transactions or [])]
+    for entry in entries:
+        if str(entry.get('index')) == number.index and str(entry.get('terminal') or '') == number.terminal:
+            if entry.get('state') in UNDECIDED_STATES and state != entry.get('state'):
+                entry['state'] = state
+                entry['settled_at'] = timezone.now().isoformat()
+                entry.update(extra)
+            if number.code and state != OTHER_SUSPECTED and (code_wins or not entry.get('code')):
+                entry['code'] = number.code
+            invoice.other_transactions = entries
+            return False
+    entries.append({
+        'index': number.index, 'code': number.code, 'terminal': number.terminal,
+        'reported_at': number.reported_at.isoformat(), 'state': state, **extra,
+    })
+    invoice.other_transactions = entries
+    return True
+
+
+def drop_other_transaction(invoice: StoreInvoice, index: str) -> None:
+    """The number became the invoice's own (it paid for it, or it is reported again): it leaves the further ones."""
+    entries = [e for e in (invoice.other_transactions or []) if str(e.get('index')) != str(index)]
+    invoice.other_transactions = entries or None
+
+
+def with_evidence(number: ReportedNumber, *, confirmation_code: str = '', card_last4: str = '') -> ReportedNumber:
+    """
+    A person's "complete after verification": the number with the customer's
+    own evidence. A typed approval number wins over any kept code. The card's
+    last four digits are compared with the report's row; when they agree the
+    row's approval number is the one checked, and when they do not — or
+    nothing is given for a suspected charge — no approval number is, and the
+    report cannot tie the number to the order.
+    """
+    from apps.core.tranzila_service import TranzilaService
+
+    if confirmation_code:
+        return replace(number, code=confirmation_code)
+    if card_last4:
+        service = TranzilaService.iframe(terminal=number.terminal or None)
+        try:
+            found = service.find_transaction(number.index)
+        except Exception as exc:  # noqa: BLE001 — no answer is no evidence
+            logger.error('Store: report lookup for %s failed: %s', number.index, exc)
+            found = {}
+        row = found.get('transaction') if found.get('success') else None
+        if row and report_card_last4(row) == card_last4:
+            return replace(number, code=str(row.get('authorization_number') or '').strip())
+        return replace(number, code='')
+    if number.suspected:
+        return replace(number, code='')
+    return number
+
+
+# ---------------------------------------------------------------------------
+# The report's word on one number
+# ---------------------------------------------------------------------------
+
+def report_answer(invoice: StoreInvoice, number: ReportedNumber) -> tuple[str, Optional[dict], str]:
+    """
+    (verified | rejected | disputed | unknown, the report's row, why) for one number.
+
+    The judge is the same check the notify has always made
+    (verify_transaction_with_tranzila): an approved charge (A/AK), this sum,
+    this approval number, made after the order, not paying for another one.
+
+      rejected  the report's definite no: the row is there and was declined,
+                is not a charge, or is of another sum;
+      disputed  the report disagrees but not definitely: another approval
+                number, made before the order, held by another order, or
+                still not listed REPORT_SETTLE after it was reported;
+      unknown   the report could not be asked, does not list it yet, the
+                number came with no approval number to compare, or it was
+                made on another terminal than the page's current one.
+
+    Only "verified" ties a number to an order; only "rejected" settles it as
+    not paid.
+    """
+    from apps.core.tranzila_service import (
+        CHARGE_TRANMODES,
+        TranzilaService,
+        is_tranzila_approved,
+        report_transaction_amount,
+    )
+    from apps.payment_links import public_views
+    from apps.payment_links.models import money
+
+    current = (TranzilaService.iframe().terminal or '').strip()
+    if (number.terminal or '').strip() != current:
+        return ANSWER_UNKNOWN, None, (
+            f'התשלום נעשה במסוף {number.terminal or "(לא ידוע)"}, ועמוד התשלום עבר מאז למסוף '
+            f'{current or "(לא מוגדר)"}; אי אפשר לשאול עליו את הדוח'
+        )
+    verdict, row = public_views.verify_transaction_with_tranzila(
+        SimpleNamespace(id=invoice.pk, amount=invoice.total_amount, created_at=invoice.created_at),
+        number.index,
+        confirmation_code=number.code,
+    )
+    if verdict == 'verified':
+        return ANSWER_VERIFIED, row, ''
+    if verdict == 'unavailable':
+        return ANSWER_UNKNOWN, None, WHY_NO_ANSWER
+    if row is not None:
+        if not is_tranzila_approved(row.get('processor_response_code') or row.get('response_code')):
+            return ANSWER_REJECTED, row, 'בדוח של טרנזילה העסקה נדחתה'
+        if str(row.get('tranmode') or '').strip().upper() not in CHARGE_TRANMODES:
+            return ANSWER_REJECTED, row, 'בדוח של טרנזילה העסקה אינה חיוב (בדיקת כרטיס או זיכוי)'
+        if report_transaction_amount(row) != money(invoice.total_amount):
+            return ANSWER_REJECTED, row, 'בדוח של טרנזילה העסקה על סכום אחר'
+        if not number.code:
+            return ANSWER_UNKNOWN, row, 'אין מספר אישור של הלקוח להשוות אליו'
+        return ANSWER_DISPUTED, row, ('העסקה בדוח של טרנזילה לא תואמת את ההזמנה (מספר אישור, מועד, '
+                                      'או שהיא כבר שייכת להזמנה אחרת)')
+    if timezone.now() - number.reported_at >= REPORT_SETTLE:
+        return ANSWER_DISPUTED, None, 'העסקה לא נמצאה בדוח של טרנזילה'
+    return ANSWER_UNKNOWN, None, WHY_NOT_LISTED_YET
+
+
 # ---------------------------------------------------------------------------
 # Which invoices this is about
 # ---------------------------------------------------------------------------
