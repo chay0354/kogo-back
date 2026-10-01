@@ -572,9 +572,9 @@ def build_family_token(family) -> str:
 
 
 def family_public_url(family) -> str:
-    from apps.core.password_reset_email import crm_frontend_url
+    from apps.core.frontend_url import public_frontend_url
 
-    return f'{crm_frontend_url()}/replace-card/{build_family_token(family)}'
+    return f'{public_frontend_url()}/replace-card/{build_family_token(family)}'
 
 
 def resolve_family_token(token: str):

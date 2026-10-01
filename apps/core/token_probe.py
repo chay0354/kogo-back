@@ -99,11 +99,18 @@ def open_page(*, tranmode: str = 'NK') -> dict:
     service = TranzilaService.iframe()
     if service.credential_error():
         raise ProbeError(f'למסוף {service.terminal} אין מפתחות: {service.credential_error()}')
-    url = service.create_payment_request(
-        amount=PROBE_SUM,
-        description=PROBE_DESCRIPTION,
-        tranmode=tranmode,
-    )
+    try:
+        url = service.create_payment_request(
+            amount=PROBE_SUM,
+            description=PROBE_DESCRIPTION,
+            tranmode=tranmode,
+            # The probe has a gate of its own: managers only, and a page that
+            # checks a card without charging. It must open while the general
+            # hosted-page switch is off (30.9.2026: only business charges are open).
+            hosted_page_allowed=True,
+        )
+    except RuntimeError as exc:  # the handshake failed
+        raise ProbeError(f'עמוד טרנזילה לא נפתח: {exc}')
     return {'url': url, 'terminal': service.terminal, 'tranmode': tranmode, 'opened_at': timezone.now().isoformat()}
 
 

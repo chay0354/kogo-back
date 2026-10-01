@@ -11,9 +11,12 @@ Then, instead of a card form of ours:
      leaves no card for the monthly charge).
   2. handle_notify — Tranzila's notify is public and unsigned, so it proves
      nothing by itself. The page's row in the terminal's own report does: an
-     approved NK (or VK) row, for this sum, with the approval number the notify
-     quoted, made after the checkout, under a number no other checkout holds.
-     The token and its expiry are read from that row, never from the POST.
+     approved card check for this sum, made after the checkout, under a number
+     no other checkout holds, and tied to this notify. The report shows the NK
+     page as tranmode N (J2) with approval number 0000000 (cogolive, 29.9.2026),
+     so the approval number ties nothing: the card token the notify carries
+     must equal the row's. The token that is charged, and its expiry, are
+     still read from the row.
   3. settle_checkout — one charge for the cart from that token on
      COURSE_TOKEN_TERMINAL, claimed first (course_checkout_<id>) so nothing can
      charge it twice, with the room and the trial credit checked again right
@@ -22,7 +25,8 @@ Then, instead of a card form of ours:
      standing orders are opened on the same card and terminal, one receipt is
      issued and one WhatsApp goes to each child's family.
 
-Nothing here runs unless COURSE_HOSTED_PAGE_ENABLED (and the hosted page) is on.
+Nothing here runs unless COURSE_HOSTED_PAGE_ENABLED is on, or the cart is of a
+course listed in COURSE_HOSTED_PAGE_COURSE_IDS.
 """
 from __future__ import annotations
 
@@ -54,8 +58,9 @@ from apps.customers.models import CourseCheckout, Payment, TranzilaTransaction
 logger = logging.getLogger(__name__)
 
 PAGE_TRANMODE = 'NK'
-# Report tranmodes that saved the card without taking the sum.
-TOKEN_ROW_TRANMODES = frozenset({'NK', 'VK'})
+# Report tranmodes that checked and saved the card without taking the sum. The
+# report shows an NK page as 'N' (J2); a VK one would be 'V' (J5).
+TOKEN_ROW_TRANMODES = frozenset({'N', 'V', 'NK', 'VK'})
 # The payer changed the page address and paid there: the money moved on the page.
 CHARGED_AT_PAGE_TRANMODES = frozenset({'A', 'AK'})
 # A report row may predate the checkout by this much (clock skew), never more.
@@ -68,6 +73,9 @@ CHECKOUT_MAX_AGE = timedelta(hours=2)
 RETRY_VERIFY_AFTER = timedelta(seconds=15)
 # The J2 check needs a sum; a cart with nothing to charge today still checks the card.
 MIN_PAGE_SUM = Decimal('1.00')
+# A checked card with no notify to tie it to (the poll found the row first)
+# waits this long for the notify before the office is asked to look.
+NOTIFY_GRACE = timedelta(minutes=5)
 
 MESSAGES = {
     CourseCheckout.STATUS_PAGE_OPEN: 'ממתינים לאישור מטרנזילה.',
@@ -122,9 +130,12 @@ def hosted_checkout_enabled(payment_ids=None) -> bool:
     COURSE_HOSTED_PAGE_ENABLED is on, or — while it is off — when every
     payment is for a course listed in COURSE_HOSTED_PAGE_COURSE_IDS (the
     hidden test course of the real 1 ₪ signup).
+
+    These two are the course page's own switch. The general
+    TRANZILA_HOSTED_PAGE_ENABLED (the store, the till, general payment links)
+    is not read: since 30.9.2026 it is off while single flows open by their
+    own switch.
     """
-    if not getattr(settings, 'TRANZILA_HOSTED_PAGE_ENABLED', False):
-        return False
     if getattr(settings, 'COURSE_HOSTED_PAGE_ENABLED', False):
         return True
     test_courses = {str(c) for c in getattr(settings, 'COURSE_HOSTED_PAGE_COURSE_IDS', []) or []}
@@ -251,6 +262,8 @@ def start_checkout(payment_ids: list[str]) -> tuple[CourseCheckout, str]:
             callback_url=f'{api_base}/api/v1/customers/widget/checkout/notify/',
             transaction_id=str(checkout.id),
             tranmode=PAGE_TRANMODE,
+            # Opened by the course page's own switch, not the general one.
+            hosted_page_allowed=hosted_checkout_enabled(ids),
         )
     except Exception as exc:
         logger.error('Course checkout %s: the page could not be opened: %s', checkout.id, exc)
@@ -279,13 +292,25 @@ def _row_time(row: dict) -> Optional[datetime]:
     return report_transaction_time(row)
 
 
+def _has_authorization_number(row: dict) -> bool:
+    """A card check (J2) is approved with 0000000: no number that ties it to a notify."""
+    return bool(str(row.get('authorization_number') or '').strip().lstrip('0'))
+
+
+def _row_token(row: dict) -> str:
+    return str(row.get('credit_card_token') or '').strip()
+
+
 def verify_page_row(checkout: CourseCheckout, index: str, confirmation_code) -> tuple[str, Optional[dict]]:
     """
-    ('verified' | 'charged_at_page' | 'unverified' | 'unavailable', row).
+    ('verified' | 'charged_at_page' | 'unverified' | 'unbound' | 'unavailable', row).
 
     Only 'verified' may lead to a charge by us. 'charged_at_page' means the
     money already moved on the page (the payer changed the tranmode): nothing
-    may be charged on top of it.
+    may be charged on top of it. 'unbound' is a card check that matches in
+    every way but has nothing yet to tie it to this checkout: no approval
+    number, and no token from the notify (checkout.card_token holds the
+    notify's token until the row is verified).
     """
     index = str(index or '').strip()
     if not index.isdigit():
@@ -311,8 +336,16 @@ def verify_page_row(checkout: CourseCheckout, index: str, confirmation_code) -> 
         reasons.append('not approved')
     if report_transaction_amount(row) != checkout.page_sum:
         reasons.append(f'sum {report_transaction_amount(row)} != {checkout.page_sum}')
-    if not same_authorization_number(row.get('authorization_number'), confirmation_code):
-        reasons.append('approval number differs from the notify')
+    notified_token = str(checkout.card_token or '').strip()
+    unbound = False
+    if _has_authorization_number(row):
+        if not same_authorization_number(row.get('authorization_number'), confirmation_code):
+            reasons.append('approval number differs from the notify')
+    elif notified_token:
+        if notified_token != _row_token(row):
+            reasons.append('card token differs from the notify')
+    else:
+        unbound = True
     made_at = _row_time(row)
     if made_at is None or made_at < checkout.created_at - CLOCK_SKEW:
         reasons.append('made before this checkout')
@@ -332,11 +365,11 @@ def verify_page_row(checkout: CourseCheckout, index: str, confirmation_code) -> 
     if mode not in TOKEN_ROW_TRANMODES:
         logger.error('Course checkout %s: row %s has tranmode %s', checkout.id, index, mode)
         return 'unverified', row
-    if not str(row.get('credit_card_token') or '').strip() or not (
-        row.get('expiration_month') and row.get('expiration_year')
-    ):
+    if not _row_token(row) or not (row.get('expiration_month') and row.get('expiration_year')):
         logger.error('Course checkout %s: row %s has no token or expiry', checkout.id, index)
         return 'unverified', row
+    if unbound:
+        return 'unbound', row
     return 'verified', row
 
 
@@ -352,12 +385,30 @@ def _apply_verdict(checkout: CourseCheckout, verdict: str, row: Optional[dict]) 
     """Inside the caller's transaction, with `checkout` locked and still page_open."""
     if verdict == 'unavailable':
         return  # stays page_open with its number; the poll asks again
+    if verdict == 'unbound':
+        # Only retry_verification leaves a row unbound; handle_notify has the
+        # notify's word by then. Asked about again in RETRY_VERIFY_AFTER.
+        CourseCheckout.objects.filter(id=checkout.id).update(updated_at=timezone.now())
+        return
     if verdict == 'verified':
         checkout.page_tranmode = str(row.get('tranmode') or '')[:10]
         checkout.card_token = str(row.get('credit_card_token') or '').strip()[:100]
         checkout.card_expire_month = int(row.get('expiration_month'))
         checkout.card_expire_year = _normalized_year(row.get('expiration_year'))
         checkout.status = CourseCheckout.STATUS_VERIFIED
+    elif verdict == 'no_notify':
+        checkout.status = CourseCheckout.STATUS_REVIEW
+        checkout.review_reason = 'no_notify'
+        _alert(
+            kind='course_checkout_no_notify', key=f'course_checkout_review:{checkout.id}',
+            title='כרטיס נבדק בטרנזילה ולא הגיע אישור — ההרשמה לבדיקה',
+            step='עמוד טרנזילה (בדיקת הכרטיס)',
+            what=('ההורה עבר את בדיקת הכרטיס בעמוד טרנזילה, אבל ההודעה מטרנזילה לא הגיעה אלינו. '
+                  'לא בוצע חיוב. ההורה רואה "התשלום בבדיקה במשרד".'),
+            why=f'לא הגיעה הודעת notify תוך {int(NOTIFY_GRACE.total_seconds() // 60)} דקות מבדיקת הכרטיס.',
+            action=f'לבדוק את עסקה {checkout.page_index} במסוף {checkout.page_terminal}, ולחזור להורה להשלמת ההרשמה.',
+            checkout=checkout,
+        )
     elif verdict == 'charged_at_page':
         checkout.page_tranmode = str(row.get('tranmode') or '')[:10]
         checkout.status = CourseCheckout.STATUS_REVIEW
@@ -380,7 +431,8 @@ def _apply_verdict(checkout: CourseCheckout, verdict: str, row: Optional[dict]) 
             title='אישור כרטיס שלא תאם לטרנזילה — ההרשמה לבדיקה',
             step='עמוד טרנזילה (בדיקת הכרטיס)',
             what='הגיעה הודעה שהכרטיס אושר, אבל העסקה לא נמצאה או לא תאמה בדוח של טרנזילה. לא בוצע חיוב.',
-            why='הסכום, מספר האישור או סוג העסקה בדוח שונים ממה שנשלח, או שהמספר כבר שייך להרשמה אחרת.',
+            why=('הסכום, מספר האישור, הכרטיס השמור או סוג העסקה בדוח שונים ממה שנשלח, '
+                 'או שהמספר כבר שייך להרשמה אחרת.'),
             action=f'לבדוק את עסקה {checkout.page_index or "(ללא מספר)"} במסוף {checkout.page_terminal} ולחזור להורה.',
             checkout=checkout,
         )
@@ -414,7 +466,13 @@ def handle_notify(data) -> dict:
         if index and not checkout.page_index:
             checkout.page_index = index
             checkout.page_confirmation_code = confirmation
-            checkout.card_last4 = str(parsed.get('card_last4') or '')[:4]
+        if index and index == checkout.page_index:
+            # The poll may have brought the number first; the notify still
+            # brings the token that ties the card check to this checkout.
+            checkout.page_confirmation_code = checkout.page_confirmation_code or confirmation
+            checkout.card_last4 = checkout.card_last4 or str(parsed.get('card_last4') or '')[:4]
+            if not checkout.card_token:
+                checkout.card_token = str(parsed.get('token') or '').strip()[:100]
         if not parsed.get('is_successful'):
             checkout.status = CourseCheckout.STATUS_DECLINED
             checkout.failure_reason = (parsed.get('error_message') or 'הכרטיס לא אושר')[:500]
@@ -422,6 +480,8 @@ def handle_notify(data) -> dict:
             return {'success': False, 'status': checkout.status}
         verdict, row = verify_page_row(checkout, checkout.page_index, checkout.page_confirmation_code)
         checkout.save()
+        if verdict == 'unbound':
+            verdict = 'unverified'  # this was the notify, and it carried no token
         _apply_verdict(checkout, verdict, row)
     if checkout.status == CourseCheckout.STATUS_VERIFIED:
         settle_checkout(checkout.id)
@@ -446,6 +506,10 @@ def retry_verification(checkout_id, *, index: str = '', confirmation_code: str =
         if not checkout.page_index:
             return
         verdict, row = verify_page_row(checkout, checkout.page_index, checkout.page_confirmation_code)
+        if verdict == 'unbound':
+            made_at = _row_time(row)
+            if made_at is not None and timezone.now() - made_at > NOTIFY_GRACE:
+                verdict = 'no_notify'
         _apply_verdict(checkout, verdict, row)
     if checkout.status == CourseCheckout.STATUS_VERIFIED:
         settle_checkout(checkout.id)

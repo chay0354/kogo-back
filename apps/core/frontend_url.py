@@ -37,9 +37,13 @@ def _is_allowed_origin(origin: str) -> bool:
 def public_frontend_url(request=None) -> str:
     """
     Base URL for parent-facing links, in order of trust:
-    an explicit CRM_FRONTEND_URL, then the CRM origin the request came from,
-    then the legacy fallback.
+    PUBLIC_LINKS_URL (the customers' own address), an explicit
+    CRM_FRONTEND_URL, then the CRM origin the request came from, then the
+    legacy fallback.
     """
+    public = (getattr(settings, 'PUBLIC_LINKS_URL', '') or '').strip()
+    if public:
+        return public.rstrip('/')
     explicit = (getattr(settings, 'CRM_FRONTEND_URL', '') or '').strip()
     if explicit:
         return explicit.rstrip('/')

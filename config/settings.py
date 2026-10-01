@@ -355,7 +355,8 @@ TRANZILA_WALLETS = [
 # apps/customers/course_checkout.py). The page only checks the card and saves
 # it (tranmode NK); the server then charges the whole cart once from that token
 # and opens the standing orders on it. Off: the widget keeps its own card form
-# (/customers/widget/charge/), exactly as before.
+# (/customers/widget/charge/), exactly as before. This is the course page's own
+# switch: it does not need, and does not open, TRANZILA_HOSTED_PAGE_ENABLED.
 COURSE_HOSTED_PAGE_ENABLED = config('COURSE_HOSTED_PAGE_ENABLED', default=False, cast=bool)
 # Courses that pay on the hosted page while the switch above is still off — a
 # hidden test course for the real 1 ₪ signup, with every other parent on the
@@ -585,6 +586,23 @@ RESEND_API_KEY = config('RESEND_API_KEY', default='')
 RESEND_FROM_EMAIL = config('RESEND_FROM_EMAIL', default='')
 # Public CRM app URL for password-reset links (e.g. https://crm.kogomalo.com)
 CRM_FRONTEND_URL = config('CRM_FRONTEND_URL', default='')
+# The address every link sent to a customer opens on — payment, card, contract
+# (owner, 1.10.2026: pay.cogomelo.co.il, in place of the bare vercel.app host).
+# Empty = links stay on the CRM address, as before. The office's own links
+# (alerts, the brief, password reset, instructors' reminders) never use this:
+# the staff are signed in on the CRM address.
+PUBLIC_LINKS_URL = config('PUBLIC_LINKS_URL', default='').strip().rstrip('/')
+# The origins that address may be served from. Listed here, not only read from
+# PUBLIC_LINKS_URL, so the domain can be opened and checked against the API
+# before a single link points at it.
+PUBLIC_LINKS_ORIGINS = ['https://pay.cogomelo.co.il']
+if PUBLIC_LINKS_URL and PUBLIC_LINKS_URL not in PUBLIC_LINKS_ORIGINS:
+    PUBLIC_LINKS_ORIGINS.append(PUBLIC_LINKS_URL)
+for _origin in PUBLIC_LINKS_ORIGINS:
+    if _origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(_origin)
+    if _origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_origin)
 
 # ==========================
 # CELERY CONFIGURATION
