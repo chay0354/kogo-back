@@ -116,8 +116,17 @@ class TillInvoiceWithoutAPageTest(OldRows):
             res = self.notify(invoice, index='31337', ConfirmationCode='0000001')
         self.assertLess(res.status_code, 500)
         self.assertEqual(held(invoice), {'status': 'completed', 'own': '777', 'code': '', 'others': []})
-        self.assertEqual((self.report_calls, self.kinds()), ([], []))
+        self.assertEqual(self.kinds(), [], 'no "double charge" for a number the report does not confirm')
+        self.assertLessEqual(len(self.report_calls), 1, 'the report is the judge, once — as before the follow-up')
         self.assertEqual({k: len(v) for k, v in self.sweep().items() if v}, {})
+
+    def test_a_second_charge_the_report_confirms_on_such_an_invoice_is_still_recorded(self):
+        invoice = self._legacy(status='completed', txn='777', terminal='iframe_terminal', age_days=0, order=None)
+        self.ledger_rows = [paid_row(index='31337', approval='0000001')]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.notify(invoice, index='31337', ConfirmationCode='0000001')
+        self.assertEqual(second_rows(invoice).count(), 1)
+        self.assertIn('store_second_charge_confirmed', self.kinds())
 
     def test_an_unconfirmed_notify_on_an_unpaid_till_invoice_without_a_page_keeps_no_number(self):
         invoice = self.invoice(order=None)

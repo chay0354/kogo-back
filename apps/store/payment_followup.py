@@ -27,6 +27,14 @@ Two rules hold everything here (reviews of 29.9-30.9.2026):
     tranzila_transaction_id, every other one is kept in other_transactions
     with what is known about it.
 
+Two things follow from them (review of 1.10.2026). Being asked is not being
+answered: a number the report could not be asked about, or does not list yet
+in its first REPORT_SETTLE, is still unanswered — no second page leaves on
+it, and nobody closes it. And only what was reported under this follow-up is
+followed (payment_reported_at, or a number in other_transactions): a number
+that sat on an invoice before it — the weeks of the test terminal — is not
+shown as in review, not asked about, and no button changes its invoice.
+
 An invoice that holds an undecided number Tranzila reported — or a suspected
 charge — and is not settled, is IN REVIEW, whatever its status reads: it is
 never failed on the word of a later notify, never handed a second payment

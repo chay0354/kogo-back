@@ -2461,18 +2461,12 @@ class PaymentService:
 
         # A till invoice no hosted page was ever opened for (a typed or saved
         # card, cash): Tranzila has no reason to notify about it, so a notify
-        # that names it is not a payment of ours. Paid already — logged, as
-        # before this follow-up existed: no number kept, nothing asked, no
-        # "double charge" told. Not paid — the report is still the judge (a
-        # confirmed payment is a payment), but a number it does not confirm
-        # is not kept either.
+        # that names it is not a payment of ours. As before this follow-up
+        # existed, the report is still the judge — a payment it confirms is a
+        # payment (a sale, or a second charge on a paid invoice) — but a
+        # number it does not confirm is only logged: not kept, not followed,
+        # no "double charge" told.
         never_had_page = not invoice.website_order_number and invoice.payment_page_opened_at is None
-        if never_had_page and invoice.payment_status in followup.PAID_STATUSES:
-            logger.warning(
-                'Store webhook for till invoice %s ignored — paid without a hosted page, another number reported (%s)',
-                invoice.invoice_number, index,
-            )
-            return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True, 'repeat': True}
 
         number = followup.number_for(invoice, index, code, (self.iframe_tranzila_service.terminal or '').strip(),
                                      code_wins=from_notify)
@@ -2489,6 +2483,12 @@ class PaymentService:
                 # Never sold again and never downgraded. A *different* number
                 # is the same order paid twice (two tabs, a page opened twice):
                 # kept and told, never swallowed.
+                if never_had_page and answer != followup.ANSWER_VERIFIED:
+                    logger.warning(
+                        'Store webhook for till invoice %s: paid without a hosted page, and the report does not '
+                        'confirm number %s (%s) — not kept', invoice.invoice_number, index, answer,
+                    )
+                    return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
                 self._record_second_store_charge(invoice, number, answer, row, code_wins=from_notify)
                 logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
                 return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
