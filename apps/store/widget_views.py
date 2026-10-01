@@ -54,6 +54,7 @@ WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE = (
     'אנחנו מוודאים שהתשלום הקודם על ההזמנה הזאת לא עבר. אל תשלמו שוב — נסו בעוד כמה דקות, '
     'או פנו אלינו.'
 )
+WEBSITE_ORDER_OLD_MESSAGE = 'ההזמנה הזאת ישנה — צרו הזמנה חדשה'
 WEBSITE_PAYMENT_IN_REVIEW_MESSAGE = (
     'התקבל כבר תשלום על ההזמנה הזאת והוא בבדיקה. אל תשלמו שוב — נעדכן אתכם, '
     'ואפשר גם לפנות אלינו.'
@@ -540,6 +541,17 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             # Paid and refunded: a payment now would be taken as the same order
             # paid twice, and sell nothing.
             return Response({'error': 'ההזמנה הזאת זוכתה. צרו הזמנה חדשה.'}, status=400)
+
+        if followup.is_old_order(invoice):
+            # An order from before the follow-up, with a transaction number
+            # nobody follows (the test terminal's weeks): no page for it. A
+            # payment on it would sit beside a number the report cannot be
+            # asked about, and the order could not be completed. 400 — the
+            # site opens a new order on it, as for any refused one. Nothing
+            # is written and the report is not read.
+            logger.warning('Website order %s: no page — an order from before the follow-up, with a number on it',
+                           invoice.website_order_number)
+            return Response({'error': WEBSITE_ORDER_OLD_MESSAGE, 'old_order': True}, status=400)
 
         # Whether a page may leave is decided in one place, for this request
         # and for the site's status poll alike (payment_followup.second_page_verdict):

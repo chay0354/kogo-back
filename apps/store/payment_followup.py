@@ -337,6 +337,23 @@ def _holds_own_number(invoice: StoreInvoice) -> bool:
     )
 
 
+def is_old_order(invoice: StoreInvoice) -> bool:
+    """
+    An unsettled invoice that carries a transaction number from before this
+    follow-up (no payment_reported_at): the weeks of the test terminal, or
+    the retired order endpoint. Nothing follows that number — and so no
+    payment page is handed out for the order either: a payment made on it
+    would land beside a number nobody can ask the report about. The site is
+    told to open a new order.
+    """
+    return (
+        invoice.payment_status in UNSETTLED_STATUSES
+        and invoice.payment_reported_at is None
+        and not _is_till_charge(invoice)
+        and is_transaction_number(invoice.tranzila_transaction_id)
+    )
+
+
 def open_numbers(invoice: StoreInvoice, *, include_suspected: bool = False,
                  include_released: bool = False) -> list[ReportedNumber]:
     """
