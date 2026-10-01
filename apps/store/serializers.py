@@ -497,11 +497,20 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
     # further one on a paid order (a second charge, or "not ours").
     payment_in_review = serializers.SerializerMethodField()
     payment_review_numbers = serializers.SerializerMethodField()
+    # The customer asked to pay this order again and was told to wait: the
+    # report could not rule out that an earlier page was paid. The site reads
+    # the order as pending meanwhile; the office sees why on the row.
+    payment_retry_waiting = serializers.SerializerMethodField()
 
     def get_payment_in_review(self, obj) -> bool:
         from apps.store.payment_followup import holds_reported_payment
 
         return holds_reported_payment(obj)
+
+    def get_payment_retry_waiting(self, obj) -> bool:
+        from apps.store.payment_followup import retry_is_refused
+
+        return retry_is_refused(obj)
 
     def get_payment_review_numbers(self, obj) -> list:
         from apps.store.payment_followup import open_numbers
@@ -525,7 +534,7 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
             'issue_date', 'notes',
             'line_items',
             'created_at',
-            'payment_in_review', 'payment_review_numbers',
+            'payment_in_review', 'payment_review_numbers', 'payment_retry_waiting',
         ]
         read_only_fields = ['id', 'invoice_number', 'issue_date', 'created_at', 'refunded_amount', 'amount_paid']
 

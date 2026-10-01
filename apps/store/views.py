@@ -435,7 +435,7 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
         POST /api/v1/store/invoices/{id}/payment-review/
         Body: {"action": "complete" | "release" | "close", "reason": "...",
                "confirmation_code": "<approval number from the customer>", "card_last4": "<4 digits>",
-               "acknowledge_charge": true | false}
+               "acknowledge_charge": ["<transaction number>", ...]}
 
         A manager decides about the numbers a website/till invoice holds
         undecided (apps/store/payment_followup.py) — a number Tranzila
@@ -467,9 +467,13 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
                     answered about it (it could not be asked, or the number
                     was reported less than ten minutes ago), or lists under
                     it an approved charge of this very sum: then the answer
-                    is 409 with what the report shows, and the number is
-                    closed only when the manager, having seen it, asks again
-                    with "acknowledge_charge".
+                    is 409 with what the report shows ("charge_shown": the
+                    numbers), and such a number is closed only when the
+                    manager, having been shown it, asks again naming it in
+                    "acknowledge_charge". A bare true, or a number the server
+                    has not shown yet, closes nothing. When some numbers were
+                    closed and another shows a charge, the 200 carries
+                    "charge_shown" and a "warning" too.
 
         Only numbers reported under this follow-up are decided here: a number
         that sat on an invoice before it (the weeks of the test terminal) is
@@ -496,9 +500,13 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
         if action_name == 'release':
             result = payment_followup.release_reported_payment(invoice.pk, by=by, reason=reason)
         elif action_name == 'close':
+            # The numbers the manager was shown a charge under, and says are
+            # not this order's. Only a list of numbers counts: a general flag
+            # acknowledges nothing.
+            named = request.data.get('acknowledge_charge')
+            acknowledged = [payment_followup.normal_number(n) for n in named] if isinstance(named, (list, tuple)) else []
             result = payment_followup.close_reported_numbers(
-                invoice.pk, by=by, reason=reason,
-                acknowledge_charge=request.data.get('acknowledge_charge') in (True, 'true', 'True', 1, '1'),
+                invoice.pk, by=by, reason=reason, acknowledged=[n for n in acknowledged if n],
             )
         else:
             result = payment_followup.complete_reported_payment(
@@ -519,15 +527,19 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
                 {**body, 'error': '"סגור — לא שלנו" מיועד להזמנה ששולמה. בהזמנה שלא שולמה: "אין תשלום — שחרר".'},
                 status=status.HTTP_409_CONFLICT,
             )
+        shown = result.get('charge_shown') or [] if action_name == 'close' else []
+        charge_warning = (
+            f'שימו לב: בדוח של טרנזילה מופיע תחת עסקה {", ".join(shown)} חיוב מאושר בדיוק בסכום של ההזמנה הזאת. '
+            'ייתכן שזה תשלום שני של הלקוח. אם הוא שלו — "חיוב שני — אימות", עם מספר האישור או 4 ספרות '
+            'מהלקוח. רק אם בדקתם שהוא של לקוח אחר: סמנו "ראיתי את החיוב בדוח" וסגרו שוב.'
+        ) if shown else ''
         if action_name == 'close' and outcome == payment_followup.CHARGE_SHOWN:
-            shown = ', '.join(result.get('charge_shown') or [])
-            return Response(
-                {**body, 'charge_shown': result.get('charge_shown') or [],
-                 'error': f'שימו לב: בדוח של טרנזילה מופיע תחת עסקה {shown} חיוב מאושר בדיוק בסכום של ההזמנה הזאת. '
-                          'ייתכן שזה תשלום שני של הלקוח. אם הוא שלו — "חיוב שני — אימות", עם מספר האישור או 4 ספרות '
-                          'מהלקוח. רק אם בדקתם שהוא של לקוח אחר: סמנו "ראיתי את החיוב בדוח" וסגרו שוב.' + more},
-                status=status.HTTP_409_CONFLICT,
-            )
+            return Response({**body, 'charge_shown': shown, 'error': charge_warning + more},
+                            status=status.HTTP_409_CONFLICT)
+        if shown:
+            # Some numbers were closed (or recorded) and another shows a
+            # charge: done, and the manager is still told what the report shows.
+            body = {**body, 'charge_shown': shown, 'warning': charge_warning}
         if action_name == 'close' and outcome == 'not_closed':
             return Response(
                 {**body, 'waiting': result.get('waiting') or [],

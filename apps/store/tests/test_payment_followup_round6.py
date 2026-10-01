@@ -127,10 +127,10 @@ class CloseTest(Base):
         self.assertIn('חיוב מאושר', res.json()['error'])
         self.assertEqual(others(invoice), {'222222': 'open'})
         # Having seen it — and only once the number is ten minutes old — the manager may close it.
-        res = self.review(invoice, 'close', 'של לקוח אחר', manager=manager, acknowledge_charge=True)
+        res = self.review(invoice, 'close', 'של לקוח אחר', manager=manager, acknowledge_charge=['222222'])
         self.assertEqual(res.status_code, 409, 'reported less than ten minutes ago')
         age_numbers(invoice, 20)
-        res = self.review(invoice, 'close', 'של לקוח אחר', manager=manager, acknowledge_charge=True)
+        res = self.review(invoice, 'close', 'של לקוח אחר', manager=manager, acknowledge_charge=['222222'])
         self.assertEqual((res.status_code, res.json()['outcome']), (200, 'closed'))
         entry = StoreInvoice.objects.get(pk=invoice.pk).other_transactions[0]
         self.assertEqual((entry['state'], entry['closed_over_charge']), ('closed', True))

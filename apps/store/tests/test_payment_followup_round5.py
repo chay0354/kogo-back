@@ -833,7 +833,7 @@ class CloseNumberTest(Base):
         # number, so the manager is shown that first, and closes knowingly.
         res = self.review(invoice, 'close', 'של לקוח של האתר השני')
         self.assertEqual((res.status_code, res.json()['outcome']), (409, 'charge_shown'))
-        res = self.review(invoice, 'close', 'של לקוח של האתר השני', acknowledge_charge=True)
+        res = self.review(invoice, 'close', 'של לקוח של האתר השני', acknowledge_charge=['111111'])
         self.assertEqual((res.status_code, res.json()['outcome']), (200, 'closed'))
         self.assertEqual(held(invoice)['others'], [('111111', 'closed', '')])
         self.assertEqual(self.sweep()['unexplained'], [], 'decided: no longer listed, and not found again')

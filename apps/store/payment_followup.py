@@ -1340,7 +1340,7 @@ def release_reported_payment(invoice_id, *, by: str, reason: str) -> dict:
     return {'outcome': 'released', 'status': 'failed'}
 
 
-def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledge_charge: bool = False) -> dict:
+def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledged=()) -> dict:
     """
     "סגור — לא שלנו": a person decides that the further numbers a PAID order
     still holds undecided are not this order's — a number reported beside its
@@ -1359,8 +1359,11 @@ def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledge_char
         it yet: a real second charge must not be closed under a lag);
       * left as it is, and SHOWN to the person ('charge_shown'), when the
         report lists under that number an approved charge of this very sum:
-        it may be the customer's second payment. Closed only when the person,
-        having seen that, says so again (`acknowledge_charge`);
+        it may be the customer's second payment. That it was shown is kept
+        on the number (charge_shown_at). Closed only when the person, having
+        been shown THAT number, asks again naming it (`acknowledged`, the
+        numbers): a general "I saw it", or one given before the first
+        answer, closes nothing;
       * closed otherwise: the report does not list it long after it was
         reported, or lists something that is not this order's charge.
 
@@ -1391,6 +1394,19 @@ def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledge_char
             and report_transaction_amount(row) == money(invoice.total_amount)
         )
 
+    acknowledged = {str(index) for index in acknowledged or ()}
+
+    def was_shown(locked_invoice, index) -> bool:
+        return any(str(e.get('index')) == index and e.get('charge_shown_at')
+                   for e in locked_invoice.other_transactions or [])
+
+    def mark_shown(locked_invoice, index) -> None:
+        entries = [dict(e) for e in locked_invoice.other_transactions or []]
+        for entry in entries:
+            if str(entry.get('index')) == index and not entry.get('charge_shown_at'):
+                entry['charge_shown_at'] = timezone.now().isoformat()
+        locked_invoice.other_transactions = entries
+
     closed, seconds, waiting, shown = [], [], [], []
     marks = {'close_reason': reason, 'closed_by': by, 'closed_at': timezone.now().isoformat()}
     with transaction.atomic():
@@ -1405,7 +1421,8 @@ def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledge_char
                 seconds.append(number.index)
             elif is_no_answer(answer, why) or (answer == ANSWER_UNKNOWN and row is None):
                 waiting.append(number.index)   # no real answer: never closed blind
-            elif shows_charge(row) and not acknowledge_charge:
+            elif shows_charge(row) and not (number.index in acknowledged and was_shown(locked, number.index)):
+                mark_shown(locked, number.index)
                 shown.append(number.index)     # the person sees it first
             elif timezone.now() - number.reported_at < REPORT_SETTLE:
                 waiting.append(number.index)   # reported minutes ago: not yet
@@ -1422,7 +1439,8 @@ def close_reported_numbers(invoice_id, *, by: str, reason: str, acknowledge_char
         else:
             outcome = 'not_closed'
         _log_review(locked, action='close', by=by, reason=reason, numbers=closed + seconds, outcome=outcome,
-                    evidence='acknowledged a charge of this sum in the report' if acknowledge_charge else '')
+                    evidence=(f"acknowledged a charge of this sum in the report: {', '.join(sorted(acknowledged))}"
+                              if acknowledged else ''))
         locked.save(update_fields=['other_transactions', 'payment_review_log'])
     logger.warning('Store invoice %s: %s closed numbers %s (%s); second charges %s; waiting %s; shown %s',
                    invoice.invoice_number, by, closed, reason, seconds, waiting, shown)
