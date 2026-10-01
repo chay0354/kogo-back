@@ -341,10 +341,14 @@ class NotifyNeverCameTest(ReviewBase):
         self.day_rows = [self.charge_row()]
         self.assertEqual(self.initiate().status_code, 200)
 
-    def test_a_page_opened_long_ago_is_not_searched(self):
+    def test_a_report_that_cannot_be_asked_blocks_however_long_ago_the_page_opened(self):
+        # Until round 5 (1.10.2026) the retry got its page half an hour after
+        # the first one. "Unknown" is not "no charge": it does not any more.
         self.opened_page(minutes_ago=45)
         self.day_report_down = True
-        self.assertEqual(self.initiate().status_code, 200)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.initiate().status_code, 409)
+        self.assertEqual(self.kinds(), ['store_report_unavailable'])
 
 
 # ---------------------------------------------------------------------------

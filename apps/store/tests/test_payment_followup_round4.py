@@ -82,7 +82,7 @@ class ReleaseDoesNotBuryTest(ReviewBase):
         invoice.refresh_from_db()
         self.assertEqual(payment_followup.other_state(invoice, '999999'), 'second_charge')
         self.assertTrue(TranzilaTransaction.objects.filter(idempotency_key=f'store_second_{invoice.id}_999999').exists())
-        self.assertTrue(OfficeAlert.objects.filter(kind='store_possible_double_charge').exists())
+        self.assertTrue(OfficeAlert.objects.filter(kind='store_second_charge_confirmed').exists())
         self.assertEqual(self.state(invoice), ('completed', 1, 8), 'sold once')
 
     def test_R1b_the_sweep_asks_about_released_numbers_too(self):
@@ -222,7 +222,7 @@ class ReportLagTest(ReviewBase):
 # ---------------------------------------------------------------------------
 
 class ReturnedGuardsTest(ReviewBase):
-    def test_W1_numbers_beyond_the_cap_are_not_kept_one_alert_per_order_bounded_sweep(self):
+    def test_W1_a_flood_of_numbers_is_kept_told_once_and_the_sweep_stays_bounded(self):
         invoice = self.invoice(status='completed', txn='123456', code='0001234')
         _opened(invoice, 5)
         StoreSale.objects.create(invoice=invoice, product=self.product, quantity=2, unit_price=4,
@@ -231,7 +231,10 @@ class ReturnedGuardsTest(ReviewBase):
             for i in range(20):
                 self.client.post(RETURNED_URL, {'order': ORDER, 'index': str(700000 + i)}, format='json', **KEY)
         invoice.refresh_from_db()
-        self.assertLessEqual(len(invoice.other_transactions or []), payment_followup.MAX_UNDECIDED_NUMBERS)
+        # Round 5: the limit is on the work, not on what is kept — a real
+        # number arriving after three made-up ones must not be dropped.
+        self.assertEqual(len(invoice.other_transactions), 20)
+        self.assertLessEqual(len(invoice.other_transactions), payment_followup.MAX_KEPT_NUMBERS)
         self.assertEqual(OfficeAlert.objects.filter(kind='store_possible_double_charge').count(), 1)
         self.assertEqual(OfficeAlert.objects.filter(kind='store_too_many_numbers').count(), 1)
         before = len(self.report_calls)
@@ -284,7 +287,7 @@ class GuardsTest(ReviewBase):
         self.assertTrue(payment_followup.holds_reported_payment(invoice))
 
     @override_settings(STORE_SWEEP_COMPLETES_PAYMENTS=False)
-    def test_O_switch_off_sweep_writes_nothing_to_unsettled_invoices(self):
+    def test_O_switch_off_sweep_sells_nothing_and_changes_no_status(self):
         web = self.invoice(txn='123456', code='0001234', age=timedelta(minutes=20))
         lost = self.invoice(order=ORDER_B)
         _opened(lost, 45, order=ORDER_B)
@@ -292,10 +295,17 @@ class GuardsTest(ReviewBase):
         self.ledger_rows = [paid_row()]
         cols = ('payment_status', 'payment_followup_at', 'other_transactions', 'tranzila_transaction_id',
                 'payment_reported_at', 'payment_review_log')
-        before = list(StoreInvoice.objects.filter(pk__in=[web.pk, lost.pk]).order_by('pk').values(*cols))
+        before = StoreInvoice.objects.filter(pk=web.pk).values(*cols).get()
         payment_followup.sweep_stuck_store_payments()
-        after = list(StoreInvoice.objects.filter(pk__in=[web.pk, lost.pk]).order_by('pk').values(*cols))
-        self.assertEqual(before, after)
+        # An invoice in review, which the report confirms: not written to at all.
+        self.assertEqual(before, StoreInvoice.objects.filter(pk=web.pk).values(*cols).get())
+        # A charge found for a lost page is kept on its invoice (round 5) —
+        # and nothing else about it changes.
+        lost.refresh_from_db()
+        self.assertEqual((lost.payment_status, lost.tranzila_transaction_id, lost.payment_followup_at,
+                          lost.payment_reported_at, lost.payment_review_log), ('pending', '', None, None, None))
+        self.assertEqual([(e['index'], e['state'], e['code']) for e in lost.other_transactions],
+                         [('555555', 'suspected', '')])
         self.assertEqual(StoreSale.objects.count(), 0)
 
 

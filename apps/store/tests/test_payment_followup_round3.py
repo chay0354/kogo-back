@@ -217,7 +217,7 @@ class LostNotifyTest(ReviewBase):
         self.assertEqual(res.status_code, 409)
         self.assertNotIn('iframe_url', res.json())
 
-    def test_with_the_switch_off_the_sweep_only_lists_and_tells_a_lost_payment(self):
+    def test_with_the_switch_off_the_sweep_keeps_and_tells_a_lost_payment_and_sells_nothing(self):
         invoice = self.invoice()
         _opened(invoice, 45)
         self.day_rows = [paid_row(index='555555')]
@@ -225,11 +225,12 @@ class LostNotifyTest(ReviewBase):
             sweep = payment_followup.sweep_stuck_store_payments()
         self.assertEqual(sweep['unexplained'], [invoice])
         self.assertTrue(OfficeAlert.objects.filter(kind='store_payment_unreported').exists())
-        invoice.refresh_from_db()
-        self.assertIsNone(invoice.other_transactions, 'nothing written')
-        # The customer's retry looks for itself, keeps it, and gets no second page.
-        self.assertEqual(self.initiate().status_code, 409)
+        # Kept on the invoice as suspected (round 5: keeping it is not a sale,
+        # a document or an email) — the order is in review at once.
+        self.assertEqual(self.state(invoice), ('pending', 0, 10))
+        self.assertEqual([(e['index'], e['state']) for e in invoice.other_transactions], [('555555', 'suspected')])
         self.assertTrue(self.poll().json()['payment_reported'])
+        self.assertEqual(self.initiate().status_code, 409)
 
     def test_P4_the_409_from_the_day_report_shows_in_the_status(self):
         invoice = self.invoice(status='failed')

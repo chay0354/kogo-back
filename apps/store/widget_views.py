@@ -500,6 +500,8 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
     earlier page was paid (down, an error, read in part) stops the page for
     as long as that lasts, with one alert to the office.
     """
+    from datetime import timedelta
+
     from django.utils import timezone
 
     from apps.core.payment_service import parse_store_cart_notes
@@ -547,15 +549,21 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             # released does not hold the order, but it is asked about too: a
             # release is a person's look, not the report's no, and one the
             # report confirms now is this order's payment.
-            followup.recheck_pending_payment(invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS)
+            # An order in review answers 409 whatever the report says now, so
+            # its check keeps the poll's pace; released numbers are asked
+            # about right now — the page waits on exactly that.
+            followup.recheck_pending_payment(
+                invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS,
+                min_interval=followup.RECHECK_INTERVAL if held else timedelta(0),
+            )
             invoice.refresh_from_db()
             if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
                 return already_paid()
             if held or followup.holds_reported_payment(invoice):
                 return in_review()
             if followup.released_not_asked(invoice):
-                # More released numbers than one check may ask about (or the
-                # check was paced): the next retry asks about the next ones.
+                # More released numbers than one check may ask about: the
+                # next retry asks about the next ones.
                 logger.warning('Website order %s: no second page yet — released numbers still to be asked about',
                                invoice.website_order_number)
                 return wait(int(followup.RECHECK_INTERVAL.total_seconds()))
