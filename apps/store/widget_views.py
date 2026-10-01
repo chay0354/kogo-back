@@ -525,10 +525,10 @@ class WidgetStorePaymentInitiateView(APIView):
             # gets back, so while payment is off it gets ours: a kind
             # "temporarily closed" page with a way to reach the office, in
             # place of an error. Still nothing written, nothing charged.
-            from apps.core.frontend_url import public_frontend_url
+            from apps.core.password_reset_email import crm_frontend_url
             return Response({
                 'ok': True,
-                'iframe_url': f'{public_frontend_url()}/store-closed',
+                'iframe_url': f'{crm_frontend_url()}/store-closed',
                 'payments_paused': True,
             })
 

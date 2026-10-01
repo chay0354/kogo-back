@@ -30,7 +30,6 @@ from django.utils import timezone
 
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
 from apps.core.manychat_service import ManyChatService
-from apps.core.password_reset_email import crm_frontend_url
 from apps.core.payment_service import JERUSALEM_TZ, PaymentService, subscription_tranzila_items
 from apps.core.tranzila_service import TranzilaService, extract_card_token, is_tranzila_uncertain_gateway_error
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
@@ -143,7 +142,9 @@ def build_card_update_token(
 
 
 def card_update_public_url_for_token(token: str) -> str:
-    return f'{crm_frontend_url()}/update-card/{token}'
+    from apps.core.frontend_url import public_frontend_url
+
+    return f'{public_frontend_url()}/update-card/{token}'
 
 
 def card_update_public_url(

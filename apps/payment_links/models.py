@@ -91,8 +91,8 @@ class PaymentLink(models.Model):
         return True
 
     def public_url(self) -> str:
-        from apps.core.password_reset_email import crm_frontend_url
-        return f'{crm_frontend_url()}/pay/{self.slug}'
+        from apps.core.frontend_url import public_frontend_url
+        return f'{public_frontend_url()}/pay/{self.slug}'
 
     def save(self, *args, **kwargs):
         # token_urlsafe(9) has 72 bits; a clash is theoretical, but retry anyway.
