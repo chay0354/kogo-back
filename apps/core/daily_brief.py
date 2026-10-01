@@ -9,9 +9,13 @@ takings are checked against Tranzila itself so "the system says it was charged"
 and "the money arrived" are two separate statements.
 
 Rules the checks follow:
-  * read-only — nothing here charges, sends or fixes, with one exception: the
+  * read-only — nothing here charges, sends or fixes, with two exceptions: the
     morning fixes at the top of the list (apps/core/morning_fixes.py), which the
     owner asked for and which touch only statuses and the dashboard's counts;
+    and the store's stuck payments (check_stuck_store_payments), which read
+    Tranzila's report and repeat the website's "paid" call — and, only while
+    STORE_SWEEP_COMPLETES_PAYMENTS is on (off until the owner decides), finish
+    a sale the report confirms and record a confirmed second charge;
   * one failing check never hides the rest: it comes back as its own red item;
   * a quiet morning must read as quiet, so a check that finds nothing says so
     instead of filling the screen.
@@ -588,6 +592,132 @@ def check_course_checkouts(today: date) -> BriefItem:
             + f' · {timezone.localtime(checkout.created_at):%d/%m %H:%M}',
             '/customers',
         ))
+    return item
+
+
+def check_stuck_store_payments(today: date) -> BriefItem:
+    """
+    Store payments on Tranzila's page (website and till) that did not end
+    cleanly — every one Tranzila reported and the CRM has neither confirmed
+    nor ruled out, at any age — and what this very check settled.
+
+    It reads Tranzila's report about the numbers such an order holds (a few
+    per order each morning, in turns), and looks in the report for a charge
+    of the same sum for an order whose page opened but whose notify never
+    came. With STORE_SWEEP_COMPLETES_PAYMENTS off (until the owner decides)
+    nothing is sold: no document, no email, no status changes. On, a
+    confirmed payment is completed through the notify's own path. Either way
+    a second charge the report confirms on a paid order is recorded (and
+    listed under "חיובים כפולים"), and a charge found for an order whose
+    notify never came is kept on the invoice and listed here every morning
+    until a person decides, in the invoice's "payment-review" — never
+    completed here. A paid website order the site never acknowledged is told
+    again. Nothing is charged or refunded (apps/store/payment_followup.py).
+    """
+    from apps.store.payment_followup import shown_number, sweep_stuck_store_payments
+
+    result = sweep_stuck_store_payments()
+    open_items = sum(len(result[key]) for key in (
+        'still_pending', 'confirmed', 'second_confirmed', 'second_open', 'unexplained', 'site_not_told',
+        'not_reached', 'not_searched'))
+    done_items = len(result['settled']) + len(result['site_told'])
+    item = BriefItem(
+        key='stuck_store_payments',
+        title='תשלומים שנתקעו בחנות',
+        severity=RED if open_items else (YELLOW if done_items else GREEN),
+        count=open_items,
+        action=(
+            'לבדוק בטרנזילה, לפי מספר העסקה שבשורה, אם הכסף ירד. ירד — לא לבקש מהלקוח לשלם שוב '
+            'ולהעביר להשלמה; לא ירד — לחזור ללקוח. הזמנה שהושלמה הבוקר שולמה: לטפל בה כרגיל. '
+            'המערכת לא מחייבת ולא מזכה כלום לבד.'
+        ),
+    )
+
+    def label(invoice) -> str:
+        who = invoice.customer_name or (invoice.child.full_name if invoice.child_id and invoice.child else '') or 'לקוח מזדמן'
+        return f'{invoice.website_order_number or invoice.invoice_number} · {who}'
+
+    def when(invoice) -> str:
+        return f'{timezone.localtime(invoice.payment_reported_at or invoice.created_at):%d/%m %H:%M}'
+
+    for invoice, reason in result['still_pending']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · בבדיקה · עסקה {shown_number(invoice.tranzila_transaction_id)} '
+            f'(מסוף {invoice.tranzila_terminal or "?"}) · {reason[:80]} · {when(invoice)}',
+            '/invoices',
+        ))
+    for invoice in result['confirmed']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · הדוח מאשר שהלקוח שילם, וההזמנה לא הושלמה (בדיקת הבוקר לא משלימה מכירות) '
+            f'· עסקה {shown_number(invoice.tranzila_transaction_id)} · {when(invoice)}',
+            '/invoices',
+        ))
+    def numbers(invoice, *states) -> str:
+        return ', '.join(
+            shown_number(entry.get('index')) for entry in (invoice.other_transactions or [])
+            if entry.get('state') in states
+        )
+
+    for invoice in result['second_confirmed']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · שולם, וחיוב שני מאושר בדוח של טרנזילה '
+            f'({numbers(invoice, "second_charge")}) — לזכות את הלקוח',
+            '/invoices',
+        ))
+    for invoice in result['second_open']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · שולם, ודווחה עליו עוד עסקה ({numbers(invoice, "open", "released")}) '
+            'שהדוח עוד לא הכריע לגביה — ייתכן חיוב כפול. מספר שלא יוכרע: "סגור — לא שלנו" במסך החשבונית',
+            '/invoices',
+        ))
+    for invoice in result['unexplained']:
+        if invoice.payment_status in ('completed', 'refunded', 'refund_failed'):
+            item.rows.append(_row(
+                label(invoice),
+                f'{_money(invoice.total_amount)} · שולם, ובדוח של טרנזילה יש עוד חיוב באותו סכום '
+                f'({numbers(invoice, "suspected")}) — ייתכן חיוב שני. להחליט במסך החשבונית',
+                '/invoices',
+            ))
+            continue
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · בדוח של טרנזילה יש חיוב באותו סכום שלא הגיעה עליו הודעה — '
+            'ייתכן שהלקוח שילם. להחליט במסך החשבונית',
+            '/invoices',
+        ))
+    for invoice in result['site_not_told']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · שולם, והאתר לא אישר שקיבל את העדכון · {when(invoice)}',
+            '/invoices',
+        ))
+    for invoice in result['not_searched']:
+        item.rows.append(_row(
+            label(invoice),
+            f'{_money(invoice.total_amount)} · נפתח עמוד תשלום, והדוח של טרנזילה לא נקרא במלואו הבוקר — '
+            'לא ידוע אם שולם. ייבדק שוב מחר',
+            '/invoices',
+        ))
+    for invoice in result['not_reached']:
+        item.rows.append(_row(label(invoice), f'{_money(invoice.total_amount)} · לא נבדק הבוקר (נגמר הזמן)', '/invoices'))
+    for invoice in result['settled']:
+        item.rows.append(_row(label(invoice), f'{_money(invoice.total_amount)} · הושלם הבוקר מול הדוח של טרנזילה', '/invoices'))
+    for invoice in result['site_told']:
+        item.rows.append(_row(label(invoice), 'האתר עודכן הבוקר שההזמנה שולמה', '/invoices'))
+    item.rows = item.rows[:MAX_ROWS]
+
+    parts = []
+    if open_items:
+        parts.append(f'{open_items} תשלומים בחנות עדיין לא הסתיימו')
+    if result['settled']:
+        parts.append(f'{len(result["settled"])} הושלמו הבוקר אחרי שהדוח של טרנזילה אישר אותם')
+    if result['site_told']:
+        parts.append(f'האתר עודכן על {len(result["site_told"])} הזמנות ששולמו')
+    item.summary = ('; '.join(parts) + '.') if parts else 'כל התשלומים בחנות שדווחו מטרנזילה הסתיימו.'
     return item
 
 
@@ -1578,13 +1708,14 @@ CHECKS = (
     check_awaiting_allocation,
     check_monthly_finalization,
     check_weekly_audit,
+    check_stuck_store_payments,
     check_tranzila_health,
     check_manychat_health,
     check_tranzila_reconciliation,
 )
 
 # Checks that call an outside service, so a quick brief can leave them out.
-EXTERNAL_CHECKS = {'tranzila_health', 'manychat_health', 'tranzila_reconciliation'}
+EXTERNAL_CHECKS = {'stuck_store_payments', 'tranzila_health', 'manychat_health', 'tranzila_reconciliation'}
 
 
 def check_key(check) -> str:
@@ -1608,6 +1739,7 @@ def check_catalogue() -> list[dict]:
         'office_alerts': 'התראות למשרד מהיממה האחרונה',
         'charges_in_processing': 'חיובים שנתקעו בבדיקה',
         'course_checkouts': 'הרשמות לחוגים שנתקעו בתשלום',
+        'stuck_store_payments': 'תשלומים שנתקעו בחנות',
         'saved_card_setup': 'חיובים שלא נשלחו בגלל הגדרות',
         'unresolved_refunds': 'זיכויים שלא התקבלה עליהם תשובה',
         'recurring_without_lesson': 'הוראות קבע שאי אפשר לחייב',

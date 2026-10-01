@@ -101,13 +101,22 @@ class WebsitePaymentInitiateTest(TestCase):
         cart = invoice.notes
         invoice.payment_status = 'failed'
         invoice.save(update_fields=['payment_status'])
+        # The retry comes after the report has caught up with the first page
+        # (within ten minutes "not found" is not enough — test_payment_followup_round4).
+        from datetime import timedelta
+        from django.utils import timezone
+        StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=timezone.now() - timedelta(minutes=15))
 
-        retry = self.client.post(
-            '/api/v1/store/widget/payment/initiate/',
-            self._payload(),
-            format='json',
-            **self.headers,
-        )
+        # A retry minutes after the first page first looks in the day's report
+        # for a payment whose notify never came (payment_followup.find_unreported_payment).
+        from apps.core.tranzila_service import TranzilaService
+        with patch.object(TranzilaService, 'list_all_transactions', return_value={'success': True, 'transactions': []}):
+            retry = self.client.post(
+                '/api/v1/store/widget/payment/initiate/',
+                self._payload(),
+                format='json',
+                **self.headers,
+            )
         self.assertEqual(retry.status_code, 200, retry.content)
         invoice.refresh_from_db()
         self.assertEqual(invoice.payment_status, 'pending')
@@ -381,7 +390,8 @@ class WebsitePickupPaymentTest(TestCase):
                     'is_successful': True,
                     'response_code': '000',
                     'error_message': '',
-                    'transaction_id': 'txn-1',
+                    # Tranzila's index is a number; anything else is not one.
+                    'transaction_id': '1001',
                     'confirmation_code': 'ok',
                 },
             )

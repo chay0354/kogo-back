@@ -247,7 +247,39 @@ def _reported_sum(raw, parsed_amount) -> Decimal:
             return Decimal('0.00')
 
 
-def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> bool:
+# A payment link paid before 25.9.2026 kept no terminal. Such a record holds a
+# transaction number only when it was paid about when the report's row was
+# made (the same day, give or take a day): numbers repeat across terminals,
+# and an old payment of the test terminal must not claim today's charge that
+# happens to carry the same number.
+UNTERMINALED_PAYMENT_WINDOW = timedelta(days=1)
+
+
+def link_payment_holds_index(txn_index: str, terminal: str, made_at=None, *, exclude_id=None) -> bool:
+    """
+    Whether a completed payment-link payment was paid by this transaction
+    number: one on this terminal, or one that kept no terminal and was paid
+    within UNTERMINALED_PAYMENT_WINDOW of `made_at` (the report row's time).
+    With no row time to compare (`made_at` None), a record without a
+    terminal counts as before — the caller refuses a row without a time
+    anyway. A record with neither terminal nor payment time holds nothing.
+    """
+    paid = PaymentLinkPayment.objects.filter(
+        gateway_transaction_id=txn_index, status=PaymentLinkPayment.STATUS_COMPLETED,
+    )
+    if exclude_id is not None:
+        paid = paid.exclude(id=exclude_id)
+    if paid.filter(tranzila_terminal=terminal).exists():
+        return True
+    unterminaled = paid.filter(tranzila_terminal='')
+    if made_at is None:
+        return unterminaled.exists()
+    return unterminaled.filter(
+        paid_at__gte=made_at - UNTERMINALED_PAYMENT_WINDOW, paid_at__lte=made_at + UNTERMINALED_PAYMENT_WINDOW,
+    ).exists()
+
+
+def _index_paid_for_something_else(row_id, txn_index: str, terminal: str, made_at=None) -> bool:
     """
     True when this transaction number already paid for another order.
 
@@ -256,7 +288,8 @@ def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> boo
     terminal. Only rows that were actually paid count, so a forged notify
     left pending cannot block the real one. Matched on the terminal, since
     numbers repeat across terminals; a payment link paid before 25.9.2026
-    kept no terminal, so a completed one with this number counts on any.
+    kept no terminal, so a completed one with this number counts only when
+    it was paid about when the report's row was made (`made_at`).
     """
     from apps.store.models import StoreInvoice
 
@@ -267,14 +300,17 @@ def _index_paid_for_something_else(row_id, txn_index: str, terminal: str) -> boo
         .exists()
     ):
         return True
-    return (
-        PaymentLinkPayment.objects.filter(
-            Q(tranzila_terminal=terminal) | Q(tranzila_terminal=''),
-            gateway_transaction_id=txn_index, status=PaymentLinkPayment.STATUS_COMPLETED,
+    # A store order paid twice keeps its second, real charge beside its own
+    # number (other_transactions, state second_charge): paid, for that order.
+    if (
+        StoreInvoice.objects.filter(
+            other_transactions__contains=[{'index': txn_index, 'terminal': terminal, 'state': 'second_charge'}],
         )
         .exclude(id=row_id)
         .exists()
-    )
+    ):
+        return True
+    return link_payment_holds_index(txn_index, terminal, made_at, exclude_id=row_id)
 
 
 # A report row may predate the row it pays for by this much (clock skew
@@ -340,7 +376,7 @@ def verify_transaction_with_tranzila(
     pdesc = str(txn.get('pdesc') or '').strip()
     if pdesc and invoice_id_from_pdesc(pdesc) != str(row.id):
         reasons.append('pdesc of another order')
-    if _index_paid_for_something_else(row.id, txn_index, service.terminal):
+    if _index_paid_for_something_else(row.id, txn_index, service.terminal, made_at):
         reasons.append('index already paid for another order')
     if reasons:
         logger.error('payment %s: transaction %s not accepted: %s', row.id, txn_index, '; '.join(reasons))

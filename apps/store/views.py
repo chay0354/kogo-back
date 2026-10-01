@@ -14,7 +14,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from apps.core.permissions import IsManagerOrPartner
+from apps.core.permissions import IsManager, IsManagerOrPartner
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -428,6 +428,144 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
                 'error': result.get('error', 'שגיאה בזיכוי החשבונית'),
                 'uncertain': bool(result.get('uncertain')),
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='payment-review', permission_classes=[IsAuthenticated, IsManager])
+    def payment_review(self, request, pk=None):
+        """
+        POST /api/v1/store/invoices/{id}/payment-review/
+        Body: {"action": "complete" | "release" | "close", "reason": "...",
+               "confirmation_code": "<approval number from the customer>", "card_last4": "<4 digits>",
+               "acknowledge_charge": ["<transaction number>", ...]}
+
+        A manager decides about the numbers a website/till invoice holds
+        undecided (apps/store/payment_followup.py) — a number Tranzila
+        reported that the report neither confirms nor rules out, a charge
+        found in the report whose notify never came, a number a person
+        released:
+
+          complete  "השלם אחרי אימות" — only through the report, with the
+                    customer's own evidence: the approval number, or the
+                    card's last four digits, which the report's row must
+                    match (and which win over any kept code). On an unpaid
+                    order — in review, or failed with released numbers — the
+                    sale happens on the notify's locked path only if the
+                    report then confirms a number. On a PAID order a number
+                    the report confirms is recorded as a second charge, for a
+                    refund; nothing is sold again. A suspected charge (found
+                    in the report by sum and time) needs that evidence —
+                    nothing else ties it to this order. 409 when the report
+                    does not confirm.
+          release   "אין תשלום — שחרר" — an order in review, only after
+                    checking in Tranzila that there is no charge: the numbers
+                    are RELEASED (still asked about by every notify, poll,
+                    retry and sweep — one the report later confirms is a sale
+                    or a second charge), the order is failed (the customer
+                    may pay again) and the site is told.
+          close     "סגור — לא שלנו" — a PAID order: its undecided further
+                    numbers leave the follow-up — unless the report confirms
+                    one now (then it is a second charge), has not really
+                    answered about it (it could not be asked, or the number
+                    was reported less than ten minutes ago), or lists under
+                    it an approved charge of this very sum: then the answer
+                    is 409 with what the report shows ("charge_shown": the
+                    numbers), and such a number is closed only when the
+                    manager, having been shown it, asks again naming it in
+                    "acknowledge_charge". A bare true, or a number the server
+                    has not shown yet, closes nothing. When some numbers were
+                    closed and another shows a charge, the 200 carries
+                    "charge_shown" and a "warning" too.
+
+        Only numbers reported under this follow-up are decided here: a number
+        that sat on an invoice before it (the weeks of the test terminal) is
+        not "in review", and no action changes such an invoice or tells the
+        site anything. "complete" on an invoice the report could never
+        settle (no cart kept, a number of another terminal) is refused
+        without touching it.
+
+        One call reads the report a few times at most; `not_asked` says how
+        many numbers still wait for another call. A reason is required; who,
+        when and why are kept on the invoice (payment_review_log). Nothing is
+        charged or refunded.
+        """
+        from apps.store import payment_followup
+
+        invoice = self.get_object()
+        action_name = str(request.data.get('action') or '').strip()
+        reason = str(request.data.get('reason') or '').strip()[:500]
+        if action_name not in ('complete', 'release', 'close'):
+            return Response({'error': 'action חייב להיות complete, release או close'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(reason) < 3:
+            return Response({'error': 'חובה לכתוב סיבה'}, status=status.HTTP_400_BAD_REQUEST)
+        by = getattr(request.user, 'email', '') or str(request.user.pk)
+        if action_name == 'release':
+            result = payment_followup.release_reported_payment(invoice.pk, by=by, reason=reason)
+        elif action_name == 'close':
+            # The numbers the manager was shown a charge under, and says are
+            # not this order's. Only a list of numbers counts: a general flag
+            # acknowledges nothing.
+            named = request.data.get('acknowledge_charge')
+            acknowledged = [payment_followup.normal_number(n) for n in named] if isinstance(named, (list, tuple)) else []
+            result = payment_followup.close_reported_numbers(
+                invoice.pk, by=by, reason=reason, acknowledged=[n for n in acknowledged if n],
+            )
+        else:
+            result = payment_followup.complete_reported_payment(
+                invoice.pk, by=by, reason=reason,
+                confirmation_code=str(request.data.get('confirmation_code') or ''),
+                card_last4=str(request.data.get('card_last4') or ''),
+            )
+        outcome = result.get('outcome')
+        not_asked = int(result.get('not_asked') or 0)
+        invoice.refresh_from_db()
+        body = {'outcome': outcome, 'not_asked': not_asked, 'invoice': StoreInvoiceSerializer(invoice).data}
+        more = (f' נבדקו רק חלק מהמספרים של ההזמנה; נשארו {not_asked} — לחצו שוב כדי לבדוק את הבאים.'
+                if not_asked else '')
+        if outcome == 'not_in_review':
+            return Response({**body, 'error': 'אין בחשבונית מספר עסקה שמחכה להחלטה'}, status=status.HTTP_409_CONFLICT)
+        if outcome == 'not_paid':
+            return Response(
+                {**body, 'error': '"סגור — לא שלנו" מיועד להזמנה ששולמה. בהזמנה שלא שולמה: "אין תשלום — שחרר".'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        shown = result.get('charge_shown') or [] if action_name == 'close' else []
+        charge_warning = (
+            f'שימו לב: בדוח של טרנזילה מופיע תחת עסקה {", ".join(shown)} חיוב מאושר בדיוק בסכום של ההזמנה הזאת. '
+            'ייתכן שזה תשלום שני של הלקוח. אם הוא שלו — "חיוב שני — אימות", עם מספר האישור או 4 ספרות '
+            'מהלקוח. רק אם בדקתם שהוא של לקוח אחר: סמנו "ראיתי את החיוב בדוח" וסגרו שוב.'
+        ) if shown else ''
+        if action_name == 'close' and outcome == payment_followup.CHARGE_SHOWN:
+            return Response({**body, 'charge_shown': shown, 'error': charge_warning + more},
+                            status=status.HTTP_409_CONFLICT)
+        if shown:
+            # Some numbers were closed (or recorded) and another shows a
+            # charge: done, and the manager is still told what the report shows.
+            body = {**body, 'charge_shown': shown, 'warning': charge_warning}
+        if action_name == 'close' and outcome == 'not_closed':
+            return Response(
+                {**body, 'waiting': result.get('waiting') or [],
+                 'error': 'שום מספר לא נסגר: הדוח של טרנזילה עוד לא ענה עליו — הוא לא זמין, או שהמספר דווח לפני פחות '
+                          'מ-10 דקות והדוח אולי עוד לא מציג אותו. נסו שוב בעוד כמה דקות.' + more},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if action_name == 'complete' and outcome == payment_followup.NOT_ELIGIBLE:
+            return Response(
+                {**body, 'error': f'אי אפשר להשלים את ההזמנה הזאת מול הדוח: {result.get("why")}. דבר לא השתנה.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if action_name == 'complete' and outcome == payment_followup.EVIDENCE_NEEDED:
+            return Response(
+                {**body, 'error': 'כדי להשלים צריך מהלקוח את מספר האישור של העסקה או את 4 ספרות הכרטיס '
+                                  'האחרונות — שום דבר אחר לא קושר את העסקה להזמנה הזאת.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if action_name == 'complete' and outcome not in ('completed', 'second_charge'):
+            return Response(
+                {**body, 'error': 'הדוח של טרנזילה לא מאשר את התשלום עם מה שהוזן (מספר אישור או 4 ספרות), '
+                                  'ולכן שום דבר לא נרשם. אם בדקתם ואין חיוב — "אין תשלום — שחרר", '
+                                  'ובהזמנה ששולמה "סגור — לא שלנו".' + more},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(body)
 
     @action(detail=True, methods=['get'], url_path='download')
     def download(self, request, pk=None):
@@ -954,9 +1092,8 @@ def payment_callback(request):
     This endpoint is public (no authentication required) since it's called
     by Tranzila's servers.
     """
+    # Never the POST itself: it may carry the card's token (TranzilaTK).
     logger.info("[STORE WEBHOOK] received: method=%s content_type=%s", request.method, request.content_type)
-    logger.debug("[STORE WEBHOOK] data=%s GET=%s POST=%s",
-                 getattr(request, 'data', None), dict(request.GET), dict(request.POST))
 
     payment_service = PaymentService()
 
@@ -973,7 +1110,10 @@ def payment_callback(request):
         from apps.core.tranzila_service import invoice_id_from_pdesc
         invoice_id = invoice_id_from_pdesc(request.data.get('pdesc', ''))
 
-        logger.info("[STORE WEBHOOK] parsed invoice_id=%s response=%s", invoice_id, parsed_response)
+        logger.info(
+            "[STORE WEBHOOK] invoice_id=%s response=%s index=%s",
+            invoice_id, parsed_response.get('response_code'), str(request.data.get('index') or '')[:20],
+        )
 
         result = payment_service.complete_store_purchase_from_webhook(
             invoice_id=invoice_id,

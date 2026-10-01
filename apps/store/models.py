@@ -441,7 +441,101 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="חשבונית נשלחה במייל",
     )
-    
+    # When the website answered "received" to our one "this order is paid"
+    # call (apps/store/payment_followup.py). Until it does, the order is paid
+    # here and still "awaiting payment" on the site, so the call is repeated
+    # from the site's status poll and the morning sweep, and the office is
+    # told if it keeps failing. Empty on till sales, on unpaid orders and on
+    # every order paid before 29.9.2026.
+    website_paid_notified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="האתר אישר שקיבל את התשלום",
+    )
+    # The last time the CRM followed this invoice's payment up by itself —
+    # asked Tranzila's report again about a pending hosted-page payment, or
+    # repeated the "paid" call to the website. Only a pace-keeper: the site
+    # polls every few seconds, and the report is asked at most once per
+    # RECHECK_INTERVAL for the same invoice, across every server instance.
+    payment_followup_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="בדיקת תשלום אחרונה",
+    )
+    # When Tranzila's notify first reported a payment (a transaction number)
+    # for this invoice — the payment's own time, as near as the CRM knows it.
+    # The office's ten minutes count from here, not from when the order was
+    # opened. Empty on invoices no notify reported a number for, and on every
+    # invoice from before 29.9.2026.
+    payment_reported_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="מועד דיווח התשלום",
+    )
+    # When the CRM last handed the website a Tranzila page for this order. A
+    # retry first looks in the report for a payment whose notify never came
+    # (apps/store/payment_followup.find_unreported_payment).
+    payment_page_opened_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="עמוד תשלום נפתח",
+    )
+    # When the first page for this order was handed out. A payment whose
+    # notify never came is looked for from here: the last page's time would
+    # miss a charge made on an earlier one.
+    payment_page_first_opened_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="עמוד תשלום ראשון נפתח",
+    )
+    # When a complete read of the terminal's report last looked for a payment
+    # of this order's pages. The pages are looked for — every morning, and by
+    # a retry — until one such read made a day after the last page was handed
+    # out; until then the order never leaves the search, whatever its age.
+    payment_search_done_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="חיפוש תשלום בדוח — אחרון",
+    )
+    # When the site last asked to pay this order again and was told "wait":
+    # the report could not rule out that an earlier page was paid (it was
+    # down, it had not caught up, a released number was unanswered). While it
+    # is set the site reads the order as pending with a payment reported —
+    # not as failed. Cleared when a look finds that a page may leave.
+    payment_retry_refused_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="בקשת תשלום חוזרת נדחתה — ממתין לדוח",
+    )
+    # Every further transaction number Tranzila reported for this invoice,
+    # beyond tranzila_transaction_id: a second tab, a page paid twice, a
+    # number the report has not answered for yet. None is ever dropped; each
+    # is [{"index", "code", "terminal", "reported_at", "state", "answered_at"}]
+    # with state open (not settled), second_charge (a real second payment, for
+    # a refund), rejected (the report definitely says it did not pay for this
+    # order), released (a person found no charge — still asked about, never
+    # buried), suspected (a charge of this sum found in the terminal's report
+    # after this order's page opened, whose notify never came: a person
+    # decides) or closed (a person decided, on a paid order, that it is not
+    # this order's). answered_at is when the report last really answered
+    # about it (asked and unanswered does not count): the numbers of one
+    # order take turns, and a released one must be answered before the
+    # customer gets another page.
+    other_transactions = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="מספרי עסקה נוספים שדווחו",
+    )
+    # What a person decided about a payment in review, and who and when
+    # (apps/store/payment_followup.release_reported_payment /
+    # complete_reported_payment / close_reported_numbers): [{"action", "by",
+    # "at", "reason", "numbers", "outcome"}]. Never edited, only added to.
+    payment_review_log = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="החלטות על תשלום בבדיקה",
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     

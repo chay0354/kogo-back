@@ -1817,12 +1817,21 @@ class TranzilaService:
         if not isinstance(response, dict) or response.get('success') is False:
             error = response.get('error') if isinstance(response, dict) else 'Tranzila report failed'
             return {'success': False, 'error': error}
-        # A refused key answers {'error_code': 20002, 'message': ...} with no rows.
-        if 'transactions' not in response and not is_tranzila_rest_ok(response.get('error_code', 0)):
-            return {'success': False, 'error': str(response.get('message') or response.get('error_code'))}
-        for row in self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows'):
+        # Three answers, and no stricter than before for the flows that live
+        # on this lookup today (payment links, the business charge):
+        #   * a row of this number in the answer — found, whatever the
+        #     envelope's error_code reads;
+        #   * no rows at all (the list empty or missing) AND an error
+        #     envelope — unknown: a refused key answers {'error_code': 20002,
+        #     'message': ...} with no rows, or with an empty list, and that
+        #     is never "no such transaction";
+        #   * a good answer without this number — no such transaction.
+        rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
+        for row in rows:
             if str(row.get('index') or row.get('transaction_index') or '').strip() == index:
                 return {'success': True, 'transaction': row}
+        if not rows and not is_tranzila_rest_ok(response.get('error_code', 0)):
+            return {'success': False, 'error': str(response.get('message') or response.get('error_code'))}
         return {'success': True, 'transaction': None}
 
     @staticmethod
@@ -1850,19 +1859,40 @@ class TranzilaService:
         end = end_date or start_date
         collected: list = []
         page = None
+        # `complete` says every row of the range was read: False when a page
+        # failed after others were read, the range had more pages than
+        # max_pages, or an answer carried no list of rows at all. A caller
+        # that looks for something ("is this charge there?") must not read a
+        # partial list as "no".
+        complete = False
+        list_keys = ('transactions', 'data', 'result', 'rows')
         for page_num in range(1, max_pages + 1):
             response = self.list_transactions(start_date, end, page=page)
-            if not isinstance(response, dict) or response.get('success') is False:
-                error = (
-                    (response or {}).get('error')
-                    if isinstance(response, dict)
-                    else 'Tranzila transaction list failed'
-                )
+            failed = not isinstance(response, dict) or response.get('success') is False
+            error = (
+                (response or {}).get('error')
+                if isinstance(response, dict)
+                else 'Tranzila transaction list failed'
+            )
+            if not failed and not is_tranzila_rest_ok(response.get('error_code', 0)):
+                # An error envelope — a refused key answers {'error_code':
+                # 20002, 'message': ...} with HTTP 200 and no rows. It says
+                # nothing about the day: an error, never "no transactions"
+                # (review of 1.10.2026).
+                failed = True
+                error = str(response.get('message') or response.get('error_code'))
+            if failed:
                 if collected:
                     logger.error("Tranzila list_transactions page %s failed after partial fetch: %s", page_num, error)
                     break
-                return {'success': False, 'error': error, 'transactions': []}
-            rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
+                return {'success': False, 'error': error, 'transactions': [], 'complete': False}
+            if not any(isinstance(response.get(key), list) for key in list_keys):
+                # Not an error and no list either: an answer we do not know.
+                # What was read is returned, marked incomplete.
+                logger.error("Tranzila list_transactions page %s: no list of rows in the answer (keys: %s)",
+                             page_num, sorted(response.keys()))
+                break
+            rows = self.extract_list_rows(response, *list_keys)
             collected.extend(rows)
             total = response.get('total')
             try:
@@ -1870,11 +1900,17 @@ class TranzilaService:
             except (TypeError, ValueError):
                 total_n = None
             if len(rows) < 1000:
+                # The last page. When the answer itself says how many rows the
+                # range has, fewer read than that is not a complete read.
+                complete = total_n is None or len(collected) >= total_n
+                if not complete:
+                    logger.error("Tranzila list_transactions: %s rows read, the answer says %s", len(collected), total_n)
                 break
             if total_n is not None and len(collected) >= total_n:
+                complete = True
                 break
             page = page_num + 1
-        return {'success': True, 'transactions': collected}
+        return {'success': True, 'transactions': collected, 'complete': complete}
 
     def list_documents(self, start_date: date, end_date: date) -> Dict:
         """

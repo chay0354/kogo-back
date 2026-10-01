@@ -180,8 +180,23 @@ WEBSITE_INTEGRATION_API_KEY = config('WEBSITE_INTEGRATION_API_KEY', default='')
 # ran on TRANZILA_TERMINAL ('realtest', not a terminal of the business), so no
 # store order paid online ever reached the business's account. Turn back on
 # only once TRANZILA_TERMINAL is a terminal of the business and a real 1 ₪
-# purchase has gone through end to end.
+# purchase has gone through end to end. This is the website store's own
+# switch (1.10.2026): its payment page opens on it alone, and does not need
+# — or open — TRANZILA_HOSTED_PAGE_ENABLED, which the till and the general
+# payment links keep.
 STORE_WEBSITE_CARD_PAYMENTS_ENABLED = config('STORE_WEBSITE_CARD_PAYMENTS_ENABLED', default=False, cast=bool)
+# Whether the morning sweep of stuck store payments (apps/store/payment_followup.py,
+# brief item "תשלומים שנתקעו בחנות", and a manager's "בדוק עכשיו") may complete
+# a sale Tranzila's report now confirms. Completing issues the document and
+# emails the customer, which the owner's morning rule (23.9.2026) keeps away
+# from automatic fixes — so it is off until he says otherwise. Off, the sweep
+# sells nothing and changes no status: it reads the report, lists and tells
+# the office, and keeps what it learned (a charge found in the report, a
+# second charge the report confirms on a paid order — neither is a sale, a
+# document or an email). The site's own status poll and Tranzila's notify
+# complete as always; so do website and till invoices on Tranzila's page
+# alike.
+STORE_SWEEP_COMPLETES_PAYMENTS = config('STORE_SWEEP_COMPLETES_PAYMENTS', default=False, cast=bool)
 
 # CORS Settings
 CORS_ALLOWED_ORIGINS = [
@@ -272,6 +287,14 @@ REST_FRAMEWORK = {
         # opening a page, and the widget's poll while the parent pays.
         'course_checkout_start': '20/min',
         'course_checkout_status': '120/min',
+        # The website store's poll of an order's payment (apps/store/widget_views.py).
+        # Every poll comes from the site's own server — one caller for all of
+        # its customers at once — so this is the whole shop's rate. Tranzila is
+        # protected per order (apps/store/payment_followup.RECHECK_INTERVAL).
+        'store_payment_status': '300/min',
+        # The website reporting the number Tranzila's page handed back
+        # (widget/payment/returned/): once per payment, from the site's server.
+        'store_payment_returned': '120/min',
     },
 }
 

@@ -6,6 +6,7 @@ same pattern as the registration widget (AllowAny + explicit key check).
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import re
@@ -16,8 +17,10 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Q
 from rest_framework import status
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core.models import Branch
@@ -28,14 +31,9 @@ from apps.store.inventory_ops import (
     serialize_integration_product,
     transfer_product_stock,
 )
-from apps.store.models import StoreProduct, StoreInvoice, StoreSale
-from apps.store.pricing import line_product_amount, order_delivery_amount, sale_unit_and_total
-from apps.store.stock_utils import (
-    available_stock_for_item,
-    decrement_product_stock,
-    peek_size_row,
-    store_line_item_branch_id,
-)
+from apps.store.models import StoreProduct, StoreInvoice
+from apps.store.pricing import line_product_amount, order_delivery_amount
+from apps.store.stock_utils import available_stock_for_item, peek_size_row
 from apps.store.website_fulfillment import (
     parse_delivery_method,
     resolve_pickup_branch,
@@ -44,7 +42,6 @@ from apps.store.website_fulfillment import (
 from apps.store.website_integration import (
     link_product_to_website,
     product_in_stock,
-    schedule_product_push,
     unlink_product_from_website,
     update_product_from_website,
 )
@@ -52,6 +49,16 @@ from apps.store.website_integration import (
 logger = logging.getLogger(__name__)
 
 WEBSITE_PAYMENTS_PAUSED_MESSAGE = 'התשלום בכרטיס באתר מושהה זמנית. אפשר לפנות אלינו ונשמח להשלים את ההזמנה.'
+WEBSITE_PAYMENT_PAGE_FAILED_MESSAGE = 'התשלום אינו זמין כרגע. נסו שוב בעוד כמה דקות או פנו אלינו.'
+WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE = (
+    'אנחנו מוודאים שהתשלום הקודם על ההזמנה הזאת לא עבר. אל תשלמו שוב — נסו בעוד כמה דקות, '
+    'או פנו אלינו.'
+)
+WEBSITE_ORDER_OLD_MESSAGE = 'ההזמנה הזאת ישנה — צרו הזמנה חדשה'
+WEBSITE_PAYMENT_IN_REVIEW_MESSAGE = (
+    'התקבל כבר תשלום על ההזמנה הזאת והוא בבדיקה. אל תשלמו שוב — נעדכן אתכם, '
+    'ואפשר גם לפנות אלינו.'
+)
 
 
 def _check_integration_key(request) -> bool:
@@ -63,11 +70,32 @@ def _check_integration_key(request) -> bool:
         auth = request.headers.get('Authorization') or ''
         if auth.startswith('Bearer '):
             provided = auth[7:].strip()
-    return provided == expected
+    # Constant time: how much of a guess was right must not show in how long
+    # the answer took.
+    return hmac.compare_digest(provided.encode(), expected.encode())
 
 
 def _integration_denied():
     return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+
+
+class IntegrationKeyRequired(APIException):
+    status_code = status.HTTP_401_UNAUTHORIZED
+    default_detail = {'error': 'unauthorized'}
+    default_code = 'unauthorized'
+
+
+class _KeyBeforeThrottle:
+    """
+    For an integration view that is throttled: the key is checked before the
+    throttle, so callers without it are turned away without using up the
+    shop's rate (every real call comes from the site's one server).
+    """
+
+    def initial(self, request, *args, **kwargs):
+        if not _check_integration_key(request):
+            raise IntegrationKeyRequired()
+        return super().initial(request, *args, **kwargs)
 
 
 def _serialize_integration_product(p: StoreProduct) -> dict:
@@ -456,11 +484,47 @@ def _resolve_website_cart_items(items, *, delivery_method='delivery', pickup_bra
 
 
 def _website_payment_initiate_response(invoice, *, callback_url, success_url, error_url, customer, status=200):
-    """Build Tranzila iframe response for a pending website invoice (or short-circuit if already paid)."""
+    """
+    Build Tranzila iframe response for a pending website invoice (or short-circuit if already paid).
+
+    Nothing is decided on a copy of the invoice read before a wait: the day
+    report, the recheck and the handshake each take seconds, and a notify can
+    complete the sale — or report a payment — meanwhile. The invoice is read
+    again before each decision, the only write (failed → pending) is a
+    conditional UPDATE that re-decides when it finds the row changed, and the
+    last look, right before a page is handed out, is whether a payment was
+    reported meanwhile (review round 3, 30.9.2026).
+
+    No second page leaves without the report's word (review round 5,
+    1.10.2026): every number the order holds — the ones a person released
+    too — is asked about first, and a report that cannot say whether an
+    earlier page was paid (down, an error, read in part) stops the page for
+    as long as that lasts, with one alert to the office.
+    """
+    from django.utils import timezone
+
     from apps.core.payment_service import parse_store_cart_notes
     from apps.core.tranzila_service import TranzilaService
+    from apps.store import payment_followup as followup
 
-    if invoice.payment_status == 'completed':
+    def in_review():
+        return Response({
+            'error': WEBSITE_PAYMENT_IN_REVIEW_MESSAGE,
+            'payment_in_review': True,
+            'invoice_number': invoice.invoice_number,
+        }, status=409)
+
+    def wait(retry_after):
+        # Not "a payment is in review" — we cannot rule one out yet. The
+        # customer is asked to wait, not to pay again.
+        return Response({
+            'error': WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE,
+            'payment_in_review': True,
+            'retry_after': retry_after,
+            'invoice_number': invoice.invoice_number,
+        }, status=409)
+
+    def already_paid():
         return Response({
             'ok': True,
             'invoice_number': invoice.invoice_number,
@@ -468,11 +532,56 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             'already_paid': True,
         }, status=status)
 
-    if invoice.payment_status == 'failed':
-        if parse_store_cart_notes(invoice.notes) is None:
-            return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
-        invoice.payment_status = 'pending'
-        invoice.save(update_fields=['payment_status'])
+    for _attempt in range(3):
+        invoice.refresh_from_db()
+        if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
+            return already_paid()
+
+        if invoice.payment_status == 'refunded':
+            # Paid and refunded: a payment now would be taken as the same order
+            # paid twice, and sell nothing.
+            return Response({'error': 'ההזמנה הזאת זוכתה. צרו הזמנה חדשה.'}, status=400)
+
+        if followup.is_old_order(invoice):
+            # An order from before the follow-up, with a transaction number
+            # nobody follows (the test terminal's weeks): no page for it. A
+            # payment on it would sit beside a number the report cannot be
+            # asked about, and the order could not be completed. 400 — the
+            # site opens a new order on it, as for any refused one. Nothing
+            # is written and the report is not read.
+            logger.warning('Website order %s: no page — an order from before the follow-up, with a number on it',
+                           invoice.website_order_number)
+            return Response({'error': WEBSITE_ORDER_OLD_MESSAGE, 'old_order': True}, status=400)
+
+        # Whether a page may leave is decided in one place, for this request
+        # and for the site's status poll alike (payment_followup.second_page_verdict):
+        # every number the order holds is asked about — a released one must
+        # be really answered — and the report is searched for a payment whose
+        # notify never came. "Unknown" is never "no charge".
+        verdict, retry_after = followup.second_page_verdict(invoice)
+        if verdict == followup.PAGE_PAID:
+            return already_paid()
+        if verdict == followup.PAGE_IN_REVIEW:
+            return in_review()
+        if verdict == followup.PAGE_WAIT:
+            return wait(retry_after)
+        if verdict == followup.PAGE_AGAIN:
+            continue
+
+        if invoice.payment_status == 'failed':
+            if parse_store_cart_notes(invoice.notes) is None:
+                return Response({'error': 'התשלום הקודם נכשל — צרו הזמנה חדשה'}, status=400)
+            reopened = StoreInvoice.objects.filter(
+                pk=invoice.pk, payment_status='failed', tranzila_transaction_id='',
+            ).update(payment_status='pending')
+            if not reopened:
+                continue  # changed since it was read: decide again
+            invoice.payment_status = 'pending'
+        break
+    else:
+        # Still changing after three reads: nothing is handed out now.
+        logger.error('Website order %s: kept changing while a page was asked for', invoice.website_order_number)
+        return in_review()
 
     if not callback_url:
         return Response({'error': 'callback_url required'}, status=400)
@@ -481,20 +590,52 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
     email = (customer.get('email') or '').strip()
     phone = (customer.get('phone') or invoice.customer_phone or '').strip()
 
-    iframe_url = TranzilaService.iframe().create_payment_request(
-        amount=invoice.total_amount,
-        currency='ILS',
-        description=f"Website order {invoice.website_order_number or invoice.invoice_number}",
-        customer_name=name,
-        customer_email=email,
-        customer_phone=re.sub(r'\D', '', phone)[:15],
-        success_url=success_url,
-        error_url=error_url,
-        callback_url=callback_url,
-        transaction_id=str(invoice.id),
-        offer_wallets=True,
-    )
+    tranzila = TranzilaService.iframe()
+    try:
+        iframe_url = tranzila.create_payment_request(
+            amount=invoice.total_amount,
+            currency='ILS',
+            description=f"Website order {invoice.website_order_number or invoice.invoice_number}",
+            customer_name=name,
+            customer_email=email,
+            customer_phone=re.sub(r'\D', '', phone)[:15],
+            success_url=success_url,
+            error_url=error_url,
+            callback_url=callback_url,
+            transaction_id=str(invoice.id),
+            offer_wallets=True,
+            # The website store has a switch of its own (checked by the
+            # caller): its page does not wait for the general hosted-page
+            # switch, which the till and the general payment links keep.
+            hosted_page_allowed=True,
+        )
+    except Exception as exc:
+        # Tranzila's handshake refused or did not answer: no page, so no
+        # payment. The order is not left pending — a pending website order
+        # counts as income in the reports — and the site may retry it (a
+        # failed order that still holds its cart reopens). Only an order no
+        # payment was ever reported for is failed: one a notify reported a
+        # number for meanwhile (the first page, paid while this retry asked
+        # for a second) is in review, and stays so.
+        logger.error('Website order %s: Tranzila page not opened: %s', invoice.website_order_number, exc)
+        StoreInvoice.objects.filter(
+            pk=invoice.pk, payment_status='pending', tranzila_transaction_id='',
+        ).update(payment_status='failed')
+        followup.alert_payment_page_failed(invoice, str(exc), tranzila.terminal)
+        return Response({'error': WEBSITE_PAYMENT_PAGE_FAILED_MESSAGE}, status=503)
 
+    # The last look before a page leaves: a payment reported, or a sale
+    # completed, while the page was being asked for.
+    invoice.refresh_from_db()
+    if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
+        return already_paid()
+    if followup.holds_reported_payment(invoice) or invoice.payment_status == 'refunded':
+        return in_review()
+    now = timezone.now()
+    StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=now, payment_retry_refused_at=None)
+    StoreInvoice.objects.filter(pk=invoice.pk, payment_page_first_opened_at__isnull=True).update(
+        payment_page_first_opened_at=now,
+    )
     return Response({
         'ok': True,
         'iframe_url': iframe_url,
@@ -517,10 +658,11 @@ class WidgetStorePaymentInitiateView(APIView):
             return _integration_denied()
 
         # Paused before anything is written or any payment page is opened —
-        # for a new order and for one the site retries. See both settings: the
-        # page this view opens is Tranzila's hosted page, which is switched off
-        # while it runs on the test terminal.
-        if not (settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED and settings.TRANZILA_HOSTED_PAGE_ENABLED):
+        # for a new order and for one the site retries. The website store's
+        # own switch, and only it (review of 1.10.2026): the general
+        # hosted-page switch belongs to the till and the general payment
+        # links, and the store on the site opens, or stays closed, without it.
+        if not settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED:
             # The website moves the whole page to whatever payment address it
             # gets back, so while payment is off it gets ours: a kind
             # "temporarily closed" page with a way to reach the office, in
@@ -620,127 +762,116 @@ class WidgetStorePaymentInitiateView(APIView):
         )
 
 
+class WidgetStorePaymentStatusView(_KeyBeforeThrottle, APIView):
+    """
+    GET /api/v1/store/widget/payment/status/?order=<website_order_number>
+    → {"status": "pending" | "completed" | "failed" | "refunded",
+       "invoice_number": "ST-…", "paid": bool, "payment_reported": bool}
+
+      paid              true only for a Tranzila payment the report confirmed.
+      payment_reported  true while Tranzila reported a payment the CRM has
+                        neither confirmed nor ruled out: the order is in
+                        review, status is "pending", and the customer must
+                        not be asked to pay again.
+      refunded          paid and then refunded: not paid.
+    (payment_followup.site_status is the one place this is decided.)
+
+    The website's poll while the customer waits on the result page. The
+    answer is always the CRM's own record. On the way, a payment Tranzila
+    reported and the report has not confirmed yet — a number a person
+    released included — is asked about again (at most once per 15 seconds
+    per order, however often the site polls, a few numbers at a time), and a
+    paid order the site never acknowledged is told again — both through
+    apps/store/payment_followup.py, neither charges anything. Authenticated
+    with the integration key, like the rest of the widget, checked before the
+    throttle. Throttled: every poll comes from the site's own server, so the
+    rate is for the whole shop.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'store_payment_status'
+
+    def get(self, request):
+        # The key was checked before the throttle (_KeyBeforeThrottle.initial).
+        order = (request.query_params.get('order') or '').strip()
+        if not order:
+            return Response({'error': 'order required'}, status=400)
+        from apps.store.payment_followup import website_order_status
+
+        payload = website_order_status(order)
+        if payload is None:
+            return Response({'error': 'order not found'}, status=404)
+        return Response(payload)
+
+
+class WidgetStorePaymentReturnedView(_KeyBeforeThrottle, APIView):
+    """
+    POST /api/v1/store/widget/payment/returned/
+    {"order": "<website_order_number>", "index": "<Tranzila's transaction number>", "code": "<ConfirmationCode>"}
+    → the same answer as the status endpoint.
+
+    Server to server, from the website, with the integration key: the number
+    Tranzila's page handed back to the site's return address, for an order
+    whose notify may never come. It is recorded as reported and judged by the
+    report exactly like a notify — believed no more than one. `code` (the
+    approval number the page returned) is optional; without it the report
+    cannot tie the number to the order, and the order stays in review for a
+    person. A number that is not this order's payment does not pass, and is
+    kept for the office like any other. Call it only for the page's
+    success return.
+
+    Refused (409, with the status) for an order whose page the CRM did not
+    hand out in the last two hours; 400 for anything but a transaction number
+    (ASCII digits, at most twenty; leading zeros are dropped). Every number
+    is kept, up to fifty per order.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'store_payment_returned'
+
+    def post(self, request):
+        # The key was checked before the throttle (_KeyBeforeThrottle.initial).
+        from apps.store import payment_followup
+
+        order = str(request.data.get('order') or '').strip()
+        index = payment_followup.normal_number(request.data.get('index'))
+        code = str(request.data.get('code') or request.data.get('ConfirmationCode') or '').strip()[:100]
+        if not order:
+            return Response({'error': 'order required'}, status=400)
+        if not index:
+            return Response({'error': 'index must be the transaction number Tranzila returned'}, status=400)
+        outcome, payload = payment_followup.record_returned_number(order, index, code)
+        if outcome == payment_followup.RETURNED_NO_ORDER:
+            return Response({'error': 'order not found'}, status=404)
+        if outcome == payment_followup.RETURNED_NO_RECENT_PAGE:
+            return Response({**payload, 'error': 'no payment page was opened for this order in the last two hours'},
+                            status=409)
+        return Response(payload)
+
+
 class WidgetStoreWebsiteOrderView(APIView):
     """
-    POST /api/v1/store/widget/order/
-    Creates a CRM store invoice from a B2C website order (walk-in customer).
+    Retired (29.9.2026). POST /api/v1/store/widget/order/ answers 410 and changes nothing.
+
+    It opened a *completed* invoice for a website order — the sale recorded,
+    the stock taken, the document signed and mailed — with no payment behind
+    it at all: a caller holding the integration key could "buy" anything.
+    The website pays through widget/payment/initiate/ (Tranzila's page,
+    confirmed against the terminal's report). Before closing it, nothing in
+    kogo-front or cogomelo-site called it, on any branch — the site keeps an
+    unused client function (submitCrmWebsiteOrder) and its contract document.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
-        if not _check_integration_key(request):
-            return _integration_denied()
-
-        idempotency_key = (request.data.get('idempotency_key') or '').strip() or None
-        website_order_number = (request.data.get('website_order_number') or '').strip() or None
-        customer = request.data.get('customer') or {}
-        items = request.data.get('items') or []
-
-        if idempotency_key:
-            existing = StoreInvoice.objects.filter(website_idempotency_key=idempotency_key).first()
-            if existing:
-                return Response({
-                    'ok': True,
-                    'invoice_number': existing.invoice_number,
-                    'invoice_id': str(existing.id),
-                    'duplicate': True,
-                })
-
-        if website_order_number:
-            existing = StoreInvoice.objects.filter(website_order_number=website_order_number).first()
-            if existing:
-                return Response({
-                    'ok': True,
-                    'invoice_number': existing.invoice_number,
-                    'invoice_id': str(existing.id),
-                    'duplicate': True,
-                })
-
-        if not items:
-            return Response({'error': 'items required'}, status=400)
-
-        name = (customer.get('name') or '').strip()
-        phone = (customer.get('phone') or '').strip()
-        email = (customer.get('email') or '').strip()
-        address = (customer.get('address') or customer.get('shipping_address') or '').strip()[:255]
-        customer_notes = (customer.get('notes') or '').strip()
-
-        try:
-            delivery_method, pickup_branch, _branch = _fulfillment_from_request(request.data)
-            with transaction.atomic():
-                total, resolved, product_items = _resolve_website_cart_items(
-                    items,
-                    delivery_method=delivery_method,
-                    pickup_branch=pickup_branch,
-                )
-
-                notes_parts = ['הזמנה מהאתר']
-                if delivery_method == 'pickup':
-                    notes_parts.append('איסוף מהסניף')
-                if email:
-                    notes_parts.append(f'email:{email}')
-                if website_order_number:
-                    notes_parts.append(f'web:{website_order_number}')
-
-                invoice = StoreInvoice(
-                    customer_name=name,
-                    customer_phone=phone,
-                    customer_email=email,
-                    shipping_address=address,
-                    customer_notes=customer_notes,
-                    total_amount=total,
-                    payment_method='credit_card',
-                    # B2C checkout confirms the sale; stock is decremented immediately.
-                    payment_status='completed',
-                    charged_with_token=False,
-                    website_order_number=website_order_number,
-                    website_idempotency_key=idempotency_key,
-                    notes=' | '.join(notes_parts),
-                    branch=pickup_branch if pickup_branch else (
-                        resolved[0]['product'].branch if resolved else None
-                    ),
-                )
-                invoice.save()
-
-                for item in product_items:
-                    product = StoreProduct.objects.get(id=item['product_id'])
-                    unit, line_total = sale_unit_and_total(product, item)
-                    StoreSale.objects.create(
-                        invoice=invoice,
-                        product=product,
-                        child=None,
-                        quantity=item['quantity'],
-                        unit_price=unit,
-                        total_price=line_total,
-                        size=item.get('size', ''),
-                        payment_method='credit_card',
-                        branch_id=store_line_item_branch_id(item, product),
-                        notes='website order',
-                    )
-                    decrement_product_stock(product, item)
-                    product.refresh_from_db(fields=['stock_quantity'])
-                    # Deferred to COMMIT: no outbound call while the order's
-                    # rows are locked, and one call for the whole cart.
-                    schedule_product_push(product)
-
-        except (KeyError, TypeError, ValueError) as exc:
-            return Response({'error': str(exc)}, status=400)
-        except Exception as exc:
-            logger.exception('Website order failed')
-            return Response({'error': 'שגיאה ביצירת ההזמנה'}, status=500)
-
-        from apps.core.payment_service import _sign_store_sale
-        _sign_store_sale(invoice)
-
-        try:
-            from apps.store.invoice_email import send_store_invoice_email
-            send_store_invoice_email(invoice)
-        except Exception:
-            logger.exception('Store invoice email failed for %s (non-fatal)', invoice.invoice_number)
-
-        return Response({
-            'ok': True,
-            'invoice_number': invoice.invoice_number,
-            'invoice_id': str(invoice.id),
-        }, status=201)
+        logger.warning(
+            'Retired website order endpoint called (integration key valid: %s); nothing written',
+            _check_integration_key(request),
+        )
+        return Response(
+            {'error': 'endpoint closed', 'use': '/api/v1/store/widget/payment/initiate/'},
+            status=status.HTTP_410_GONE,
+        )

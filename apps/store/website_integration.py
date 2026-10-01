@@ -355,20 +355,28 @@ def sync_products_from_website() -> dict:
     }
 
 
-def notify_website_order_status(
+ORDER_STATUS_TIMEOUT_SECONDS = 30
+
+
+def post_website_order_status(
     *,
     website_order_number: str,
     invoice_number: str,
     invoice_id: str,
     status: str,
     provider_txn_id: str = '',
-) -> bool:
+    timeout: float = ORDER_STATUS_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
     """
-    Tell the B2C site that a website order was paid or failed (after Tranzila webhook).
-    POST /api/integrations/order-paid on the public shop.
+    POST /api/integrations/order-paid on the public shop: (answered 2xx, why not).
+
+    The reason is for the office alert when a paid order's call keeps failing
+    (apps/store/payment_followup.py), so it says what a person can act on.
     """
-    if not _integration_configured() or not website_order_number:
-        return False
+    if not website_order_number:
+        return False, 'להזמנה אין מספר הזמנה של האתר'
+    if not _integration_configured():
+        return False, 'החיבור לאתר לא מוגדר בשרת (WEBSITE_INTEGRATION_URL / WEBSITE_INTEGRATION_API_KEY)'
 
     url = settings.WEBSITE_INTEGRATION_URL.rstrip('/') + '/api/integrations/order-paid'
     headers = {
@@ -383,7 +391,7 @@ def notify_website_order_status(
         'provider_txn_id': provider_txn_id or None,
     }
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
         if resp.status_code >= 400:
             logger.error(
                 'Website order status push failed: HTTP %s order=%s body=%s',
@@ -391,9 +399,34 @@ def notify_website_order_status(
                 website_order_number,
                 resp.text[:500],
             )
-            return False
+            return False, f'האתר ענה HTTP {resp.status_code}: {resp.text[:200]}'
         logger.info('Notified website order %s → %s', website_order_number, status)
-        return True
+        return True, ''
     except requests.RequestException as exc:
         logger.warning('Website order status push error for %s: %s', website_order_number, exc)
-        return False
+        return False, f'האתר לא ענה: {exc}'[:300]
+
+
+def notify_website_order_status(
+    *,
+    website_order_number: str,
+    invoice_number: str,
+    invoice_id: str,
+    status: str,
+    provider_txn_id: str = '',
+) -> bool:
+    """
+    Tell the B2C site that a website order was paid or failed (after Tranzila webhook).
+    POST /api/integrations/order-paid on the public shop.
+
+    A "paid" call goes through apps/store/payment_followup.tell_website_paid
+    instead, which records the site's answer and repeats the call until it lands.
+    """
+    ok, _why = post_website_order_status(
+        website_order_number=website_order_number,
+        invoice_number=invoice_number,
+        invoice_id=invoice_id,
+        status=status,
+        provider_txn_id=provider_txn_id,
+    )
+    return ok

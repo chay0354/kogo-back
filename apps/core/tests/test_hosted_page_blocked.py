@@ -111,8 +111,28 @@ class TheWebsiteStore(TestCase):
             stock_quantity=10, website_legacy_id=7001, is_active=True,
         )
 
-    def test_stays_paused_even_with_card_payments_turned_on(self):
-        res = APIClient().post(
+    def test_opens_on_its_own_switch_without_the_general_one(self):
+        # Until 1.10.2026 the site also waited for TRANZILA_HOSTED_PAGE_ENABLED.
+        # The fifth review of stage 3 gave the website store a gate of its own
+        # (STORE_WEBSITE_CARD_PAYMENTS_ENABLED alone), so a controlled 1 ₪
+        # purchase on the site does not open the till and the general links.
+        res = self._initiate()
+
+        self.assertNotIn('payments_paused', res.data)
+        self.assertIn('iframenew.php', res.data['iframe_url'])
+        self.assertEqual(StoreInvoice.objects.count(), 1)
+
+    @override_settings(STORE_WEBSITE_CARD_PAYMENTS_ENABLED=False, TRANZILA_HOSTED_PAGE_ENABLED=True)
+    def test_stays_paused_while_its_own_switch_is_off_whatever_the_general_one_reads(self):
+        res = self._initiate()
+
+        self.assertTrue(res.data['payments_paused'])
+        self.assertTrue(res.data['iframe_url'].endswith('/store-closed'))
+        self.assertNotIn('iframenew.php', res.data['iframe_url'])
+        self.assertFalse(StoreInvoice.objects.exists())
+
+    def _initiate(self):
+        return APIClient().post(
             '/api/v1/store/widget/payment/initiate/',
             {
                 'website_order_number': 'CG-1', 'idempotency_key': 'k-1',
@@ -121,11 +141,6 @@ class TheWebsiteStore(TestCase):
             },
             format='json', HTTP_X_INTEGRATION_KEY='test-key',
         )
-
-        self.assertTrue(res.data['payments_paused'])
-        self.assertTrue(res.data['iframe_url'].endswith('/store-closed'))
-        self.assertNotIn('iframenew.php', res.data['iframe_url'])
-        self.assertFalse(StoreInvoice.objects.exists())
 
 
 @override_settings(**IFRAME_SETTINGS, CRM_API_BASE_URL='https://api.example.test')
