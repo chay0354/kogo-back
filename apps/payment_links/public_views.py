@@ -74,7 +74,11 @@ class PublicPaymentLinkView(_PublicView):
     throttle_scope = 'payment_link_view'
 
     def get(self, request, slug: str):
-        link = PaymentLink.objects.prefetch_related('options').filter(slug=slug).first()
+        link = (
+            PaymentLink.objects.prefetch_related('options')
+            .select_related('business_customer', 'target_invoice')
+            .filter(slug=slug).first()
+        )
         if link is None:
             return Response({'error': 'הקישור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
         if not link.is_open():
@@ -167,10 +171,26 @@ class PublicPaymentStartView(_PublicView):
 
         with transaction.atomic():
             if business_charge:
+                from apps.payment_links.business_charge import abandon_stale_attempts, attempt_abandoned_after
+
                 link = PaymentLink.objects.select_for_update().get(pk=link.pk)
-                if not link.is_open() or link.payments.filter(status=PaymentLinkPayment.STATUS_PENDING).exists():
+                # A payment started and never finished blocked the link for
+                # good: the customer who opened it yesterday could not pay
+                # today. Past the waiting time it is retired (failed,
+                # 'abandoned') and a new attempt goes through.
+                abandon_stale_attempts(link, now=now)
+                if not link.is_open():
                     return Response(
                         {'error': 'כבר התחיל ניסיון תשלום בקישור הזה. יש לבדוק את מצבו לפני ניסיון נוסף.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if link.payments.filter(status=PaymentLinkPayment.STATUS_PENDING).exists():
+                    minutes = int(attempt_abandoned_after().total_seconds() // 60)
+                    return Response(
+                        {'error': (
+                            'כבר התחיל ניסיון תשלום בקישור הזה. אם התשלום לא הושלם, '
+                            f'אפשר לנסות שוב כ־{minutes} דקות אחרי שהתחיל.'
+                        )},
                         status=status.HTTP_409_CONFLICT,
                     )
             row = PaymentLinkPayment.objects.create(
@@ -454,6 +474,11 @@ def payment_link_callback(request):
         row.card_type = str(parsed.get('card_type') or '')[:30]
         row.reported_amount = _reported_sum(request.data.get('sum'), parsed.get('amount'))
         row.paid_at = timezone.now()
+        if row.failure_reason == PaymentLinkPayment.REASON_ABANDONED:
+            # An attempt retired as abandoned (business_charge.abandon_stale_attempts)
+            # whose approved notify came after all: it is settled like any
+            # other, and no longer reads as a failure.
+            row.failure_reason = ''
 
         currency = str(request.data.get('currency') or parsed.get('currency') or '1').strip().upper()
         if not _amounts_match(row.amount, row.reported_amount):

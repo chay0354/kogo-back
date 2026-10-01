@@ -292,6 +292,21 @@ BUSINESS_CHARGE_TRANZILA_TERMINAL = config('BUSINESS_CHARGE_TRANZILA_TERMINAL', 
 # It opens Tranzila's hosted page for business charges alone; the store, the
 # till and general payment links stay behind TRANZILA_HOSTED_PAGE_ENABLED.
 BUSINESS_CHARGE_ENABLED = config('BUSINESS_CHARGE_ENABLED', default=False, cast=bool)
+# Owner, 1.10.2026: a business charge paid the day it was created gets one
+# חשבונית מס/קבלה; one still unpaid after this many hours gets an open חשבונית
+# מס (the business-invoices cron), and the payment that follows closes it with
+# a קבלה (apps/payment_links/business_charge.issue_overdue_business_invoices).
+BUSINESS_CHARGE_INVOICE_AFTER_HOURS = config('BUSINESS_CHARGE_INVOICE_AFTER_HOURS', default=24, cast=int)
+# A payment the customer started and never finished stops blocking a new
+# attempt on the same link after this many minutes. The cron above waits the
+# same time for an attempt that is still under way.
+BUSINESS_CHARGE_ATTEMPT_ABANDONED_MINUTES = config('BUSINESS_CHARGE_ATTEMPT_ABANDONED_MINUTES', default=20, cast=int)
+# The rule above starts here (ISO 8601 with its offset): a link created before
+# this moment never gets an automatic tax invoice, so the first cron run does
+# not invoice every old unpaid link at once. Empty → no such bound.
+BUSINESS_CHARGE_INVOICE_LINKS_FROM = config(
+    'BUSINESS_CHARGE_INVOICE_LINKS_FROM', default='2026-10-01T00:00:00+03:00',
+)
 
 # RESTful API v1 credentials (required for token-based charges)
 TRANZILA_PUBLIC_KEY = config('TRANZILA_PUBLIC_KEY', default='')  # Goes in X-tranzila-api-app-key header
