@@ -1246,7 +1246,15 @@ def check_card_payout(today: date) -> BriefItem:
     item.summary = f"ב־{when} צפוי להיכנס {_money(ours['net'])} (גבייה של {payout.label}), לפני עמלות."
     tranzila = card_payouts.tranzila_summary(payout.month, ours['net'])
     if tranzila['complete']:
-        item.summary += f" בטרנזילה {_money(tranzila['total'])}, פער {_money(tranzila['gap'])}."
+        # Which side has more, in words: a minus sign in front of money is easy to misread.
+        gap = Decimal(str(tranzila['gap']))
+        if gap == 0:
+            gap_text = 'אין פער'
+        elif gap > 0:
+            gap_text = f'פער {_money(gap)} — בטרנזילה יותר'
+        else:
+            gap_text = f'פער {_money(-gap)} — אצלנו יותר'
+        item.summary += f" בטרנזילה {_money(tranzila['total'])}, {gap_text}."
         for terminal in tranzila['terminals']:
             item.rows.append(_row(
                 f"{terminal['terminal']} · {terminal['label']}",

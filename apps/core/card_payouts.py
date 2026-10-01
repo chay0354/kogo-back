@@ -677,7 +677,9 @@ def _add_payment_links(ledger: _Ledger, start: datetime, end: datetime) -> None:
     counted once. The month: paid_at. The branch: the link's.
 
     Refunds: none are recorded — a link payment has no refund status, the
-    refund is made at Tranzila. Such a refund is part of the gap.
+    refund is made at Tranzila. Such a refund is part of the gap. So is a
+    payment left in 'review' (the report disagreed with the page): it is not
+    counted until the office settles it.
     """
     from apps.payment_links.models import PaymentLinkPayment
 

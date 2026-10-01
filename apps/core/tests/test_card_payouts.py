@@ -17,7 +17,6 @@ from django.test import TestCase, override_settings
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
-from apps.core import card_payouts
 from apps.core.card_payouts import (
     PayoutError,
     classify_report_row,
@@ -854,8 +853,20 @@ class BriefItemTests(MoneyFixture, TestCase):
         item = check_card_payout(date(2026, 10, 6))
         self.assertEqual(item.severity, GREEN)
         self.assertIn('בטרנזילה 1,350 ₪', item.summary)
-        self.assertIn('פער 50 ₪', item.summary)
+        self.assertIn('פער 50 ₪ — בטרנזילה יותר', item.summary)
         self.assertEqual(len(item.rows), 4)
+
+    def test_the_gap_says_which_side_has_more(self):
+        from apps.core.daily_brief import check_card_payout
+
+        for terminal, charges in (('fxpmichalweb', '0.00'), ('fxpmichalwebtok', '1200.00'),
+                                  ('cogolive', '0.00'), ('cogolivetok', '0.00')):
+            CardPayoutTerminalMonth.objects.create(
+                terminal=terminal, month=SEP, charges_total=Decimal(charges), complete=True, fetched_at=il(1, month=10),
+            )
+        self.assertIn('פער 100 ₪ — אצלנו יותר', check_card_payout(date(2026, 10, 3)).summary)
+        CardPayoutTerminalMonth.objects.filter(terminal='cogolive').update(charges_total=Decimal('100.00'))
+        self.assertIn('אין פער', check_card_payout(date(2026, 10, 3)).summary)
 
     def test_a_partial_read_is_not_quoted(self):
         from apps.core.daily_brief import check_card_payout
