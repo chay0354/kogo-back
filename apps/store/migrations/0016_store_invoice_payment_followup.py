@@ -9,9 +9,10 @@ class Migration(migrations.Migration):
     (apps/store/payment_followup.py): when the website acknowledged "paid",
     when the CRM last followed the payment up by itself, when Tranzila first
     reported a payment, when the first and the last payment page were handed out,
-    when the report was last searched for a payment of those pages, every
-    further transaction number Tranzila reported, and what a person decided
-    about a payment in review.
+    when the report was last searched for a payment of those pages, when a
+    request to pay again was last told to wait, every further transaction
+    number Tranzila reported, and what a person decided about a payment in
+    review.
 
     Rolling this back (migrate store 0015) drops other_transactions and
     payment_review_log, and with them numbers nothing else keeps. A retreat
@@ -61,6 +62,11 @@ class Migration(migrations.Migration):
             model_name='storeinvoice',
             name='payment_search_done_at',
             field=models.DateTimeField(blank=True, null=True, verbose_name='חיפוש תשלום בדוח — אחרון'),
+        ),
+        migrations.AddField(
+            model_name='storeinvoice',
+            name='payment_retry_refused_at',
+            field=models.DateTimeField(blank=True, null=True, verbose_name='בקשת תשלום חוזרת נדחתה — ממתין לדוח'),
         ),
         migrations.AddField(
             model_name='storeinvoice',

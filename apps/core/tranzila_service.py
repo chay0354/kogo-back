@@ -1817,8 +1817,10 @@ class TranzilaService:
         if not isinstance(response, dict) or response.get('success') is False:
             error = response.get('error') if isinstance(response, dict) else 'Tranzila report failed'
             return {'success': False, 'error': error}
-        # A refused key answers {'error_code': 20002, 'message': ...} with no rows.
-        if 'transactions' not in response and not is_tranzila_rest_ok(response.get('error_code', 0)):
+        # A refused key answers {'error_code': 20002, 'message': ...} with no
+        # rows — or with an empty list. An error envelope is never "no such
+        # transaction", whatever else it carries (review of 1.10.2026).
+        if not is_tranzila_rest_ok(response.get('error_code', 0)):
             return {'success': False, 'error': str(response.get('message') or response.get('error_code'))}
         for row in self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows'):
             if str(row.get('index') or row.get('transaction_index') or '').strip() == index:
@@ -1891,7 +1893,11 @@ class TranzilaService:
             except (TypeError, ValueError):
                 total_n = None
             if len(rows) < 1000:
-                complete = True
+                # The last page. When the answer itself says how many rows the
+                # range has, fewer read than that is not a complete read.
+                complete = total_n is None or len(collected) >= total_n
+                if not complete:
+                    logger.error("Tranzila list_transactions: %s rows read, the answer says %s", len(collected), total_n)
                 break
             if total_n is not None and len(collected) >= total_n:
                 complete = True

@@ -500,8 +500,6 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
     earlier page was paid (down, an error, read in part) stops the page for
     as long as that lasts, with one alert to the office.
     """
-    from datetime import timedelta
-
     from django.utils import timezone
 
     from apps.core.payment_service import parse_store_cart_notes
@@ -538,76 +536,25 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
         if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
             return already_paid()
 
-        held = followup.holds_reported_payment(invoice)
-        if held or (invoice.payment_status in followup.UNSETTLED_STATUSES
-                    and followup.open_numbers(invoice, include_released=True)):
-            # Tranzila already reported a payment for this order — or the
-            # report shows one whose notify never came — that is neither
-            # confirmed nor ruled out, whatever the status reads. Asked again
-            # first; a second page now could take the same customer's money
-            # twice. A suspected charge waits for a person. A number a person
-            # released does not hold the order, but it is asked about too: a
-            # release is a person's look, not the report's no, and one the
-            # report confirms now is this order's payment.
-            # An order in review answers 409 whatever the report says now, so
-            # its check keeps the poll's pace; released numbers are asked
-            # about right now — the page waits on exactly that.
-            outcome = followup.recheck_pending_payment(
-                invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS,
-                min_interval=followup.RECHECK_INTERVAL if held else timedelta(0),
-            )
-            invoice.refresh_from_db()
-            if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
-                return already_paid()
-            if held or followup.holds_reported_payment(invoice):
-                return in_review()
-            # (An order with no cart kept cannot be asked about or paid again:
-            # it is refused below, with "open a new order".)
-            if outcome != followup.RECHECK_NOT_ELIGIBLE and followup.released_not_asked(invoice):
-                # More released numbers than one check may ask about: the
-                # next retry asks about the next ones.
-                logger.warning('Website order %s: no second page yet — released numbers still to be asked about',
-                               invoice.website_order_number)
-                return wait(int(followup.RECHECK_INTERVAL.total_seconds()))
-
         if invoice.payment_status == 'refunded':
             # Paid and refunded: a payment now would be taken as the same order
             # paid twice, and sell nothing.
             return Response({'error': 'ההזמנה הזאת זוכתה. צרו הזמנה חדשה.'}, status=400)
 
-        opened = invoice.payment_page_opened_at
-        if opened is not None and not followup.search_is_final(invoice):
-            # A page for this order was handed out before. If its notify never
-            # came, the report is the only place the payment shows: a matching
-            # charge there is kept on the order ("suspected") and holds it in
-            # review until a person decides. A report that cannot say — down,
-            # an error, read only in part — is not "no charge": no second page
-            # without the check, however long it lasts, and the office hears
-            # that a customer is waiting (reviews of 30.9 and 1.10.2026).
-            found, rows = followup.find_unreported_payment(invoice)
-            if found == 'found':
-                logger.error('Website order %s: no second page — the day report shows a matching charge',
-                             invoice.website_order_number)
-                followup.keep_suspected_charges(invoice.pk, rows)
-                followup.alert_payment_unreported(invoice, rows)
-                return in_review()
-            if found == 'unknown':
-                logger.error('Website order %s: no second page — the day report could not be asked in full',
-                             invoice.website_order_number)
-                followup.alert_report_unavailable(invoice)
-                return wait(60)
-            followup.mark_searched(invoice.pk)
-            # The report took time: decide again on what the invoice is now.
-            invoice.refresh_from_db()
-            if followup.holds_reported_payment(invoice) or invoice.payment_status in followup.PAID_STATUSES:
-                continue
-            if found == 'none' and timezone.now() - opened < followup.REPORT_SETTLE:
-                # The report may not list a payment made on the last page
-                # minutes ago: "not found" is not "not paid" yet. The customer
-                # is asked to wait, not to pay again.
-                logger.warning('Website order %s: no second page yet — the last page opened %ss ago',
-                               invoice.website_order_number, int((timezone.now() - opened).total_seconds()))
-                return wait(int((followup.REPORT_SETTLE - (timezone.now() - opened)).total_seconds()) + 1)
+        # Whether a page may leave is decided in one place, for this request
+        # and for the site's status poll alike (payment_followup.second_page_verdict):
+        # every number the order holds is asked about — a released one must
+        # be really answered — and the report is searched for a payment whose
+        # notify never came. "Unknown" is never "no charge".
+        verdict, retry_after = followup.second_page_verdict(invoice)
+        if verdict == followup.PAGE_PAID:
+            return already_paid()
+        if verdict == followup.PAGE_IN_REVIEW:
+            return in_review()
+        if verdict == followup.PAGE_WAIT:
+            return wait(retry_after)
+        if verdict == followup.PAGE_AGAIN:
+            continue
 
         if invoice.payment_status == 'failed':
             if parse_store_cart_notes(invoice.notes) is None:
@@ -645,6 +592,10 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             callback_url=callback_url,
             transaction_id=str(invoice.id),
             offer_wallets=True,
+            # The website store has a switch of its own (checked by the
+            # caller): its page does not wait for the general hosted-page
+            # switch, which the till and the general payment links keep.
+            hosted_page_allowed=True,
         )
     except Exception as exc:
         # Tranzila's handshake refused or did not answer: no page, so no
@@ -669,7 +620,7 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
     if followup.holds_reported_payment(invoice) or invoice.payment_status == 'refunded':
         return in_review()
     now = timezone.now()
-    StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=now)
+    StoreInvoice.objects.filter(pk=invoice.pk).update(payment_page_opened_at=now, payment_retry_refused_at=None)
     StoreInvoice.objects.filter(pk=invoice.pk, payment_page_first_opened_at__isnull=True).update(
         payment_page_first_opened_at=now,
     )
@@ -695,10 +646,11 @@ class WidgetStorePaymentInitiateView(APIView):
             return _integration_denied()
 
         # Paused before anything is written or any payment page is opened —
-        # for a new order and for one the site retries. See both settings: the
-        # page this view opens is Tranzila's hosted page, which is switched off
-        # while it runs on the test terminal.
-        if not (settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED and settings.TRANZILA_HOSTED_PAGE_ENABLED):
+        # for a new order and for one the site retries. The website store's
+        # own switch, and only it (review of 1.10.2026): the general
+        # hosted-page switch belongs to the till and the general payment
+        # links, and the store on the site opens, or stays closed, without it.
+        if not settings.STORE_WEBSITE_CARD_PAYMENTS_ENABLED:
             # The website moves the whole page to whatever payment address it
             # gets back, so while payment is off it gets ours: a kind
             # "temporarily closed" page with a way to reach the office, in

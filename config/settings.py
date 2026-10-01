@@ -180,7 +180,10 @@ WEBSITE_INTEGRATION_API_KEY = config('WEBSITE_INTEGRATION_API_KEY', default='')
 # ran on TRANZILA_TERMINAL ('realtest', not a terminal of the business), so no
 # store order paid online ever reached the business's account. Turn back on
 # only once TRANZILA_TERMINAL is a terminal of the business and a real 1 ₪
-# purchase has gone through end to end.
+# purchase has gone through end to end. This is the website store's own
+# switch (1.10.2026): its payment page opens on it alone, and does not need
+# — or open — TRANZILA_HOSTED_PAGE_ENABLED, which the till and the general
+# payment links keep.
 STORE_WEBSITE_CARD_PAYMENTS_ENABLED = config('STORE_WEBSITE_CARD_PAYMENTS_ENABLED', default=False, cast=bool)
 # Whether the morning sweep of stuck store payments (apps/store/payment_followup.py,
 # brief item "תשלומים שנתקעו בחנות", and a manager's "בדוק עכשיו") may complete

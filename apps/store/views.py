@@ -434,7 +434,8 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
         """
         POST /api/v1/store/invoices/{id}/payment-review/
         Body: {"action": "complete" | "release" | "close", "reason": "...",
-               "confirmation_code": "<approval number from the customer>", "card_last4": "<4 digits>"}
+               "confirmation_code": "<approval number from the customer>", "card_last4": "<4 digits>",
+               "acknowledge_charge": true | false}
 
         A manager decides about the numbers a website/till invoice holds
         undecided (apps/store/payment_followup.py) — a number Tranzila
@@ -461,8 +462,21 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
                     or a second charge), the order is failed (the customer
                     may pay again) and the site is told.
           close     "סגור — לא שלנו" — a PAID order: its undecided further
-                    numbers leave the follow-up, unless the report confirms
-                    one now (then it is a second charge) or cannot be asked.
+                    numbers leave the follow-up — unless the report confirms
+                    one now (then it is a second charge), has not really
+                    answered about it (it could not be asked, or the number
+                    was reported less than ten minutes ago), or lists under
+                    it an approved charge of this very sum: then the answer
+                    is 409 with what the report shows, and the number is
+                    closed only when the manager, having seen it, asks again
+                    with "acknowledge_charge".
+
+        Only numbers reported under this follow-up are decided here: a number
+        that sat on an invoice before it (the weeks of the test terminal) is
+        not "in review", and no action changes such an invoice or tells the
+        site anything. "complete" on an invoice the report could never
+        settle (no cart kept, a number of another terminal) is refused
+        without touching it.
 
         One call reads the report a few times at most; `not_asked` says how
         many numbers still wait for another call. A reason is required; who,
@@ -482,7 +496,10 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
         if action_name == 'release':
             result = payment_followup.release_reported_payment(invoice.pk, by=by, reason=reason)
         elif action_name == 'close':
-            result = payment_followup.close_reported_numbers(invoice.pk, by=by, reason=reason)
+            result = payment_followup.close_reported_numbers(
+                invoice.pk, by=by, reason=reason,
+                acknowledge_charge=request.data.get('acknowledge_charge') in (True, 'true', 'True', 1, '1'),
+            )
         else:
             result = payment_followup.complete_reported_payment(
                 invoice.pk, by=by, reason=reason,
@@ -502,9 +519,25 @@ class StoreInvoiceViewSet(viewsets.ModelViewSet):
                 {**body, 'error': '"סגור — לא שלנו" מיועד להזמנה ששולמה. בהזמנה שלא שולמה: "אין תשלום — שחרר".'},
                 status=status.HTTP_409_CONFLICT,
             )
+        if action_name == 'close' and outcome == payment_followup.CHARGE_SHOWN:
+            shown = ', '.join(result.get('charge_shown') or [])
+            return Response(
+                {**body, 'charge_shown': result.get('charge_shown') or [],
+                 'error': f'שימו לב: בדוח של טרנזילה מופיע תחת עסקה {shown} חיוב מאושר בדיוק בסכום של ההזמנה הזאת. '
+                          'ייתכן שזה תשלום שני של הלקוח. אם הוא שלו — "חיוב שני — אימות", עם מספר האישור או 4 ספרות '
+                          'מהלקוח. רק אם בדקתם שהוא של לקוח אחר: סמנו "ראיתי את החיוב בדוח" וסגרו שוב.' + more},
+                status=status.HTTP_409_CONFLICT,
+            )
         if action_name == 'close' and outcome == 'not_closed':
             return Response(
-                {**body, 'error': 'הדוח של טרנזילה לא ענה, ולכן שום מספר לא נסגר. נסו שוב בעוד כמה דקות.' + more},
+                {**body, 'waiting': result.get('waiting') or [],
+                 'error': 'שום מספר לא נסגר: הדוח של טרנזילה עוד לא ענה עליו — הוא לא זמין, או שהמספר דווח לפני פחות '
+                          'מ-10 דקות והדוח אולי עוד לא מציג אותו. נסו שוב בעוד כמה דקות.' + more},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if action_name == 'complete' and outcome == payment_followup.NOT_ELIGIBLE:
+            return Response(
+                {**body, 'error': f'אי אפשר להשלים את ההזמנה הזאת מול הדוח: {result.get("why")}. דבר לא השתנה.'},
                 status=status.HTTP_409_CONFLICT,
             )
         if action_name == 'complete' and outcome == payment_followup.EVIDENCE_NEEDED:

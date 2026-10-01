@@ -2166,6 +2166,10 @@ class PaymentService:
         # Store product items in invoice notes for webhook processing
         import json
         invoice.notes = json.dumps(product_items)
+        # A hosted page was handed out for this invoice: only such an invoice
+        # may be paid by a notify (complete_store_purchase_from_webhook).
+        invoice.payment_page_opened_at = timezone.now()
+        invoice.payment_page_first_opened_at = invoice.payment_page_opened_at
         invoice.save()
         
         return {
@@ -2418,8 +2422,16 @@ class PaymentService:
         if not tranzila_response.get('is_successful'):
             return self._store_notify_declined(invoice, index, tranzila_response)
 
+        # Whether this notify may also ask about the order's other numbers is
+        # decided BEFORE its own number is kept: keeping it stamps the
+        # follow-up's pace-keeper, and the stamp of this very notify must not
+        # be what stops the question (review of 1.10.2026). At most once per
+        # RECHECK_INTERVAL per invoice: the notify address is public, and a
+        # stream of made-up notifies must not turn into several report reads
+        # each.
+        may_ask_others = bool(index) and followup._claim_followup(invoice.pk, followup.RECHECK_INTERVAL)
         result = self._store_notify_approved(invoice, index, code, site_timeout=site_timeout, source=source)
-        if index and not result.get('repeat'):
+        if may_ask_others and not result.pop('repeat', False):
             self._ask_other_store_numbers(invoice.pk, index, site_timeout=site_timeout)
         result.pop('repeat', None)
         return result
@@ -2447,6 +2459,21 @@ class PaymentService:
             logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
             return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True, 'repeat': True}
 
+        # A till invoice no hosted page was ever opened for (a typed or saved
+        # card, cash): Tranzila has no reason to notify about it, so a notify
+        # that names it is not a payment of ours. Paid already — logged, as
+        # before this follow-up existed: no number kept, nothing asked, no
+        # "double charge" told. Not paid — the report is still the judge (a
+        # confirmed payment is a payment), but a number it does not confirm
+        # is not kept either.
+        never_had_page = not invoice.website_order_number and invoice.payment_page_opened_at is None
+        if never_had_page and invoice.payment_status in followup.PAID_STATUSES:
+            logger.warning(
+                'Store webhook for till invoice %s ignored — paid without a hosted page, another number reported (%s)',
+                invoice.invoice_number, index,
+            )
+            return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True, 'repeat': True}
+
         number = followup.number_for(invoice, index, code, (self.iframe_tranzila_service.terminal or '').strip(),
                                      code_wins=from_notify)
         # Asked before the row is locked: the report may take up to 30 seconds,
@@ -2470,6 +2497,9 @@ class PaymentService:
                 sold = self._sell_store_invoice(invoice, number, row)
                 if sold is None:
                     return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+            elif never_had_page:
+                logger.error("Store webhook for till invoice %s not confirmed by Tranzila (%s: %s); no hosted page "
+                             "was opened for it — number %s not kept", invoice.invoice_number, answer, why, index)
             elif followup.other_state(invoice, index) == followup.OTHER_REJECTED:
                 # The report already definitely ruled this number out for this
                 # order, and it still does not confirm it: a repeat changes
@@ -2512,12 +2542,10 @@ class PaymentService:
         about the order's other undecided numbers too — a number a person
         released may be the real payment, and the one just reported the second
         (or the other way round). One report read went to the notify's own
-        number; the rest of the per-check limit goes to these, in turns.
-
-        At the follow-up's own pace (RECHECK_INTERVAL per invoice): the notify
-        address is public, and a stream of made-up notifies must not turn
-        into several report reads each. What is skipped here is asked by the
-        site's poll, the next notify, a retry, or the morning.
+        number; the rest of the per-check limit goes to these, in turns. The
+        caller keeps the pace (once per RECHECK_INTERVAL per invoice); what
+        is skipped is asked by the site's poll, the next notify, a retry, or
+        the morning.
         """
         from apps.store import payment_followup as followup
         from apps.store.models import StoreInvoice
@@ -2526,8 +2554,6 @@ class PaymentService:
         if invoice is None:
             return
         if not any(n.index != index for n in followup.open_numbers(invoice, include_released=True)):
-            return
-        if not followup._claim_followup(invoice_id, followup.RECHECK_INTERVAL):
             return
         try:
             self.settle_reported_store_payment(
@@ -2571,8 +2597,9 @@ class PaymentService:
           asked about only with it (payment_followup.with_evidence).
         * `max_numbers`: report reads this call may make — never more than
           MAX_REPORT_READS_PER_INVOICE. The numbers take turns
-          (payment_followup.next_to_ask): what was asked is stamped on the
-          invoice in every mode, and 'not_asked' says how many wait.
+          (payment_followup.next_to_ask): what the report really answered
+          about is stamped on the invoice in every mode, and 'not_asked'
+          says how many wait.
         * `skip`: numbers somebody is asking about right now (the notify's own).
 
         Reads the report before locking the invoice. Never charges.
@@ -2600,7 +2627,11 @@ class PaymentService:
         sold = None
         with transaction.atomic():
             invoice = StoreInvoice.objects.select_for_update().get(pk=invoice.pk)
-            stamped = followup.mark_asked(invoice, asked)
+            # "Answered" is stamped only for what the report really answered
+            # about: a number it could not be asked about, or does not list
+            # yet, was asked — and is still unanswered.
+            stamped = followup.mark_answered(
+                invoice, [i for i, (_n, answer, _row, why) in asked.items() if not followup.is_no_answer(answer, why)])
             # Only numbers still undecided under the lock: another notify or
             # poll may have settled some while the report was being read — and
             # may have reported new ones, which nobody has asked about yet.

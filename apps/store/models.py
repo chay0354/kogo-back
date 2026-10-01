@@ -497,18 +497,30 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="חיפוש תשלום בדוח — אחרון",
     )
+    # When the site last asked to pay this order again and was told "wait":
+    # the report could not rule out that an earlier page was paid (it was
+    # down, it had not caught up, a released number was unanswered). While it
+    # is set the site reads the order as pending with a payment reported —
+    # not as failed. Cleared when a look finds that a page may leave.
+    payment_retry_refused_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="בקשת תשלום חוזרת נדחתה — ממתין לדוח",
+    )
     # Every further transaction number Tranzila reported for this invoice,
     # beyond tranzila_transaction_id: a second tab, a page paid twice, a
     # number the report has not answered for yet. None is ever dropped; each
-    # is [{"index", "code", "terminal", "reported_at", "state", "asked_at"}]
+    # is [{"index", "code", "terminal", "reported_at", "state", "answered_at"}]
     # with state open (not settled), second_charge (a real second payment, for
     # a refund), rejected (the report definitely says it did not pay for this
     # order), released (a person found no charge — still asked about, never
     # buried), suspected (a charge of this sum found in the terminal's report
     # after this order's page opened, whose notify never came: a person
     # decides) or closed (a person decided, on a paid order, that it is not
-    # this order's). asked_at is when the report was last asked about it:
-    # the numbers of one order take turns.
+    # this order's). answered_at is when the report last really answered
+    # about it (asked and unanswered does not count): the numbers of one
+    # order take turns, and a released one must be answered before the
+    # customer gets another page.
     other_transactions = models.JSONField(
         null=True,
         blank=True,
