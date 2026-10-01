@@ -1817,14 +1817,21 @@ class TranzilaService:
         if not isinstance(response, dict) or response.get('success') is False:
             error = response.get('error') if isinstance(response, dict) else 'Tranzila report failed'
             return {'success': False, 'error': error}
-        # A refused key answers {'error_code': 20002, 'message': ...} with no
-        # rows — or with an empty list. An error envelope is never "no such
-        # transaction", whatever else it carries (review of 1.10.2026).
-        if not is_tranzila_rest_ok(response.get('error_code', 0)):
-            return {'success': False, 'error': str(response.get('message') or response.get('error_code'))}
-        for row in self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows'):
+        # Three answers, and no stricter than before for the flows that live
+        # on this lookup today (payment links, the business charge):
+        #   * a row of this number in the answer — found, whatever the
+        #     envelope's error_code reads;
+        #   * no rows at all (the list empty or missing) AND an error
+        #     envelope — unknown: a refused key answers {'error_code': 20002,
+        #     'message': ...} with no rows, or with an empty list, and that
+        #     is never "no such transaction";
+        #   * a good answer without this number — no such transaction.
+        rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
+        for row in rows:
             if str(row.get('index') or row.get('transaction_index') or '').strip() == index:
                 return {'success': True, 'transaction': row}
+        if not rows and not is_tranzila_rest_ok(response.get('error_code', 0)):
+            return {'success': False, 'error': str(response.get('message') or response.get('error_code'))}
         return {'success': True, 'transaction': None}
 
     @staticmethod
