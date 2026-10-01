@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -33,6 +34,22 @@ SETUP_PROBLEM = 'תקלת הגדרות, לא נשלח חיוב ולא נשלחה
 # same broken request again.
 REQUEST_REJECTED = 'הסליקה דחתה את הבקשה בגלל תקלה אצלנו, לא חויב ולא נשלחה הודעה להורה'
 
+# Vercel kills the request at 300 seconds. On 1.10.2026 every run was cut that
+# way after about fifteen charges (a charge, its signed receipt and its mail
+# take some twenty seconds), and a cut that lands between the gateway call and
+# its answer leaves a claim nobody resolved: the standing order is blocked
+# until the office checks the terminal. So no charge starts after this many
+# seconds. The slowest row — a 30-second gateway timeout, then the receipt —
+# still ends inside the limit.
+CHARGE_BUDGET_SECONDS = 200
+# The check and cash documents ride the end of the run. Past this point there
+# is no room for even one of them; they wait for the next run.
+DOCUMENTS_CUTOFF_SECONDS = 235
+
+
+def _clock() -> float:
+    return time.monotonic()
+
 
 def _next_month_first(from_day: date) -> date:
     if from_day.month == 12:
@@ -45,15 +62,20 @@ def _paid_until(end_of_charge_month: date) -> date:
     return date(end_of_charge_month.year, end_of_charge_month.month, last_day)
 
 
-def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> dict:
+def process_due_recurring_charges(
+    *, dry_run: bool = False, limit: int = 40, budget_seconds: float | None = None,
+) -> dict:
     """
     Charge active RecurringPayment rows whose next_billing_date is today or earlier.
     Creates Payment + Invoice and sends email (via PaymentService._create_invoice_from_payment).
 
-    `limit` keeps each Vercel cron invocation under the function timeout; leftover
-    rows stay due and the next hourly run continues.
+    `limit` caps the rows read and `budget_seconds` the time spent starting
+    charges; leftover rows stay due and the next run continues.
     """
     from apps.core.payment_service import PaymentService
+
+    started = _clock()
+    budget = CHARGE_BUDGET_SECONDS if budget_seconds is None else budget_seconds
 
     # A downgrade scheduled from the customers page moves the child on its
     # date, *before* the lower amount is promoted — a move that fails puts the
@@ -107,7 +129,14 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
         summary['setup_problems'] += 1
         summary['errors'].append(f'{recurring.id}: {SETUP_PROBLEM} — {reason}')
 
-    for recurring in due_rows:
+    for position, recurring in enumerate(due_rows):
+        # Checked before the row is touched: a run that stops here has claimed
+        # nothing and called nobody, so every row left is simply still due.
+        if not dry_run and _clock() - started >= budget:
+            summary['stopped_early'] = True
+            summary['left_due'] = len(due_rows) - position
+            break
+
         if recurring.last_charge_date and recurring.last_charge_date >= today:
             summary['skipped'] += 1
             continue
@@ -428,6 +457,15 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
         except Exception:
             logger.exception('Recurring setup alert failed (non-fatal)')
 
+    # A run that used up its budget on cards still moves these along, one of
+    # each, so a full card queue cannot hold them back for days. With no room
+    # left for even that, they are not started and the next run takes them.
+    documents_limit = 1 if summary.get('stopped_early') else batch
+    deferred = {'checked': 0, 'issued': 0, 'errors': [], 'deferred': True}
+
+    def documents_have_time() -> bool:
+        return _clock() - started < DOCUMENTS_CUTOFF_SECONDS
+
     try:
         from apps.documents.check_plans import issue_due_check_invoices
         from apps.documents.models import CheckItem
@@ -444,8 +482,10 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 'errors': [],
                 'dry_run': True,
             }
+        elif documents_have_time():
+            summary['check_invoices'] = issue_due_check_invoices(today=today, limit=documents_limit)
         else:
-            summary['check_invoices'] = issue_due_check_invoices(today=today, limit=batch)
+            summary['check_invoices'] = dict(deferred)
     except Exception as exc:
         logger.exception('Check invoice issuance failed')
         summary['check_invoices'] = {'checked': 0, 'issued': 0, 'errors': [str(exc)]}
@@ -466,8 +506,10 @@ def process_due_recurring_charges(*, dry_run: bool = False, limit: int = 40) -> 
                 'errors': [],
                 'dry_run': True,
             }
+        elif documents_have_time():
+            summary['cash_documents'] = issue_due_cash_documents(today=today, limit=documents_limit)
         else:
-            summary['cash_documents'] = issue_due_cash_documents(today=today, limit=batch)
+            summary['cash_documents'] = dict(deferred)
     except Exception as exc:
         logger.exception('Cash plan document issuance failed')
         summary['cash_documents'] = {'checked': 0, 'issued': 0, 'errors': [str(exc)]}

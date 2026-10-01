@@ -2172,7 +2172,7 @@ def cron_recurring_billing(request):
     Charge due monthly subscriptions and email invoices.
 
     Auth: X-Cron-Token, ?token=, or Authorization Bearer matching CRON_TOKEN / CRON_SECRET.
-    Vercel Cron on kogo-back hits this hourly 08:00–15:00 Israel on billing days.
+    Vercel Cron on kogo-back hits this every five minutes, 08:00–20:55 Israel (summer clock).
     """
     if not _cron_request_authorized(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
@@ -2230,7 +2230,7 @@ def cron_recurring_billing_status(request):
         'vercel_cron_seen': last_vercel is not None,
         'last_invocation': _heartbeat_payload(last),
         'last_vercel_cron': _heartbeat_payload(last_vercel),
-        'schedule_utc': '0 5,6,7,8,9,10,11,12 * * *',
+        'schedule_utc': '*/5 5-17 * * *',
         'note': (
             'vercel_cron_seen=true only after Vercel Cron calls this app '
             '(User-Agent vercel-cron/1.0). A dry_run from curl does not count.'
