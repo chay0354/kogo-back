@@ -295,6 +295,34 @@ def report_windows(month: date, today: date) -> list[tuple[date, date]]:
     return windows
 
 
+def our_charges_on_terminal(terminal: str, month: date) -> int:
+    """
+    How many successful charges our own records hold on `terminal` in `month`.
+
+    A row with no terminal is one of the production (michal) pair — every card
+    saved before 25.9.2026 — and cannot say which of the two, so it counts for
+    both. Used only to tell an empty report from a report closed to our key.
+    """
+    from apps.customers.models import TranzilaTransaction
+
+    start, end = _month_bounds(month)
+    production = {
+        str(getattr(settings, 'TRANZILA_PROD_TERMINAL', '') or '').strip(),
+        str(getattr(settings, 'TRANZILA_PROD_TOKEN_TERMINAL', '') or '').strip(),
+    }
+    names = [terminal]
+    if terminal in production:
+        names.append('')
+    return (
+        TranzilaTransaction.objects
+        .filter(is_successful=True, tranzila_terminal__in=names,
+                response_timestamp__gte=start, response_timestamp__lt=end)
+        .exclude(transaction_type='refund')
+        .exclude(transaction_id='')
+        .count()
+    )
+
+
 def refresh_terminal_month(terminal: str, month: date, *, today: Optional[date] = None):
     """
     Read one terminal's month from Tranzila's report and keep its sums.
@@ -337,11 +365,26 @@ def refresh_terminal_month(terminal: str, month: date, *, today: Optional[date] 
             complete = False
             errors.append(f'{label}: הדוח לא נקרא עד סופו')
 
+    summary = summarise_report_rows(rows, month)
+    if complete and not rows:
+        # An empty report is believed only when we hold no charge of our own
+        # on this terminal in the month. On 1.10.2026 Tranzila answered the
+        # michal terminals with an empty list and no error while hundreds of
+        # charges had been made on them that month: a report that is closed to
+        # our key looks exactly like a month with no transactions.
+        ours = our_charges_on_terminal(terminal, month)
+        if ours:
+            complete = False
+            errors.append(
+                f'טרנזילה החזירה דוח ריק, אבל אצלנו רשומים {ours} חיובים מוצלחים במסוף הזה בחודש הזה — '
+                'כנראה שדוח העסקאות לא פתוח למפתח שבידינו. לבקש מטרנזילה לפתוח אותו.'
+            )
+
     snapshot, _ = CardPayoutTerminalMonth.objects.update_or_create(
         terminal=terminal,
         month=month,
         defaults={
-            **summarise_report_rows(rows, month),
+            **summary,
             'complete': complete,
             'error': ' · '.join(errors)[:2000],
             'fetched_at': timezone.now(),
