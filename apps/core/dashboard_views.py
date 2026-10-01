@@ -7,6 +7,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from django.db import models
 from django.db.models import Sum, Count, Q, Avg, Max, F
 from django.db.models.functions import Least, TruncMonth
@@ -103,6 +104,9 @@ class DashboardViewSet(viewsets.ViewSet):
     All endpoints require authentication and manager role.
     """
     permission_classes = [IsAuthenticated, IsManagerOrPartner]
+    # No throttle on the dashboard itself; an action that calls Tranzila names
+    # its own scope (an @action may only set attributes the class already has).
+    throttle_scope = None
 
     def _scope(self, request):
         """Partners see dashboard data only for assigned branches.
@@ -1493,6 +1497,87 @@ class DashboardViewSet(viewsets.ViewSet):
             'by_source': sorted(by_source.values(), key=lambda x: -x['invoiced']),
             'by_status': sorted(by_status.values(), key=lambda x: -x['amount']),
         })
+
+    @action(detail=False, methods=['get'], url_path='incoming')
+    def incoming_money(self, request):
+        """
+        Money about to come in: what the card company transfers on the payout
+        day (apps/core/card_payouts.py).
+
+        Query params:
+        - month: YYYY-MM, the month that was charged (default: the month of
+          the upcoming transfer)
+        - branch_id: one branch (default: all the user may see)
+
+        A partner sees their own branches only, and a branch_id is crossed
+        with them: a branch that is not theirs answers nothing, never the
+        data of the ones that are. Tranzila's side is the whole company's, so
+        it is given to a manager only, and only with no branch filter. It is
+        read from the stored snapshots — this GET never calls Tranzila.
+        """
+        import uuid
+
+        from apps.core import card_payouts
+        from apps.core.models import UserProfile
+        from apps.core.scoping import get_user_role
+
+        month = None
+        raw_month = (request.query_params.get('month') or '').strip()
+        if raw_month:
+            month = card_payouts.parse_month(raw_month)
+            if month is None:
+                return Response({'error': 'חודש לא תקין. הצורה היא YYYY-MM.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        branch_id = (request.query_params.get('branch_id') or '').strip()
+        if branch_id in ('', 'all'):
+            branch_id = None
+        else:
+            try:
+                branch_id = str(uuid.UUID(branch_id))
+            except ValueError:
+                return Response({'error': 'סניף לא תקין.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        scoped, _c_ids, scoped_branch_ids, _i_ids = self._scope(request)
+        branch_ids = [str(b) for b in scoped_branch_ids] if scoped else None
+        if branch_id:
+            # Both limits at once: the branch asked for, inside what the user may see.
+            branch_ids = [branch_id] if branch_ids is None or branch_id in branch_ids else []
+
+        is_manager = get_user_role(request.user) == UserProfile.ROLE_MANAGER
+        return Response(card_payouts.incoming_money(
+            month,
+            today=card_payouts.israel_today(),
+            branch_ids=branch_ids,
+            with_tranzila=is_manager and not scoped and branch_id is None,
+        ))
+
+    @action(
+        detail=False, methods=['post'], url_path='incoming/refresh',
+        permission_classes=[IsAuthenticated, IsManager],
+        throttle_classes=[ScopedRateThrottle], throttle_scope='card_payout_refresh',
+    )
+    def refresh_incoming_terminal(self, request):
+        """
+        Read one terminal's month from Tranzila's report and keep its sums.
+        Body: {month: YYYY-MM, terminal}. Managers only; one terminal per call,
+        so a slow terminal never holds up the others. Reads only — nothing is
+        charged, refunded or changed at Tranzila.
+        """
+        from apps.core import card_payouts
+
+        month = card_payouts.parse_month(request.data.get('month'))
+        if month is None:
+            return Response({'error': 'חודש לא תקין. הצורה היא YYYY-MM.'}, status=status.HTTP_400_BAD_REQUEST)
+        terminal = str(request.data.get('terminal') or '').strip()
+        try:
+            snapshot = card_payouts.refresh_terminal_month(terminal, month)
+        except card_payouts.PayoutError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        entry = next(
+            (row for row in card_payouts.payout_terminals() if row['terminal'] == snapshot.terminal),
+            {'terminal': snapshot.terminal, 'label': snapshot.terminal},
+        )
+        return Response(card_payouts.snapshot_payload(entry, snapshot))
 
     @action(detail=False, methods=['get'], url_path='activity')
     def activity_data(self, request):

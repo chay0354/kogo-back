@@ -1219,6 +1219,57 @@ def check_revenue_drop(today: date) -> BriefItem:
     return item
 
 
+def check_card_payout(today: date) -> BriefItem:
+    """
+    The money the card company is about to transfer (apps/core/card_payouts).
+
+    Information, not an alert — always green. In the days up to the payout day
+    it says what arrives on it: the card money the CRM recorded for last
+    month, and, when a manager has read every terminal's month from Tranzila,
+    Tranzila's own figure and the gap beside it. After the payout day it says
+    in one line what the month we are in has collected so far. It reads the
+    database and the stored snapshots only: nothing here calls Tranzila.
+    """
+    from apps.core import card_payouts
+
+    payout = card_payouts.upcoming_payout(today)
+    ours = card_payouts.our_card_money(payout.month)
+    when = f'{payout.payout_date.day}.{payout.payout_date.month}'
+    item = BriefItem(key='card_payout', title='כסף שעומד להיכנס', severity=GREEN)
+    if not payout.is_closed(today):
+        item.summary = (
+            f"ההעברה הבאה ב־{when}: עד עכשיו נגבו {_money(ours['net'])} באשראי "
+            f'(גבייה של {payout.label}, לפני עמלות).'
+        )
+        return item
+
+    item.summary = f"ב־{when} צפוי להיכנס {_money(ours['net'])} (גבייה של {payout.label}), לפני עמלות."
+    tranzila = card_payouts.tranzila_summary(payout.month, ours['net'])
+    if tranzila['complete']:
+        # Which side has more, in words: a minus sign in front of money is easy to misread.
+        gap = Decimal(str(tranzila['gap']))
+        if gap == 0:
+            gap_text = 'אין פער'
+        elif gap > 0:
+            gap_text = f'פער {_money(gap)} — בטרנזילה יותר'
+        else:
+            gap_text = f'פער {_money(-gap)} — אצלנו יותר'
+        item.summary += f" בטרנזילה {_money(tranzila['total'])}, {gap_text}."
+        for terminal in tranzila['terminals']:
+            item.rows.append(_row(
+                f"{terminal['terminal']} · {terminal['label']}",
+                f"{_money(terminal['net'])} · {terminal['count']} חיובים",
+                '/',
+            ))
+    else:
+        item.rows.append(_row(
+            'עוד לא אומת מול טרנזילה',
+            'בדשבורד, בלשונית כספים: "עדכן מטרנזילה" קורא את הדוח של כל מסוף.',
+            '/',
+        ))
+    return item
+
+
 def check_refunds(today: date) -> BriefItem:
     """Every refund of the last week, in one place, so none passes unseen."""
     from django.db.models import Sum
@@ -1698,6 +1749,7 @@ CHECKS = (
     check_children_to_deactivate,
     check_duplicate_charges,
     check_revenue_drop,
+    check_card_payout,
     check_refunds,
     check_active_without_standing_order,
     check_ended_standing_orders,
@@ -1750,6 +1802,7 @@ def check_catalogue() -> list[dict]:
         'children_to_deactivate': 'ילדים שסיימו ועדיין פעילים',
         'duplicate_charges': 'חיובים כפולים',
         'revenue_drop': 'הכנסות אתמול',
+        'card_payout': 'כסף שעומד להיכנס',
         'refunds': 'זיכויים',
         'active_without_standing_order': 'ילדים פעילים בלי הוראת קבע',
         'ended_standing_orders': 'הוראות קבע שהסתיימו',
