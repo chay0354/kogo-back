@@ -21,6 +21,19 @@ A customer is keyed by their ת"ז/ח"פ, else the old software's customer numbe
 else email, else phone. The owner's rule for the details is "the future
 definition matters more than history; the latest wins": the name, email, phone
 and address are the ones on the customer's newest document.
+
+One ח"פ is not always one customer: a network of community centres invoices
+under one company number, and the old software kept each centre as a customer
+of its own. A company number that the file has under several customer numbers
+with different names is therefore split back into those customers
+(split_shared_company_numbers). A person's ת"ז under two names stays one
+customer — that is somebody who changed the name they trade under.
+
+Open invoices
+-------------
+A tax invoice the old software still shows as open is collected and closed
+there, so it is not history yet: prepare_rows marks it, and the commit does
+not write it. Its customer is still read from it.
 """
 from __future__ import annotations
 
@@ -104,6 +117,23 @@ CARD_PAYMENT = 'כרטיס אשראי'
 # A document of any of these is issued by hand, to somebody who is not paying a
 # lesson subscription by card.
 MANUAL_TYPES = frozenset({'tax_invoice', 'transaction_invoice', 'receipt', 'credit_invoice'})
+# The ones that make their customer a business customer. A credit note alone
+# does not: a parent refunded for a missed lesson is still a parent.
+BUSINESS_TYPES = MANUAL_TYPES - {'credit_invoice'}
+
+# An invoice the old software has not been paid for. Only an invoice can be
+# open; a receipt or a credit note has no status at all in the export.
+OPEN_STATUSES = frozenset({'פתוחה', 'פתוח'})
+OPEN_TYPES = frozenset({'tax_invoice', 'transaction_invoice'})
+
+# Rent, as the office writes it in a document's details, and what the old
+# software writes in the remark of a charge it made on a standing order.
+RENTAL_DETAILS = re.compile(r'השכר|שכירות')
+STANDING_ORDER = 'הוראת קבע'
+
+# A company number shared by several of the old software's customers: each is
+# keyed '<ח"פ>/ext:<customer number>'.
+SHARED_KEY_SEPARATOR = '/ext:'
 
 # A name that is an organisation, not a parent. Matched after the quotes are
 # made plain, so מתנ״ס and מתנ"ס are one pattern.
@@ -113,8 +143,9 @@ ORGANISATION_NAME = re.compile(
 )
 
 REASON_LABELS = {
-    'document_type': 'הופק לו מסמך ידני (חשבונית מס / עסקה / קבלה / זיכוי)',
+    'document_type': 'הופק לו מסמך ידני (חשבונית מס / עסקה / קבלה)',
     'not_card': 'שילם שלא בכרטיס אשראי',
+    'rental': 'רוב המסמכים שלו הם שכירות',
     'company_number': 'מספר חברה / עמותה (9 ספרות שמתחילות ב-5)',
     'organisation_name': 'השם הוא של ארגון',
     'dealer_number': 'רשום כעוסק מורשה',
@@ -257,6 +288,16 @@ def plain_name(value: str) -> str:
     return _SPACES.sub(' ', (value or '').translate(_QUOTES)).strip().casefold()
 
 
+def shared_key(id_number: str, ext_number: str) -> str:
+    """The key of one of several customers under one company number."""
+    return f'{id_number}{SHARED_KEY_SEPARATOR}{ext_number}'
+
+
+def is_open_invoice(row: dict) -> bool:
+    """An invoice the old software still shows as unpaid."""
+    return row['doc_type'] in OPEN_TYPES and clean_text(row.get('status')) in OPEN_STATUSES
+
+
 # --------------------------------------------------------------------------
 # The sheet -> rows
 # --------------------------------------------------------------------------
@@ -366,6 +407,67 @@ def _order(row) -> tuple:
     return (row['date'], row['number'])
 
 
+def _row_name(row) -> str:
+    return f"{row['first_name']} {row['last_name']}".strip()
+
+
+def mark_open_invoices(rows: list) -> int:
+    """Flag every open invoice (`row['open']`); how many there are."""
+    count = 0
+    for row in rows:
+        if is_open_invoice(row):
+            row['open'] = True
+            count += 1
+        else:
+            row.pop('open', None)
+    return count
+
+
+def _shared_company_numbers(rows: list) -> dict:
+    """
+    company number -> {customer number: its newest named row}, for the company
+    numbers the file has under several customer numbers with different names.
+
+    The same name under two customer numbers is one customer entered twice, and
+    stays one. A ת"ז is never split: two names on one person's ID is a person
+    who renamed their business.
+    """
+    newest = defaultdict(dict)
+    for row in rows:
+        id_number, ext_number = row.get('id_number') or '', row.get('ext_number') or ''
+        if not ext_number or not is_company_number(id_number) or not _row_name(row):
+            continue
+        seen = newest[id_number].get(ext_number)
+        if seen is None or _order(row) > _order(seen):
+            newest[id_number][ext_number] = row
+    return {
+        id_number: by_ext for id_number, by_ext in newest.items()
+        if len({plain_name(_row_name(row)) for row in by_ext.values()}) > 1
+    }
+
+
+def split_shared_company_numbers(rows: list) -> int:
+    """Key each customer of a shared company number on their own; how many customers that made."""
+    shared = _shared_company_numbers(rows)
+    for row in rows:
+        id_number, ext_number = row.get('id_number') or '', row.get('ext_number') or ''
+        if id_number in shared and ext_number:
+            row['customer_key'] = shared_key(id_number, ext_number)
+    return sum(len(by_ext) for by_ext in shared.values())
+
+
+def prepare_rows(rows: list) -> dict:
+    """
+    What is decided about the rows before anything is counted or written: which
+    are open invoices, and which customers share a company number. Changes the
+    rows in place, and the answer is the same however often it is asked.
+    """
+    return {
+        'open_invoices': mark_open_invoices(rows),
+        'customers_sharing_an_id': split_shared_company_numbers(rows),
+    }
+
+
 @dataclass
 class Customer:
     key: str
@@ -381,15 +483,22 @@ class Customer:
     deleted: bool = False
     ext_numbers: list = field(default_factory=list)
     names: list = field(default_factory=list)  # distinct names, oldest first
-    documents: int = 0
+    documents: int = 0  # the ones that are imported: open invoices are not counted
     types: dict = field(default_factory=dict)
-    latest: dict = field(default_factory=dict)  # the newest document: doc_type, type_label, number, date, location
+    # The newest document: doc_type, type_label, number, date — and `location`,
+    # the newest one any of the customer's documents names.
+    latest: dict = field(default_factory=dict)
     kind: str = 'parent'  # 'business' or 'parent'
     reasons: list = field(default_factory=list)
 
     @property
     def full_name(self) -> str:
         return f'{self.first_name} {self.last_name}'.strip()
+
+    @property
+    def shares_id(self) -> bool:
+        """One of several customers under one company number: the number alone does not say which."""
+        return SHARED_KEY_SEPARATOR in self.key
 
     @property
     def company_number(self) -> str:
@@ -412,17 +521,25 @@ def classify(customer: Customer, rows: list) -> tuple[str, list]:
     """
     ('business', reasons) or ('parent', []).
 
-    Business/manual: anything the office issued by hand, a חשבונית מס/קבלה paid
-    any way but by card, a company number, or an organisation's name. Everyone
-    else paid for lessons by card through the old software's subscriptions —
-    a parent, who is (or will be) a family in kogo rather than a business
-    customer.
+    Business/manual: an invoice or a receipt the office issued by hand, a
+    חשבונית מס/קבלה paid any way but by card, rent, a company number, or an
+    organisation's name. Everyone else paid for lessons by card through the old
+    software's subscriptions — a parent, who is (or will be) a family in kogo
+    rather than a business customer. A credit note alone changes nothing: it
+    is a refund to that parent.
     """
     reasons = []
-    if any(row['doc_type'] in MANUAL_TYPES for row in rows):
+    if any(row['doc_type'] in BUSINESS_TYPES for row in rows):
         reasons.append('document_type')
     if any(row['doc_type'] == 'combined' and row['payment_type'] != CARD_PAYMENT for row in rows):
         reasons.append('not_card')
+    # A tenant on a standing order gets the same card-paid חשבונית מס/קבלה a
+    # parent does. Renting is what they do with the business when most of their
+    # documents are rent, and they keep doing it: more than once, or on a
+    # standing order. A studio rented for one birthday is neither.
+    rent = [row for row in rows if RENTAL_DETAILS.search(row['details'])]
+    if 2 * len(rent) > len(rows) and (len(rent) > 1 or any(STANDING_ORDER in row['remark'] for row in rent)):
+        reasons.append('rental')
     if is_company_number(customer.id_number):
         reasons.append('company_number')
     if any(ORGANISATION_NAME.search(name.translate(_QUOTES)) for name in customer.names):
@@ -455,21 +572,27 @@ def customers_from_rows(rows: list) -> dict:
                 customer.names.append(full)
             if row['ext_number'] and row['ext_number'] not in customer.ext_numbers:
                 customer.ext_numbers.append(row['ext_number'])
-        newest = own[-1]
-        named = next((row for row in reversed(own) if row['first_name'] or row['last_name']), newest)
+        named = next((row for row in reversed(own) if row['first_name'] or row['last_name']), own[-1])
         customer.first_name, customer.last_name = named['first_name'], named['last_name']
         # The newest name goes last, even if it was also used before.
         latest_name = customer.full_name
         customer.names = [n for n in customer.names if plain_name(n) != plain_name(latest_name)] + [latest_name]
-        customer.deleted = newest['deleted']
-        customer.documents = len(own)
-        customer.types = dict(Counter(row['doc_type'] for row in own))
+        customer.deleted = own[-1]['deleted']
+        # An open invoice gives the customer's details and nothing else: it is
+        # not imported, so it is not counted and is not their newest document —
+        # unless it is all they have.
+        imported = [row for row in own if not row.get('open')]
+        newest = (imported or own)[-1]
+        customer.documents = len(imported)
+        customer.types = dict(Counter(row['doc_type'] for row in imported))
         customer.latest = {
             'doc_type': newest['doc_type'],
             'type_label': newest['type_label'],
             'number': newest['number'],
             'date': newest['date'],
-            'location': newest['location'],
+            # A receipt or a credit note often names no location; the customer
+            # is still filed where their last document that named one was.
+            'location': next((row['location'] for row in reversed(own) if row['location']), ''),
         }
         customer.kind, customer.reasons = classify(customer, own)
         customers[key] = customer
@@ -521,6 +644,9 @@ def type_table(rows: list) -> list:
             'last_date': last['date'],
             'latest_date': max(row['date'] for row in own),
             'missing_in_span': (last['number'] - first['number'] + 1) - len(numbers),
+            # Open invoices are in the span — the old software gave them their
+            # numbers — though they are not imported.
+            'open': sum(1 for row in own if row.get('open')),
         })
     return table
 

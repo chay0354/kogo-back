@@ -167,6 +167,16 @@ def _local_date(value):
 _DATE_FIELDS = {'FormalDocument': 'document_date', 'Invoice': 'invoice_date', 'StoreInvoice': 'issue_date'}
 
 
+def _continues(run) -> str:
+    """'חשבונית מס · אחרון 40413' — and the numbers left to the previous software, when the run starts further up."""
+    if run.previous_last_number is None:
+        return ''
+    text = f'{run.previous_type_label} · אחרון {run.previous_last_number}'
+    if run.reserved:
+        text += f' · {run.reserved[0]}–{run.reserved[1]} שמורים לתוכנה הקודמת'
+    return text
+
+
 def _runs() -> list:
     from apps.documents.numbering import _series_sources, continuity
 
@@ -183,8 +193,7 @@ def _runs() -> list:
         lines.append(RunLine(
             name=run.name, label=run.label, first=run.first, last=run.last, issued=run.issued,
             first_date=_local_date(span['first']), last_date=_local_date(span['last']),
-            continues=(f'{run.previous_type_label} · אחרון {run.previous_last_number}'
-                       if run.previous_last_number is not None else ''),
+            continues=_continues(run),
             missing=run.missing,
         ))
     return lines

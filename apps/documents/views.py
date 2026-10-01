@@ -488,6 +488,22 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="{doc.document_number}.pdf"'
         return response
 
+    @action(detail=False, methods=['get'], url_path='next-number')
+    def expected_number(self, request):
+        """
+        GET /api/v1/documents/documents/next-number/?document_type=tax_invoice
+
+        The number the next document of this type would take, for the wizard to
+        show before the office confirms. Nothing is taken: the number is handed
+        out at issue, and the answer says so by being read again each time.
+        """
+        from apps.documents.numbering import expected_document_number
+
+        expected = expected_document_number((request.query_params.get('document_type') or '').strip())
+        if expected is None:
+            return Response({'error': 'סוג מסמך לא מוכר'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(expected)
+
     @action(detail=False, methods=['get'], url_path='open-invoices')
     def open_invoices(self, request):
         """
@@ -828,7 +844,8 @@ class DocumentSeriesViewSet(viewsets.ViewSet):
 
     GET  /api/v1/documents/series/
     POST /api/v1/documents/series/open/
-         {series, year, start, previous_last_number, previous_type_label, note}
+         {series, year, start, previous_last_number, previous_type_label, note, reserve}
+         `reserve`: start above last + 1, the numbers between left to the previous software.
 
     Managers only: an opening fixes where a run's numbers start, for good.
     """
@@ -850,6 +867,7 @@ class DocumentSeriesViewSet(viewsets.ViewSet):
                 series=data.get('series'),
                 year=data.get('year'),
                 start=data.get('start'),
+                reserve=data.get('reserve') in (True, 'true', 'True', '1', 1),
                 previous_last_number=data.get('previous_last_number'),
                 previous_type_label=data.get('previous_type_label'),
                 note=data.get('note') or '',
