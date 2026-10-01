@@ -20,6 +20,7 @@ from apps.core.manychat_service import (
     manychat_error_detail,
 )
 from apps.core.scoping import ACTIVE_ENROLLMENT_STATUSES
+from apps.core.whatsapp_alerts import alert_send_failure
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ def broadcast_to_children(
                     location=ctx.get('location', ''),
                     lookup_names=lookup_names,
                 )
-            return svc.send_automation_to_contact(
+            outcome = svc.send_automation_to_contact(
                 automation_type='flow',
                 automation_id=automation_id,
                 phone=phone,
@@ -158,7 +159,18 @@ def broadcast_to_children(
             outcome = {'sent': False, 'error': manychat_error_detail(exc)}
             if isinstance(exc, ManyChatContactUnfindable):
                 outcome['reason'] = 'contact_unfindable'
-            return outcome
+        # A template (kind) reports its own failures from notify_registration;
+        # an automation sent by name — or one that raised — is reported here.
+        if not outcome.get('sent'):
+            alert_send_failure(
+                phone=phone,
+                where='תפוצה מדף הלקוחות',
+                parent_name=parent_name,
+                child_name=ctx.get('child_name') or '',
+                reason=outcome.get('reason', ''),
+                error=outcome.get('error', ''),
+            )
+        return outcome
 
     def settle(target: dict, key: str, outcome: dict, tally: dict) -> None:
         """Record one real send on its row; only a message that went out uses up the phone."""

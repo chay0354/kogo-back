@@ -49,6 +49,9 @@ ALERT_FIELDS = {
 # A WhatsApp template value: one line, and short.
 _MAX_VALUE = 900
 
+# Why an alert kept with deliver=False never reached the office's WhatsApp.
+HELD_NOTE = 'במערכת בלבד, בלי וואטסאפ למשרד'
+
 
 def _one_line(value) -> str:
     text = re.sub(r'\s+', ' ', str(value or '')).strip()
@@ -82,8 +85,15 @@ def raise_office_alert(
     action: str = '',
     link: str = '',
     details: Optional[dict] = None,
+    deliver: bool = True,
 ) -> None:
-    """Keep the alert and send it to the office once the caller's transaction commits. Never raises."""
+    """
+    Keep the alert and send it to the office once the caller's transaction commits. Never raises.
+
+    ``deliver=False`` keeps it in the system only — the morning brief — with
+    no WhatsApp to the office (the WhatsApp-delivery alerts, by the owner's
+    choice on 30.9.2026).
+    """
     fields = dict(title=title, where=where, what=what, why=why, customer=customer, action=action, link=link)
 
     def _record_and_send():
@@ -103,7 +113,10 @@ def raise_office_alert(
             logger.exception('Office alert %s could not be recorded', dedup_key)
             return
         logger.warning('Office alert [%s] %s — %s', kind, alert.title, alert.what)
-        deliver_office_alert(alert)
+        if deliver:
+            deliver_office_alert(alert)
+        else:
+            OfficeAlert.objects.filter(id=alert.id).update(error=HELD_NOTE)
 
     try:
         transaction.on_commit(_record_and_send)

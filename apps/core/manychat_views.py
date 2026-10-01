@@ -562,6 +562,8 @@ class WhatsAppViewSet(viewsets.ViewSet):
             result = svc.notify_registration(
                 kind=kind_map[kind],
                 lookup_names=lookup_names,
+                # A test: the person running it is looking at the result.
+                alert_office=False,
                 **ctx,
             )
         except ManyChatError as exc:
