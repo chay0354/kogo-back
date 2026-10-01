@@ -2385,7 +2385,13 @@ class PaymentService:
             source: 'notify', or 'returned' (the number the site got back
                 from the page): a returned number the report disputes waits
                 for the ordinary clock before the office hears — the real
-                notify is usually on its way
+                notify is usually on its way — and the approval number it
+                brings only fills a blank, where a notify's own replaces
+                whatever was kept
+
+        Whatever the notify's own number ends as, the order's OTHER undecided
+        numbers — a released one, one reported beside it — are asked about
+        too, within the per-check limit of report reads.
 
         Returns:
             Dict with completion result
@@ -2412,6 +2418,19 @@ class PaymentService:
         if not tranzila_response.get('is_successful'):
             return self._store_notify_declined(invoice, index, tranzila_response)
 
+        result = self._store_notify_approved(invoice, index, code, site_timeout=site_timeout, source=source)
+        if index and not result.get('repeat'):
+            self._ask_other_store_numbers(invoice.pk, index, site_timeout=site_timeout)
+        result.pop('repeat', None)
+        return result
+
+    def _store_notify_approved(self, invoice, index: str, code: str, *, site_timeout: Optional[float],
+                               source: str) -> Dict:
+        """An "approved" notify (or a returned number) for a store invoice: see complete_store_purchase_from_webhook."""
+        from apps.store import payment_followup as followup
+        from apps.store.models import StoreInvoice
+
+        from_notify = source != 'returned'
         if not index:
             # "Approved" without a number proves nothing and leaves nothing to
             # ask the report about. Nothing is recorded; a number the invoice
@@ -2426,9 +2445,10 @@ class PaymentService:
             # is asked about — a released or ruled-out one included: "already
             # handled" without the report could hide a second charge.
             logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
-            return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
+            return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True, 'repeat': True}
 
-        number = followup.number_for(invoice, index, code, (self.iframe_tranzila_service.terminal or '').strip())
+        number = followup.number_for(invoice, index, code, (self.iframe_tranzila_service.terminal or '').strip(),
+                                     code_wins=from_notify)
         # Asked before the row is locked: the report may take up to 30 seconds,
         # and the lock would hold every other notify and poll of this order.
         answer, row, why = followup.report_answer(invoice, number)
@@ -2442,7 +2462,7 @@ class PaymentService:
                 # Never sold again and never downgraded. A *different* number
                 # is the same order paid twice (two tabs, a page opened twice):
                 # kept and told, never swallowed.
-                self._record_second_store_charge(invoice, number, answer, row)
+                self._record_second_store_charge(invoice, number, answer, row, code_wins=from_notify)
                 logger.info(f"Store webhook for invoice {invoice.invoice_number} already processed")
                 return {'success': True, 'invoice_id': str(invoice.id), 'already_processed': True}
 
@@ -2461,7 +2481,7 @@ class PaymentService:
                 # — as the invoice's own, or beside it, a released one reopened
                 # — and the invoice is in review; apps/store/payment_followup.py
                 # asks the report again.
-                own = self._keep_reported_number(invoice, number)
+                own = self._keep_reported_number(invoice, number, code_wins=from_notify)
                 logger.error(
                     "Store webhook for invoice %s not confirmed by Tranzila (%s: %s); in review",
                     invoice.invoice_number, answer, why,
@@ -2471,7 +2491,7 @@ class PaymentService:
                 # or a number the site returned, before the notify — after ten
                 # minutes from the payment. After commit, once per invoice. A
                 # further number was told as a possible double charge already.
-                if own and source != 'returned' and answer in (followup.ANSWER_REJECTED, followup.ANSWER_DISPUTED):
+                if own and from_notify and answer in (followup.ANSWER_REJECTED, followup.ANSWER_DISPUTED):
                     followup.alert_payment_unverified(invoice, row, why)
                 elif own:
                     followup.alert_if_stuck(invoice, why=why)
@@ -2486,13 +2506,37 @@ class PaymentService:
         self._after_store_sale(invoice, sold, site_timeout=site_timeout)
         return {'success': True, 'invoice_id': str(invoice.id)}
 
+    def _ask_other_store_numbers(self, invoice_id, index: str, *, site_timeout: Optional[float] = None) -> None:
+        """
+        After a notify (or a returned number) for `index`: the report is asked
+        about the order's other undecided numbers too — a number a person
+        released may be the real payment, and the one just reported the second
+        (or the other way round). One report read went to the notify's own
+        number; the rest of the per-check limit goes to these, in turns.
+        """
+        from apps.store import payment_followup as followup
+        from apps.store.models import StoreInvoice
+
+        invoice = StoreInvoice.objects.filter(pk=invoice_id).first()
+        if invoice is None:
+            return
+        if not any(n.index != index for n in followup.open_numbers(invoice, include_released=True)):
+            return
+        try:
+            self.settle_reported_store_payment(
+                invoice_id, skip=(index,), site_timeout=site_timeout,
+                max_numbers=followup.MAX_REPORT_READS_PER_INVOICE - 1,
+            )
+        except Exception:  # noqa: BLE001 — the notify's own answer stands; the sweep asks again
+            logger.exception('Store invoice %s: asking about its other numbers failed', invoice.invoice_number)
+
     def settle_reported_store_payment(
         self, invoice_id, *, complete: bool = True, decline: bool = False, write: bool = True,
         include_suspected: bool = False, evidence: Optional[dict] = None, site_timeout: Optional[float] = None,
-        max_numbers: Optional[int] = None,
+        max_numbers: Optional[int] = None, skip: tuple = (),
     ) -> Dict:
         """
-        Ask the report about every undecided number of a store invoice — the
+        Ask the report about the undecided numbers of a store invoice — the
         ones a person released included — and settle what it allows
         (apps/store/payment_followup.py).
 
@@ -2500,26 +2544,32 @@ class PaymentService:
           `complete` — through the same locked sale the notify makes; any
           other number stays beside it. Without `complete` nothing is sold and
           the office is told the report confirms it.
-        * On a paid invoice, a further confirmed number is a second charge.
+        * On a paid invoice, a further confirmed number is a second charge:
+          recorded and told as confirmed, in every mode.
         * `decline` — a "declined" notify came: the invoice is failed only
           when every number holding it in review at the moment of the lock was
           asked about, and the report gave each a definite no (declined, not a
           charge, another sum). A number reported while the report was being
           read, one it does not list, or one with another approval number,
-          keeps the order in review. Released numbers do not hold it.
+          keeps the order in review — and so does a charge found in the
+          report (suspected). Released numbers do not hold it.
         * Otherwise it stays in review (pending) — or, when only released
           numbers are left, as it is.
-        * `write` off (the morning sweep while its switch is off): read and
-          tell only — nothing on the invoice changes, nothing is recorded.
+        * `write` off (the morning sweep while its switch is off): an unpaid
+          invoice is read and told only — nothing sold, no status, no number
+          moved.
         * `include_suspected` / `evidence` (confirmation_code / card_last4): a
           person's "complete after verification" with the customer's own
           evidence, which wins over any kept code; a suspected charge is
           asked about only with it (payment_followup.with_evidence).
-        * `max_numbers`: at most this many report reads (the sweep's cap); the
-          rest wait for the next time.
+        * `max_numbers`: report reads this call may make — never more than
+          MAX_REPORT_READS_PER_INVOICE. The numbers take turns
+          (payment_followup.next_to_ask): what was asked is stamped on the
+          invoice in every mode, and 'not_asked' says how many wait.
+        * `skip`: numbers somebody is asking about right now (the notify's own).
 
         Reads the report before locking the invoice. Never charges.
-        Returns {'outcome': completed | confirmed | paid | declined | in_review | nothing_open, ...}.
+        Returns {'outcome': completed | confirmed | paid | declined | in_review | released_open | nothing_open, ...}.
         """
         from apps.store import payment_followup as followup
         from apps.store.models import StoreInvoice
@@ -2529,71 +2579,88 @@ class PaymentService:
             return {'outcome': 'nothing_open'}
 
         def numbers_of(inv):
-            return followup.open_numbers(inv, include_suspected=include_suspected, include_released=True)
+            return [n for n in followup.open_numbers(inv, include_suspected=include_suspected, include_released=True)
+                    if n.index not in skip]
 
-        numbers = numbers_of(invoice)
-        if max_numbers is not None:
-            numbers = numbers[:max_numbers]
-        if evidence:
-            numbers = [followup.with_evidence(n, **evidence) for n in numbers]
-        else:
-            numbers = [followup.with_evidence(n) for n in numbers]
+        every = numbers_of(invoice)
+        limit = min(max_numbers or followup.MAX_REPORT_READS_PER_INVOICE, followup.MAX_REPORT_READS_PER_INVOICE)
+        numbers = [followup.with_evidence(n, **(evidence or {})) for n in followup.next_to_ask(every, limit)]
         asked = {n.index: (n, *followup.report_answer(invoice, n)) for n in numbers}
         if not asked:
             return {'outcome': 'nothing_open', 'status': invoice.payment_status}
-
-        if not write:
-            return self._tell_reported_store_payment(invoice, list(asked.values()))
+        not_asked = len(every) - len(asked)
 
         sold = None
         with transaction.atomic():
             invoice = StoreInvoice.objects.select_for_update().get(pk=invoice.pk)
+            stamped = followup.mark_asked(invoice, asked)
             # Only numbers still undecided under the lock: another notify or
             # poll may have settled some while the report was being read — and
             # may have reported new ones, which nobody has asked about yet.
             still_open = {n.index: n for n in numbers_of(invoice)}
             answers = [(asked[i][0], answer, row, why)
                        for i, (_n, answer, row, why) in asked.items() if i in still_open]
-            unasked_blocking = [n for i, n in still_open.items() if i not in asked and not n.released]
+            unasked_blocking = [n for i, n in still_open.items()
+                                if i not in asked and not n.released and not n.suspected]
 
             if invoice.payment_status in followup.PAID_STATUSES:
-                for number, answer, row, _why in answers:
-                    if not number.primary:
-                        self._record_second_store_charge(invoice, number, answer, row)
-                return {'outcome': 'paid', 'status': invoice.payment_status}
+                # In every mode: a second charge the report confirms is
+                # recorded and told. No sale, no document, no email.
+                recorded = [
+                    number.index for number, answer, row, _why in answers
+                    if not number.primary and self._record_second_store_charge(invoice, number, answer, row)
+                ]
+                if stamped:
+                    invoice.save(update_fields=['other_transactions'])
+                return {'outcome': 'paid', 'status': invoice.payment_status, 'second_charges': recorded,
+                        'not_asked': not_asked}
+
+            if not write:
+                if stamped:
+                    invoice.save(update_fields=['other_transactions'])
+                return {**self._tell_reported_store_payment(invoice, answers), 'not_asked': not_asked}
 
             for number, answer, row, _why in answers:
                 if answer == followup.ANSWER_REJECTED and not number.primary:
                     followup.keep_other_transaction(invoice, number, followup.OTHER_REJECTED)
             confirmed = next(((n, row) for n, answer, row, _why in answers if answer == followup.ANSWER_VERIFIED), None)
-            blocking = [(n, answer) for n, answer, _r, _w in answers if not n.released]
+            blocking = [(n, answer) for n, answer, _r, _w in answers if not n.released and not n.suspected]
 
             if confirmed is not None and complete:
                 sold = self._sell_store_invoice(invoice, *confirmed)
                 if sold is None:
-                    return {'outcome': 'completed', 'status': 'completed'}
+                    return {'outcome': 'completed', 'status': 'completed', 'not_asked': not_asked}
             elif confirmed is not None:
                 invoice.save(update_fields=['other_transactions'])
                 followup.alert_payment_confirmed(invoice, confirmed[0].index)
-                return {'outcome': 'confirmed', 'status': invoice.payment_status, 'index': confirmed[0].index}
+                return {'outcome': 'confirmed', 'status': invoice.payment_status, 'index': confirmed[0].index,
+                        'not_asked': not_asked}
             elif (decline and blocking and not unasked_blocking
                   and all(answer == followup.ANSWER_REJECTED for _n, answer in blocking)):
-                # Every number holding the order in review was asked about, and
-                # the report definitely says none paid for it; Tranzila says
-                # the attempt was declined: the decline stands. The numbers
-                # are kept, marked, beside the invoice.
+                # Every reported number holding the order in review was asked
+                # about, and the report definitely says none paid for it;
+                # Tranzila says the attempt was declined. The numbers are
+                # kept, marked, beside the invoice.
                 for number, _answer in blocking:
                     if number.primary:
                         followup.keep_other_transaction(invoice, number, followup.OTHER_REJECTED)
                 invoice.tranzila_transaction_id = ''
                 invoice.tranzila_confirmation_code = ''
+                fields = ['tranzila_transaction_id', 'tranzila_confirmation_code', 'payment_status', 'other_transactions']
+                if followup.suspected_numbers(invoice):
+                    # A charge found in the report still may be this order's
+                    # payment: the decline rules out the reported numbers, not
+                    # that one. In review for a person; the site hears nothing.
+                    invoice.payment_status = 'pending'
+                    invoice.save(update_fields=fields)
+                    logger.warning('Store invoice %s declined, but a charge found in the report keeps it in review',
+                                   invoice.invoice_number)
+                    return {'outcome': 'in_review', 'status': 'pending', 'not_asked': not_asked}
                 invoice.payment_status = 'failed'
-                invoice.save(update_fields=[
-                    'tranzila_transaction_id', 'tranzila_confirmation_code', 'payment_status', 'other_transactions',
-                ])
+                invoice.save(update_fields=fields)
                 transaction.on_commit(lambda: self._tell_website_failed(invoice))
                 logger.warning('Store invoice %s declined; the report rules out every reported number', invoice.invoice_number)
-                return {'outcome': 'declined', 'status': 'failed'}
+                return {'outcome': 'declined', 'status': 'failed', 'not_asked': not_asked}
             else:
                 fields = ['other_transactions']
                 if followup.holds_reported_payment(invoice) and invoice.payment_status != 'pending':
@@ -2604,7 +2671,7 @@ class PaymentService:
                 if not followup.holds_reported_payment(invoice):
                     # Only numbers a person released are left undecided: asked
                     # again next time, the order as it is.
-                    return {'outcome': 'released_open', 'status': invoice.payment_status}
+                    return {'outcome': 'released_open', 'status': invoice.payment_status, 'not_asked': not_asked}
                 primary = next(((n, answer, row, why) for n, answer, row, why in answers if n.primary), None)
                 reasons = '; '.join(sorted({why for _n, _a, _r, why in answers if why}
                                            | ({'מספר עסקה נוסף דווח בזמן שהדוח נבדק'} if unasked_blocking else set())))
@@ -2614,22 +2681,21 @@ class PaymentService:
                     followup.alert_payment_unverified(invoice, primary[2], primary[3])
                 else:
                     followup.alert_if_stuck(invoice, why=reasons)
-                return {'outcome': 'in_review', 'status': 'pending'}
+                return {'outcome': 'in_review', 'status': 'pending', 'not_asked': not_asked}
 
         self._after_store_sale(invoice, sold, site_timeout=site_timeout)
-        return {'outcome': 'completed', 'status': 'completed'}
+        return {'outcome': 'completed', 'status': 'completed', 'not_asked': not_asked}
 
     def _tell_reported_store_payment(self, invoice, answers: list) -> Dict:
-        """settle_reported_store_payment without writing: what the report says, told to the office."""
+        """An unpaid invoice, without selling or changing it: what the report says, told to the office."""
         from apps.store import payment_followup as followup
 
-        if invoice.payment_status in followup.PAID_STATUSES:
-            confirmed = [n.index for n, answer, _r, _w in answers if answer == followup.ANSWER_VERIFIED and not n.primary]
-            return {'outcome': 'paid', 'status': invoice.payment_status, 'second_charges': confirmed}
         confirmed = next((n for n, answer, _r, _w in answers if answer == followup.ANSWER_VERIFIED), None)
         if confirmed is not None:
             followup.alert_payment_confirmed(invoice, confirmed.index)
             return {'outcome': 'confirmed', 'status': invoice.payment_status, 'index': confirmed.index}
+        if not followup.holds_reported_payment(invoice):
+            return {'outcome': 'released_open', 'status': invoice.payment_status}
         primary = next(((n, answer, row, why) for n, answer, row, why in answers if n.primary), None)
         if primary is not None and primary[1] in (followup.ANSWER_REJECTED, followup.ANSWER_DISPUTED):
             followup.alert_payment_unverified(invoice, primary[2], primary[3])
@@ -2704,7 +2770,7 @@ class PaymentService:
             provider_txn_id=provider_txn_id,
         )
 
-    def _keep_reported_number(self, invoice, number) -> Optional[bool]:
+    def _keep_reported_number(self, invoice, number, *, code_wins: bool = True) -> Optional[bool]:
         """
         A number the report does not confirm (yet), kept on the locked invoice:
         as its own when it has none, beside it otherwise — never over it. The
@@ -2714,30 +2780,37 @@ class PaymentService:
         Each number has its own clock: one that becomes the invoice's own — the
         first, or one after a number that was ruled out — carries the time it
         was first reported, so it is not judged "missing from the report" by an
-        older number's time. At most MAX_UNDECIDED_NUMBERS undecided numbers
-        are kept; a new one beyond that is not, and the office is told once.
-        True when the number is the invoice's own, False when kept beside it,
-        None when not kept.
+        older number's time. The approval number on `number` is the one
+        payment_followup.number_for chose (a notify's own wins; the site's
+        only fills a blank) and is kept with it.
+
+        Every number is kept: more than MAX_UNDECIDED_NUMBERS unanswered ones
+        are told to the office once, and only beyond MAX_KEPT_NUMBERS on one
+        order is a new one refused (None). True when the number is the
+        invoice's own, False when kept beside it.
         """
         from apps.store import payment_followup as followup
 
         now = timezone.now()
         index = number.index
-        known = index == (invoice.tranzila_transaction_id or '').strip() or bool(followup.other_state(invoice, index))
-        if not known and followup.undecided_count(invoice) >= followup.MAX_UNDECIDED_NUMBERS:
-            logger.error('Store invoice %s: number %s not kept — %s undecided numbers already',
-                         invoice.invoice_number, index, followup.MAX_UNDECIDED_NUMBERS)
-            followup.alert_too_many_numbers(invoice, index)
+        own = (invoice.tranzila_transaction_id or '').strip()
+        known = index == own or bool(followup.other_state(invoice, index))
+        if not known and not followup.has_room(invoice):
+            logger.error('Store invoice %s: number %s not kept — %s numbers already',
+                         invoice.invoice_number, index, followup.MAX_KEPT_NUMBERS)
+            followup.alert_too_many_numbers(invoice, index, kept=False)
             return None
         further = False
-        if not followup.is_transaction_number(invoice.tranzila_transaction_id):
+        if not followup.is_transaction_number(own):
             followup.drop_other_transaction(invoice, index)  # a released one, reported again
             invoice.tranzila_transaction_id = index
             invoice.tranzila_confirmation_code = number.code
             invoice.tranzila_terminal = number.terminal
             invoice.payment_reported_at = number.reported_at
-        elif invoice.tranzila_transaction_id.strip() != index:
-            further = followup.keep_other_transaction(invoice, number, followup.OTHER_OPEN)
+        elif own != index:
+            further = followup.keep_other_transaction(invoice, number, followup.OTHER_OPEN, code_wins=code_wins)
+        elif number.code:
+            invoice.tranzila_confirmation_code = number.code
         if invoice.payment_reported_at is None:
             invoice.payment_reported_at = now
         invoice.payment_status = 'pending'
@@ -2748,6 +2821,8 @@ class PaymentService:
         ])
         if further:
             followup.alert_possible_double_charge(invoice, index)
+        if followup.unanswered_count(invoice) > followup.MAX_UNDECIDED_NUMBERS:
+            followup.alert_too_many_numbers(invoice, index)
         return invoice.tranzila_transaction_id.strip() == index
 
     def _sell_store_invoice(self, invoice, number, row=None) -> Optional[list]:
@@ -2898,7 +2973,8 @@ class PaymentService:
                     invoice.invoice_number,
                 )
 
-    def _record_second_store_charge(self, invoice, number, answer: str, row=None, *, alert: bool = True) -> None:
+    def _record_second_store_charge(self, invoice, number, answer: str, row=None, *, alert: bool = True,
+                                    code_wins: bool = False) -> bool:
         """
         A paid invoice reported paid again under another transaction number
         (the caller holds the row lock).
@@ -2906,31 +2982,35 @@ class PaymentService:
         Every such number is kept on the invoice (other_transactions) and the
         office is told, once per order, that it may have been paid twice. One
         the report confirms is also kept as its own transaction row and shown
-        in the morning brief under "חיובים כפולים", so the office refunds it;
-        one the report definitely rules out is marked so; any other stays
-        undecided — a released one released — and is asked again. At most
-        MAX_UNDECIDED_NUMBERS undecided numbers are kept.
+        in the morning brief under "חיובים כפולים", so the office refunds it —
+        and told as a confirmed second charge, per number; no document is
+        made and the customer gets no email. One the report definitely rules
+        out is marked so; any other stays undecided — a released one
+        released — and is asked again. Kept up to MAX_KEPT_NUMBERS per order
+        (one the report confirms, always). True when a confirmed second
+        charge was recorded now.
         """
         from apps.store import payment_followup as followup
 
         if not number.index or number.index == (invoice.tranzila_transaction_id or '').strip():
-            return  # the same transaction reported again
+            return False  # the same transaction reported again
         previous = followup.other_state(invoice, number.index)
-        if answer == followup.ANSWER_VERIFIED:
+        verified = answer == followup.ANSWER_VERIFIED
+        if verified:
             state = followup.OTHER_SECOND_CHARGE
         elif answer == followup.ANSWER_REJECTED:
             state = followup.OTHER_REJECTED
         else:
             # Undecided: stays what it was (open, released, suspected), a new one open.
             state = previous if previous in followup.UNDECIDED_STATES else followup.OTHER_OPEN
-            if not previous and followup.undecided_count(invoice) >= followup.MAX_UNDECIDED_NUMBERS:
-                logger.error('Store invoice %s: further number %s not kept — %s undecided numbers already',
-                             invoice.invoice_number, number.index, followup.MAX_UNDECIDED_NUMBERS)
-                followup.alert_too_many_numbers(invoice, number.index)
-                return
-        new = followup.keep_other_transaction(invoice, number, state)
+            if not previous and not followup.has_room(invoice):
+                logger.error('Store invoice %s: further number %s not kept — %s numbers already',
+                             invoice.invoice_number, number.index, followup.MAX_KEPT_NUMBERS)
+                followup.alert_too_many_numbers(invoice, number.index, kept=False)
+                return False
+        new = followup.keep_other_transaction(invoice, number, state, code_wins=code_wins or verified)
         invoice.save(update_fields=['other_transactions'])
-        if answer == followup.ANSWER_VERIFIED:
+        if verified:
             TranzilaTransaction.objects.get_or_create(
                 idempotency_key=f'store_second_{invoice.id}_{number.index}'[:255],
                 defaults={
@@ -2953,8 +3033,13 @@ class PaymentService:
         else:
             logger.error('Store invoice %s: another transaction %s reported (%s)',
                          invoice.invoice_number, number.index, answer)
-        if alert and (new or answer == followup.ANSWER_VERIFIED):
+        if alert and verified:
+            followup.alert_second_charge_confirmed(invoice, number.index)
+        elif alert and new:
             followup.alert_possible_double_charge(invoice, number.index, answer)
+        if new and followup.unanswered_count(invoice) > followup.MAX_UNDECIDED_NUMBERS:
+            followup.alert_too_many_numbers(invoice, number.index)
+        return verified and previous != followup.OTHER_SECOND_CHARGE
 
     def create_cash_invoice(
         self,

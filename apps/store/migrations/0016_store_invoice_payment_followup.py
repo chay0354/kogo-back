@@ -8,7 +8,8 @@ class Migration(migrations.Migration):
     What a store invoice keeps for following a hosted-page payment up
     (apps/store/payment_followup.py): when the website acknowledged "paid",
     when the CRM last followed the payment up by itself, when Tranzila first
-    reported a payment, when the first and the last payment page were handed out, every
+    reported a payment, when the first and the last payment page were handed out,
+    when the report was last searched for a payment of those pages, every
     further transaction number Tranzila reported, and what a person decided
     about a payment in review.
 
@@ -55,6 +56,11 @@ class Migration(migrations.Migration):
             model_name='storeinvoice',
             name='payment_page_first_opened_at',
             field=models.DateTimeField(blank=True, null=True, verbose_name='עמוד תשלום ראשון נפתח'),
+        ),
+        migrations.AddField(
+            model_name='storeinvoice',
+            name='payment_search_done_at',
+            field=models.DateTimeField(blank=True, null=True, verbose_name='חיפוש תשלום בדוח — אחרון'),
         ),
         migrations.AddField(
             model_name='storeinvoice',

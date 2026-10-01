@@ -45,8 +45,12 @@ What can go wrong after the customer paid, and what answers it:
      keeps the site's answer (website_paid_notified_at) and is repeated.
   3. A second number for the same order: kept, told to the office once per
      order as a possible double charge, recorded as a second charge once the
-     report confirms it. At most MAX_UNDECIDED_NUMBERS undecided numbers are
-     kept per order; beyond that the office is told, once.
+     report confirms it — also while the sweep's switch is off — and told as
+     "a confirmed second charge, to refund". Every reported number is kept
+     (up to MAX_KEPT_NUMBERS per order); more than MAX_UNDECIDED_NUMBERS
+     unanswered ones are told once. What is limited is the work: one check
+     reads the report at most MAX_REPORT_READS_PER_INVOICE times per order,
+     the numbers taking turns (`next_to_ask`), so each is asked in the end.
   4. The notify never came at all. The site can report the number it got
      back from the page (widget/payment/returned/, `record_returned_number`),
      for an order whose page it opened in the last RETURNED_PAGE_WINDOW —
@@ -55,22 +59,36 @@ What can go wrong after the customer paid, and what answers it:
      (`find_unreported_payment`), by a retry (a match is kept as suspected and
      blocks a second page; a report that has not caught up — the last page
      opened less than REPORT_SETTLE ago — blocks it too) and by the sweep
-     (lists and tells; also for paid orders that opened more than one page).
-     A report read only in part is "unknown", never "nothing there".
+     (also for paid orders that opened more than one page). A match is kept
+     on the invoice as suspected, whatever the sweep's switch reads, and
+     stays in the brief until a person decides. A report that cannot be read
+     — or was read only in part, or answered an error — is "unknown", never
+     "nothing there": no second page is handed out on it, and the office is
+     told a customer is waiting. An order's pages are looked for until one
+     complete read made SEARCH_FINAL_AFTER after its last page
+     (payment_search_done_at), at any age.
   5. Any of it stays that way: the office hears (apps/core/office_alerts.py),
-     once per order and event. A person settles an invoice in review with the
-     managers' tool (`complete_reported_payment` / `release_reported_payment`),
-     with a reason; who and when are kept on the invoice.
+     once per order and event — and again after a person's release, when
+     something new happens to the order. A person settles an invoice with the
+     managers' tool (`complete_reported_payment` / `release_reported_payment`
+     / `close_reported_numbers`), with a reason; who and when are kept on the
+     invoice.
 
 Who drives the follow-up:
   * the website's status poll, GET /api/v1/store/widget/payment/status/
     (`website_order_status`), at most once per RECHECK_INTERVAL per invoice;
   * the morning brief's sweep, "תשלומים שנתקעו בחנות"
     (`sweep_stuck_store_payments`). With STORE_SWEEP_COMPLETES_PAYMENTS off
-    (until the owner decides) it only READS and TELLS: it writes nothing to
-    any invoice. On, it settles what the report confirms, as the poll does;
-  * the site asking to pay an order again (widget/payment/initiate/);
-  * another notify, or a returned number, for the same invoice.
+    (until the owner decides) it sells nothing: no sale, no status, no
+    document, no email. What it keeps either way is what it learned — a
+    charge found in the report (suspected), a second charge the report
+    confirms on a paid order, when each number was last asked. On, it also
+    completes what the report confirms, as the poll does;
+  * the site asking to pay an order again (widget/payment/initiate/): every
+    number the order holds — released ones too — is asked about before a
+    second page leaves;
+  * another notify, or a returned number, for the same invoice: the order's
+    other undecided numbers are asked about too.
 There is no cron of its own: a new Vercel cron is a Level-2 decision (plan
 item 2.7), so between the site's polls and the morning an invoice waits.
 """
@@ -81,6 +99,7 @@ import re
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from types import SimpleNamespace
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -105,25 +124,42 @@ STUCK_AFTER = timedelta(minutes=10)
 # "not known yet" for this long after it was reported, and "not there" after;
 # a retry this soon after the last page opened gets no new page on "not found".
 REPORT_SETTLE = timedelta(minutes=10)
-# A report that cannot be asked stops a retry this soon after a page was
-# handed out; after that the retry gets its page.
-UNREPORTED_WINDOW = timedelta(minutes=30)
-# How far back a payment whose notify never came is looked for, and how far
-# back invoices from before 29.9.2026 (no payment_reported_at) are swept.
+# The morning's one read of the report covers the orders whose first page
+# opened this recently; an older order still not looked for gets a read of
+# its own days (MAX_OLD_SEARCHES a morning). Also how far back invoices from
+# before 29.9.2026 (no payment_reported_at) are swept.
 SEARCH_WINDOW = timedelta(days=3)
 LEGACY_WINDOW = timedelta(days=3)
+MAX_OLD_SEARCHES = 3
+# An order's pages are looked for in the report until one complete read made
+# this long after its last page was handed out: nothing new can appear later.
+SEARCH_FINAL_AFTER = timedelta(hours=24)
+# Pages of the report (1000 rows each) one search may read; more than that is
+# "read in part", which is "unknown".
+DAY_REPORT_MAX_PAGES = 10
 # The site may report a returned number only for an order whose page it
 # opened this recently.
 RETURNED_PAGE_WINDOW = timedelta(hours=2)
-# Undecided numbers kept per order (a number the report confirms is always
-# kept): beyond this, a flood of made-up numbers is refused and told once.
+# More reported numbers than this that the report has not answered for (the
+# order's own and the open ones; a charge found in the report or one a person
+# released is not counted) is told to the office, once. All of them are kept.
 MAX_UNDECIDED_NUMBERS = 3
+# Numbers kept per order, in any state. Beyond it a new unconfirmed number is
+# not kept (and the office is told); one the report confirms always is.
+MAX_KEPT_NUMBERS = 50
+# A transaction number is an integer on Tranzila's side; nothing longer is one.
+MAX_NUMBER_DIGITS = 20
+# A second page leaves only when every released number of the order was asked
+# about this recently.
+ASKED_FRESH = timedelta(minutes=10)
 # The sweep runs inside the morning brief's request (the platform cuts a request
 # at 300 seconds, and every report read may take up to 30). What it does not
 # reach in time it lists as not checked, and the next morning carries on.
 SWEEP_BUDGET_SECONDS = 60
-# ...and no one invoice may take more than this of it, or this many report reads.
+# ...and no one invoice may take more than this of it.
 SWEEP_INVOICE_SECONDS = 20
+# Report reads one check of one invoice may make — the sweep, the poll, a
+# notify, a retry, a person's decision. The numbers take turns.
 MAX_REPORT_READS_PER_INVOICE = 4
 # From the status poll the site is waiting on our answer, so a "paid" call to
 # it made on the way gets a shorter leash than the notify's.
@@ -148,6 +184,7 @@ ANSWER_VERIFIED = 'verified'   # an approved charge of this sum for this order
 ANSWER_REJECTED = 'rejected'   # a definite no: declined, not a charge, or another sum
 ANSWER_DISPUTED = 'disputed'   # the report disagrees, not definitely (approval, time, owner, not listed)
 ANSWER_UNKNOWN = 'unknown'     # the report could not be asked, or does not list it yet
+WHY_NO_ANSWER = 'הדוח של טרנזילה לא ענה'
 
 # other_transactions[*].state
 OTHER_OPEN = 'open'                    # undecided; the order is in review
@@ -155,6 +192,7 @@ OTHER_SUSPECTED = 'suspected'          # found in the report by sum and time; th
 OTHER_RELEASED = 'released'            # a person found no charge; undecided, still asked, not blocking
 OTHER_SECOND_CHARGE = 'second_charge'  # decided: a real second payment, for a refund
 OTHER_REJECTED = 'rejected'            # decided: the report's definite no
+OTHER_CLOSED = 'closed'                # decided by a person, on a paid order: not this order's
 UNDECIDED_STATES = (OTHER_OPEN, OTHER_SUSPECTED, OTHER_RELEASED)
 BLOCKING_STATES = (OTHER_OPEN, OTHER_SUSPECTED)
 
@@ -185,6 +223,19 @@ def is_transaction_number(value) -> bool:
     return bool(_NUMBER.fullmatch(str(value or '').strip()))
 
 
+def normal_number(value) -> str:
+    """
+    A transaction number as it is kept and asked about: ASCII digits, without
+    leading zeros ('0123456' and '123456' are one transaction — the report is
+    asked by its value), at most MAX_NUMBER_DIGITS. '' for anything else.
+    """
+    value = str(value or '').strip()
+    if not _NUMBER.fullmatch(value):
+        return ''
+    value = value.lstrip('0')
+    return value if value and len(value) <= MAX_NUMBER_DIGITS else ''
+
+
 def shown_number(value) -> str:
     """A transaction number for an alert or the brief — never anything else that sat in its place."""
     value = str(value or '').strip()
@@ -203,8 +254,7 @@ def notify_index(tranzila_response: dict) -> str:
     """
     raw = tranzila_response.get('raw_payload')
     value = raw.get('index', '') if isinstance(raw, dict) else tranzila_response.get('transaction_id', '')
-    value = str(value or '').strip()
-    return value if is_transaction_number(value) else ''
+    return normal_number(value)
 
 
 def report_card_last4(row: Optional[dict]) -> str:
@@ -226,6 +276,7 @@ class ReportedNumber:
     reported_at: datetime
     primary: bool
     state: str = OTHER_OPEN   # for a further number: its other_transactions state
+    asked_at: Optional[datetime] = None   # for a further number: when the report was last asked about it
 
     @property
     def suspected(self) -> bool:
@@ -257,6 +308,7 @@ def _entry_number(invoice: StoreInvoice, entry: dict) -> ReportedNumber:
         reported_at=_parse_time(entry.get('reported_at')) or invoice.created_at,
         primary=False,
         state=str(entry.get('state') or OTHER_OPEN),
+        asked_at=_parse_time(entry.get('asked_at')) if entry.get('asked_at') else None,
     )
 
 
@@ -274,7 +326,8 @@ def open_numbers(invoice: StoreInvoice, *, include_suspected: bool = False,
     The undecided numbers of this invoice: its own (while unsettled) and the
     further open ones — the ones that keep it in review. `include_released`
     adds those a person released (still asked about, not blocking);
-    `include_suspected` those found in the report (a person's decision only).
+    `include_suspected` those found in the report (a person's decision only,
+    on an unpaid order and on a paid one).
     """
     numbers = []
     if _holds_own_number(invoice):
@@ -288,7 +341,7 @@ def open_numbers(invoice: StoreInvoice, *, include_suspected: bool = False,
     wanted = {OTHER_OPEN}
     if include_released:
         wanted.add(OTHER_RELEASED)
-    if include_suspected and invoice.payment_status in UNSETTLED_STATUSES:
+    if include_suspected:
         wanted.add(OTHER_SUSPECTED)
     for entry in invoice.other_transactions or []:
         if entry.get('state') in wanted and is_transaction_number(entry.get('index')):
@@ -304,10 +357,53 @@ def suspected_numbers(invoice: StoreInvoice) -> list[ReportedNumber]:
     ]
 
 
-def undecided_count(invoice: StoreInvoice) -> int:
-    """Numbers kept for this order that nothing has decided yet (the cap counts these)."""
+def unanswered_count(invoice: StoreInvoice) -> int:
+    """
+    Reported numbers the report has not answered for: the order's own and the
+    open ones. A charge found in the report, or a number a person released,
+    is not a number somebody keeps sending.
+    """
     own = 1 if _holds_own_number(invoice) else 0
-    return own + sum(1 for e in invoice.other_transactions or [] if e.get('state') in UNDECIDED_STATES)
+    return own + sum(1 for e in invoice.other_transactions or [] if e.get('state') == OTHER_OPEN)
+
+
+def has_room(invoice: StoreInvoice) -> bool:
+    """Whether one more number may be kept on this order (MAX_KEPT_NUMBERS, in any state)."""
+    own = 1 if is_transaction_number(invoice.tranzila_transaction_id) else 0
+    return own + len(invoice.other_transactions or []) < MAX_KEPT_NUMBERS
+
+
+def next_to_ask(numbers: list[ReportedNumber], limit: int) -> list[ReportedNumber]:
+    """
+    The numbers one check asks the report about: at most `limit`, the order's
+    own first, then the ones asked longest ago (never asked before all). Each
+    check stamps what it asked (`mark_asked`), so the numbers take turns and
+    every one is asked in the end, however many an order holds.
+    """
+    never = datetime.min.replace(tzinfo=dt_timezone.utc)
+    return sorted(numbers, key=lambda n: (not n.primary, n.asked_at or never))[:max(limit, 1)]
+
+
+def mark_asked(invoice: StoreInvoice, indexes) -> bool:
+    """Stamp the further numbers just asked about (the caller holds the row lock and saves). True when any was."""
+    wanted = {str(i) for i in indexes}
+    now = timezone.now().isoformat()
+    entries = [dict(entry) for entry in (invoice.other_transactions or [])]
+    stamped = False
+    for entry in entries:
+        if str(entry.get('index')) in wanted and entry.get('state') in UNDECIDED_STATES:
+            entry['asked_at'] = now
+            stamped = True
+    if stamped:
+        invoice.other_transactions = entries
+    return stamped
+
+
+def released_not_asked(invoice: StoreInvoice) -> list[ReportedNumber]:
+    """Released numbers of this order the report was not asked about in the last ASKED_FRESH."""
+    since = timezone.now() - ASKED_FRESH
+    return [n for n in open_numbers(invoice, include_released=True)
+            if n.released and (n.asked_at is None or n.asked_at < since)]
 
 
 def holds_reported_payment(invoice: StoreInvoice) -> bool:
@@ -321,17 +417,28 @@ def holds_reported_payment(invoice: StoreInvoice) -> bool:
     return bool(open_numbers(invoice)) or bool(suspected_numbers(invoice))
 
 
-def number_for(invoice: StoreInvoice, index: str, code: str, terminal: str) -> ReportedNumber:
+def number_for(invoice: StoreInvoice, index: str, code: str, terminal: str, *,
+               code_wins: bool = True) -> ReportedNumber:
     """
     A number a notify (or the site) reports now. One the invoice already
     holds keeps the time it was first reported and its state; a new one — or
     one that takes the place of a number ruled out — starts its own clock now.
+
+    The approval number: a notify's is Tranzila's own and wins over whatever
+    was kept (`code_wins`); the one the site returned only fills a blank — it
+    never writes over a kept one. Neither is believed: the report decides.
     """
+    def effective(kept) -> str:
+        kept = str(kept or '').strip()
+        return code if code and (code_wins or not kept) else kept
+
     if index == (invoice.tranzila_transaction_id or '').strip():
-        return ReportedNumber(index, code, terminal, invoice.payment_reported_at or timezone.now(), True)
+        return ReportedNumber(index, effective(invoice.tranzila_confirmation_code), terminal,
+                              invoice.payment_reported_at or timezone.now(), True)
     for entry in invoice.other_transactions or []:
         if str(entry.get('index')) == index and entry.get('state') in UNDECIDED_STATES:
-            return ReportedNumber(index, code, terminal, _parse_time(entry.get('reported_at')) or timezone.now(),
+            return ReportedNumber(index, effective(entry.get('code')), terminal,
+                                  _parse_time(entry.get('reported_at')) or timezone.now(),
                                   False, str(entry.get('state')))
     return ReportedNumber(index, code, terminal, timezone.now(), not is_transaction_number(invoice.tranzila_transaction_id))
 
@@ -343,11 +450,14 @@ def other_state(invoice: StoreInvoice, index: str) -> str:
     return ''
 
 
-def keep_other_transaction(invoice: StoreInvoice, number: ReportedNumber, state: str, **extra) -> bool:
+def keep_other_transaction(invoice: StoreInvoice, number: ReportedNumber, state: str, *,
+                           code_wins: bool = False, **extra) -> bool:
     """
     Keep a further number on the invoice (the caller holds the row lock and
     saves). A number already kept moves on only while undecided (open,
-    suspected, released); a decided one stays as it is. True when new.
+    suspected, released); a decided one stays as it is. Its approval number
+    fills a blank; it replaces a kept one only with `code_wins` (a notify's
+    own). True when new.
     """
     entries = [dict(entry) for entry in (invoice.other_transactions or [])]
     for entry in entries:
@@ -356,7 +466,7 @@ def keep_other_transaction(invoice: StoreInvoice, number: ReportedNumber, state:
                 entry['state'] = state
                 entry['settled_at'] = timezone.now().isoformat()
                 entry.update(extra)
-            if number.code and not entry.get('code') and state != OTHER_SUSPECTED:
+            if number.code and state != OTHER_SUSPECTED and (code_wins or not entry.get('code')):
                 entry['code'] = number.code
             invoice.other_transactions = entries
             return False
@@ -450,7 +560,7 @@ def report_answer(invoice: StoreInvoice, number: ReportedNumber) -> tuple[str, O
     if verdict == 'verified':
         return ANSWER_VERIFIED, row, ''
     if verdict == 'unavailable':
-        return ANSWER_UNKNOWN, None, 'הדוח של טרנזילה לא ענה'
+        return ANSWER_UNKNOWN, None, WHY_NO_ANSWER
     if row is not None:
         if not is_tranzila_approved(row.get('processor_response_code') or row.get('response_code')):
             return ANSWER_REJECTED, row, 'בדוח של טרנזילה העסקה נדחתה'
@@ -496,27 +606,43 @@ def _in_review():
     return _with_undecided_numbers().filter(payment_status__in=UNSETTLED_STATUSES)
 
 
-def _pages_with_nothing_reported(since):
-    """Website orders a page was handed out for since `since`, with no undecided number."""
-    qs = (
-        StoreInvoice.objects
-        .filter(payment_status__in=UNSETTLED_STATUSES, website_order_number__isnull=False,
-                payment_page_opened_at__gte=since, tranzila_transaction_id='')
-        .exclude(website_order_number='')
-    )
-    for state in UNDECIDED_STATES:
-        qs = qs.exclude(other_transactions__contains=[{'state': state}])
-    return qs
+def _needing_report_search():
+    """
+    Website orders whose pages must still be looked for in the report: a page
+    was handed out, and no complete read of the report has covered the order
+    SEARCH_FINAL_AFTER after its last page (payment_search_done_at) — at any
+    age, so an order the report could not be read for is never dropped by
+    the clock.
 
-
-def _paid_after_more_than_one_page(since):
-    """Paid website orders that handed out more than one page: an earlier page may have been paid too."""
+      * unpaid orders that nothing holds in review: the notify of a page may
+        never have come. Numbers a person released do not stop the search —
+        the customer got a new page since;
+      * paid orders that handed out more than one page: an earlier page may
+        have been paid too.
+    """
+    unpaid = Q(payment_status__in=UNSETTLED_STATUSES, tranzila_transaction_id='')
+    for state in BLOCKING_STATES:
+        unpaid &= ~Q(other_transactions__contains=[{'state': state}])
+    several_pages = Q(payment_status__in=PAID_STATUSES, payment_page_first_opened_at__lt=F('payment_page_opened_at'))
     return (
         StoreInvoice.objects
-        .filter(payment_status__in=PAID_STATUSES, website_order_number__isnull=False,
-                payment_page_opened_at__gte=since, payment_page_first_opened_at__isnull=False)
-        .filter(payment_page_first_opened_at__lt=F('payment_page_opened_at'))
+        .filter(website_order_number__isnull=False, payment_page_opened_at__isnull=False)
+        .exclude(website_order_number='')
+        .filter(Q(payment_search_done_at__isnull=True)
+                | Q(payment_search_done_at__lt=F('payment_page_opened_at') + SEARCH_FINAL_AFTER))
+        .filter(unpaid | several_pages)
     )
+
+
+def search_is_final(invoice: StoreInvoice) -> bool:
+    """A complete read of the report covered this order's pages long enough after the last one: nothing new can show."""
+    done, opened = invoice.payment_search_done_at, invoice.payment_page_opened_at
+    return done is not None and opened is not None and done >= opened + SEARCH_FINAL_AFTER
+
+
+def mark_searched(invoice_id) -> None:
+    """A complete read of the report looked for this order's pages now."""
+    StoreInvoice.objects.filter(pk=invoice_id).update(payment_search_done_at=timezone.now())
 
 
 def _owed_a_paid_call():
@@ -587,9 +713,12 @@ def recheck_pending_payment(invoice_id, *, min_interval: timedelta = RECHECK_INT
     (PaymentService.settle_reported_store_payment): a confirmed number
     completes the sale — when `complete` — through the locked path the notify
     uses; on a paid invoice, a confirmed further number is a second charge.
-    With `write` off (the morning sweep while its switch is off) it only reads
-    the report and tells the office: nothing on the invoice changes, not even
-    the pace-keeper. Nothing is ever charged; the report is read.
+    With `write` off (the morning sweep while its switch is off) nothing is
+    sold and no status changes: the office is told what the report says. What
+    is kept either way: a second charge the report confirms on a paid order,
+    and when each number was asked. At most MAX_REPORT_READS_PER_INVOICE
+    numbers are asked at a time (`max_numbers`), in turns. Nothing is ever
+    charged; the report is read.
     """
     from apps.core.payment_service import PaymentService
 
@@ -709,16 +838,17 @@ def site_status(invoice: StoreInvoice) -> dict:
 
 def website_order_status(website_order_number: str) -> Optional[dict]:
     """
-    The site's poll for one order. A reported payment in review is asked about
-    again (paced) and completed when the report confirms it — the customer is
-    waiting for exactly that; a paid order the site never acknowledged is told
-    again. None when there is no such order.
+    The site's poll for one order. Every undecided number of an unpaid order
+    — a payment in review, and a number a person released — is asked about
+    again (paced) and the order completed when the report confirms one: the
+    customer is waiting for exactly that. A paid order the site never
+    acknowledged is told again. None when there is no such order.
     """
     invoice = StoreInvoice.objects.filter(website_order_number=website_order_number).first()
     if invoice is None:
         return None
     try:
-        if holds_reported_payment(invoice):
+        if invoice.payment_status in UNSETTLED_STATUSES and open_numbers(invoice, include_released=True):
             recheck_pending_payment(invoice.pk, site_timeout=POLL_SITE_TIMEOUT_SECONDS)
             invoice.refresh_from_db()
         elif invoice.payment_status == 'completed' and invoice.website_paid_notified_at is None:
@@ -743,8 +873,9 @@ def record_returned_number(website_order_number: str, index: str, code: str = ''
     Taken only for an order whose page the CRM handed out within
     RETURNED_PAGE_WINDOW. Believed exactly as much as a notify — which is not
     at all: recorded as reported, judged by the report through the notify's
-    own path, kept within the per-order cap. A number that is not this
-    order's payment does not pass, and is kept for the office like any other.
+    own path. A number that is not this order's payment does not pass, and is
+    kept for the office like any other. The approval number it brings only
+    fills a blank: a notify's own is never written over by it.
     """
     from apps.core.payment_service import PaymentService
 
@@ -773,19 +904,28 @@ def record_returned_number(website_order_number: str, index: str, code: str = ''
 def _day_report(first_day, last_day) -> Optional[list[dict]]:
     """
     The page terminal's report rows for these days, or None when it cannot be
-    asked — or was read only in part (a page failed, or more pages than read):
-    a partial list says nothing about what it lacks.
+    asked, answered an error, or was read only in part (a page failed, or
+    more pages than read): a partial list says nothing about what it lacks.
     """
     from apps.core.tranzila_service import TranzilaService
 
     try:
-        response = TranzilaService.iframe().list_all_transactions(first_day, last_day, max_pages=3)
+        response = TranzilaService.iframe().list_all_transactions(first_day, last_day, max_pages=DAY_REPORT_MAX_PAGES)
     except Exception as exc:  # network, keys — never a reason to open a second page
         logger.error('Store: day report failed: %s', exc)
         return None
     if not response.get('success') or response.get('complete') is False:
         return None
     return list(response.get('transactions') or [])
+
+
+def _search_days(invoice: StoreInvoice):
+    """The report days a payment of this order's pages can be on: from its first page to the day after its last."""
+    first = invoice.payment_page_first_opened_at or invoice.payment_page_opened_at
+    last = invoice.payment_page_opened_at or first
+    today = timezone.localtime(timezone.now(), REPORT_TZ).date()
+    return (timezone.localtime(first, REPORT_TZ).date(),
+            min(today, timezone.localtime(last, REPORT_TZ).date() + timedelta(days=1)))
 
 
 def _index_explained(index: str, terminal: str, invoice_pk) -> bool:
@@ -819,8 +959,9 @@ def find_unreported_payment(invoice: StoreInvoice, rows: Optional[list[dict]] = 
     ('found', rows) | ('none', []) | ('unknown', []) — whether the terminal's
     report shows a payment for this order whose notify never came.
 
-    Asked of the report of the days since the order's FIRST page was handed
-    out, on the page's terminal (or of `rows`, the sweep's one read of it). A
+    Asked of the report of the days from the order's FIRST page to the day
+    after its last, on the page's terminal (or of `rows`, the sweep's one
+    read of it). A
     candidate row is an approved charge (A/AK) of exactly this sum, made after
     that first page, under a number this order does not hold already and
     nothing of ours was paid by. The report's rows carry no pdesc (seen on the
@@ -845,7 +986,7 @@ def find_unreported_payment(invoice: StoreInvoice, rows: Optional[list[dict]] = 
     if first is None:
         return 'none', []
     if rows is None:
-        rows = _day_report(timezone.localtime(first, REPORT_TZ).date(), timezone.localtime(timezone.now(), REPORT_TZ).date())
+        rows = _day_report(*_search_days(invoice))
         if rows is None:
             return 'unknown', []
     terminal = (TranzilaService.iframe().terminal or '').strip()
@@ -877,30 +1018,41 @@ def find_unreported_payment(invoice: StoreInvoice, rows: Optional[list[dict]] = 
     return ('found', matches) if matches else ('none', [])
 
 
-def keep_suspected_charges(invoice_id, rows: list[dict]) -> bool:
+def keep_suspected_charges(invoice_id, rows: list[dict]) -> list[str]:
     """
     Keep charges the report shows for this order's pages, whose notify never
-    came, on the invoice as "suspected": the order is then in review (the
-    site reads payment_reported) and gets no second page until a person
-    decides. The report's own approval number is NOT kept with them: it would
-    let the charge verify itself. Only on an invoice still unsettled. True
-    when kept.
+    came, on the invoice as "suspected" — whoever found them, whatever the
+    sweep's switch reads: keeping one is not a sale, a document or an email.
+    On an unpaid order it is then in review (the site reads payment_reported)
+    and gets no second page until a person decides; on a paid one it is a
+    possible second charge, listed every morning until a person decides. The
+    report's own approval number is NOT kept with them: it would let the
+    charge verify itself. Returns the numbers kept now for the first time.
     """
     from apps.core.tranzila_service import TranzilaService, report_transaction_time
 
     terminal = (TranzilaService.iframe().terminal or '').strip()
+    kept = []
     with transaction.atomic():
         invoice = StoreInvoice.objects.select_for_update().filter(pk=invoice_id).first()
-        if invoice is None or invoice.payment_status not in UNSETTLED_STATUSES:
-            return False
+        if invoice is None:
+            return kept
         for row in rows:
-            index = str(row.get('index') or row.get('transaction_index') or '').strip()
+            index = normal_number(row.get('index') or row.get('transaction_index'))
+            if not index or other_state(invoice, index) or index == (invoice.tranzila_transaction_id or '').strip():
+                continue
+            if not has_room(invoice):
+                logger.error('Store invoice %s: charge %s found in the report not kept — %s numbers already',
+                             invoice.invoice_number, index, MAX_KEPT_NUMBERS)
+                break
             keep_other_transaction(invoice, ReportedNumber(
                 index=index, code='', terminal=terminal,
                 reported_at=report_transaction_time(row) or timezone.now(), primary=False, state=OTHER_SUSPECTED,
             ), OTHER_SUSPECTED)
-        invoice.save(update_fields=['other_transactions'])
-    return True
+            kept.append(index)
+        if kept:
+            invoice.save(update_fields=['other_transactions'])
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -923,33 +1075,49 @@ EVIDENCE_NEEDED = 'evidence_needed'
 def complete_reported_payment(invoice_id, *, by: str, reason: str, confirmation_code: str = '',
                               card_last4: str = '') -> dict:
     """
-    A person, having looked, asks to complete an order in review. Only through
-    the report: the numbers it holds are asked about with the customer's own
-    evidence — the approval number the customer read, or the card's last four
-    digits — which wins over any kept code, and the sale happens on the
-    locked path only if the report confirms one. A suspected charge (found in
-    the report by sum and time) needs that evidence: without it nothing ties
-    it to this order. Who, when, why and what evidence are kept on the
-    invoice either way.
+    A person, having looked, asks to complete an order: one in review, or a
+    failed one that holds numbers a person released. Only through the report:
+    the numbers it holds are asked about with the customer's own evidence —
+    the approval number the customer read, or the card's last four digits —
+    which wins over any kept code, and the sale happens on the locked path
+    only if the report confirms one. A suspected charge (found in the report
+    by sum and time) needs that evidence: without it nothing ties it to this
+    order.
+
+    On a PAID order the same evidence decides a further number — a charge
+    found in the report, or one reported beside the payment: when the report
+    confirms it, it is a second charge, recorded for a refund. Nothing is
+    sold again.
+
+    One call reads the report at most MAX_REPORT_READS_PER_INVOICE times (two
+    reads per number with the card's digits), the numbers taking turns:
+    'not_asked' says how many still wait for the next call. Who, when, why
+    and what evidence are kept on the invoice either way.
     """
     from apps.core.payment_service import PaymentService
 
     invoice = StoreInvoice.objects.filter(pk=invoice_id).first()
     if invoice is None:
         return {'outcome': 'not_found'}
-    if not holds_reported_payment(invoice):
+    paid = invoice.payment_status in PAID_STATUSES
+    numbers = open_numbers(invoice, include_suspected=True, include_released=True)
+    if not numbers:
         return {'outcome': 'not_in_review', 'status': invoice.payment_status}
     confirmation_code = re.sub(r'[^0-9]', '', confirmation_code or '')[:20]
     card_last4 = re.sub(r'[^0-9]', '', card_last4 or '')[-4:]
-    numbers = open_numbers(invoice, include_suspected=True, include_released=True)
-    evidence = ('approval' if confirmation_code else '') or ('card_last4' if len(card_last4) == 4 else '')
+    card_last4 = card_last4 if len(card_last4) == 4 else ''
+    evidence = ('approval' if confirmation_code else '') or ('card_last4' if card_last4 else '')
     if not evidence and all(n.suspected or not n.code for n in numbers):
         result = {'outcome': EVIDENCE_NEEDED, 'status': invoice.payment_status}
     else:
+        reads_per_number = 2 if evidence == 'card_last4' else 1
         result = PaymentService().settle_reported_store_payment(
             invoice.pk, complete=True, include_suspected=True,
-            evidence={'confirmation_code': confirmation_code, 'card_last4': card_last4 if len(card_last4) == 4 else ''},
+            evidence={'confirmation_code': confirmation_code, 'card_last4': card_last4},
+            max_numbers=max(1, MAX_REPORT_READS_PER_INVOICE // reads_per_number),
         )
+        if paid:
+            result = {**result, 'outcome': 'second_charge' if result.get('second_charges') else 'not_confirmed'}
     with transaction.atomic():
         locked = StoreInvoice.objects.select_for_update().get(pk=invoice.pk)
         _log_review(locked, action='complete', by=by, reason=reason, numbers=[n.index for n in numbers],
@@ -965,9 +1133,10 @@ def release_reported_payment(invoice_id, *, by: str, reason: str) -> dict:
     A person, having checked Tranzila, found no charge for this order: the
     customer may pay again. The numbers it holds are RELEASED, not ruled out
     — a person's look is not the report's no: they stop holding the order in
-    review, but every notify, returned number and sweep still asks the report
-    about them, and one it later confirms is a sale (the order not paid yet)
-    or a second charge (paid meanwhile). The order is failed and the site is
+    review, but the report is still asked about them — by every notify and
+    returned number, by the site's poll, by the sweep, and before a second
+    page leaves — and one it later confirms is a sale (the order not paid
+    yet) or a second charge (paid meanwhile). The order is failed and the site is
     told. Nothing is charged, refunded or deleted; who, when and why are kept.
     """
     from apps.core.payment_service import PaymentService
@@ -996,6 +1165,59 @@ def release_reported_payment(invoice_id, *, by: str, reason: str) -> dict:
     return {'outcome': 'released', 'status': 'failed'}
 
 
+def close_reported_numbers(invoice_id, *, by: str, reason: str) -> dict:
+    """
+    "סגור — לא שלנו": a person decides that the further numbers a PAID order
+    still holds undecided are not this order's — a number reported beside its
+    payment that the report never listed, a charge found in the report that
+    is another customer's. Without it such a number would be asked about, and
+    listed in the brief, for ever.
+
+    The report is asked first (in turns, MAX_REPORT_READS_PER_INVOICE a
+    call): a number it confirms is a second charge and is recorded as one,
+    never closed; one the report could not be asked about stays as it is.
+    The rest are CLOSED: they leave the follow-up and stay on the invoice,
+    with who, when and why. Nothing is charged, refunded or deleted.
+    """
+    from apps.core.payment_service import PaymentService
+
+    invoice = StoreInvoice.objects.filter(pk=invoice_id).first()
+    if invoice is None:
+        return {'outcome': 'not_found'}
+    if invoice.payment_status not in PAID_STATUSES:
+        return {'outcome': 'not_paid', 'status': invoice.payment_status}
+    numbers = next_to_ask(open_numbers(invoice, include_suspected=True, include_released=True),
+                          MAX_REPORT_READS_PER_INVOICE)
+    if not numbers:
+        return {'outcome': 'not_in_review', 'status': invoice.payment_status}
+    asked = {n.index: report_answer(invoice, with_evidence(n)) for n in numbers}
+
+    closed, seconds = [], []
+    marks = {'close_reason': reason, 'closed_by': by, 'closed_at': timezone.now().isoformat()}
+    with transaction.atomic():
+        locked = StoreInvoice.objects.select_for_update().get(pk=invoice.pk)
+        for number in numbers:
+            answer, row, why = asked[number.index]
+            if other_state(locked, number.index) not in UNDECIDED_STATES:
+                continue  # decided meanwhile
+            if answer == ANSWER_VERIFIED:
+                PaymentService()._record_second_store_charge(locked, number, answer, row)
+                seconds.append(number.index)
+            elif answer == ANSWER_UNKNOWN and why == WHY_NO_ANSWER:
+                continue  # the report could not be asked: not closed blind
+            else:
+                keep_other_transaction(locked, number, OTHER_CLOSED, **marks)
+                closed.append(number.index)
+        outcome = 'closed' if closed else ('second_charge' if seconds else 'not_closed')
+        left = len(open_numbers(locked, include_suspected=True, include_released=True))
+        _log_review(locked, action='close', by=by, reason=reason, numbers=closed + seconds, outcome=outcome)
+        locked.save(update_fields=['other_transactions', 'payment_review_log'])
+    logger.warning('Store invoice %s: %s closed numbers %s (%s); second charges %s', invoice.invoice_number, by,
+                   closed, reason, seconds)
+    return {'outcome': outcome, 'status': invoice.payment_status, 'closed': closed, 'second_charges': seconds,
+            'not_asked': left}
+
+
 # ---------------------------------------------------------------------------
 # 5. The morning sweep
 # ---------------------------------------------------------------------------
@@ -1004,39 +1226,46 @@ def sweep_stuck_store_payments(*, budget_seconds: float = SWEEP_BUDGET_SECONDS,
                                complete: Optional[bool] = None) -> dict:
     """
     Every invoice with an undecided number (at any age once this follow-up
-    recorded when its payment was reported; released numbers included), every
-    website order whose page was opened in SEARCH_WINDOW with nothing reported,
-    every paid website order that handed out more than one page (searched in
-    the report for a charge of an earlier page), and every paid website order
-    the site has not acknowledged.
+    recorded when its payment was reported; released and suspected numbers
+    included), every website order whose pages still have to be looked for in
+    the report (`_needing_report_search`), and every paid website order the
+    site has not acknowledged.
 
     With STORE_SWEEP_COMPLETES_PAYMENTS on (`complete`), it settles what the
-    report allows, as the site's poll does. Off, it only reads and tells: no
-    sale, no document, no email, no status, nothing written to an invoice in
-    review — the one thing it still does is repeat the "paid" call for an
-    order already paid, to our own website, and keep the site's answer. A
-    charge found for an order whose notify never came is listed and told,
-    never completed. Each invoice gets at most SWEEP_INVOICE_SECONDS and
-    MAX_REPORT_READS_PER_INVOICE report reads. Never charges; never raises
-    for one invoice.
+    report allows, as the site's poll does. Off, it sells nothing: no sale, no
+    status, no document, no email. Either way it keeps what it learned — a
+    second charge the report confirms on a paid order (recorded and told as
+    confirmed), a charge found in the report for an order's pages (kept as
+    suspected, never completed: a person decides), when each number was asked
+    — and repeats the "paid" call for an order already paid. Each invoice gets
+    at most MAX_REPORT_READS_PER_INVOICE report reads, its numbers taking
+    turns from one morning to the next. Never charges; never raises for one
+    invoice.
 
     Returns lists of invoices: 'settled' (completed now), 'confirmed' (the
     report confirms it, not completed here), 'still_pending' (with the reason),
-    'second_open' (a further number of a paid order still undecided),
+    'second_confirmed' (a second charge of a paid order the report confirmed
+    now), 'second_open' (a further number of a paid order still undecided),
     'released_open' (an unpaid order with only numbers a person released,
     still undecided), 'unexplained' (a charge in the report may be its payment,
-    or a second one), 'site_told', 'site_not_told', 'not_reached'.
+    or a second one — until a person decides), 'site_told', 'site_not_told',
+    'not_reached' (out of time), 'not_searched' (the report could not be read
+    in full for its pages).
     """
     if complete is None:
         complete = bool(getattr(settings, 'STORE_SWEEP_COMPLETES_PAYMENTS', False))
     write = complete
     started = time.monotonic()
     now = timezone.now()
-    result = {'settled': [], 'confirmed': [], 'still_pending': [], 'second_open': [], 'released_open': [],
-              'unexplained': [], 'site_told': [], 'site_not_told': [], 'not_reached': []}
+    result = {'settled': [], 'confirmed': [], 'still_pending': [], 'second_confirmed': [], 'second_open': [],
+              'released_open': [], 'unexplained': [], 'site_told': [], 'site_not_told': [], 'not_reached': [],
+              'not_searched': []}
 
     def out_of_time() -> bool:
         return time.monotonic() - started > budget_seconds
+
+    def second_charges(invoice) -> set:
+        return {str(e.get('index')) for e in invoice.other_transactions or [] if e.get('state') == OTHER_SECOND_CHARGE}
 
     undecided = (
         _with_undecided_numbers()
@@ -1050,31 +1279,39 @@ def sweep_stuck_store_payments(*, budget_seconds: float = SWEEP_BUDGET_SECONDS,
         if out_of_time():
             result['not_reached'].append(invoice)
             continue
-        paid = invoice.payment_status in PAID_STATUSES
-        if not paid and not open_numbers(invoice, include_released=True) and suspected_numbers(invoice):
-            # Found in the report, never reported for it: a person decides.
-            alert_payment_unreported(invoice, [], suspected=[n.index for n in suspected_numbers(invoice)])
-            result['unexplained'].append(invoice)
-            continue
-        invoice_started = time.monotonic()
-        try:
-            outcome = recheck_pending_payment(invoice.pk, complete=complete, write=write,
-                                              max_numbers=MAX_REPORT_READS_PER_INVOICE)
-        except Exception as exc:  # noqa: BLE001 — one invoice never stops the rest
-            logger.exception('Store sweep: recheck of %s failed', invoice.invoice_number)
-            outcome = f'error: {exc}'
-        if time.monotonic() - invoice_started > SWEEP_INVOICE_SECONDS:
-            logger.warning('Store sweep: %s took %.0fs', invoice.invoice_number, time.monotonic() - invoice_started)
-        invoice.refresh_from_db()
-        if paid:
+        was_paid = invoice.payment_status in PAID_STATUSES
+        seconds_before = second_charges(invoice)
+        outcome = None
+        if open_numbers(invoice, include_released=True):
+            invoice_started = time.monotonic()
+            try:
+                outcome = recheck_pending_payment(invoice.pk, complete=complete, write=write,
+                                                  max_numbers=MAX_REPORT_READS_PER_INVOICE)
+            except Exception as exc:  # noqa: BLE001 — one invoice never stops the rest
+                logger.exception('Store sweep: recheck of %s failed', invoice.invoice_number)
+                outcome = f'error: {exc}'
+            if time.monotonic() - invoice_started > SWEEP_INVOICE_SECONDS:
+                logger.warning('Store sweep: %s took %.0fs', invoice.invoice_number, time.monotonic() - invoice_started)
+            invoice.refresh_from_db()
+        if was_paid:
+            if second_charges(invoice) - seconds_before:
+                result['second_confirmed'].append(invoice)
             if open_numbers(invoice, include_released=True):
                 result['second_open'].append(invoice)
+            if suspected_numbers(invoice):
+                # A charge found in the report beside the payment: listed until a person decides.
+                result['unexplained'].append(invoice)
             continue
         if invoice.payment_status == 'completed':
             result['settled'].append(invoice)
             continue
         if outcome == RECHECK_CONFIRMED:
             result['confirmed'].append(invoice)
+            continue
+        if suspected_numbers(invoice) and not open_numbers(invoice):
+            # Held by a charge found in the report, never reported for it: a person decides.
+            alert_payment_unreported(invoice, [], suspected=[n.index for n in suspected_numbers(invoice)])
+            result['unexplained'].append(invoice)
             continue
         if not holds_reported_payment(invoice):
             if open_numbers(invoice, include_released=True):
@@ -1087,34 +1324,50 @@ def sweep_stuck_store_payments(*, budget_seconds: float = SWEEP_BUDGET_SECONDS,
         alert_if_stuck(invoice, why=reason)
         result['still_pending'].append((invoice, reason))
 
-    # Orders whose page was opened and whose notify may never have come, and
-    # paid orders that opened more than one page: one read of the report for all.
-    lost = list(_pages_with_nothing_reported(now - SEARCH_WINDOW).order_by('payment_page_opened_at'))
-    multi = list(_paid_after_more_than_one_page(now - SEARCH_WINDOW).order_by('payment_page_opened_at'))
-    if (lost or multi) and not out_of_time():
-        firsts = [timezone.localtime(i.payment_page_first_opened_at or i.payment_page_opened_at, REPORT_TZ).date()
-                  for i in lost + multi]
-        rows = _day_report(min(firsts), timezone.localtime(now, REPORT_TZ).date())
-        for invoice in lost + multi:
-            if rows is None:
-                break  # the report cannot be asked in full: the next morning looks again
-            found, matches = find_unreported_payment(invoice, rows)
-            if found != 'found':
-                continue
+    # Orders whose pages still have to be looked for in the report: a notify
+    # that may never have come, or an earlier page of a paid order. What is
+    # found is kept on the invoice (suspected) and told; never completed.
+    def look_for(invoice, rows) -> None:
+        found, matches = find_unreported_payment(invoice, rows)
+        if found == 'found':
+            keep_suspected_charges(invoice.pk, matches)
             if invoice.payment_status in PAID_STATUSES:
-                # Already paid; an earlier page's charge may be a second one. Told, never written.
-                alert_possible_double_charge(invoice, str(matches[0].get('index') or ''),
-                                             others=[str(m.get('index') or '') for m in matches])
+                alert_second_charge_found(invoice, [normal_number(m.get('index') or m.get('transaction_index'))
+                                                    for m in matches])
             else:
-                # Kept on the order (switch on) so the site reads it as a
-                # payment in review and a retry gets no second page; switch
-                # off, only listed and told — a retry keeps it itself.
-                if write:
-                    keep_suspected_charges(invoice.pk, matches)
                 alert_payment_unreported(invoice, matches)
-            result['unexplained'].append(invoice)
-    elif lost or multi:
-        result['not_reached'].extend(lost + multi)
+            if invoice not in result['unexplained']:
+                result['unexplained'].append(invoice)
+        mark_searched(invoice.pk)
+
+    def first_page(invoice):
+        return invoice.payment_page_first_opened_at or invoice.payment_page_opened_at
+
+    to_search = list(_needing_report_search().order_by('payment_page_opened_at'))
+    recent = [i for i in to_search if first_page(i) >= now - SEARCH_WINDOW]
+    old = [i for i in to_search if first_page(i) < now - SEARCH_WINDOW]
+    if recent and out_of_time():
+        result['not_reached'].extend(recent)
+    elif recent:
+        # One read of the report for all of them.
+        rows = _day_report(min(timezone.localtime(first_page(i), REPORT_TZ).date() for i in recent),
+                           timezone.localtime(now, REPORT_TZ).date())
+        if rows is None:
+            result['not_searched'].extend(recent)  # unknown is not "nothing there": the next morning looks again
+        else:
+            for invoice in recent:
+                look_for(invoice, rows)
+    # An order nobody could look for in time (the report was down, or read in
+    # part, for days) is not dropped by the clock: a read of its own days.
+    for position, invoice in enumerate(old):
+        if position >= MAX_OLD_SEARCHES or out_of_time():
+            result['not_reached'].append(invoice)
+            continue
+        rows = _day_report(*_search_days(invoice))
+        if rows is None:
+            result['not_searched'].append(invoice)
+            continue
+        look_for(invoice, rows)
 
     for invoice in _owed_a_paid_call().order_by('created_at'):
         if out_of_time():
@@ -1170,9 +1423,24 @@ def _link(invoice: StoreInvoice) -> str:
     return f'{base}/invoices' if base else ''
 
 
+def _episode(invoice: StoreInvoice) -> int:
+    """How many times a person released this order's payment: what happens after a release is a new event."""
+    return sum(1 for entry in invoice.payment_review_log or []
+               if entry.get('action') == 'release' and entry.get('outcome') == 'released')
+
+
 def _alert(invoice: StoreInvoice, *, kind: str, key: str, title: str, step: str, what: str,
-           why: str = '', action: str = '', extra: Optional[dict] = None) -> None:
+           why: str = '', action: str = '', extra: Optional[dict] = None, per_episode: bool = True) -> None:
+    """
+    One alert per key. A key of an order counts its releases (`per_episode`):
+    "once per order" would otherwise be once for ever, and a payment stuck
+    again after a person released the first would reach nobody.
+    """
     from apps.core.office_alerts import raise_office_alert
+
+    episode = _episode(invoice) if per_episode else 0
+    if episode:
+        key = f'{key}:{episode}'
 
     try:
         customer = describe_store_customer(invoice)
@@ -1263,12 +1531,12 @@ def alert_decline_conflict(invoice: StoreInvoice, why: str) -> None:
 def alert_possible_double_charge(invoice: StoreInvoice, index: str, answer: str = ANSWER_UNKNOWN,
                                  *, others: Optional[list[str]] = None) -> None:
     """
-    A further number reported — or found in the report — for the same order.
-    At once, and once per order: the order's page in the CRM lists every
-    number (other_transactions); a stream of numbers is one event.
+    A further number reported for the same order, which the report has not
+    confirmed. At once, and once per order: the order's page in the CRM lists
+    every number (other_transactions); a stream of numbers is one event. One
+    the report confirms has its own alert (`alert_second_charge_confirmed`).
     """
     said = {
-        ANSWER_VERIFIED: 'הדוח של טרנזילה מאשר שגם היא חיוב אמיתי',
         ANSWER_REJECTED: 'הדוח של טרנזילה לא מאשר אותה כחיוב של ההזמנה',
     }.get(answer, 'הדוח של טרנזילה עוד לא הכריע לגביה')
     further = ', '.join(dict.fromkeys(shown_number(i) for i in ([index] + list(others or [])) if i))
@@ -1286,14 +1554,69 @@ def alert_possible_double_charge(invoice: StoreInvoice, index: str, answer: str 
     )
 
 
-def alert_too_many_numbers(invoice: StoreInvoice, index: str) -> None:
-    """More undecided numbers reported for one order than MAX_UNDECIDED_NUMBERS: not kept. Once per order."""
+def alert_second_charge_confirmed(invoice: StoreInvoice, index: str) -> None:
+    """
+    The report confirms a second charge on a paid order: recorded, to refund.
+    Once per number — it comes from the report itself, so it cannot be
+    flooded — and whatever the sweep's switch reads.
+    """
+    _alert(
+        invoice, kind='store_second_charge_confirmed', key=f'store_second:{invoice.pk}:{index}',
+        title='חיוב שני מאושר בחנות — לזכות',
+        step='אישור התשלום מול הדוח של טרנזילה',
+        what=(f'הזמנה {_order_ref(invoice)} שולמה בעסקה {shown_number(invoice.tranzila_transaction_id)}, והדוח של '
+              f'טרנזילה מאשר שגם עסקה {shown_number(index)} על ₪{invoice.total_amount} היא חיוב אמיתי של אותה '
+              'הזמנה: הלקוח שילם פעמיים. המכירה נרשמה פעם אחת; על החיוב השני לא הופק מסמך ולא נשלח מייל.'),
+        why='אותה הזמנה שולמה פעמיים — למשל בשתי לשוניות, או בעמוד תשלום שנפתח פעמיים.',
+        action=(f'לזכות בטרנזילה את עסקה {shown_number(index)} (₪{invoice.total_amount}) ולעדכן את הלקוח. '
+                f'לא לזכות את {shown_number(invoice.tranzila_transaction_id)}. '
+                'החיוב מופיע גם בתדריך הבוקר תחת "חיובים כפולים".'),
+        extra={'second_transaction': shown_number(index)},
+        per_episode=False,
+    )
+
+
+def alert_second_charge_found(invoice: StoreInvoice, indexes: list[str]) -> None:
+    """
+    The report shows a charge of the same sum made on an earlier page of an
+    order that is already paid: kept on the invoice (suspected) until a
+    person decides. Told per charge found — the report is its source — also
+    when the order was already told about another number.
+    """
+    indexes = [i for i in dict.fromkeys(indexes) if i]
+    if not indexes:
+        return
+    numbers = ', '.join(shown_number(i) for i in indexes[:5])
+    _alert(
+        invoice, kind='store_possible_double_charge', key=f'store_double_found:{invoice.pk}:{indexes[0]}',
+        title='ייתכן חיוב שני בחנות — נמצא בדוח של טרנזילה',
+        step='בדיקת הבוקר של תשלומים בחנות',
+        what=(f'הזמנה {_order_ref(invoice)} שולמה בעסקה {shown_number(invoice.tranzila_transaction_id)}, ונפתח לה '
+              f'יותר מעמוד תשלום אחד. בדוח של טרנזילה יש עוד חיוב מאושר באותו סכום מאז העמוד הראשון: {numbers}. '
+              'ייתכן שהלקוח שילם פעמיים. העסקה נשמרה בחשבונית ותופיע בתדריך עד שתוכרע.'),
+        why='לא הגיעה עליה הודעה. המסוף משותף עם האתר השני, כך שזה עשוי גם להיות תשלום של לקוח אחר.',
+        action=('לבדוק בטרנזילה של מי העסקה. של הלקוח — לזכות אותה, ובמסך החשבונית "השלם אחרי אימות" עם '
+                'מספר האישור או 4 ספרות הכרטיס (נרשם כחיוב שני). לא שלו — "סגור — לא שלנו".'),
+        extra={'second_transaction': shown_number(indexes[0])},
+        per_episode=False,
+    )
+
+
+def alert_too_many_numbers(invoice: StoreInvoice, index: str, *, kept: bool = True) -> None:
+    """
+    More reported numbers the report has not answered for than
+    MAX_UNDECIDED_NUMBERS on one order. Once per order. They are all kept
+    (up to MAX_KEPT_NUMBERS) and asked about in turns.
+    """
     _alert(
         invoice, kind='store_too_many_numbers', key=f'store_too_many_numbers:{invoice.pk}',
         title='יותר מדי מספרי עסקה על הזמנה אחת בחנות',
         step='הודעות טרנזילה / דיווח מהאתר',
         what=(f'על הזמנה {_order_ref(invoice)} דווחו יותר מ-{MAX_UNDECIDED_NUMBERS} מספרי עסקה שהדוח של טרנזילה '
-              f'לא אישר. הנוספים (למשל {shown_number(index)}) לא נשמרו. מספר שהדוח מאשר נשמר תמיד.'),
+              f'לא אישר (האחרון: {shown_number(index)}). '
+              + ('כולם נשמרו בחשבונית ונבדקים מול הדוח בתורות, כמה בכל בדיקה. '
+                 if kept else f'כבר נשמרו {MAX_KEPT_NUMBERS} מספרים, ולכן האחרון לא נשמר. ')
+              + 'מספר שהדוח מאשר נשמר תמיד.'),
         why='כנראה מספרים שגויים או מזויפים שנשלחו על ההזמנה.',
         action='לבדוק בטרנזילה את התשלומים של ההזמנה, ולבדוק מי שלח את המספרים (האתר / הודעות טרנזילה).',
     )
@@ -1301,6 +1624,12 @@ def alert_too_many_numbers(invoice: StoreInvoice, index: str) -> None:
 
 def alert_payment_confirmed(invoice: StoreInvoice, index: str) -> None:
     """The morning sweep found the report confirms a payment it was not allowed to complete. Once per invoice."""
+    if invoice.website_order_number:
+        action = ('לא לבקש מהלקוח לשלם שוב. ההזמנה תושלם לבד כשהאתר ישאל עליה או כשהלקוח ינסה לשלם שוב. '
+                  'אפשר להשלים אותה כבר עכשיו במסך החשבונית: "השלם אחרי אימות".')
+    else:
+        action = ('לא לבקש מהלקוח לשלם שוב. להשלים את ההזמנה במסך החשבונית: "השלם אחרי אימות" — '
+                  'בקופה אין מי שישאל עליה לבד.')
     _alert(
         invoice, kind='store_payment_confirmed', key=f'store_payment_confirmed:{invoice.pk}',
         title='הדוח של טרנזילה מאשר תשלום בחנות — ההזמנה לא הושלמה',
@@ -1309,40 +1638,53 @@ def alert_payment_confirmed(invoice: StoreInvoice, index: str) -> None:
               'בדיקת הבוקר לא משלימה מכירות (STORE_SWEEP_COMPLETES_PAYMENTS כבוי), ולכן עדיין לא נמכר דבר, '
               'המלאי לא ירד ולא הופק מסמך.'),
         why='ההודעה של טרנזילה לא אומתה בזמנה, והדוח מאשר רק עכשיו.',
-        action=('לא לבקש מהלקוח לשלם שוב. ההזמנה תושלם לבד כשהאתר ישאל עליה; אחרת — להשלים אותה ידנית, '
-                'או להדליק את המתג אחרי אישור בעל המערכת.'),
+        action=action,
     )
 
 
 def alert_payment_unreported(invoice: StoreInvoice, rows: list[dict], *, suspected: Optional[list[str]] = None) -> None:
     """
     A charge in the terminal's report may be this order's payment, whose notify
-    never came (or the report could not be asked when a retry came). Once per
-    invoice: the order is held in review until a person decides.
+    never came. Once per invoice (and again after a release): the order is
+    held in review until a person decides.
     """
     from apps.core.tranzila_service import report_transaction_amount
 
-    if rows or suspected:
-        seen = '; '.join(
-            [f"עסקה {shown_number(row.get('index') or row.get('transaction_index'))} על ₪{report_transaction_amount(row)}"
-             for row in rows[:3]]
-            + [f'עסקה {shown_number(index)}' for index in (suspected or [])[:3]]
-        )
-        what = (f'בדוח של טרנזילה יש חיוב מאושר באותו סכום של הזמנה {_order_ref(invoice)}, אחרי שנפתח לה עמוד '
-                f'התשלום, בלי שהגיעה עליו הודעה: {seen}. ההזמנה בבדיקה: לא נפתח לה עמוד נוסף ולא נמכר דבר.')
-        why = ('ייתכן שההודעה של טרנזילה על התשלום לא הגיעה. המסוף משותף עם האתר השני, כך שזה עשוי גם '
-               'להיות תשלום של לקוח אחר.')
-    else:
-        what = (f'הלקוח ביקש לשלם שוב על הזמנה {_order_ref(invoice)}, זמן קצר אחרי שנפתח לו עמוד תשלום. '
-                'הדוח של טרנזילה לא ענה, ולכן לא נפתח עמוד נוסף (לחצי שעה מפתיחת העמוד).')
-        why = 'אי אפשר לדעת אם העמוד הקודם כבר נגבה.'
+    seen = '; '.join(
+        [f"עסקה {shown_number(row.get('index') or row.get('transaction_index'))} על ₪{report_transaction_amount(row)}"
+         for row in rows[:3]]
+        + [f'עסקה {shown_number(index)}' for index in (suspected or [])[:3]]
+    )
     _alert(
         invoice, kind='store_payment_unreported', key=f'store_payment_unreported:{invoice.pk}',
         title='ייתכן שהלקוח כבר שילם — ההזמנה בבדיקה',
         step='תשלום שלא הגיעה עליו הודעה',
-        what=what, why=why,
+        what=(f'בדוח של טרנזילה יש חיוב מאושר באותו סכום של הזמנה {_order_ref(invoice)}, אחרי שנפתח לה עמוד '
+              f'התשלום, בלי שהגיעה עליו הודעה: {seen}. ההזמנה בבדיקה: לא נפתח לה עמוד נוסף ולא נמכר דבר.'),
+        why=('ייתכן שההודעה של טרנזילה על התשלום לא הגיעה. המסוף משותף עם האתר השני, כך שזה עשוי גם '
+             'להיות תשלום של לקוח אחר.'),
         action=('לבדוק בטרנזילה אם העסקה שייכת להזמנה הזאת, ולהחליט במסך החשבונית: "השלם אחרי אימות" '
                 'או "אין תשלום — שחרר". עד אז הלקוח לא יתבקש לשלם שוב.'),
+    )
+
+
+def alert_report_unavailable(invoice: StoreInvoice) -> None:
+    """
+    A customer asked to pay an order again and the report could not say
+    whether an earlier page was paid — it did not answer, answered an error,
+    or was read only in part. No second page without that check, however long
+    it lasts; the office hears once per order.
+    """
+    _alert(
+        invoice, kind='store_report_unavailable', key=f'store_report_unavailable:{invoice.pk}',
+        title='הדוח של טרנזילה לא זמין — לקוח מחכה',
+        step='בקשה לשלם שוב על הזמנה שכבר נפתח לה עמוד תשלום',
+        what=(f'הלקוח ביקש לשלם שוב על הזמנה {_order_ref(invoice)}, אחרי שכבר נפתח לה עמוד תשלום. הדוח של '
+              'טרנזילה לא ענה או נקרא רק בחלקו, ולכן אי אפשר לדעת אם העמוד הקודם נגבה. לא נפתח עמוד נוסף, '
+              'והלקוח מחכה.'),
+        why='בלי הדוח אי אפשר לשלול שהלקוח כבר שילם, ועמוד נוסף עלול לחייב אותו פעמיים.',
+        action=('לבדוק בטרנזילה אם יש חיוב על הסכום הזה מאז שנפתח העמוד. יש — לא לבקש תשלום שוב ולהעביר '
+                'לבדיקה טכנית. אין — לומר ללקוח לנסות שוב בעוד כמה דקות; עמוד ייפתח כשהדוח יחזור לענות.'),
     )
 
 
@@ -1390,4 +1732,5 @@ def alert_payment_page_failed(invoice: StoreInvoice, error: str, terminal: str) 
         why=str(error)[:300],
         action=(f'לבדוק את מסוף {terminal or "(לא מוגדר)"} ואת המפתחות שלו. אם זה חוזר — לפנות לטרנזילה. '
                 'ההתראה הזאת נשלחת פעם אחת ביום.'),
+        per_episode=False,
     )

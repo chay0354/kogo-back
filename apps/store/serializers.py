@@ -489,8 +489,12 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
     line_items = StoreSaleSerializer(many=True, read_only=True)
     child_name = serializers.CharField(source='child.full_name', read_only=True, allow_null=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True, allow_null=True)
-    # A payment in review (apps/store/payment_followup.py): the numbers the
-    # managers' "payment-review" action decides about.
+    # A payment in review (apps/store/payment_followup.py), and the numbers
+    # the managers' "payment-review" action decides about. `payment_in_review`
+    # is the unpaid order a number holds (no second page for the customer);
+    # `payment_review_numbers` lists every undecided number of the invoice —
+    # also a released one on a failed order (it may still be completed) and a
+    # further one on a paid order (a second charge, or "not ours").
     payment_in_review = serializers.SerializerMethodField()
     payment_review_numbers = serializers.SerializerMethodField()
 
@@ -500,13 +504,12 @@ class StoreInvoiceSerializer(serializers.ModelSerializer):
         return holds_reported_payment(obj)
 
     def get_payment_review_numbers(self, obj) -> list:
-        from apps.store.payment_followup import holds_reported_payment, open_numbers
+        from apps.store.payment_followup import open_numbers
 
-        if not holds_reported_payment(obj):
-            return []
         return [
-            {'index': n.index, 'suspected': n.suspected, 'reported_at': n.reported_at.isoformat()}
-            for n in open_numbers(obj, include_suspected=True)
+            {'index': n.index, 'suspected': n.suspected, 'released': n.released,
+             'reported_at': n.reported_at.isoformat()}
+            for n in open_numbers(obj, include_suspected=True, include_released=True)
         ]
 
     class Meta:

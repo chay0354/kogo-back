@@ -1851,23 +1851,39 @@ class TranzilaService:
         collected: list = []
         page = None
         # `complete` says every row of the range was read: False when a page
-        # failed after others were read, or the range had more pages than
-        # max_pages. A caller that looks for something ("is this charge
-        # there?") must not read a partial list as "no".
+        # failed after others were read, the range had more pages than
+        # max_pages, or an answer carried no list of rows at all. A caller
+        # that looks for something ("is this charge there?") must not read a
+        # partial list as "no".
         complete = False
+        list_keys = ('transactions', 'data', 'result', 'rows')
         for page_num in range(1, max_pages + 1):
             response = self.list_transactions(start_date, end, page=page)
-            if not isinstance(response, dict) or response.get('success') is False:
-                error = (
-                    (response or {}).get('error')
-                    if isinstance(response, dict)
-                    else 'Tranzila transaction list failed'
-                )
+            failed = not isinstance(response, dict) or response.get('success') is False
+            error = (
+                (response or {}).get('error')
+                if isinstance(response, dict)
+                else 'Tranzila transaction list failed'
+            )
+            if not failed and not is_tranzila_rest_ok(response.get('error_code', 0)):
+                # An error envelope — a refused key answers {'error_code':
+                # 20002, 'message': ...} with HTTP 200 and no rows. It says
+                # nothing about the day: an error, never "no transactions"
+                # (review of 1.10.2026).
+                failed = True
+                error = str(response.get('message') or response.get('error_code'))
+            if failed:
                 if collected:
                     logger.error("Tranzila list_transactions page %s failed after partial fetch: %s", page_num, error)
                     break
                 return {'success': False, 'error': error, 'transactions': [], 'complete': False}
-            rows = self.extract_list_rows(response, 'transactions', 'data', 'result', 'rows')
+            if not any(isinstance(response.get(key), list) for key in list_keys):
+                # Not an error and no list either: an answer we do not know.
+                # What was read is returned, marked incomplete.
+                logger.error("Tranzila list_transactions page %s: no list of rows in the answer (keys: %s)",
+                             page_num, sorted(response.keys()))
+                break
+            rows = self.extract_list_rows(response, *list_keys)
             collected.extend(rows)
             total = response.get('total')
             try:

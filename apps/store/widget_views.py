@@ -493,6 +493,12 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
     conditional UPDATE that re-decides when it finds the row changed, and the
     last look, right before a page is handed out, is whether a payment was
     reported meanwhile (review round 3, 30.9.2026).
+
+    No second page leaves without the report's word (review round 5,
+    1.10.2026): every number the order holds — the ones a person released
+    too — is asked about first, and a report that cannot say whether an
+    earlier page was paid (down, an error, read in part) stops the page for
+    as long as that lasts, with one alert to the office.
     """
     from django.utils import timezone
 
@@ -507,6 +513,16 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             'invoice_number': invoice.invoice_number,
         }, status=409)
 
+    def wait(retry_after):
+        # Not "a payment is in review" — we cannot rule one out yet. The
+        # customer is asked to wait, not to pay again.
+        return Response({
+            'error': WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE,
+            'payment_in_review': True,
+            'retry_after': retry_after,
+            'invoice_number': invoice.invoice_number,
+        }, status=409)
+
     def already_paid():
         return Response({
             'ok': True,
@@ -517,20 +533,32 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
 
     for _attempt in range(3):
         invoice.refresh_from_db()
-        if followup.holds_reported_payment(invoice):
+        if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
+            return already_paid()
+
+        held = followup.holds_reported_payment(invoice)
+        if held or (invoice.payment_status in followup.UNSETTLED_STATUSES
+                    and followup.open_numbers(invoice, include_released=True)):
             # Tranzila already reported a payment for this order — or the
             # report shows one whose notify never came — that is neither
             # confirmed nor ruled out, whatever the status reads. Asked again
             # first; a second page now could take the same customer's money
-            # twice. A suspected charge waits for a person.
+            # twice. A suspected charge waits for a person. A number a person
+            # released does not hold the order, but it is asked about too: a
+            # release is a person's look, not the report's no, and one the
+            # report confirms now is this order's payment.
             followup.recheck_pending_payment(invoice.pk, site_timeout=followup.POLL_SITE_TIMEOUT_SECONDS)
             invoice.refresh_from_db()
             if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
                 return already_paid()
-            return in_review()
-
-        if invoice.payment_status in followup.MONEY_KEPT_STATUSES:
-            return already_paid()
+            if held or followup.holds_reported_payment(invoice):
+                return in_review()
+            if followup.released_not_asked(invoice):
+                # More released numbers than one check may ask about (or the
+                # check was paced): the next retry asks about the next ones.
+                logger.warning('Website order %s: no second page yet — released numbers still to be asked about',
+                               invoice.website_order_number)
+                return wait(int(followup.RECHECK_INTERVAL.total_seconds()))
 
         if invoice.payment_status == 'refunded':
             # Paid and refunded: a payment now would be taken as the same order
@@ -538,12 +566,14 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
             return Response({'error': 'ההזמנה הזאת זוכתה. צרו הזמנה חדשה.'}, status=400)
 
         opened = invoice.payment_page_opened_at
-        if opened is not None and timezone.now() - opened < followup.SEARCH_WINDOW:
+        if opened is not None and not followup.search_is_final(invoice):
             # A page for this order was handed out before. If its notify never
             # came, the report is the only place the payment shows: a matching
             # charge there is kept on the order ("suspected") and holds it in
-            # review until a person decides; a report that cannot say holds
-            # it for half an hour from the page (review items 2-4, 30.9.2026).
+            # review until a person decides. A report that cannot say — down,
+            # an error, read only in part — is not "no charge": no second page
+            # without the check, however long it lasts, and the office hears
+            # that a customer is waiting (reviews of 30.9 and 1.10.2026).
             found, rows = followup.find_unreported_payment(invoice)
             if found == 'found':
                 logger.error('Website order %s: no second page — the day report shows a matching charge',
@@ -551,11 +581,12 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
                 followup.keep_suspected_charges(invoice.pk, rows)
                 followup.alert_payment_unreported(invoice, rows)
                 return in_review()
-            if found == 'unknown' and timezone.now() - opened < followup.UNREPORTED_WINDOW:
+            if found == 'unknown':
                 logger.error('Website order %s: no second page — the day report could not be asked in full',
                              invoice.website_order_number)
-                followup.alert_payment_unreported(invoice, [])
-                return in_review()
+                followup.alert_report_unavailable(invoice)
+                return wait(60)
+            followup.mark_searched(invoice.pk)
             # The report took time: decide again on what the invoice is now.
             invoice.refresh_from_db()
             if followup.holds_reported_payment(invoice) or invoice.payment_status in followup.PAID_STATUSES:
@@ -564,15 +595,9 @@ def _website_payment_initiate_response(invoice, *, callback_url, success_url, er
                 # The report may not list a payment made on the last page
                 # minutes ago: "not found" is not "not paid" yet. The customer
                 # is asked to wait, not to pay again.
-                wait = int((followup.REPORT_SETTLE - (timezone.now() - opened)).total_seconds()) + 1
                 logger.warning('Website order %s: no second page yet — the last page opened %ss ago',
                                invoice.website_order_number, int((timezone.now() - opened).total_seconds()))
-                return Response({
-                    'error': WEBSITE_PAYMENT_RECENT_PAGE_MESSAGE,
-                    'payment_in_review': True,
-                    'retry_after': wait,
-                    'invoice_number': invoice.invoice_number,
-                }, status=409)
+                return wait(int((followup.REPORT_SETTLE - (timezone.now() - opened)).total_seconds()) + 1)
 
         if invoice.payment_status == 'failed':
             if parse_store_cart_notes(invoice.notes) is None:
@@ -822,8 +847,9 @@ class WidgetStorePaymentReturnedView(_KeyBeforeThrottle, APIView):
     success return.
 
     Refused (409, with the status) for an order whose page the CRM did not
-    hand out in the last two hours; 400 for anything but ASCII digits. At
-    most three undecided numbers are kept per order.
+    hand out in the last two hours; 400 for anything but a transaction number
+    (ASCII digits, at most twenty; leading zeros are dropped). Every number
+    is kept, up to fifty per order.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -835,11 +861,11 @@ class WidgetStorePaymentReturnedView(_KeyBeforeThrottle, APIView):
         from apps.store import payment_followup
 
         order = str(request.data.get('order') or '').strip()
-        index = str(request.data.get('index') or '').strip()
+        index = payment_followup.normal_number(request.data.get('index'))
         code = str(request.data.get('code') or request.data.get('ConfirmationCode') or '').strip()[:100]
         if not order:
             return Response({'error': 'order required'}, status=400)
-        if not payment_followup.is_transaction_number(index):
+        if not index:
             return Response({'error': 'index must be the transaction number Tranzila returned'}, status=400)
         outcome, payload = payment_followup.record_returned_number(order, index, code)
         if outcome == payment_followup.RETURNED_NO_ORDER:

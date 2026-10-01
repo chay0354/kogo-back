@@ -473,8 +473,8 @@ class StoreInvoice(models.Model):
         verbose_name="מועד דיווח התשלום",
     )
     # When the CRM last handed the website a Tranzila page for this order. A
-    # retry within half an hour first looks for a payment whose notify never
-    # came (apps/store/payment_followup.find_unreported_payment).
+    # retry first looks in the report for a payment whose notify never came
+    # (apps/store/payment_followup.find_unreported_payment).
     payment_page_opened_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -488,15 +488,27 @@ class StoreInvoice(models.Model):
         blank=True,
         verbose_name="עמוד תשלום ראשון נפתח",
     )
+    # When a complete read of the terminal's report last looked for a payment
+    # of this order's pages. The pages are looked for — every morning, and by
+    # a retry — until one such read made a day after the last page was handed
+    # out; until then the order never leaves the search, whatever its age.
+    payment_search_done_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="חיפוש תשלום בדוח — אחרון",
+    )
     # Every further transaction number Tranzila reported for this invoice,
     # beyond tranzila_transaction_id: a second tab, a page paid twice, a
     # number the report has not answered for yet. None is ever dropped; each
-    # is [{"index", "code", "terminal", "reported_at", "state"}] with state
-    # open (not settled), second_charge (a real second payment, for a refund),
-    # rejected (the report definitely says it did not pay for this order),
-    # released (a person found no charge — still asked about, never buried)
-    # or suspected (a charge of this sum found in the terminal's report after
-    # this order's page opened, whose notify never came: a person decides).
+    # is [{"index", "code", "terminal", "reported_at", "state", "asked_at"}]
+    # with state open (not settled), second_charge (a real second payment, for
+    # a refund), rejected (the report definitely says it did not pay for this
+    # order), released (a person found no charge — still asked about, never
+    # buried), suspected (a charge of this sum found in the terminal's report
+    # after this order's page opened, whose notify never came: a person
+    # decides) or closed (a person decided, on a paid order, that it is not
+    # this order's). asked_at is when the report was last asked about it:
+    # the numbers of one order take turns.
     other_transactions = models.JSONField(
         null=True,
         blank=True,
@@ -504,8 +516,8 @@ class StoreInvoice(models.Model):
     )
     # What a person decided about a payment in review, and who and when
     # (apps/store/payment_followup.release_reported_payment /
-    # complete_reported_payment): [{"action", "by", "at", "reason", "numbers",
-    # "outcome"}]. Never edited, only added to.
+    # complete_reported_payment / close_reported_numbers): [{"action", "by",
+    # "at", "reason", "numbers", "outcome"}]. Never edited, only added to.
     payment_review_log = models.JSONField(
         null=True,
         blank=True,
