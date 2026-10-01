@@ -187,9 +187,12 @@ STORE_WEBSITE_CARD_PAYMENTS_ENABLED = config('STORE_WEBSITE_CARD_PAYMENTS_ENABLE
 # a sale Tranzila's report now confirms. Completing issues the document and
 # emails the customer, which the owner's morning rule (23.9.2026) keeps away
 # from automatic fixes — so it is off until he says otherwise. Off, the sweep
-# reads the report, lists and tells the office. The site's own status poll
-# and Tranzila's notify complete as always; so do website and till invoices
-# on Tranzila's page alike.
+# sells nothing and changes no status: it reads the report, lists and tells
+# the office, and keeps what it learned (a charge found in the report, a
+# second charge the report confirms on a paid order — neither is a sale, a
+# document or an email). The site's own status poll and Tranzila's notify
+# complete as always; so do website and till invoices on Tranzila's page
+# alike.
 STORE_SWEEP_COMPLETES_PAYMENTS = config('STORE_SWEEP_COMPLETES_PAYMENTS', default=False, cast=bool)
 
 # CORS Settings

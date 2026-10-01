@@ -814,8 +814,9 @@ class WidgetStorePaymentStatusView(_KeyBeforeThrottle, APIView):
 
     The website's poll while the customer waits on the result page. The
     answer is always the CRM's own record. On the way, a payment Tranzila
-    reported and the report has not confirmed yet is asked about again (at
-    most once per 15 seconds per order, however often the site polls), and a
+    reported and the report has not confirmed yet — a number a person
+    released included — is asked about again (at most once per 15 seconds
+    per order, however often the site polls, a few numbers at a time), and a
     paid order the site never acknowledged is told again — both through
     apps/store/payment_followup.py, neither charges anything. Authenticated
     with the integration key, like the rest of the widget, checked before the
