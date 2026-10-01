@@ -639,9 +639,13 @@ class TranzilaService:
             'sum': self._format_iframe_sum(amount),
             'currency': self._get_currency_code(currency),
             'tranmode': 'A',
+            # Seen on the cogolive page, 1.10.2026: without `lang` the page opens in
+            # English, and the button takes its colour from `trButtonColor` only
+            # (`buttonColor` was ignored and the button stayed Tranzila's own).
+            'lang': 'il',
             'trBgColor': 'ffffff',
             'trTextColor': '000000',
-            'buttonColor': '4CAF50',
+            'trButtonColor': '2B3090',
             'company': 'cogomelo',
             'country': 'Israel',
             'zip': '0000000',

@@ -13,6 +13,7 @@ terminal directly are untouched.
 """
 from decimal import Decimal
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from django.test import TestCase, override_settings
 from rest_framework.authtoken.models import Token
@@ -44,6 +45,23 @@ class TheHostedPageItself(TestCase):
     def test_opens_when_turned_on(self):
         url = TranzilaService.iframe().create_payment_request(amount=Decimal('10.00'), transaction_id='x')
         self.assertIn('/iframe_terminal/iframenew.php', url)
+
+    @override_settings(TRANZILA_HOSTED_PAGE_ENABLED=True)
+    def test_opens_in_hebrew_with_our_button_colour(self):
+        """Parents read Hebrew: the page is asked for it, and for the widget's navy."""
+        url = TranzilaService.iframe().create_payment_request(amount=Decimal('10.00'), transaction_id='x')
+        params = parse_qs(urlsplit(url).query)
+        self.assertEqual(params['lang'], ['il'])
+        self.assertEqual(params['trButtonColor'], ['2B3090'])
+        # The name Tranzila ignores must not come back as if it did something.
+        self.assertNotIn('buttonColor', params)
+
+    def test_the_standing_order_page_is_in_hebrew_too(self):
+        with patch.object(TranzilaService, 'create_handshake_token', return_value='thtk'):
+            url = TranzilaService.iframe().create_recurring_payment_request(amount=Decimal('10.00'), transaction_id='x')
+        params = parse_qs(urlsplit(url).query)
+        self.assertEqual(params['lang'], ['il'])
+        self.assertEqual(params['trButtonColor'], ['2B3090'])
 
 
 @override_settings(**IFRAME_SETTINGS)
