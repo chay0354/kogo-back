@@ -201,6 +201,35 @@ def formal_document_number(document_type: str) -> str:
     return next_document_number(series)
 
 
+def expected_document_number(document_type: str) -> dict | None:
+    """
+    The number the next document of this type issued by hand would take, read
+    without taking it — what the documents wizard shows before the office
+    confirms. None for a type that has no run of its own (a draft).
+
+    It is a look, not a promise: the number is handed out only when the
+    document is issued (DocumentSeries.next_number, under the run's lock), and
+    a document issued in between takes this one.
+    """
+    from apps.documents.models import DocumentSeriesOpening
+
+    series = FORMAL_SERIES.get(document_type)
+    if series is None:
+        return None
+    year = _tax_year(None)
+    row = DocumentSeries.objects.filter(series=series, year=year).first()
+    start, counter = (row.start, row.counter) if row else (1, 0)
+    opening = DocumentSeriesOpening.objects.filter(series=series, year=year).first()
+    return {
+        'document_type': document_type,
+        'series': series,
+        'year': year,
+        'next_number': format_document_number(series, year, max(counter, start - 1) + 1),
+        # Said when the run continues the previous software's: where it took over from.
+        'continues': continuation_note(opening.previous_last_number, opening.start) if opening else '',
+    }
+
+
 @dataclass(frozen=True)
 class SeriesRun:
     """One run in one tax year, and whether every number it handed out is on a document."""

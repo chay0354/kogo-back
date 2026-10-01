@@ -488,6 +488,22 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="{doc.document_number}.pdf"'
         return response
 
+    @action(detail=False, methods=['get'], url_path='next-number')
+    def expected_number(self, request):
+        """
+        GET /api/v1/documents/documents/next-number/?document_type=tax_invoice
+
+        The number the next document of this type would take, for the wizard to
+        show before the office confirms. Nothing is taken: the number is handed
+        out at issue, and the answer says so by being read again each time.
+        """
+        from apps.documents.numbering import expected_document_number
+
+        expected = expected_document_number((request.query_params.get('document_type') or '').strip())
+        if expected is None:
+            return Response({'error': 'סוג מסמך לא מוכר'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(expected)
+
     @action(detail=False, methods=['get'], url_path='open-invoices')
     def open_invoices(self, request):
         """

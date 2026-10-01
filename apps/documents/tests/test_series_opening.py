@@ -464,6 +464,36 @@ class SeriesEndpointTests(APITestCase):
         self.assertEqual((opening['reserved_from'], opening['reserved_to']), (40414, 40599))
         self.assertIn('40414–40599 שמורים לתוכנה הקודמת', opening['continues'])
 
+    def test_the_wizard_is_told_the_number_the_next_document_would_take(self):
+        expected = '/api/v1/documents/documents/next-number/'
+        self.client.force_authenticate(self.manager)
+        # A run nobody opened starts at 1.
+        fresh = self.client.get(expected, {'document_type': 'receipt'})
+        self.assertEqual((fresh.status_code, fresh.data['next_number'], fresh.data['continues']),
+                         (200, f'RC-{self.year}-000001', ''))
+
+        self.client.post(OPEN, self.payload(start=40600, reserve=True), format='json')
+        told = self.client.get(expected, {'document_type': 'tax_invoice'}).data
+        self.assertEqual((told['series'], told['next_number']), ('TI', f'TI-{self.year}-040600'))
+        self.assertIn('אחרון 40413', told['continues'])
+        self.assertIn('40414–40599 שמורים לתוכנה הקודמת', told['continues'])
+        # Looking takes nothing: asked twice, the same number; and the run handed out none.
+        self.assertEqual(self.client.get(expected, {'document_type': 'tax_invoice'}).data['next_number'],
+                         told['next_number'])
+        self.assertEqual(DocumentSeries.objects.get(series='TI', year=self.year).issued, 0)
+        # Once a number is really handed out, the next look is the one after it.
+        self.assertEqual(next_document_number('TI'), f'TI-{self.year}-040600')
+        self.assertEqual(self.client.get(expected, {'document_type': 'tax_invoice'}).data['next_number'],
+                         f'TI-{self.year}-040601')
+
+        self.assertEqual(self.client.get(expected, {'document_type': 'draft'}).status_code, 400)
+        self.assertEqual(self.client.get(expected).status_code, 400)
+        # A partner issues documents too, and is told; a worker is not.
+        self.client.force_authenticate(make_user('partner-next@test', UserProfile.ROLE_PARTNER))
+        self.assertEqual(self.client.get(expected, {'document_type': 'tax_invoice'}).status_code, 200)
+        self.client.force_authenticate(make_user('worker-next@test', UserProfile.ROLE_WORKER))
+        self.assertEqual(self.client.get(expected, {'document_type': 'tax_invoice'}).status_code, 403)
+
     def test_bad_input_is_a_400_and_a_second_opening_a_409(self):
         self.client.force_authenticate(self.manager)
         self.assertEqual(self.client.post(OPEN, self.payload(series='ZZ'), format='json').status_code, 400)
