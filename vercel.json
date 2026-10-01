@@ -3,7 +3,7 @@
   "crons": [
     {
       "path": "/api/v1/customers/cron/recurring-billing/",
-      "schedule": "*/10 5-14 * * *"
+      "schedule": "*/5 5-17 * * *"
     },
     {
       "path": "/api/v1/core/ping/",

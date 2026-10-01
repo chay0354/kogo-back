@@ -188,13 +188,16 @@ class ScheduleTests(TestCase):
         self.assertLess(CHARGE_BUDGET_SECONDS, DOCUMENTS_CUTOFF_SECONDS)
         self.assertLess(DOCUMENTS_CUTOFF_SECONDS, 300)
 
-    def test_runs_are_ten_minutes_apart_so_two_never_overlap(self):
+    def test_runs_are_five_minutes_apart_the_longest_a_run_can_live(self):
+        # The gap equals the function limit, so a run is over — finished or
+        # killed — by the time the next one starts. Should two ever meet, the
+        # unique claim lets only one of them charge a standing order.
         minute, hours, *rest = self._billing_schedule().split()
-        self.assertEqual(minute, '*/10')
+        self.assertEqual(minute, '*/5')
         self.assertEqual(rest, ['*', '*', '*'])
         first, last = (int(h) for h in hours.split('-'))
-        # 08:00 to 17:50 on Israel's summer clock, 07:00 to 16:50 in winter.
-        self.assertEqual((first, last), (5, 14))
+        # 08:00 to 20:55 on Israel's summer clock, 07:00 to 19:55 in winter.
+        self.assertEqual((first, last), (5, 17))
 
     @override_settings(CRON_TOKEN='test-cron-token')
     def test_the_status_endpoint_reports_the_schedule_that_is_deployed(self):
