@@ -338,7 +338,8 @@ TRANZILA_WALLETS = [
 # apps/customers/course_checkout.py). The page only checks the card and saves
 # it (tranmode NK); the server then charges the whole cart once from that token
 # and opens the standing orders on it. Off: the widget keeps its own card form
-# (/customers/widget/charge/), exactly as before.
+# (/customers/widget/charge/), exactly as before. This is the course page's own
+# switch: it does not need, and does not open, TRANZILA_HOSTED_PAGE_ENABLED.
 COURSE_HOSTED_PAGE_ENABLED = config('COURSE_HOSTED_PAGE_ENABLED', default=False, cast=bool)
 # Courses that pay on the hosted page while the switch above is still off — a
 # hidden test course for the real 1 ₪ signup, with every other parent on the
