@@ -47,6 +47,25 @@ def validate_business_charge_link(link: PaymentLink, amount: Decimal) -> None:
             raise BusinessChargeDocumentError(f'נותרו בחשבונית ₪{left}, פחות מסכום הגבייה')
 
 
+# Tranzila's `cardtype` on the hosted page's notify (docs.tranzila.com, iframe
+# integration). The payment row keeps the code as it arrived; a tax document
+# names the card, it does not print "2".
+TRANZILA_CARD_TYPES = {
+    '1': 'מאסטרקארד',
+    '2': 'ויזה',
+    '3': 'דיינרס',
+    '4': 'אמריקן אקספרס',
+    '5': 'ישראכרט',
+    '6': 'מאסטרו',
+}
+
+
+def card_brand_name(card_type: str) -> str:
+    """The card's name for a document; an unknown code or a name passes through."""
+    raw = str(card_type or '').strip()
+    return TRANZILA_CARD_TYPES.get(raw, raw)
+
+
 def _common(link: PaymentLink) -> dict:
     return {
         'client_type': 'business',
@@ -62,7 +81,7 @@ def _card_row(payment: PaymentLinkPayment) -> dict:
         'method': 'credit_card',
         'amount': payment.amount,
         'card_last_four': payment.card_last4,
-        'card_brand': payment.card_type,
+        'card_brand': card_brand_name(payment.card_type),
         'installments': 1,
         'reference': payment.gateway_confirmation_code,
         'paid_on': israel_today(),
@@ -107,7 +126,7 @@ def _receipt_data(payment: PaymentLinkPayment, invoice) -> dict:
             'linked_invoice_id': invoice.document_number,
             'card_amount': payment.amount,
             'card_last_four': payment.card_last4,
-            'card_brand': payment.card_type,
+            'card_brand': card_brand_name(payment.card_type),
             'card_installments': 1,
             'card_notes': f'אישור {payment.gateway_confirmation_code}'.strip(),
         },
