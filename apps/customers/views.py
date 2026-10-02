@@ -125,16 +125,27 @@ class FamilyViewSet(viewsets.ModelViewSet):
 
         GET  /api/v1/customers/families/{id}/widget-identification/
         POST the same  {"blocked": true | false, "reason": "..."}
+        POST the same  {"release_lock": true}
 
         Switched off, the form never recognises the family: it opens empty for
         them, as for a new parent, and no notice is sent — for a dispute
         between parents, a restraining order, or a parent who asked. Every
         change needs a reason and is kept with who made it and when.
+
+        The form also locks an identity number by itself, for a day, after five
+        wrong phones were tried with it. `release_lock` opens it at once, for a
+        parent the office knows; it is kept with who opened it and when.
         """
         from apps.customers.identification_models import FamilyIdentificationSwitch
+        from apps.customers.widget_identification import locked_until, release_guessing_lock
 
         family = self.get_object()
-        if request.method == 'POST':
+        if request.method == 'POST' and request.data.get('release_lock') is True:
+            # The lock is the form's own doing and not an office decision, so
+            # whoever may see the family may open it.
+            if release_guessing_lock(family, by=request.user) is None:
+                return Response({'error': 'הזיהוי של המשפחה אינו נעול'}, status=status.HTTP_400_BAD_REQUEST)
+        elif request.method == 'POST':
             blocked = request.data.get('blocked')
             reason = str(request.data.get('reason') or '').strip()
             if not isinstance(blocked, bool):
@@ -169,6 +180,17 @@ class FamilyViewSet(viewsets.ModelViewSet):
             'blocked_at': family.widget_identification_blocked_at,
             'reason': family.widget_identification_blocked_reason or '',
             'consent_at': family.widget_identification_consent_at,
+            # Set while five wrong phones hold the family's identity number locked: when it opens by itself.
+            'locked_until': locked_until(family),
+            'releases': [
+                {'released_at': row.released_at, 'released_by_name': who(row.released_by)}
+                for row in family.identification_releases.select_related('released_by')[:5]
+            ],
+            # What the form last answered about this family — why a parent was not recognised.
+            'recent': [
+                {'at': row.created_at, 'outcome': row.outcome, 'label': row.get_outcome_display()}
+                for row in family.identify_attempts.all()[:8]
+            ],
             'history': [
                 {
                     'blocked': row.blocked,
