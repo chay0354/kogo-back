@@ -108,6 +108,7 @@ class TheEvent(TestCase):
     def test_the_length_of_a_lesson_in_words(self):
         self.assertEqual(trial_calendar.duration_words(45), '45 דקות')
         self.assertEqual(trial_calendar.duration_words(60), 'שעה')
+        self.assertEqual(trial_calendar.duration_words(75), 'שעה ורבע')
         self.assertEqual(trial_calendar.duration_words(90), 'שעה וחצי')
 
     def test_a_day_the_lesson_does_not_take_place_on_is_no_event(self):
@@ -165,6 +166,15 @@ class ForGoogle(TestCase):
         details = trial_calendar.google_notes(trial_calendar.build_trial_event(lesson, MONDAY, today=TODAY))
 
         self.assertIn('&lt;b&gt;דני&lt;/b&gt;', details)
+
+    def test_an_apostrophe_in_a_name_stays_an_apostrophe(self):
+        lesson = _lesson()
+        lesson.instructor.first_name = "גראנג'י"
+        lesson.instructor.save()
+
+        details = trial_calendar.google_notes(trial_calendar.build_trial_event(lesson, MONDAY, today=TODAY))
+
+        self.assertIn("<b>גראנג'י סתיו</b>", details)
 
 
 class ForAppleAndTheRest(TestCase):
