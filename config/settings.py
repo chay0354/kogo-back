@@ -533,10 +533,15 @@ OFFICE_ALERT_PHONES = config('OFFICE_ALERT_PHONES', default='')
 # (2.10.2026: "upload everything but the WhatsApp"). Set to False to switch it
 # off at once: the form is then always told "not known" and opens empty for
 # everyone, as it did before. On, the answer shows children's first names to
-# whoever holds a parent's identity number and phone — and only for a family
-# whose parent accepted terms carrying the identification paragraph (core
-# migration 0028), so nobody is recognised before they sign again.
+# whoever holds a parent's identity number and phone.
 WIDGET_IDENTIFICATION_ENABLED = config('WIDGET_IDENTIFICATION_ENABLED', default=True, cast=bool)
+# Recognise only a family whose parent accepted terms carrying the
+# identification paragraph (core migration 0028). Off by the owner's decision
+# (2.10.2026): with it on, nobody who was already a customer — and no family
+# back from a trial lesson, which is whom the identification is for — is
+# recognised until they sign again. The paragraph stays in the terms, and the
+# acceptance is still recorded on the family.
+WIDGET_IDENTIFICATION_REQUIRES_CONSENT = config('WIDGET_IDENTIFICATION_REQUIRES_CONSENT', default=False, cast=bool)
 # The short WhatsApp to the parent on every identification ("a registration
 # began with your details. Not you? Call the office."). It is a real send, so
 # it has its own switch and needs an approved template: the flow's ns here.

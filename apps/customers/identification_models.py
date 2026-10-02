@@ -27,6 +27,7 @@ class WidgetIdentifyAttempt(models.Model):
     OUTCOME_MISMATCH = 'mismatch'
     OUTCOME_OLD = 'old'
     OUTCOME_NO_CONSENT = 'no_consent'
+    OUTCOME_UNPROVEN_CARD = 'unproven_card'
     OUTCOME_HIDDEN = 'hidden'
     OUTCOME_DUPLICATE = 'duplicate'
     OUTCOME_LOCKED = 'locked'
@@ -43,6 +44,7 @@ class WidgetIdentifyAttempt(models.Model):
         (OUTCOME_MISMATCH, 'ת.ז. מוכרת, טלפון אחר'),
         (OUTCOME_OLD, 'לקוח ישן'),
         (OUTCOME_NO_CONSENT, 'בלי הסכמה בתקנון'),
+        (OUTCOME_UNPROVEN_CARD, 'הטלפון בכרטיס הוחלף בלי הוכחה'),
         (OUTCOME_HIDDEN, 'כובה במשרד'),
         (OUTCOME_DUPLICATE, 'שתי משפחות עם אותה ת.ז.'),
         (OUTCOME_LOCKED, 'ת.ז. ננעלה אחרי ניסיונות שגויים'),

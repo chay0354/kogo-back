@@ -55,6 +55,13 @@ class Family(models.Model):
     widget_identification_blocked_reason = models.TextField(
         null=True, blank=True, verbose_name="סיבת כיבוי הזיהוי"
     )
+    # A registration that knew the identity number but not the card's phone
+    # replaced the phone (allowed only on a card nobody paid on yet). From then
+    # the phone on the card proves nobody, and the form does not recognise the
+    # family by it until the family has paid.
+    widget_contact_unproven_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="הטלפון בכרטיס הוחלף בלי הוכחה"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")

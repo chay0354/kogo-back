@@ -697,6 +697,11 @@ def _resolve_family_and_child(data, branch, *, identified=False):
             if phone and family.phone != phone:
                 family.phone = phone
                 updates['phone'] = phone
+                if not proven:
+                    # Put there by an identity number alone: this phone proves
+                    # nobody to the form's identification until the family pays.
+                    family.widget_contact_unproven_at = timezone.now()
+                    updates['widget_contact_unproven_at'] = family.widget_contact_unproven_at
             if parent_email and family.email != parent_email:
                 if proven and family.email:
                     _tell_office_of_new_email(family, family.email, parent_email)
