@@ -34,6 +34,7 @@ from .widget_views import (
     WidgetTermsView,
 )
 from .widget_identify_views import WidgetIdentifyView
+from .widget_calendar_views import WidgetTrialEventFileView, WidgetTrialEventView
 from .views import cron_card_update_reminders, cron_recurring_billing, cron_recurring_billing_status
 
 router = DefaultRouter()
@@ -64,6 +65,8 @@ urlpatterns = [
     path('widget/branches/', WidgetBranchesView.as_view(), name='widget-branches'),
     path('widget/lesson-occurrences/', WidgetLessonOccurrencesView.as_view(), name='widget-lesson-occurrences'),
     path('widget/terms/', WidgetTermsView.as_view(), name='widget-terms'),
+    path('widget/trial-event/', WidgetTrialEventView.as_view(), name='widget-trial-event'),
+    path('widget/trial-event.ics', WidgetTrialEventFileView.as_view(), name='widget-trial-event-file'),
     path('card-update/<str:token>/', CardUpdatePreviewView.as_view(), name='card-update-preview'),
     path('card-update/<str:token>/charge/', CardUpdateChargeView.as_view(), name='card-update-charge'),
     path('card-links/', CardLinkListCreateView.as_view(), name='card-links'),

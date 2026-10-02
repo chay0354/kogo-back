@@ -21,7 +21,13 @@ class CourseType(models.Model):
     """תחומים - Course categories (e.g., Capoeira, Basketball, Judo)"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200, verbose_name="שם התחום")
+    # The field in a word or two, for where the full name is too long — the
+    # title of a calendar event ("היפהופ", not "היפהופ - מחול"). Empty: the name.
+    # Both new columns are nullable: they land while the previous code still inserts fields.
+    short_name = models.CharField(max_length=60, blank=True, null=True, verbose_name="שם קצר")
     description = models.TextField(blank=True, verbose_name="תיאור")
+    # What to come with to a trial lesson, in a short line ("מכנס ארוך. בשיעור מורידים נעליים.").
+    trial_bring_note = models.TextField(blank=True, null=True, verbose_name="מה להביא לשיעור ניסיון")
     is_active = models.BooleanField(default=True, verbose_name="פעיל")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")

@@ -25,6 +25,10 @@ class Branch(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200, verbose_name="שם הסניף")
     address = models.TextField(verbose_name="כתובת", blank=True)
+    # How to get in from the street — the parking, the floor, which door. Told
+    # to a parent with the address, in the calendar event of a trial lesson.
+    # Nullable: the column lands while the previous code still inserts branches.
+    arrival_directions = models.TextField(verbose_name="איך מגיעים", blank=True, null=True)
     phone = models.CharField(max_length=20, verbose_name="טלפון", blank=True)
     email = models.EmailField(verbose_name="אימייל", blank=True)
     manager_name = models.CharField(max_length=200, verbose_name="שם מנהל", blank=True)
