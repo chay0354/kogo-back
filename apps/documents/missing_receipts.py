@@ -259,6 +259,9 @@ def _run_dict(run) -> dict:
         'previous_type_label': run.previous_type_label,
         'previous_last_number': run.previous_last_number,
         'continues': run.continues,
+        # The numbers left to the previous software while it still issues, or null.
+        'reserved_from': run.reserved[0] if run.reserved else None,
+        'reserved_to': run.reserved[1] if run.reserved else None,
     }
 
 

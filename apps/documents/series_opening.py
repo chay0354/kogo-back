@@ -18,9 +18,15 @@ What an opening may and may not do:
   document type. Two kogo runs both starting at 121883 would be two runs of
   one type sharing numbers; a receipt run that continued a tax-invoice run
   would mix two types in one run (סעיף 5(ג)).
-* The start is always the old last number plus one: the point is one run with
-  no gap and no overlap, so the office types what the old program shows and
-  kogo works out the rest.
+* The start is the old last number plus one: one run with no gap and no
+  overlap, so the office types what the old program shows and kogo works out
+  the rest.
+* Unless the old program is still issuing — to the customers who have not
+  moved to kogo yet. Then both programs hand out numbers of the same type for
+  a while, and "last plus one" would be handed out twice. The office may
+  instead start the kogo run further up; the numbers between stay the old
+  program's, the opening says so, and no number is ever given by both. The
+  start is still above the old last number, always.
 
 Race-safety: the check and the change happen under the run's row lock, the
 same lock next_number takes (DocumentSeries.open_at), and the database refuses
@@ -158,7 +164,10 @@ def opening_dict(opening: DocumentSeriesOpening | None) -> dict | None:
         'note': opening.note,
         'created_by': opening.created_by_name,
         'created_at': opening.created_at.isoformat() if opening.created_at else None,
-        'continues': continuation_note(opening.previous_last_number),
+        'continues': continuation_note(opening.previous_last_number, opening.start),
+        # The numbers left to the previous software while it still issues, or null.
+        'reserved_from': opening.reserved[0] if opening.reserved else None,
+        'reserved_to': opening.reserved[1] if opening.reserved else None,
     }
 
 
@@ -270,9 +279,14 @@ def _positive_int(value, what: str) -> int:
 
 
 def open_series(*, series, year, previous_last_number, previous_type_label, note='', start=None,
-                user=None, today=None) -> DocumentSeriesOpening:
+                reserve=False, user=None, today=None) -> DocumentSeriesOpening:
     """
     Open a kogo run at the previous software's last number plus one, with its record.
+
+    With `reserve`, `start` may be higher than that — while the previous
+    software still issues, the numbers from last + 1 up to start - 1 are left
+    to it. Without `reserve` a start that is not last + 1 is refused as before:
+    an opening is for good, and a mistyped number must not become one.
 
     Raises OpeningRefused with the reason in Hebrew. On success the run's next
     number is `start`, and the returned record says who opened it and from what.
@@ -301,10 +315,21 @@ def open_series(*, series, year, previous_last_number, previous_type_label, note
         raise OpeningRefused(f'המספר האחרון בתוכנה הקודמת גדול מדי (עד {MAX_START - 1:,})')
     first = last + 1
     if start not in (None, ''):
-        if _positive_int(start, 'המספר הראשון') != first:
+        chosen = _positive_int(start, 'המספר הראשון')
+        if chosen != first and not reserve:
             raise OpeningRefused(
                 f'הסדרה ממשיכה בדיוק מהמספר שאחרי האחרון בתוכנה הקודמת: {first}, בלי דילוג ובלי חפיפה'
             )
+        if chosen < first:
+            raise OpeningRefused(
+                f'המספר הראשון חייב להיות אחרי האחרון בתוכנה הקודמת: {first} לפחות, בלי חפיפה'
+            )
+        if chosen > MAX_START:
+            raise OpeningRefused(f'המספר הראשון גדול מדי (עד {MAX_START:,})')
+        # Above last + 1: the numbers between are left to the previous software.
+        first = chosen
+    elif reserve:
+        raise OpeningRefused('כדי להשאיר מספרים לתוכנה הקודמת יש להזין את המספר הראשון של הסדרה')
 
     note = str(note or '').strip()
     if len(note) > 1000:

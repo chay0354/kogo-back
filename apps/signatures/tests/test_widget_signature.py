@@ -130,7 +130,7 @@ class WidgetRegisterSignatureTests(TestCase):
         self.assertEqual(signature.refs['payment_ids'], [first.json()['payment_id'], second.json()['payment_id']])
 
     def test_a_capture_that_raises_never_changes_the_response(self, *_mocks):
-        control = self._register(parent_id_number='987654321')
+        control = self._register(parent_id_number='987654324')
         with patch('apps.signatures.capture.record_registration_signature', side_effect=RuntimeError('boom')):
             res = self._register()
 

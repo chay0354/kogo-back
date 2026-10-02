@@ -143,6 +143,20 @@ def child_already_has_registration_fee(child, current_lesson=None) -> bool:
     ).exists()
 
 
+def child_paid_registration_fee_before(child) -> bool:
+    """
+    The child is already a paying student, so the yearly fee is behind them.
+
+    For the form's wording only ("כבר שולמו"): it reads the same facts as
+    `child_already_has_registration_fee`, minus a row still in flight — a fee
+    not yet charged is not one that was paid — and decides nothing about money.
+    """
+    payments = Payment.objects.filter(child=child, status='completed')
+    if payments.filter(Q(registration_fee__gt=0) | Q(payment_type='recurring_subscription')).exists():
+        return True
+    return RecurringPayment.objects.filter(child=child, status__in=('active', 'paused')).exists()
+
+
 def resolve_include_registration_fee(child, lesson, requested: bool) -> bool:
     """Honor an explicit opt-out, otherwise charge only if this child has not paid yet."""
     if not requested:
@@ -913,6 +927,7 @@ class PaymentService:
         include_registration_fee: bool = True,
         include_monthly_amount: bool = True,
         quote_only: bool = False,
+        rehearsal: bool = False,
     ) -> Dict:
         """
         Initiate a recurring subscription payment for a child's lesson enrollment.
@@ -930,6 +945,12 @@ class PaymentService:
         The office's subscription dialog prices a lesson this way; the row it
         used to leave behind on every open carried a registration fee that hid
         the fee from the child's next signup and posed as a sibling signing up.
+
+        `rehearsal` is the registration form's quote (WidgetQuoteView): the
+        whole of this runs, rows included, inside a transaction the caller
+        rolls back, so a basket of several lessons is priced exactly as its
+        registration will be. Nothing differs here but the name in the log,
+        so a rolled-back row is never read as a registration that began.
 
         Args:
             child_id: UUID of child
@@ -1121,7 +1142,7 @@ class PaymentService:
         tranzila_url = None
         if not quote_only:
             log_payment_operation(
-                "SUBSCRIPTION_INITIATED",
+                "SUBSCRIPTION_REHEARSED" if rehearsal else "SUBSCRIPTION_INITIATED",
                 child=child.full_name,
                 payment_id=payment.id,
                 amount=discount_calculation.final_price
@@ -1136,6 +1157,14 @@ class PaymentService:
             'discount_amount': float(discount_calculation.total_discount_amount),
             'prorated_amount': float(prorated_lesson),
             'registration_fee': float(registration_fee),
+            # No fee on this registration because the child paid it before (the
+            # form then says so instead of leaving the line out).
+            'registration_fee_paid_before': bool(
+                include_registration_fee
+                and registration_fee == 0
+                and registration_fee_amount(lesson.course) > 0
+                and child_paid_registration_fee_before(child)
+            ),
             'final_amount': float(prorated_final),
             **describe_trial_credit(trial_credit),
             'prorate_factor': float(prorate_factor),

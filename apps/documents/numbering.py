@@ -201,6 +201,35 @@ def formal_document_number(document_type: str) -> str:
     return next_document_number(series)
 
 
+def expected_document_number(document_type: str) -> dict | None:
+    """
+    The number the next document of this type issued by hand would take, read
+    without taking it — what the documents wizard shows before the office
+    confirms. None for a type that has no run of its own (a draft).
+
+    It is a look, not a promise: the number is handed out only when the
+    document is issued (DocumentSeries.next_number, under the run's lock), and
+    a document issued in between takes this one.
+    """
+    from apps.documents.models import DocumentSeriesOpening
+
+    series = FORMAL_SERIES.get(document_type)
+    if series is None:
+        return None
+    year = _tax_year(None)
+    row = DocumentSeries.objects.filter(series=series, year=year).first()
+    start, counter = (row.start, row.counter) if row else (1, 0)
+    opening = DocumentSeriesOpening.objects.filter(series=series, year=year).first()
+    return {
+        'document_type': document_type,
+        'series': series,
+        'year': year,
+        'next_number': format_document_number(series, year, max(counter, start - 1) + 1),
+        # Said when the run continues the previous software's: where it took over from.
+        'continues': continuation_note(opening.previous_last_number, opening.start) if opening else '',
+    }
+
+
 @dataclass(frozen=True)
 class SeriesRun:
     """One run in one tax year, and whether every number it handed out is on a document."""
@@ -217,6 +246,13 @@ class SeriesRun:
     previous_last_number: int | None = None
 
     @property
+    def reserved(self) -> tuple | None:
+        """(first, last) of the numbers between the old run's last and this run's start, left to the old software."""
+        if self.previous_last_number is None or self.start <= self.previous_last_number + 1:
+            return None
+        return self.previous_last_number + 1, self.start - 1
+
+    @property
     def name(self) -> str:
         return f'{self.series}-{self.year}' if self.series else str(self.year)
 
@@ -229,11 +265,18 @@ class SeriesRun:
         """'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413)', or '' for a run that starts at 1."""
         if self.previous_last_number is None:
             return ''
-        return continuation_note(self.previous_last_number)
+        return continuation_note(self.previous_last_number, self.start)
 
 
-def continuation_note(previous_last_number: int) -> str:
-    return f'ממשיך את הסדרה של התוכנה הקודמת (אחרון {previous_last_number})'
+def continuation_note(previous_last_number: int, start: int | None = None) -> str:
+    """
+    'ממשיך את הסדרה של התוכנה הקודמת (אחרון 40413)' — and, when the run starts
+    further up, which numbers were left to the previous software.
+    """
+    note = f'ממשיך את הסדרה של התוכנה הקודמת (אחרון {previous_last_number})'
+    if start is not None and start > previous_last_number + 1:
+        note += f'; המספרים {previous_last_number + 1}–{start - 1} שמורים לתוכנה הקודמת'
+    return note
 
 
 def _series_sources() -> dict:

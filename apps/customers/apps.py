@@ -7,7 +7,7 @@ class CustomersConfig(AppConfig):
 
     def ready(self):
         # Import models to ensure they're registered
-        from apps.customers import financial_models, status_history_models  # noqa
+        from apps.customers import financial_models, identification_models, status_history_models  # noqa
         # Import signals to track status changes
         from apps.customers import signals  # noqa
         # store_models moved to apps.store

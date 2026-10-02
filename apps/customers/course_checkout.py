@@ -247,16 +247,19 @@ def start_checkout(payment_ids: list[str]) -> tuple[CourseCheckout, str]:
         )
         checkout.payments.set(payments)
 
-    family = payments[0].family
-    parent = family.parents.filter(is_primary=True).first() if family else None
     try:
+        # Nothing of the family goes into the page's address. The address is
+        # handed to whoever holds the payment's id — which a registration with
+        # a parent's identity number alone gives — and it used to carry the
+        # parent's full name, email and phone from the card. The checkout id in
+        # the return addresses is what ties the page to the registration.
         url = TranzilaService.iframe().create_payment_request(
             amount=checkout.page_sum,
             currency='ILS',
-            description=f'הרשמה לחוגים — {family.name if family else ""}'[:80],
-            customer_name=(parent.full_name if parent else (family.name if family else '')),
-            customer_email=(family.email if family else ''),
-            customer_phone=(family.phone if family else ''),
+            description='הרשמה לחוגים',
+            customer_name='',
+            customer_email='',
+            customer_phone='',
             success_url=f'{front_base}/widget/checkout-result?c={checkout.id}&r=ok',
             error_url=f'{front_base}/widget/checkout-result?c={checkout.id}&r=fail',
             callback_url=f'{api_base}/api/v1/customers/widget/checkout/notify/',

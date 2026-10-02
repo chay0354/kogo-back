@@ -17,6 +17,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from datetime import datetime, date, timedelta
 from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 from apps.customers.child_status import CHILD_STATUS_RANK, STATUS_GHOST
 from apps.customers.models import Family, Parent, Child, Payment, RecurringPayment, BusinessCustomer, CronHeartbeat
 from apps.customers.phone_search import PhoneAwareSearchFilter
@@ -115,6 +117,68 @@ class FamilyViewSet(viewsets.ModelViewSet):
         else:
             revoke_consent(family)
         return Response(FamilyComputerizedDocsConsentSerializer(family).data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='widget-identification')
+    def widget_identification(self, request, pk=None):
+        """
+        The office's switch for the registration form recognising this family.
+
+        GET  /api/v1/customers/families/{id}/widget-identification/
+        POST the same  {"blocked": true | false, "reason": "..."}
+
+        Switched off, the form never recognises the family: it opens empty for
+        them, as for a new parent, and no notice is sent — for a dispute
+        between parents, a restraining order, or a parent who asked. Every
+        change needs a reason and is kept with who made it and when.
+        """
+        from apps.customers.identification_models import FamilyIdentificationSwitch
+
+        family = self.get_object()
+        if request.method == 'POST':
+            blocked = request.data.get('blocked')
+            reason = str(request.data.get('reason') or '').strip()
+            if not isinstance(blocked, bool):
+                return Response({'error': 'יש לשלוח blocked עם true או false'}, status=status.HTTP_400_BAD_REQUEST)
+            if len(reason) < 2:
+                return Response({'error': 'יש לכתוב סיבה'}, status=status.HTTP_400_BAD_REQUEST)
+            if blocked == bool(family.widget_identification_blocked_at):
+                return Response({'error': 'המתג כבר במצב הזה'}, status=status.HTTP_400_BAD_REQUEST)
+            # Anyone who sees the family may switch it off; what the office
+            # switched off, only a manager switches back on.
+            if not blocked and not IsManager().has_permission(request, self):
+                return Response(
+                    {'error': 'רק מנהל יכול להפעיל מחדש את הזיהוי'}, status=status.HTTP_403_FORBIDDEN,
+                )
+            with transaction.atomic():
+                family.widget_identification_blocked_at = timezone.now() if blocked else None
+                family.widget_identification_blocked_reason = reason if blocked else None
+                family.save(update_fields=[
+                    'widget_identification_blocked_at', 'widget_identification_blocked_reason', 'updated_at',
+                ])
+                FamilyIdentificationSwitch.objects.create(
+                    family=family, blocked=blocked, reason=reason, changed_by=request.user,
+                )
+
+        def who(user):
+            if user is None:
+                return ''
+            return (user.get_full_name() or '').strip() or user.get_username()
+
+        return Response({
+            'blocked': bool(family.widget_identification_blocked_at),
+            'blocked_at': family.widget_identification_blocked_at,
+            'reason': family.widget_identification_blocked_reason or '',
+            'consent_at': family.widget_identification_consent_at,
+            'history': [
+                {
+                    'blocked': row.blocked,
+                    'reason': row.reason,
+                    'changed_at': row.changed_at,
+                    'changed_by_name': who(row.changed_by),
+                }
+                for row in family.identification_switches.select_related('changed_by')[:20]
+            ],
+        })
 
 
 class ParentViewSet(viewsets.ModelViewSet):

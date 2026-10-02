@@ -148,10 +148,24 @@ class ClassificationTests(SimpleTestCase):
     def test_a_parent_paying_lessons_by_card(self):
         self.assertEqual(self.kind(row(), row()), 'parent')
 
-    def test_any_document_issued_by_hand_is_business(self):
-        for doc_type in ('tax_invoice', 'transaction_invoice', 'receipt', 'credit_invoice'):
+    def test_an_invoice_or_a_receipt_issued_by_hand_is_business(self):
+        for doc_type in ('tax_invoice', 'transaction_invoice', 'receipt'):
             with self.subTest(doc_type):
                 self.assertEqual(self.kind(row(), row(doc_type=doc_type)), 'business')
+
+    def test_a_credit_note_alone_is_a_refund_to_a_parent(self):
+        self.assertEqual(self.kind(row(), row(doc_type='credit_invoice')), 'parent')
+        self.assertEqual(self.kind(row(doc_type='tax_invoice'), row(doc_type='credit_invoice')), 'business')
+
+    def test_a_tenant_on_a_standing_order_is_business(self):
+        customers = customers_from_rows([row(details='השכרת סטודיו'), row(details='שכירות כפר סבא'), row()])
+        customer = next(iter(customers.values()))
+        self.assertEqual((customer.kind, customer.reasons), ('business', ['rental']))
+        # A new tenant has one document so far — on a standing order.
+        self.assertEqual(self.kind(row(details='השכרה חודשית', remark='תשלום בהוראת קבע #77')), 'business')
+        # A studio rented once for a birthday, by a parent or by a stranger, is not a tenancy.
+        self.assertEqual(self.kind(row(details='השכרת סטודיו'), row(), row()), 'parent')
+        self.assertEqual(self.kind(row(details='השכרת סטודיו')), 'parent')
 
     def test_an_invoice_receipt_paid_otherwise_than_by_card(self):
         self.assertEqual(self.kind(row(payment_type='העברה בנקאית')), 'business')

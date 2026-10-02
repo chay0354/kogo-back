@@ -27,7 +27,18 @@ else:
     ACTIVE_ENV_FILE = 'environment variables (no .env file found)'
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = config('SECRET_KEY', default='django-insecure-development-key-change-in-production')
+_DEFAULT_SECRET_KEY = 'django-insecure-development-key-change-in-production'
+SECRET_KEY = config('SECRET_KEY', default=_DEFAULT_SECRET_KEY)
+# Whoever knows the key can sign what the server signs. With the default one
+# above — public, it is in the repository — nothing that rests on a signature
+# may be trusted: the registration form's identification stays off.
+SECRET_KEY_IS_DEFAULT = SECRET_KEY == _DEFAULT_SECRET_KEY
+# The day a real key is set, the links already in parents' hands (card update,
+# card replacement) were signed with the default one — and a link we sent must
+# keep opening. So an earlier signature is still read; everything new is signed
+# with the real key only. The registration form's identification never reads
+# the earlier one (see widget_identification._read_signed).
+SECRET_KEY_FALLBACKS = [] if SECRET_KEY_IS_DEFAULT else [_DEFAULT_SECRET_KEY]
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # On Vercel, default DEBUG to False unless explicitly enabled.
@@ -290,6 +301,12 @@ REST_FRAMEWORK = {
         # opening a page, and the widget's poll while the parent pays.
         'course_checkout_start': '20/min',
         'course_checkout_status': '120/min',
+        # The registration form asking whether a parent is known, and for the
+        # price before the signature (apps/customers/widget_identify_views.py,
+        # WidgetQuoteView). A soft limit like the rest: the limits that hold
+        # are counted from the database (WidgetIdentifyAttempt).
+        'widget_identify': '30/min',
+        'widget_quote': '30/min',
         # The website store's poll of an order's payment (apps/store/widget_views.py).
         # Every poll comes from the site's own server — one caller for all of
         # its customers at once — so this is the whole shop's rate. Tranzila is
@@ -511,6 +528,21 @@ MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS = config('MANYCHAT_RENTAL_CARD_UPDATE_FLOW_N
 # Either empty: alerts are kept and shown in the morning brief, not sent.
 MANYCHAT_OFFICE_ALERT_FLOW_NS = config('MANYCHAT_OFFICE_ALERT_FLOW_NS', default='')
 OFFICE_ALERT_PHONES = config('OFFICE_ALERT_PHONES', default='')
+# The registration form recognising a returning parent by identity number and
+# phone (apps/customers/widget_identification.py). On by the owner's decision
+# (2.10.2026: "upload everything but the WhatsApp"). Set to False to switch it
+# off at once: the form is then always told "not known" and opens empty for
+# everyone, as it did before. On, the answer shows children's first names to
+# whoever holds a parent's identity number and phone — and only for a family
+# whose parent accepted terms carrying the identification paragraph (core
+# migration 0028), so nobody is recognised before they sign again.
+WIDGET_IDENTIFICATION_ENABLED = config('WIDGET_IDENTIFICATION_ENABLED', default=True, cast=bool)
+# The short WhatsApp to the parent on every identification ("a registration
+# began with your details. Not you? Call the office."). It is a real send, so
+# it has its own switch and needs an approved template: the flow's ns here.
+# Either missing: nobody is messaged and the form does not say anyone was.
+WIDGET_IDENTIFICATION_NOTICE_ENABLED = config('WIDGET_IDENTIFICATION_NOTICE_ENABLED', default=False, cast=bool)
+MANYCHAT_IDENTIFICATION_NOTICE_FLOW_NS = config('MANYCHAT_IDENTIFICATION_NOTICE_FLOW_NS', default='')
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))
 # Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
 TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))

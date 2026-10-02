@@ -250,6 +250,39 @@ class RefreshTests(TestCase):
         self.assertIn('Authorization failed', snapshot.error)
         self.assertEqual(snapshot.charges_total, Decimal('350.00'))
 
+    def _our_charge(self, terminal, when):
+        from apps.customers.models import TranzilaTransaction
+
+        return TranzilaTransaction.objects.create(
+            transaction_id='496024', confirmation_code='0012345', transaction_type='recurring_charge',
+            response_code='000', response_message='', response_data={}, request_data={},
+            is_successful=True, tranzila_terminal=terminal, response_timestamp=when,
+        )
+
+    def test_an_empty_report_is_not_believed_when_we_charged_on_that_terminal(self):
+        # 1.10.2026: Tranzila answered the michal terminals with an empty list
+        # and no error, in a month with hundreds of charges on them.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        self._our_charge('', datetime(2026, 9, 10, 12, 0, tzinfo=ZoneInfo('Asia/Jerusalem')))
+        self._answers(*[{'success': True, 'complete': True, 'transactions': []}] * 3)
+        snapshot = refresh_terminal_month(TERMINALS['TRANZILA_PROD_TOKEN_TERMINAL'], SEP, today=date(2026, 10, 1))
+        self.assertFalse(snapshot.complete)
+        self.assertIn('דוח ריק', snapshot.error)
+        self.assertIn('1 חיובים', snapshot.error)
+
+    def test_an_empty_report_is_believed_when_we_charged_nothing_there(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        # A charge on the michal pair says nothing about cogolivetok.
+        self._our_charge('', datetime(2026, 9, 10, 12, 0, tzinfo=ZoneInfo('Asia/Jerusalem')))
+        self._answers(*[{'success': True, 'complete': True, 'transactions': []}] * 3)
+        snapshot = refresh_terminal_month(TERMINALS['TRANZILA_TOKEN_TERMINAL'], SEP, today=date(2026, 10, 1))
+        self.assertTrue(snapshot.complete)
+        self.assertEqual(snapshot.error, '')
+
     def test_a_crash_is_recorded_not_raised(self):
         self.service.list_all_transactions.side_effect = RuntimeError('boom')
         with self.assertLogs('apps.core.card_payouts', level='ERROR'):
