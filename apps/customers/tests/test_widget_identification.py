@@ -15,12 +15,17 @@ from django.core import signing
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APIClient
 
 from apps.core.models import RegistrationTerms
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.customers import widget_identification as identification
-from apps.customers.identification_models import FamilyIdentificationSwitch, WidgetIdentifyAttempt
+from apps.customers.identification_models import (
+    FamilyIdentificationRelease,
+    FamilyIdentificationSwitch,
+    WidgetIdentifyAttempt,
+)
 from apps.customers.models import Child, Family, Payment
 
 IDENTIFY = '/api/v1/customers/widget/identify/'
@@ -894,6 +899,134 @@ class TheOfficeSwitch(TestCase):
 
     def test_nobody_signed_out_can_touch_it(self):
         self.assertIn(APIClient().get(self.url).status_code, (401, 403))
+
+
+class TheOfficeOpensALock(IdentificationCase):
+    """Five wrong phones lock an identity number for a day. The office can open it sooner, for a parent it knows."""
+
+    def setUp(self):
+        super().setUp()
+        self.url = f'/api/v1/customers/families/{self.family.id}/widget-identification/'
+        self.manager = get_user_model().objects.get(pk=TestDataFactory.create_user('office@example.com').pk)
+        self.office = APIClient()
+        self.office.force_authenticate(self.manager)
+
+    def lock(self, parent_id=PARENT_ID):
+        for last in range(5):
+            self.ask(parent_id, phone=f'052999990{last}')
+
+    def open_it(self):
+        return self.office.post(self.url, {'release_lock': True}, format='json')
+
+    def test_the_card_says_until_when_it_is_locked(self):
+        self.assertIsNone(self.office.get(self.url).json()['locked_until'])
+
+        self.lock()
+
+        oldest = WidgetIdentifyAttempt.objects.filter(outcome='mismatch').order_by('created_at').first()
+        self.assertEqual(
+            parse_datetime(self.office.get(self.url).json()['locked_until']),
+            oldest.created_at + timedelta(hours=24),
+        )
+
+    def test_four_wrong_phones_lock_nothing_and_there_is_nothing_to_open(self):
+        for last in range(4):
+            self.ask(phone=f'052999990{last}')
+
+        self.assertIsNone(self.office.get(self.url).json()['locked_until'])
+        self.assertEqual(self.open_it().status_code, 400)
+        self.assertEqual(FamilyIdentificationRelease.objects.count(), 0)
+
+    def test_opened_the_right_phone_is_recognised_at_once(self):
+        self.lock()
+        self.assertEqual(self.ask(), UNKNOWN)
+
+        response = self.open_it()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNone(response.json()['locked_until'])
+        self.assertEqual(self.ask()['status'], 'known')
+
+    def test_it_is_kept_with_who_opened_it_and_nothing_of_the_log_is_erased(self):
+        self.lock()
+        kept = WidgetIdentifyAttempt.objects.count()
+
+        body = self.open_it().json()
+
+        row = FamilyIdentificationRelease.objects.get()
+        self.assertEqual((row.family_id, row.released_by), (self.family.id, self.manager))
+        self.assertEqual(len(body['releases']), 1)
+        self.assertEqual(WidgetIdentifyAttempt.objects.count(), kept)
+
+    def test_five_new_wrong_phones_lock_it_again(self):
+        self.lock()
+        self.open_it()
+
+        for last in range(4):
+            self.ask(phone=f'052888880{last}')
+        self.assertEqual(self.ask()['status'], 'known')
+        self.ask(phone='0528888804')
+
+        self.assertEqual(self.ask(), UNKNOWN)
+        self.assertEqual(self.outcomes()[-1], 'locked')
+        self.assertIsNotNone(self.office.get(self.url).json()['locked_until'])
+
+    def test_the_forms_other_doors_open_with_it(self):
+        self.lock()
+        self.assertTrue(identification.guessing_locked(PARENT_ID))
+
+        self.open_it()
+
+        self.assertFalse(identification.guessing_locked(PARENT_ID))
+
+    def test_opening_one_family_opens_no_other(self):
+        _family('222222226', '0502222222', child_name='נועה')
+        self.lock('222222226')
+        self.lock()
+
+        self.open_it()
+
+        self.assertEqual(self.ask('222222226', '0502222222'), UNKNOWN)
+        self.assertTrue(identification.guessing_locked('222222226'))
+        self.assertEqual(self.ask()['status'], 'known')
+
+    def test_a_release_from_before_the_day_opens_nothing(self):
+        FamilyIdentificationRelease.objects.create(
+            family=self.family, id_hash=identification._keyed(PARENT_ID),
+            released_at=timezone.now() - timedelta(hours=25),
+        )
+
+        self.lock()
+
+        self.assertEqual(self.ask(), UNKNOWN)
+
+    def test_the_office_sees_what_the_form_last_answered(self):
+        self.ask(phone='0529999900')
+        self.ask()
+
+        recent = self.office.get(self.url).json()['recent']
+
+        self.assertEqual([row['outcome'] for row in recent], ['known', 'mismatch'])
+        self.assertEqual(recent[1]['label'], 'ת.ז. מוכרת, טלפון אחר')
+
+    def test_a_value_that_is_not_true_opens_nothing(self):
+        self.lock()
+
+        response = self.office.post(self.url, {'release_lock': 'true'}, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(FamilyIdentificationRelease.objects.count(), 0)
+
+    def test_an_instructor_cannot_open_it(self):
+        from apps.core.models import UserProfile
+
+        self.lock()
+        client = APIClient()
+        coach = TestDataFactory.create_user('coach@example.com', role=UserProfile.ROLE_WORKER)
+        client.force_authenticate(get_user_model().objects.get(pk=coach.pk))
+
+        self.assertEqual(client.post(self.url, {'release_lock': True}, format='json').status_code, 403)
+        self.assertEqual(FamilyIdentificationRelease.objects.count(), 0)
 
 
 class TheMasks(TestCase):

@@ -7,6 +7,9 @@ serverless, so a counter kept in memory would be per instance and forgotten).
 
 `FamilyIdentificationSwitch` is the history of the office switching a family's
 identification off or back on, each time with its reason.
+
+`FamilyIdentificationRelease` is the office letting a family's identity number
+be tried again, after wrong phones locked it for the day.
 """
 import uuid
 
@@ -100,6 +103,32 @@ class FamilyIdentificationSwitch(models.Model):
 
     def __str__(self):
         return f'{self.family_id} {"off" if self.blocked else "on"} {self.changed_at:%d/%m/%Y}'
+
+
+class FamilyIdentificationRelease(models.Model):
+    """
+    The office opened a family's identity number after wrong phones locked it.
+
+    Nothing of the log is erased: the wrong tries stay where they are, and the
+    lock counts only those made after the last release.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    family = models.ForeignKey(Family, on_delete=models.CASCADE, related_name='identification_releases')
+    # The keyed hash the lock counts on: the family's identity number as it was then.
+    id_hash = models.CharField(max_length=64, db_index=True)
+    released_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='family_identification_releases',
+    )
+    released_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = 'family_identification_releases'
+        ordering = ['-released_at']
+
+    def __str__(self):
+        return f'{self.family_id} released {self.released_at:%d/%m/%Y %H:%M}'
 
 
 class WidgetRateBucket(models.Model):

@@ -16,7 +16,8 @@ small and the ways to abuse it are closed one by one:
     paying, or at a trial lesson — and that the office did not switch off;
   * never by a phone that an identity number alone put on the card;
   * five wrong phones for one identity number lock it for a day, counted one
-    request at a time so sending them together changes nothing;
+    request at a time so sending them together changes nothing — and the
+    office can open it sooner for a parent it knows (`release_guessing_lock`);
   * a third family from one device stops identification there for a day, and a
     cap per network, per hour and per day stops a sweep;
   * a silent check that the form was really opened, a moment before asking;
@@ -42,6 +43,7 @@ from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from apps.customers.identification_models import FamilyIdentificationRelease as Release
 from apps.customers.identification_models import WidgetIdentifyAttempt as Attempt
 from apps.customers.models import Family, Payment
 from apps.enrollments.person_match import normalise_phone
@@ -405,13 +407,55 @@ def _never_wait_long() -> None:
         cursor.execute("SET LOCAL lock_timeout = '3s'")
 
 
+def _wrong_tries(id_hash: str, now):
+    """
+    The wrong phones that still count against an identity number: the last
+    day's, and only those tried after the office last opened it.
+    """
+    since = now - WINDOW
+    tries = Attempt.objects.filter(id_hash=id_hash, outcome__in=Attempt.WRONG_PHONE, created_at__gte=since)
+    released_at = (
+        Release.objects.filter(id_hash=id_hash, released_at__gte=since)
+        .order_by('-released_at').values_list('released_at', flat=True).first()
+    )
+    return tries.filter(created_at__gt=released_at) if released_at else tries
+
+
 def guessing_locked(parent_id: str) -> bool:
     """Five wrong phones were tried for this identity number today — anywhere the form takes a phone."""
     if not parent_id:
         return False
-    return Attempt.objects.filter(
-        id_hash=_keyed(parent_id), outcome__in=Attempt.WRONG_PHONE, created_at__gte=timezone.now() - WINDOW,
-    ).count() >= WRONG_PHONE_LIMIT
+    return _wrong_tries(_keyed(parent_id), timezone.now()).count() >= WRONG_PHONE_LIMIT
+
+
+def _identity_number_of(family) -> str:
+    return ''.join(ch for ch in str(family.parent_id_number or '') if ch.isdigit())
+
+
+def locked_until(family, now=None):
+    """
+    When the family's identity number opens again by itself — None while it is
+    not locked. It opens when the fifth most recent wrong try is a day old.
+    """
+    parent_id = _identity_number_of(family)
+    if not parent_id:
+        return None
+    tries = list(
+        _wrong_tries(_keyed(parent_id), now or timezone.now())
+        .order_by('-created_at').values_list('created_at', flat=True)[:WRONG_PHONE_LIMIT]
+    )
+    return tries[-1] + WINDOW if len(tries) >= WRONG_PHONE_LIMIT else None
+
+
+def release_guessing_lock(family, *, by=None):
+    """
+    The office opens a locked identity number: the wrong tries made until now
+    stop counting, and five new ones lock it again. Kept with who and when.
+    None when there is nothing to open.
+    """
+    if locked_until(family) is None:
+        return None
+    return Release.objects.create(family=family, id_hash=_keyed(_identity_number_of(family)), released_by=by)
 
 
 def note_wrong_phone(parent_id: str, family) -> None:
@@ -489,9 +533,7 @@ def _decide(*, family, parent_id, phone, accepted_near, keep, data):
         _keep(Attempt.OUTCOME_BOT, **keep)
         return dict(UNKNOWN)
 
-    if Attempt.objects.filter(
-        id_hash=id_hash, outcome__in=Attempt.WRONG_PHONE, created_at__gte=since,
-    ).count() >= WRONG_PHONE_LIMIT:
+    if _wrong_tries(id_hash, now).count() >= WRONG_PHONE_LIMIT:
         locked_family = family or Family.objects.filter(parent_id_number=parent_id).first()
         _keep(Attempt.OUTCOME_LOCKED, family=locked_family, **keep)
         _alert_office(
