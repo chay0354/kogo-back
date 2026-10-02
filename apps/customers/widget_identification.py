@@ -97,6 +97,17 @@ def is_enabled() -> bool:
     )
 
 
+def _read_signed(value, *, salt: str, max_age):
+    """
+    What we signed — with the server's own key and no other.
+
+    Links sent before a real key was set stay readable elsewhere
+    (settings.SECRET_KEY_FALLBACKS); an identification must not be: the earlier
+    key is in the repository, and whoever has it could sign himself into any family.
+    """
+    return signing.loads(str(value or ''), salt=salt, max_age=max_age, fallback_keys=[])
+
+
 def form_ticket() -> str:
     """Handed to the form when it opens; an identification must bring it back."""
     return signing.dumps({'t': time.time()}, salt=FORM_SALT)
@@ -290,7 +301,7 @@ def _opened_the_form(data) -> bool:
     if str(data.get('website') or '').strip():
         return False
     try:
-        opened = float(signing.loads(str(data.get('ticket') or ''), salt=FORM_SALT, max_age=FORM_MAX_AGE)['t'])
+        opened = float(_read_signed(data.get('ticket'), salt=FORM_SALT, max_age=FORM_MAX_AGE)['t'])
     except Exception:
         return False
     return time.time() - opened >= FORM_MIN_AGE
@@ -405,7 +416,7 @@ def _identify(data, *, ip: str) -> dict:
     if near_token:
         # The parent pressed "update" on the similar number offered a moment ago.
         try:
-            offered = signing.loads(near_token, salt=NEAR_SALT, max_age=NEAR_MAX_AGE)
+            offered = _read_signed(near_token, salt=NEAR_SALT, max_age=NEAR_MAX_AGE)
             family = Family.objects.filter(id=offered['f']).first()
             id_hash = offered['h']
         except Exception:
@@ -560,7 +571,7 @@ def family_of_token(token: str, device: str = ''):
     if not is_enabled():
         return None
     try:
-        payload = signing.loads(str(token or ''), salt=TOKEN_SALT, max_age=TOKEN_MAX_AGE)
+        payload = _read_signed(token, salt=TOKEN_SALT, max_age=TOKEN_MAX_AGE)
     except Exception:
         return None
     if payload.get('d') != _device_mark(str(device or '').strip()):

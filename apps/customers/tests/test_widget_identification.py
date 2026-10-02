@@ -832,3 +832,56 @@ class TheMasks(TestCase):
         self.assertEqual(identification.mask_email('dana@example.com'), 'd•••••••••')
         self.assertEqual(identification.mask_number('050-1234567', dots=9), '•••••••••7')
         self.assertEqual(identification.mask_date(date(2018, 6, 21)), '••/••/•••8')
+
+
+EARLIER_KEY = 'the-key-that-was-in-the-repository'
+DEVICE = 'device-aaaaaaaaaaaaaaaa'
+
+
+@override_settings(
+    SECRET_KEY='a-real-key-set-on-the-server', SECRET_KEY_IS_DEFAULT=False, SECRET_KEY_FALLBACKS=[EARLIER_KEY],
+)
+class AfterARealKeyIsSet(IdentificationCase):
+    """Links already sent keep opening with the earlier key; an identification never does."""
+
+    def test_a_ticket_signed_with_the_earlier_key_opens_nothing(self):
+        ticket = signing.dumps({'t': time.time() - 30}, key=EARLIER_KEY, salt=identification.FORM_SALT)
+
+        self.assertEqual(self.ask(ticket=ticket), UNKNOWN)
+        self.assertEqual(self.ask()['status'], 'known')
+
+    def test_a_token_signed_with_the_earlier_key_is_nobody(self):
+        token = self.ask()['token']
+        forged = signing.dumps(
+            signing.loads(token, salt=identification.TOKEN_SALT), key=EARLIER_KEY, salt=identification.TOKEN_SALT,
+        )
+
+        self.assertEqual(identification.family_of_token(token, DEVICE), self.family)
+        self.assertIsNone(identification.family_of_token(forged, DEVICE))
+
+    def test_a_similar_number_offer_signed_with_the_earlier_key_identifies_nobody(self):
+        offered = self.ask(phone='0501234576')['near_token']
+        forged = signing.dumps(
+            signing.loads(offered, salt=identification.NEAR_SALT), key=EARLIER_KEY, salt=identification.NEAR_SALT,
+        )
+
+        answer = self.client.post(
+            IDENTIFY, {'near_token': forged, 'device_id': DEVICE, 'ticket': _ticket()}, format='json',
+        ).json()
+
+        self.assertEqual(answer, UNKNOWN)
+
+    def test_a_card_link_a_parent_already_holds_still_opens(self):
+        from apps.customers import card_replacement
+
+        sent_before = signing.dumps(
+            {'f': str(self.family.id)}, key=EARLIER_KEY, salt=card_replacement.SIGN_SALT,
+        ).replace(':', '~')
+        sent_now = card_replacement.build_family_token(self.family)
+
+        self.assertEqual(card_replacement.resolve_family_token(sent_before), self.family)
+        # A new link is signed with the real key: it opens with no earlier key at all.
+        with override_settings(SECRET_KEY_FALLBACKS=[]):
+            self.assertEqual(card_replacement.resolve_family_token(sent_now), self.family)
+            with self.assertRaises(card_replacement.CardReplacementError):
+                card_replacement.resolve_family_token(sent_before)
