@@ -16,6 +16,13 @@ Nothing here knows about a model. Rows whose value is empty are dropped rather
 than printed as a bare label, which is what lets a document from 2024 — no
 company number, no order number, no card digits — render without holes.
 
+One page, always (the owner's rule). A document is drawn the sample's way
+first, and when that is one page it is the result — an ordinary document is
+never touched. Only one that runs over is drawn again, pressed to fit: the
+white space closes first (every letter keeps its size), and if that is not
+enough the body under the document's name is scaled down evenly. See
+:class:`Fit` and :func:`render_invoice_pdf`.
+
 Hebrew RTL: text is wrapped to the column width *first* and each resulting line
 is bidi-reordered on its own (the technique of ``period_report_pdf._rtl_cell``
 and ``signatures.pdf._wrapped``). Reordering a whole string and letting
@@ -25,6 +32,7 @@ scrambles a long Hebrew name.
 from __future__ import annotations
 
 import io
+import logging
 import os
 from dataclasses import dataclass, field as dataclass_field
 from decimal import Decimal
@@ -39,11 +47,14 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
-    KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    Flowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
+from reportlab.platypus.doctemplate import LayoutError
 
 from apps.documents.issuer import ISSUER_COMPANY_NUMBER, ISSUER_NAME
 from apps.documents.signature_seal import SignatureSeal
+
+logger = logging.getLogger(__name__)
 
 # --- the palette, taken from the sample -------------------------------------
 # Sampled out of design/invoice-sample.pdf's content stream; named once here so
@@ -281,9 +292,45 @@ class InvoiceLayout:
     pdf_author: str = ''
 
 
+# --- how hard a document is pressed onto its one page -------------------------------
+
+@dataclass(frozen=True)
+class Fit:
+    """
+    How far a document's body is pressed to stay on its one page.
+
+    ``tight`` closes the white space — 0 is the sample's own spacing, 1 the
+    tightest that still reads as the same design — and leaves every letter its
+    size. ``scale`` then shrinks the body evenly: it is laid out ``1/scale``
+    times wider and drawn at ``scale``, so the cards and the table still span
+    the page while everything inside them (type, padding, corners, the seal)
+    is that much smaller.
+
+    The default presses nothing: every number below comes back exactly as it
+    was written, which is what keeps an ordinary document byte-for-byte the
+    sample's.
+    """
+    tight: float = 0.0
+    scale: float = 1.0
+    # The payment details under the totals (True), beside them (False), or
+    # decided by their height as an ordinary document's are (None).
+    stacked: bool | None = None
+
+    def gap(self, normal: float, tightest: float) -> float:
+        """A piece of white space: `normal` in the sample, `tightest` when fully pressed."""
+        return normal - self.tight * (normal - tightest)
+
+    def wide(self, points: float) -> float:
+        """A width of the page, in the units the body is laid out in."""
+        return points / self.scale
+
+
+NATURAL = Fit()
+
+
 # --- styles -------------------------------------------------------------------
 
-def _styles() -> dict[str, ParagraphStyle]:
+def _styles(fit: Fit = NATURAL) -> dict[str, ParagraphStyle]:
     return {
         'title': ParagraphStyle(
             'InvTitle', fontName=FONT_BOLD, fontSize=18.5, leading=24,
@@ -298,11 +345,11 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=HEADING_COLOR, alignment=TA_RIGHT,
         ),
         'label': ParagraphStyle(
-            'InvLabel', fontName=FONT_BOLD, fontSize=8.25, leading=13,
+            'InvLabel', fontName=FONT_BOLD, fontSize=8.25, leading=fit.gap(13, 10.5),
             textColor=LABEL_COLOR, alignment=TA_RIGHT,
         ),
         'value': ParagraphStyle(
-            'InvValue', fontName=FONT_REGULAR, fontSize=8.25, leading=13,
+            'InvValue', fontName=FONT_REGULAR, fontSize=8.25, leading=fit.gap(13, 10.5),
             textColor=VALUE_COLOR, alignment=TA_LEFT,
         ),
         'th': ParagraphStyle(
@@ -314,19 +361,19 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=colors.white, alignment=TA_RIGHT,
         ),
         'td': ParagraphStyle(
-            'InvTd', fontName=FONT_REGULAR, fontSize=7.9, leading=11,
+            'InvTd', fontName=FONT_REGULAR, fontSize=7.9, leading=fit.gap(11, 10),
             textColor=BODY_TEXT, alignment=TA_RIGHT,
         ),
         'td_num': ParagraphStyle(
-            'InvTdNum', fontName=FONT_REGULAR, fontSize=7.9, leading=11,
+            'InvTdNum', fontName=FONT_REGULAR, fontSize=7.9, leading=fit.gap(11, 10),
             textColor=BODY_TEXT, alignment=TA_CENTER,
         ),
         'td_bold': ParagraphStyle(
-            'InvTdBold', fontName=FONT_BOLD, fontSize=7.9, leading=11,
+            'InvTdBold', fontName=FONT_BOLD, fontSize=7.9, leading=fit.gap(11, 10),
             textColor=BODY_TEXT, alignment=TA_CENTER,
         ),
         'td_sub': ParagraphStyle(
-            'InvTdSub', fontName=FONT_REGULAR, fontSize=7.1, leading=10,
+            'InvTdSub', fontName=FONT_REGULAR, fontSize=7.1, leading=fit.gap(10, 9),
             textColor=SUB_TEXT, alignment=TA_RIGHT,
         ),
         'grand_label': ParagraphStyle(
@@ -338,11 +385,11 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=GRAND_TOTAL_COLOR, alignment=TA_LEFT,
         ),
         'payment_note': ParagraphStyle(
-            'InvPaymentNote', fontName=FONT_REGULAR, fontSize=7.1, leading=10,
+            'InvPaymentNote', fontName=FONT_REGULAR, fontSize=7.1, leading=fit.gap(10, 9),
             textColor=ACCENT_NOTE, alignment=TA_RIGHT,
         ),
         'note': ParagraphStyle(
-            'InvNote', fontName=FONT_REGULAR, fontSize=7.1, leading=12.1,
+            'InvNote', fontName=FONT_REGULAR, fontSize=7.1, leading=fit.gap(12.1, 9.6),
             textColor=NOTE_TEXT, alignment=TA_RIGHT,
         ),
     }
@@ -405,8 +452,8 @@ def _draw_footer(canvas, text: str, page_number: int) -> None:
         canvas.setFont(FONT_REGULAR, 12)
         canvas.setFillColor(FOOTER_TEXT)
         canvas.drawCentredString(PAGE_WIDTH / 2, _y(FOOTER_TEXT_TOP + 11.5), rtl(text))
-    # Only a document that actually runs over says which page you are holding;
-    # page one then stays exactly the sample.
+    # A document is one page (render_invoice_pdf), so this is reached only if
+    # pressing it onto the page failed and the flowing drawing went out instead.
     if page_number > 1:
         canvas.setFont(FONT_REGULAR, 7.1)
         canvas.setFillColor(SUB_TEXT)
@@ -471,7 +518,7 @@ class _Rule(Table):
         ]))
 
 
-def _pairs_table(fields: list[Field], styles: dict, width: float) -> Table:
+def _pairs_table(fields: list[Field], styles: dict, width: float, fit: Fit = NATURAL) -> Table:
     """Label on the right, value to its left — the card's inner grid."""
     rows = [f for f in fields if f.filled]
     if not rows:
@@ -489,25 +536,26 @@ def _pairs_table(fields: list[Field], styles: dict, width: float) -> Table:
     table = Table(data, colWidths=[value_w, label_w])
     table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 2.6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2.6),
+        ('TOPPADDING', (0, 0), (-1, -1), fit.gap(2.6, 0.75)),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), fit.gap(2.6, 0.75)),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     return table
 
 
-def _details_card(layout: InvoiceLayout, styles: dict) -> Table:
+def _details_card(layout: InvoiceLayout, styles: dict, fit: Fit = NATURAL) -> Table:
     """One rounded card: the document and its customer beside the business."""
-    business_w = CONTENT_WIDTH * BUSINESS_HALF
-    document_w = CONTENT_WIDTH - business_w
+    content_w = fit.wide(CONTENT_WIDTH)
+    business_w = content_w * BUSINESS_HALF
+    document_w = content_w - business_w
 
     def column(heading: str, fields: list[Field], width: float) -> list:
         inner = width - 2 * CARD_PADDING
         return [
             para(heading, styles['heading'], inner),
-            Spacer(1, 6.5),
-            _pairs_table(fields, styles, inner),
+            Spacer(1, fit.gap(6.5, 4)),
+            _pairs_table(fields, styles, inner, fit),
         ]
 
     card = Table(
@@ -520,18 +568,18 @@ def _details_card(layout: InvoiceLayout, styles: dict) -> Table:
         ('ROUNDEDCORNERS', [CARD_RADIUS] * 4),
         ('BOX', (0, 0), (-1, -1), 0.9, CARD_BORDER),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 14),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 16),
+        ('TOPPADDING', (0, 0), (-1, -1), fit.gap(14, 8)),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), fit.gap(16, 9)),
         ('LEFTPADDING', (0, 0), (-1, -1), CARD_PADDING),
         ('RIGHTPADDING', (0, 0), (-1, -1), CARD_PADDING),
     ]))
     return card
 
 
-def _items_table(layout: InvoiceLayout, styles: dict) -> Table:
-    widths = list(ITEM_COL_WIDTHS)
+def _items_table(layout: InvoiceLayout, styles: dict, fit: Fit = NATURAL) -> Table:
+    widths = [fit.wide(width) for width in ITEM_COL_WIDTHS]
     # Absorb rounding into the description column so the table ends on CONTENT_RIGHT.
-    widths[-1] += CONTENT_WIDTH - sum(widths)
+    widths[-1] += fit.wide(CONTENT_WIDTH) - sum(widths)
 
     header = [
         para('סה"כ כולל מע"מ', styles['th'], widths[0]),
@@ -570,17 +618,17 @@ def _items_table(layout: InvoiceLayout, styles: dict) -> Table:
         # numbers beside its first line.
         ('VALIGN', (0, 0), (-1, 0), 'MIDDLE'),
         ('VALIGN', (0, 1), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, 0), 9.5),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 9.5),
-        ('TOPPADDING', (0, 1), (-1, -1), 10.5),
-        ('BOTTOMPADDING', (0, 1), (-1, -1), 10.5),
+        ('TOPPADDING', (0, 0), (-1, 0), fit.gap(9.5, 4.5)),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), fit.gap(9.5, 4.5)),
+        ('TOPPADDING', (0, 1), (-1, -1), fit.gap(10.5, 3)),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), fit.gap(10.5, 3)),
         ('LEFTPADDING', (0, 0), (-1, -1), 6),
         ('RIGHTPADDING', (0, 0), (-1, -1), 6),
     ]))
     return table
 
 
-def _totals_card(layout: InvoiceLayout, styles: dict, width: float) -> Table:
+def _totals_card(layout: InvoiceLayout, styles: dict, width: float, fit: Fit = NATURAL) -> Table:
     """
     The card at the foot: the VAT breakdown, a rule, then the amount due.
 
@@ -600,8 +648,8 @@ def _totals_card(layout: InvoiceLayout, styles: dict, width: float) -> Table:
         )
         table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), valign),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('TOPPADDING', (0, 0), (-1, -1), fit.gap(2, 0.75)),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), fit.gap(2, 0.75)),
             ('LEFTPADDING', (0, 0), (-1, -1), 0),
             ('RIGHTPADDING', (0, 0), (-1, -1), 0),
         ]))
@@ -610,10 +658,10 @@ def _totals_card(layout: InvoiceLayout, styles: dict, width: float) -> Table:
     breakdown = [(row.label, row.value) for row in layout.totals if row.filled]
     body: list = []
     if breakdown:
-        body += [grid(breakdown, styles['label'], styles['value'], 'TOP'), Spacer(1, 4.5)]
+        body += [grid(breakdown, styles['label'], styles['value'], 'TOP'), Spacer(1, fit.gap(4.5, 3))]
     body += [
         _Rule(CARD_BORDER, 0.8, inner),
-        Spacer(1, 6),
+        Spacer(1, fit.gap(6, 3)),
         grid([(layout.grand_label, layout.grand_value)],
              styles['grand_label'], styles['grand_value'], 'MIDDLE'),
     ]
@@ -624,26 +672,26 @@ def _totals_card(layout: InvoiceLayout, styles: dict, width: float) -> Table:
         ('ROUNDEDCORNERS', [CARD_RADIUS] * 4),
         ('BOX', (0, 0), (-1, -1), 0.9, CARD_BORDER),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 15),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 15),
+        ('TOPPADDING', (0, 0), (-1, -1), fit.gap(15, 8)),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), fit.gap(15, 8)),
         ('LEFTPADDING', (0, 0), (-1, -1), pad),
         ('RIGHTPADDING', (0, 0), (-1, -1), pad),
     ]))
     return card
 
 
-def _payment_block(layout: InvoiceLayout, styles: dict, width: float) -> Table:
+def _payment_block(layout: InvoiceLayout, styles: dict, width: float, fit: Fit = NATURAL) -> Table:
     body: list = [
         para(layout.payment_heading, styles['heading'], width),
-        Spacer(1, 8),
-        _pairs_table(layout.payment_fields, styles, width),
+        Spacer(1, fit.gap(8, 4)),
+        _pairs_table(layout.payment_fields, styles, width, fit),
     ]
     if layout.payment_note:
-        body += [Spacer(1, 4), para(layout.payment_note, styles['payment_note'], width)]
+        body += [Spacer(1, fit.gap(4, 2.5)), para(layout.payment_note, styles['payment_note'], width)]
     block = Table([[body]], colWidths=[width])
     block.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 10),
+        ('TOPPADDING', (0, 0), (-1, -1), fit.gap(10, 4)),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 5),
@@ -661,12 +709,14 @@ TOTALS_GAP = 24.4
 BOTTOM_ROW_MAX_HEIGHT = (BODY_BOTTOM - BODY_TOP) * 0.6
 
 
-def _bottom_row(layout: InvoiceLayout, styles: dict, *, with_payment: bool = True) -> Table:
-    payment_w = CONTENT_WIDTH - TOTALS_WIDTH - TOTALS_GAP
+def _bottom_row(layout: InvoiceLayout, styles: dict, fit: Fit = NATURAL, *, with_payment: bool = True) -> Table:
+    totals_w = fit.wide(TOTALS_WIDTH)
+    gap_w = fit.wide(TOTALS_GAP)
+    payment_w = fit.wide(CONTENT_WIDTH) - totals_w - gap_w
     row = Table(
-        [[_payment_block(layout, styles, payment_w) if with_payment else '', '',
-          _totals_card(layout, styles, TOTALS_WIDTH)]],
-        colWidths=[payment_w, TOTALS_GAP, TOTALS_WIDTH],
+        [[_payment_block(layout, styles, payment_w, fit) if with_payment else '', '',
+          _totals_card(layout, styles, totals_w, fit)]],
+        colWidths=[payment_w, gap_w, totals_w],
     )
     row.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -678,26 +728,35 @@ def _bottom_row(layout: InvoiceLayout, styles: dict, *, with_payment: bool = Tru
     return row
 
 
-def _bottom(layout: InvoiceLayout, styles: dict) -> list:
+def _bottom(layout: InvoiceLayout, styles: dict, fit: Fit = NATURAL) -> list:
     """
     The payment details beside the totals — the sample's layout, and every
     ordinary document's. When they run taller than BOTTOM_ROW_MAX_HEIGHT, the
     totals come first and the payment details follow at full width, their rows
     free to continue on the next page.
+
+    A document being pressed onto its page has already been told which of the
+    two it is (``fit.stacked``), so the choice does not move under it while the
+    pressing is worked out.
     """
-    row = _bottom_row(layout, styles)
-    _, height = row.wrap(CONTENT_WIDTH, PAGE_HEIGHT)
-    if height <= BOTTOM_ROW_MAX_HEIGHT:
-        return [row]
+    content_w = fit.wide(CONTENT_WIDTH)
+    stacked = fit.stacked
+    if not stacked:
+        row = _bottom_row(layout, styles, fit)
+        if stacked is None:
+            _, height = row.wrap(content_w, PAGE_HEIGHT)
+            stacked = height > BOTTOM_ROW_MAX_HEIGHT
+        if not stacked:
+            return [row]
     tall: list = [
-        _bottom_row(layout, styles, with_payment=False),
-        Spacer(1, 17),
-        para(layout.payment_heading, styles['heading'], CONTENT_WIDTH),
-        Spacer(1, 8),
-        _pairs_table(layout.payment_fields, styles, CONTENT_WIDTH),
+        _bottom_row(layout, styles, fit, with_payment=False),
+        Spacer(1, fit.gap(17, 9)),
+        para(layout.payment_heading, styles['heading'], content_w),
+        Spacer(1, fit.gap(8, 4)),
+        _pairs_table(layout.payment_fields, styles, content_w, fit),
     ]
     if layout.payment_note:
-        tall += [Spacer(1, 4), para(layout.payment_note, styles['payment_note'], CONTENT_WIDTH)]
+        tall += [Spacer(1, fit.gap(4, 2.5)), para(layout.payment_note, styles['payment_note'], content_w)]
     return tall
 
 
@@ -748,12 +807,13 @@ def _signature_seal(centre_text: str = '') -> SignatureSeal:
     )
 
 
-def _notes_block(layout: InvoiceLayout, styles: dict) -> list:
+def _notes_block(layout: InvoiceLayout, styles: dict, fit: Fit = NATURAL) -> list:
     """The small print between a grey rule and a cyan one — with the seal at its left on a signed original."""
     lines = [n for n in layout.notes if (n.lead or n.text)]
     if not lines and not layout.signed_seal:
         return []
-    width = CONTENT_WIDTH - SEAL_COLUMN if layout.signed_seal else CONTENT_WIDTH
+    content_w = fit.wide(CONTENT_WIDTH)
+    width = content_w - SEAL_COLUMN if layout.signed_seal else content_w
     rows = [[_note_paragraph(note, styles['note'], width)] for note in lines] or [['']]
     block = Table(rows, colWidths=[width])
     no_padding = [
@@ -767,40 +827,194 @@ def _notes_block(layout: InvoiceLayout, styles: dict) -> list:
         block = Table([[_signature_seal(layout.seal_centre_text), block]], colWidths=[SEAL_COLUMN, width])
         block.setStyle(TableStyle(no_padding + [('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
     return [
-        _Rule(RULE_GREY, 0.8), Spacer(1, 11),
+        _Rule(RULE_GREY, 0.8, content_w), Spacer(1, fit.gap(11, 6)),
         block,
-        Spacer(1, 11), _Rule(RULE_CYAN, 0.7),
+        Spacer(1, fit.gap(11, 6)), _Rule(RULE_CYAN, 0.7, content_w),
     ]
 
 
 # --- the one entry point ------------------------------------------------------
 
-def build_story(layout: InvoiceLayout) -> list:
-    styles = _styles()
-    story: list = [
+def _head(layout: InvoiceLayout, styles: dict) -> list:
+    """The document's name and its מקור / העתק mark — never pressed, the same on every document."""
+    return [
         para(layout.title, styles['title'], CONTENT_WIDTH),
         Spacer(1, 7),
         para(layout.copy_mark, styles['copy_mark'], CONTENT_WIDTH),
-        Spacer(1, 20),
-        _details_card(layout, styles),
-        Spacer(1, 22),
-        para(layout.items_heading, styles['heading'], CONTENT_WIDTH),
-        Spacer(1, 9),
-        _items_table(layout, styles),
-        Spacer(1, 17),
-        *_bottom(layout, styles),
     ]
-    notes = _notes_block(layout, styles)
+
+
+def _body(layout: InvoiceLayout, styles: dict, fit: Fit = NATURAL, *, flowing: bool = True) -> list:
+    """
+    Everything under the document's name.
+
+    `flowing` is the ordinary drawing, where the story may break across pages
+    and the small print is kept together; a pressed body is one block that
+    never breaks, so it takes the small print as plain rows.
+    """
+    body: list = [
+        Spacer(1, fit.gap(20, 10)),
+        _details_card(layout, styles, fit),
+        Spacer(1, fit.gap(22, 10)),
+        para(layout.items_heading, styles['heading'], fit.wide(CONTENT_WIDTH)),
+        Spacer(1, fit.gap(9, 5)),
+        _items_table(layout, styles, fit),
+        Spacer(1, fit.gap(17, 9)),
+        *_bottom(layout, styles, fit),
+    ]
+    notes = _notes_block(layout, styles, fit)
     if notes:
-        story.append(Spacer(1, 26))
+        body.append(Spacer(1, fit.gap(26, 10)))
         # The small print belongs with the document, never alone on a last page.
-        story.append(KeepTogether(notes))
-    return story
+        body += [KeepTogether(notes)] if flowing else notes
+    return body
 
 
-def render_invoice_pdf(layout: InvoiceLayout) -> bytes:
-    """Draw `layout` and return the PDF bytes."""
-    ensure_fonts_registered()
+def build_story(layout: InvoiceLayout) -> list:
+    """The sample's own drawing: what every document that fits its page is drawn from."""
+    styles = _styles()
+    return _head(layout, styles) + _body(layout, styles)
+
+
+# --- one page, always ---------------------------------------------------------
+
+# Kept clear at the foot of the pressed body, so rounding never tips it over.
+FIT_SLACK = 1.0
+# Below this the table's type is under 5pt: the document is still one page, as
+# the owner asked, but it is small enough to be worth a line in the log.
+SMALL_PRINT_SCALE = 0.64
+
+
+def _measure(layout: InvoiceLayout, fit: Fit, avail_width: float, canvas=None) -> tuple[list, float]:
+    """The body pressed by `fit`: each flowable with its size, and their total height (layout units)."""
+    layout_width = fit.wide(avail_width)
+    parts: list = []
+    total = 0.0
+    for flowable in _body(layout, _styles(fit), fit, flowing=False):
+        width, height = flowable.wrapOn(canvas, layout_width, PAGE_HEIGHT * 1000)
+        parts.append((flowable, width, height))
+        total += height
+    return parts, total
+
+
+def _stacks_shorter(layout: InvoiceLayout, avail_width: float) -> bool:
+    """
+    Whether the payment details take less of the page under the totals than beside them.
+
+    Beside is the sample's layout and stays unless under is really shorter —
+    a dozen checks, whose details wrap in the narrow column, is the case.
+    """
+    def height(stacked: bool) -> float:
+        fit = Fit(tight=1.0, stacked=stacked)
+        return sum(
+            flowable.wrap(fit.wide(avail_width), PAGE_HEIGHT * 1000)[1]
+            for flowable in _bottom(layout, _styles(fit), fit)
+        )
+
+    return height(True) < height(False)
+
+
+def _press(layout: InvoiceLayout, avail_width: float, room: float, canvas=None) -> tuple[Fit, list, float]:
+    """
+    The least pressing that brings the body inside `room` points of height.
+
+    White space first: the height falls in a straight line as it closes, so the
+    least tightening that fits is worked out, not searched for. Only when the
+    tightest spacing is still too tall is the body scaled, and then by no more
+    than it needs.
+    """
+    stacked = _stacks_shorter(layout, avail_width)
+
+    def measured(tight: float, scale: float) -> tuple[Fit, list, float]:
+        fit = Fit(tight=tight, scale=scale, stacked=stacked)
+        parts, height = _measure(layout, fit, avail_width, canvas)
+        return fit, parts, height
+
+    natural = measured(0.0, 1.0)
+    if natural[2] <= room:
+        return natural
+    tightest = measured(1.0, 1.0)
+    if tightest[2] <= room:
+        need = (natural[2] - room) / (natural[2] - tightest[2])
+        chosen = measured(min(1.0, need + 0.002), 1.0)
+        return chosen if chosen[2] <= room else tightest
+
+    # Laid out wider, long text wraps less, so the height at a scale is not the
+    # height at full size: start from full size's and correct until it fits.
+    scale = room / tightest[2]
+    best = None
+    for _ in range(8):
+        candidate = measured(1.0, scale)
+        used = candidate[2] * scale
+        if used <= room:
+            best = candidate
+            break
+        scale *= room / used * 0.995
+    if best is None:
+        return candidate          # the drawing itself still holds it to the room (_PressedBody.wrap)
+    # ...and when the wrapping gave room back, take it: the largest scale that fits.
+    low, high = best[0].scale, 1.0
+    if best[2] * low < room * 0.985:
+        for _ in range(6):
+            middle = (low + high) / 2
+            candidate = measured(1.0, middle)
+            if candidate[2] * middle <= room:
+                best, low = candidate, middle
+            else:
+                high = middle
+    return best
+
+
+class _PressedBody(Flowable):
+    """
+    The body of a document that would run over, as one block that fits what is
+    left of its page under the document's name.
+
+    The pressing is worked out when the frame says how much room there is, so
+    it is exact whatever the title above it took.
+    """
+
+    def __init__(self, layout: InvoiceLayout):
+        super().__init__()
+        self.layout = layout
+        self.fit = NATURAL
+        self.draw_scale = 1.0
+        self._parts: list = []
+
+    def wrap(self, avail_width, avail_height):
+        room = max(avail_height - FIT_SLACK, 1.0)
+        self.fit, self._parts, height = _press(
+            self.layout, avail_width, room, getattr(self, 'canv', None),
+        )
+        # The last word: whatever was worked out, the block is never taller than the room.
+        self.draw_scale = min(self.fit.scale, room / height) if height > 0 else self.fit.scale
+        self.width = avail_width
+        self.height = height * self.draw_scale
+        return self.width, self.height
+
+    def draw(self) -> None:
+        canvas = self.canv
+        layout_width = self.fit.wide(self.width)
+        canvas.saveState()
+        # Centred only if the last word above had to shrink it past its layout.
+        canvas.translate((self.width - layout_width * self.draw_scale) / 2, self.height)
+        canvas.scale(self.draw_scale, self.draw_scale)
+        y = 0.0
+        for flowable, width, height in self._parts:
+            y -= height
+            # As a frame places it: a table centres on the column, text starts at its edge.
+            flowable.drawOn(canvas, 0, y, _sW=layout_width - width)
+        canvas.restoreState()
+
+
+def build_pressed_story(layout: InvoiceLayout) -> tuple[list, _PressedBody]:
+    """The same document with its body pressed onto the one page."""
+    body = _PressedBody(layout)
+    return _head(layout, _styles()) + [body], body
+
+
+def _draw(layout: InvoiceLayout, story: list) -> tuple[bytes, int]:
+    """`story` on the design's page: the PDF bytes and how many pages it took."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -814,9 +1028,45 @@ def render_invoice_pdf(layout: InvoiceLayout) -> bytes:
     )
     on_page = _page_painter(layout)
     doc.build(
-        build_story(layout),
+        story,
         onFirstPage=on_page,
         onLaterPages=on_page,
         canvasmaker=_canvas_maker(layout),
     )
-    return buffer.getvalue()
+    return buffer.getvalue(), doc.page
+
+
+def render_invoice_pdf(layout: InvoiceLayout) -> bytes:
+    """
+    Draw `layout` and return the PDF bytes — one A4 page, whatever it holds.
+
+    The sample's drawing comes first, and when it is one page it is what goes
+    out: a document that fits is not measured, pressed or changed in any way.
+    Only one that runs over (or holds a block taller than a page, which the
+    flowing drawing cannot place at all) is drawn again with its body pressed.
+
+    Pressing must never cost a document: if it fails, the flowing drawing goes
+    out as it always did and the failure is logged.
+    """
+    ensure_fonts_registered()
+    try:
+        flowing, pages = _draw(layout, build_story(layout))
+    except LayoutError:
+        flowing, pages = b'', 0
+    if pages == 1:
+        return flowing
+
+    name = layout.pdf_title or layout.title
+    try:
+        story, body = build_pressed_story(layout)
+        pressed, pressed_pages = _draw(layout, story)
+    except Exception:
+        if not flowing:
+            raise
+        logger.exception('Document %s could not be pressed onto one page; drawn on %s pages', name, pages)
+        return flowing
+    if pressed_pages != 1:
+        logger.error('Document %s still took %s pages after pressing', name, pressed_pages)
+    elif body.draw_scale < SMALL_PRINT_SCALE:
+        logger.warning('Document %s fits one page only at %.0f%% size', name, body.draw_scale * 100)
+    return pressed
