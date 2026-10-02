@@ -30,6 +30,7 @@ from apps.customers.child_identity import find_existing_child_on_family
 from apps.customers.widget_identification import (
     EXPIRED_MESSAGE as IDENTIFICATION_EXPIRED_MESSAGE,
     IdentificationExpired,
+    family_phones,
     fill_from_identification,
     guessing_locked,
     is_established,
@@ -541,9 +542,10 @@ def _record_signature(request, *, family, child, branch, data, refs):
 
 INVALID_PARENT_ID_MESSAGE = 'מספר תעודת הזהות של ההורה אינו תקין'
 # Registrations from one address in an hour — counted whoever they are for and
-# whatever phone they carry, so the count says nothing about a family. Far
-# above a family, and above an office registering walk-ins all day.
-WIDGET_REGISTER_HOURLY_LIMIT = 120
+# whatever phone they carry, so the count says nothing about a family. It is
+# there to stop a machine, never a crowd: a whole school behind one address on
+# the day registration opens is nowhere near it.
+WIDGET_REGISTER_HOURLY_LIMIT = 600
 # Children priced in a day for a family by someone who did not type its phone.
 UNPROVEN_QUOTE_DAILY_ITEMS = 24
 
@@ -827,7 +829,9 @@ class WidgetLookupView(APIView):
             # for a day — the right phone included, so it confirms nothing.
             if not guessing_locked(parent_id_number):
                 knows_the_phone = proves_parent(family, typed_phone)
-                if not knows_the_phone:
+                # A card with no real mobile on it has nothing to guess at:
+                # its own parent could never type the right one.
+                if not knows_the_phone and family_phones(family):
                     note_wrong_phone(parent_id_number, family)
         if not knows_the_phone:
             return Response({
@@ -1179,7 +1183,8 @@ class WidgetQuoteView(APIView):
             return refused
         if not _quote_is_unproven(items, family):
             return None
-        note_wrong_phone(parent_id, family)
+        if family_phones(family):
+            note_wrong_phone(parent_id, family)
         if over_limit('unproven-quote', parent_id, UNPROVEN_QUOTE_DAILY_ITEMS, per='day', by=len(items)):
             return refused
         return None

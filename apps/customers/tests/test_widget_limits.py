@@ -202,6 +202,21 @@ class WidgetLimitsTest(TestCase):
         # Registration itself goes on.
         self.assertEqual(self.client.post(REGISTER, self._item(), format='json').status_code, 201)
 
+    def test_a_card_with_no_mobile_on_it_has_nothing_to_guess_at(self):
+        """Its own parent can never type "the right one", so their look-ups must not lock them out."""
+        from apps.customers.identification_models import WidgetIdentifyAttempt
+
+        family = TestDataFactory.create_family(parent_id_number='123456782', phone='03-1234567')
+        family.parents.all().delete()
+        for _ in range(7):
+            self._lookup(HTTP_X_FORWARDED_FOR='203.0.113.9')
+            self.client.post(LOOKUP, {
+                'parent_id_number': '123456782', 'child_first_name': 'Kid', 'child_last_name': 'Parent',
+                'parent_phone': '0529999999',
+            }, format='json')
+
+        self.assertEqual(WidgetIdentifyAttempt.objects.count(), 0)
+
     def test_a_look_up_without_a_phone_is_not_a_guess(self):
         """The form as it was sends no phone; it is told nothing and counted as nothing."""
         from apps.customers.identification_models import WidgetIdentifyAttempt
