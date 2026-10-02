@@ -11,8 +11,9 @@ handed out by lesson and date alone.
 How it is written, so a parent can read it at a glance:
 
   * the title says what and at what hour: "שיעור ניסיון בקפוארה - 16:45";
-  * the notes are a few short lines, the most needed first; each opens with one
-    sign, and nowhere else is there one;
+  * the notes are short parts with a line drawn between them and air above
+    it, each under a heading of its own — and only a heading carries a sign:
+    first what to come with, then the rest of the details, then whom to ask;
   * the day and the hours are written in the notes too, not only in the event's
     own time — a note is what is read on a lock screen and in a shared invite;
   * the address stands in the location field (a calendar turns it into a map),
@@ -20,7 +21,7 @@ How it is written, so a parent can read it at a glance:
   * the office phone closes the notes, for whatever is still unclear.
 
 Google keeps simple markup in an event's notes (bold, a link, a line break), so
-its notes are set in bold where it helps. An .ics file is plain text.
+its headings and labels are set in bold. An .ics file is plain text.
 """
 from __future__ import annotations
 
@@ -49,14 +50,21 @@ class NoSuchEvent(ValueError):
 
 
 @dataclass(frozen=True)
-class Line:
-    """One line of the notes: a sign, the words to set in bold (if any), and the rest."""
-    sign: str
-    strong: str = ''
+class Row:
+    """One row under a heading: a short label (if any), what it says, and a phone to press."""
+    label: str = ''
     text: str = ''
-    # A second, plain line right under it (how to get in from the street).
-    under: str = ''
     phone: str = ''
+
+
+@dataclass(frozen=True)
+class Section:
+    """A part of the notes: a heading with its one sign, and the rows under it."""
+    sign: str
+    title: str
+    rows: list[Row] = field(default_factory=list)
+    # Said on the heading's own line, right after the title (the office and its phone).
+    beside: Row | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +74,7 @@ class TrialEvent:
     start: datetime
     end: datetime
     location: str
-    lines: list[Line] = field(default_factory=list)
+    sections: list[Section] = field(default_factory=list)
 
 
 # ── the facts ────────────────────────────────────────────────────────────────
@@ -137,16 +145,24 @@ def build_trial_event(lesson, on: date, *, today: date | None = None) -> TrialEv
     course_type = getattr(course, 'course_type', None)
     location = location_of(branch)
 
-    lines = [Line(sign='🕒', strong=f'{day}, {hours}', text=f'({duration_words(minutes)})')]
+    details = [Row(label='מתי', text=f'{day}, {hours} ({duration_words(minutes)})')]
     instructor = lesson.instructor.full_name if lesson.instructor_id else ''
     if instructor:
-        lines.append(Line(sign='👤', text='בהדרכת', strong=instructor))
+        details.append(Row(label='בהדרכת', text=instructor))
+    if location:
+        details.append(Row(label='איפה', text=location))
+    directions = (branch.arrival_directions or '').strip() if branch is not None else ''
+    if directions:
+        details.append(Row(label='הגעה', text=directions))
+
+    # What to come with stands first: it is what a parent opens the event for
+    # on the morning of the lesson. Without it, the details are the whole event.
+    sections = []
     bring = ((course_type.trial_bring_note if course_type is not None else '') or '').strip()
     if bring:
-        lines.append(Line(sign='🎒', strong='להביא:', text=bring))
-    if location:
-        lines.append(Line(sign='📍', strong=location, under=(branch.arrival_directions or '').strip()))
-    lines.append(Line(sign='📞', strong='שאלות?', text=OFFICE_NAME, phone=OFFICE_PHONE))
+        sections.append(Section(sign='🎒', title='מה להביא', rows=[Row(text=bring)]))
+    sections.append(Section(sign='📋', title='פרטים נוספים' if bring else 'פרטי השיעור', rows=details))
+    sections.append(Section(sign='📞', title='שאלות?', beside=Row(text=OFFICE_NAME, phone=OFFICE_PHONE)))
 
     return TrialEvent(
         uid=f'trial-{lesson.id}-{on:%Y%m%d}@cogomelo.co.il',
@@ -154,28 +170,26 @@ def build_trial_event(lesson, on: date, *, today: date | None = None) -> TrialEv
         start=start,
         end=end,
         location=location,
-        lines=lines,
+        sections=sections,
     )
 
 
 # ── the notes ────────────────────────────────────────────────────────────────
 
-def _words(line: Line) -> list[str]:
-    """The line's words in reading order: the bold part leads, except after "בהדרכת"."""
-    if line.sign == '👤':
-        return [line.text, line.strong]
-    return [line.strong, line.text]
+# The line drawn between two parts of the notes, with air above it.
+RULE = '──────────'
 
 
 def plain_notes(event: TrialEvent) -> str:
-    """The notes as plain text: one short line for each fact."""
-    out = []
-    for line in event.lines:
-        words = ' '.join(word for word in _words(line) if word)
-        out.append(' '.join(part for part in (line.sign, words, line.phone) if part))
-        if line.under:
-            out.append(line.under)
-    return '\n'.join(out)
+    """The notes as plain text: each part under its heading, a line drawn between the parts."""
+    parts = []
+    for section in event.sections:
+        heading = f'{section.sign} {section.title}'
+        if section.beside is not None:
+            heading = ' '.join(part for part in (heading, section.beside.text, section.beside.phone) if part)
+        rows = [f'{row.label}: {row.text}' if row.label else row.text for row in section.rows]
+        parts.append('\n'.join([heading, *rows]))
+    return f'\n\n{RULE}\n'.join(parts)
 
 
 def _as_text(value: str) -> str:
@@ -183,22 +197,27 @@ def _as_text(value: str) -> str:
     return html_escape(value, quote=False)
 
 
+def _phone_link(phone: str) -> str:
+    digits = ''.join(ch for ch in phone if ch.isdigit())
+    return f'<a href="tel:{digits}">{_as_text(phone)}</a>'
+
+
 def google_notes(event: TrialEvent) -> str:
-    """The same notes with the markup Google keeps: bold, a line break, a phone link."""
-    out = []
-    for line in event.lines:
-        words = []
-        for word in _words(line):
-            if not word:
-                continue
-            words.append(f'<b>{_as_text(word)}</b>' if word == line.strong else _as_text(word))
-        if line.phone:
-            digits = ''.join(ch for ch in line.phone if ch.isdigit())
-            words.append(f'<a href="tel:{digits}">{_as_text(line.phone)}</a>')
-        out.append(f'{line.sign} {" ".join(words)}')
-        if line.under:
-            out.append(_as_text(line.under))
-    return '<br>'.join(out)
+    """The same notes with the markup Google keeps: bold headings and labels, line breaks, a phone link."""
+    parts = []
+    for section in event.sections:
+        heading = f'<b>{section.sign} {_as_text(section.title)}</b>'
+        if section.beside is not None:
+            beside = [_as_text(section.beside.text)] if section.beside.text else []
+            if section.beside.phone:
+                beside.append(_phone_link(section.beside.phone))
+            heading = ' '.join([heading, *beside])
+        rows = [
+            f'<b>{_as_text(row.label)}:</b> {_as_text(row.text)}' if row.label else _as_text(row.text)
+            for row in section.rows
+        ]
+        parts.append('<br>'.join([heading, *rows]))
+    return f'<br><br>{RULE}<br>'.join(parts)
 
 
 # ── Google ───────────────────────────────────────────────────────────────────
