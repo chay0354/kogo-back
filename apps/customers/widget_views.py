@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
 from django.db import transaction
 from django.db.models import Prefetch, Q
 
@@ -25,6 +26,15 @@ from apps.customers.child_status import (
 )
 from apps.customers.models import Family, Parent, Child, Payment
 from apps.customers.child_identity import find_existing_child_on_family
+from apps.customers.widget_identification import (
+    EXPIRED_MESSAGE as IDENTIFICATION_EXPIRED_MESSAGE,
+    IdentificationExpired,
+    family_phones,
+    fill_from_identification,
+    record_identification_consent,
+)
+from apps.enrollments.person_match import normalise_phone
+from apps.customers.widget_limits import too_many
 from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
@@ -52,6 +62,29 @@ STALE_PROCESSING_MESSAGE = (
     'התשלום נבדק מול חברת האשראי. אל תשלמו שוב — המשרד יבדוק ויחזור אליכם.'
 )
 DUPLICATE_PAYMENT_MESSAGE = 'ההרשמה הזו כבר שולמה או נמצאת בתשלום — אין צורך לשלם שוב.'
+
+
+UNEXPECTED_FAILURE_MESSAGE = 'אירעה שגיאה בהרשמה (קוד {code}). נסו שוב, ואם זה חוזר פנו למשרד עם הקוד.'
+
+
+def _unexpected_failure(where: str, exc: Exception):
+    """
+    A registration step failed in a way nobody planned for.
+
+    The parent is told so with a short code and nothing else: the exception's
+    own text used to go out in the answer, and it can carry table and column
+    names or a stored value. The code is written to the log beside the full
+    traceback, so the office can quote it.
+    """
+    import logging
+    import secrets
+
+    code = secrets.token_hex(3).upper()
+    logging.getLogger(__name__).exception('Widget registration failed while %s [code %s]', where, code, exc_info=exc)
+    return Response(
+        {'error': UNEXPECTED_FAILURE_MESSAGE.format(code=code)},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
 
 
 def _twin_payment(payment):
@@ -503,12 +536,42 @@ def _record_signature(request, *, family, child, branch, data, refs):
         )
 
 
-def _resolve_family_and_child(data, branch):
+def _tell_office_of_other_contact(family, phone, email) -> None:
+    """A registration came with a phone that is not the family's: the card is kept, the office is told."""
+    try:
+        from apps.core.office_alerts import crm_child_link, describe_family, raise_office_alert
+
+        child = family.children.exclude(status='ghost').first()
+        typed = f'טלפון {phone}' + (f', דוא״ל {email}' if email and email != family.email else '')
+        raise_office_alert(
+            kind='widget_other_contact',
+            dedup_key=f'widget-other-contact:{family.id}:{normalise_phone(phone)}',
+            title='הרשמה עם טלפון שונה מזה שבכרטיס',
+            where='טופס ההרשמה באתר',
+            what=f'בהרשמה הוקלד {typed}. הפרטים בכרטיס לא שונו, וההודעות ממשיכות להישלח לטלפון השמור.',
+            why='תעודת זהות לבדה לא מספיקה כדי להחליף טלפון או דוא״ל של משפחה. רק המשרד מעדכן אותם.',
+            customer=describe_family(family),
+            action='לוודא מול ההורה מה המספר הנכון, ולעדכן בכרטיס הלקוח אם צריך.',
+            link=crm_child_link(child.id if child else None),
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception('Other-contact alert failed (non-fatal)')
+
+
+def _resolve_family_and_child(data, branch, *, identified=False):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
     the Child (existing active child on discount confirmation, or a new record).
     Records the family's consent to computerized documents when the payload
     gives it (`computerized_docs_consent`).
+
+    A known family's phone and email change only for a parent who proved to be
+    that parent: one the form identified (`identified`), or one who typed the
+    phone the card already holds. An identity number alone does not: it used to
+    be enough to move a family's WhatsApp messages and receipts to whoever
+    typed it. Otherwise the card is kept and the office is told.
 
     Shared by WidgetRegisterView (paid flow) and WidgetTrialRegisterView (trial flow).
     """
@@ -538,27 +601,31 @@ def _resolve_family_and_child(data, branch):
             is_primary=True,
         )
     else:
-        updates = {}
         phone = data['parent_phone'].strip()
-        if phone and family.phone != phone:
-            family.phone = phone
-            updates['phone'] = phone
-        if parent_email and family.email != parent_email:
-            family.email = parent_email
-            updates['email'] = parent_email
-        if updates:
-            family.save(update_fields=list(updates.keys()) + ['updated_at'])
-        primary = family.parents.filter(is_primary=True).first()
-        if primary:
-            parent_updates = {}
-            if phone and primary.phone != phone:
-                primary.phone = phone
-                parent_updates['phone'] = phone
-            if parent_email and primary.email != parent_email:
-                primary.email = parent_email
-                parent_updates['email'] = parent_email
-            if parent_updates:
-                primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
+        known_phones = family_phones(family)
+        if not identified and known_phones and normalise_phone(phone) not in known_phones:
+            _tell_office_of_other_contact(family, phone, parent_email)
+        else:
+            updates = {}
+            if phone and family.phone != phone:
+                family.phone = phone
+                updates['phone'] = phone
+            if parent_email and family.email != parent_email:
+                family.email = parent_email
+                updates['email'] = parent_email
+            if updates:
+                family.save(update_fields=list(updates.keys()) + ['updated_at'])
+            primary = family.parents.filter(is_primary=True).first()
+            if primary:
+                parent_updates = {}
+                if phone and primary.phone != phone:
+                    primary.phone = phone
+                    parent_updates['phone'] = phone
+                if parent_email and primary.email != parent_email:
+                    primary.email = parent_email
+                    parent_updates['email'] = parent_email
+                if parent_updates:
+                    primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
 
     # סעיף 18ב(ג): the parent accepted the terms, and their paragraph on
     # computerized documents is the consent to receive invoices, receipts and
@@ -566,6 +633,9 @@ def _resolve_family_and_child(data, branch):
     # without it records nothing — and never withdraws a consent given before.
     if _computerized_docs_consent_given(data):
         record_consent(family, CONSENT_SOURCE_WIDGET)
+        # The same acceptance of the terms is the consent to be recognised next
+        # time, once the terms carry that paragraph.
+        record_identification_consent(family)
 
     # ── 2. Resolve child ──────────────────────────────────────
     child = None
@@ -632,6 +702,11 @@ class WidgetLookupView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        # A parent asks once per child; a sweep of identity numbers asks without end.
+        refused = too_many('lookup', request, WIDGET_LOOKUP_HOURLY_LIMIT)
+        if refused is not None:
+            return refused
+
         parent_id_number = (request.data.get('parent_id_number') or '').strip()
         child_first_name = (request.data.get('child_first_name') or '').strip()
         child_last_name  = (request.data.get('child_last_name')  or '').strip()
@@ -758,7 +833,22 @@ def _register_course(request, data, *, rehearsal=False):
     so the figures are the ones a registration will get, but the caller rolls
     the whole thing back. In that mode nothing that outlives a rollback happens
     here — no signature is kept — and no consent is recorded.
+
+    A registration from a parent the form identified carries `identify_token`
+    and sends the hidden details empty; they are completed from the family's
+    card before anything else is looked at.
     """
+    identified = False
+    if str(data.get('identify_token') or '').strip():
+        try:
+            data = fill_from_identification(data)
+        except IdentificationExpired:
+            return Response(
+                {'error': IDENTIFICATION_EXPIRED_MESSAGE, 'identification_expired': True},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        identified = True
+
     required = [
         'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
         'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
@@ -820,12 +910,9 @@ def _register_course(request, data, *, rehearsal=False):
 
     try:
         with transaction.atomic():
-            family, child = _resolve_family_and_child(data, lesson.course.branch)
+            family, child = _resolve_family_and_child(data, lesson.course.branch, identified=identified)
     except Exception as exc:
-        return Response(
-            {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _unexpected_failure('saving the family and child', exc)
 
     already = _already_registered_response(child, lesson=lesson, bundle=bundle)
     if already:
@@ -903,14 +990,15 @@ def _register_course(request, data, *, rehearsal=False):
     except ValueError as exc:
         return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as exc:
-        return Response(
-            {'error': f'שגיאה בתהליך התשלום: {exc}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _unexpected_failure('pricing and opening the payment', exc)
 
 
 # A form holds a handful of children and lessons; more than this is not a form.
 WIDGET_QUOTE_MAX_ITEMS = 12
+# Per address and hour, counted in the database (apps/customers/widget_limits.py).
+# Well above what a family does, and an office registering walk-ins all day.
+WIDGET_QUOTE_HOURLY_LIMIT = 90
+WIDGET_LOOKUP_HOURLY_LIMIT = 120
 
 # What a quote never returns: rows that no longer exist once it is rolled back.
 _QUOTE_DROPPED_KEYS = ('payment_id', 'payments', 'child_id', 'tranzila_url')
@@ -938,8 +1026,19 @@ class WidgetQuoteView(APIView):
     """
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'widget_quote'
 
     def post(self, request):
+        refused = too_many('quote', request, WIDGET_QUOTE_HOURLY_LIMIT)
+        if refused is not None:
+            return refused
+        response = self._quote(request)
+        # A price worked out for one family is never a page to be stored.
+        response['Cache-Control'] = 'no-store'
+        return response
+
+    def _quote(self, request):
         items = request.data.get('items')
         if (
             not isinstance(items, list)
@@ -1123,10 +1222,7 @@ class WidgetTrialRegisterView(APIView):
                         description=f"שיעור ניסיון - {course.name} - {child.full_name}",
                     )
             except Exception as exc:
-                return Response(
-                    {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
+                return _unexpected_failure('saving the family and child', exc)
 
             _record_signature(
                 request, family=family, child=child, branch=lesson.course.branch, data=data,
@@ -1177,10 +1273,7 @@ class WidgetTrialRegisterView(APIView):
                         'start_date', 'trial_lesson_date', 'trial_outcome', 'status', 'end_date', 'updated_at',
                     ])
         except Exception as exc:
-            return Response(
-                {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return _unexpected_failure('saving the family and child', exc)
 
         try:
             whatsapp_result = stamp_and_notify_trial_enrollment(str(enrollment.id))

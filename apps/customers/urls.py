@@ -33,6 +33,7 @@ from .widget_views import (
     WidgetLessonOccurrencesView,
     WidgetTermsView,
 )
+from .widget_identify_views import WidgetIdentifyView
 from .views import cron_card_update_reminders, cron_recurring_billing, cron_recurring_billing_status
 
 router = DefaultRouter()
@@ -50,6 +51,7 @@ urlpatterns = [
     path('widget/lookup/', WidgetLookupView.as_view(), name='widget-lookup'),
     path('widget/register/', WidgetRegisterView.as_view(), name='widget-register'),
     path('widget/quote/', WidgetQuoteView.as_view(), name='widget-quote'),
+    path('widget/identify/', WidgetIdentifyView.as_view(), name='widget-identify'),
     path('widget/trial-register/', WidgetTrialRegisterView.as_view(), name='widget-trial-register'),
     path('widget/charge/', WidgetChargeView.as_view(), name='widget-charge'),
     path('widget/payment-status/', WidgetPaymentStatusView.as_view(), name='widget-payment-status'),

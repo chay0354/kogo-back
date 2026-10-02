@@ -6,6 +6,7 @@ family, child, payment, consent or signature — is left behind.
 """
 from decimal import Decimal
 
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -52,6 +53,7 @@ def _rows():
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 class WidgetQuoteTest(TestCase):
     def setUp(self):
+        cache.clear()  # the soft per-minute throttle counts across tests
         self.client = APIClient()
         self.course = TestDataFactory.create_course(price=Decimal('350.00'))
         self.lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=0)

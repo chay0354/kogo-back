@@ -175,14 +175,20 @@ class FamilySerializer(serializers.ModelSerializer):
             'children',
             'computerized_docs_consent_at', 'computerized_docs_consent_source',
             'computerized_docs_consent_revoked_at', 'accepts_computerized_documents',
+            'widget_identification_consent_at', 'widget_identification_blocked_at',
+            'widget_identification_blocked_reason',
         ]
         # The consent is taken through record_consent / revoke_consent (the
         # widget, families/{id}/computerized-consent/), never typed into the
         # card: when and where it was given is the record סעיף 18ב(ג) asks for.
+        # The identification switch goes through families/{id}/widget-identification/,
+        # which asks for a reason and keeps the history.
         read_only_fields = [
             'id', 'parents', 'children', 'accepts_computerized_documents',
             'computerized_docs_consent_at', 'computerized_docs_consent_source',
             'computerized_docs_consent_revoked_at',
+            'widget_identification_consent_at', 'widget_identification_blocked_at',
+            'widget_identification_blocked_reason',
         ]
 
 

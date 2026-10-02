@@ -40,6 +40,22 @@ class Family(models.Model):
         null=True, blank=True, verbose_name="ביטול ההסכמה"
     )
 
+    # The registration form recognises a returning parent by identity number
+    # and phone, and shows the children's first names (apps/customers/
+    # widget_identification.py). Only a family whose parent accepted terms that
+    # say so is recognised, and never one the office switched off — a dispute
+    # between parents, a restraining order. All three are nullable, as above:
+    # the columns land while the previous code is still inserting families.
+    widget_identification_consent_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="הסכמה לזיהוי בטופס ההרשמה"
+    )
+    widget_identification_blocked_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="הזיהוי בטופס ההרשמה כובה במשרד"
+    )
+    widget_identification_blocked_reason = models.TextField(
+        null=True, blank=True, verbose_name="סיבת כיבוי הזיהוי"
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="תאריך עדכון")
 

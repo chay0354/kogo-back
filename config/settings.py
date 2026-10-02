@@ -290,6 +290,12 @@ REST_FRAMEWORK = {
         # opening a page, and the widget's poll while the parent pays.
         'course_checkout_start': '20/min',
         'course_checkout_status': '120/min',
+        # The registration form asking whether a parent is known, and for the
+        # price before the signature (apps/customers/widget_identify_views.py,
+        # WidgetQuoteView). A soft limit like the rest: the limits that hold
+        # are counted from the database (WidgetIdentifyAttempt).
+        'widget_identify': '30/min',
+        'widget_quote': '30/min',
         # The website store's poll of an order's payment (apps/store/widget_views.py).
         # Every poll comes from the site's own server — one caller for all of
         # its customers at once — so this is the whole shop's rate. Tranzila is
@@ -511,6 +517,19 @@ MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS = config('MANYCHAT_RENTAL_CARD_UPDATE_FLOW_N
 # Either empty: alerts are kept and shown in the morning brief, not sent.
 MANYCHAT_OFFICE_ALERT_FLOW_NS = config('MANYCHAT_OFFICE_ALERT_FLOW_NS', default='')
 OFFICE_ALERT_PHONES = config('OFFICE_ALERT_PHONES', default='')
+# The registration form recognising a returning parent by identity number and
+# phone (apps/customers/widget_identification.py). Off: the form asks and is
+# always told "not known", so it opens empty for everyone, as it did before.
+# Turn on only once the terms carry the identification paragraph (core
+# migration 0028 adds it) and the owner has decided to — the answer shows
+# children's first names to whoever holds a parent's identity number and phone.
+WIDGET_IDENTIFICATION_ENABLED = config('WIDGET_IDENTIFICATION_ENABLED', default=False, cast=bool)
+# The short WhatsApp to the parent on every identification ("a registration
+# began with your details. Not you? Call the office."). It is a real send, so
+# it has its own switch and needs an approved template: the flow's ns here.
+# Either missing: nobody is messaged and the form does not say anyone was.
+WIDGET_IDENTIFICATION_NOTICE_ENABLED = config('WIDGET_IDENTIFICATION_NOTICE_ENABLED', default=False, cast=bool)
+MANYCHAT_IDENTIFICATION_NOTICE_FLOW_NS = config('MANYCHAT_IDENTIFICATION_NOTICE_FLOW_NS', default='')
 CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD = int(config('CONSECUTIVE_ABSENCE_WHATSAPP_THRESHOLD', default=3))
 # Hour (24h, Israel) to send test-lesson-10am on the trial lesson date.
 TRIAL_10AM_REMINDER_HOUR = int(config('TRIAL_10AM_REMINDER_HOUR', default=10))
