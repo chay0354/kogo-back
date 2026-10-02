@@ -12,8 +12,9 @@ An identity number and a phone are not a password, so what is shown is kept
 small and the ways to abuse it are closed one by one:
 
   * off unless WIDGET_IDENTIFICATION_ENABLED;
-  * only a family whose parent accepted terms that say so, that was with us in
-    the last twelve months, and that the office did not switch off;
+  * only a family that was with us in the last twelve months — on a team,
+    paying, or at a trial lesson — and that the office did not switch off;
+  * never by a phone that an identity number alone put on the card;
   * five wrong phones for one identity number lock it for a day, counted one
     request at a time so sending them together changes nothing;
   * a third family from one device stops identification there for a day, and a
@@ -48,7 +49,8 @@ from apps.enrollments.person_match import normalise_phone
 logger = logging.getLogger(__name__)
 
 # The title of the identification paragraph in the terms (core migration 0028).
-# A family is recognised only if its parent accepted terms that carry it.
+# Accepting terms that carry it is recorded on the family; it is asked for
+# before recognising one only under WIDGET_IDENTIFICATION_REQUIRES_CONSENT.
 TERMS_MARKER = 'זיהוי בהרשמה הבאה'
 
 TOKEN_SALT = 'widget-identification'
@@ -188,17 +190,43 @@ def is_established(family) -> bool:
 
     Until then a card is only what somebody typed — a registration never paid,
     a free trial booked — and whoever typed it may not have been the parent.
-    So an unpaid card is corrected by the next registration, as it always was,
-    and is never a card the form recognises anyone by.
+    So an unpaid card is corrected by the next registration, as it always was
+    (and is marked when that happens: see `phone_is_the_parents`).
     """
     return family.children.filter(status__in=ACTIVE_CHILD_STATUSES).exists() or _paid(family).exists()
 
 
+def phone_is_the_parents(family) -> bool:
+    """
+    The phone on the card can be taken for the parent's own.
+
+    A family back from a trial lesson is whom the form is there to recognise,
+    and its card was never paid on — so the next registration may still replace
+    its phone with an identity number alone. Were that phone then good for
+    identification, anybody with a parent's identity number could put his own
+    phone on the card and be shown the children. So a card whose phone was
+    replaced that way recognises nobody until the family has paid.
+    """
+    return not family.widget_contact_unproven_at or is_established(family)
+
+
 def _recently_active(family, now) -> bool:
-    """A paying child today, or a payment in the last twelve months."""
+    """A paying child today, or a payment or a trial lesson in the last twelve months."""
     if family.children.filter(status__in=ACTIVE_CHILD_STATUSES).exists():
         return True
-    return _paid(family).filter(payment_date__gte=now - ACTIVE_WINDOW).exists()
+    since = now - ACTIVE_WINDOW
+    if _paid(family).filter(payment_date__gte=since).exists():
+        return True
+    from apps.enrollments.models import LessonEnrollment
+
+    # The date is cleared when a trial child subscribes; the day it was held is kept.
+    return LessonEnrollment.objects.filter(child__family=family).filter(
+        Q(trial_lesson_date__gte=since.date()) | Q(trial_held_on__gte=since.date()),
+    ).exists()
+
+
+def requires_consent() -> bool:
+    return bool(getattr(settings, 'WIDGET_IDENTIFICATION_REQUIRES_CONSENT', False))
 
 
 def terms_carry_the_paragraph() -> bool:
@@ -486,11 +514,14 @@ def _decide(*, family, parent_id, phone, accepted_near, keep, data):
     if family.widget_identification_blocked_at:
         _keep(Attempt.OUTCOME_HIDDEN, family=family, **keep)
         return dict(UNKNOWN)
-    if not family.widget_identification_consent_at:
+    if requires_consent() and not family.widget_identification_consent_at:
         _keep(Attempt.OUTCOME_NO_CONSENT, family=family, **keep)
         return dict(UNKNOWN)
     if not _recently_active(family, now) or not identifiable_children(family).exists():
         _keep(Attempt.OUTCOME_OLD, family=family, **keep)
+        return dict(UNKNOWN)
+    if not phone_is_the_parents(family):
+        _keep(Attempt.OUTCOME_UNPROVEN_CARD, family=family, **keep)
         return dict(UNKNOWN)
 
     phones = family_phones(family)

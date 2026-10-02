@@ -126,7 +126,14 @@ class WhoIsRecognised(IdentificationCase):
         self.assertTrue(answer['enabled'])
         self.assertTrue(answer['ticket'])
 
-    def test_a_family_that_never_accepted_the_paragraph_is_not_recognised(self):
+    def test_a_family_that_was_with_us_before_the_paragraph_is_recognised(self):
+        """Whoever was already a customer never signed the new terms — and is whom the form is for."""
+        Family.objects.filter(id=self.family.id).update(widget_identification_consent_at=None)
+
+        self.assertEqual(self.ask()['status'], 'known')
+
+    @override_settings(WIDGET_IDENTIFICATION_REQUIRES_CONSENT=True)
+    def test_asking_for_the_consent_first_is_a_switch(self):
         Family.objects.filter(id=self.family.id).update(widget_identification_consent_at=None)
 
         self.assertEqual(self.ask(), UNKNOWN)
@@ -153,6 +160,32 @@ class WhoIsRecognised(IdentificationCase):
         )
 
         self.assertEqual(self.ask()['status'], 'known')
+
+    def test_a_trial_lesson_in_the_last_year_keeps_a_family_recognised(self):
+        """Back from a trial lesson to register: the parent the identification is there for."""
+        from apps.enrollments.models import LessonEnrollment
+
+        Child.objects.filter(id=self.child.id).update(status='trial_completed')
+        lesson = TestDataFactory.create_lesson(course=TestDataFactory.create_course(), day_of_week=0)
+        LessonEnrollment.objects.create(
+            child=self.child, lesson=lesson, status='active',
+            trial_lesson_date=timezone.localdate() - timedelta(days=20),
+        )
+
+        self.assertEqual(self.ask()['status'], 'known')
+
+    def test_a_trial_lesson_over_a_year_ago_does_not(self):
+        from apps.enrollments.models import LessonEnrollment
+
+        Child.objects.filter(id=self.child.id).update(status='trial_completed')
+        lesson = TestDataFactory.create_lesson(course=TestDataFactory.create_course(), day_of_week=0)
+        LessonEnrollment.objects.create(
+            child=self.child, lesson=lesson, status='active',
+            trial_lesson_date=timezone.localdate() - timedelta(days=400),
+        )
+
+        self.assertEqual(self.ask(), UNKNOWN)
+        self.assertEqual(self.outcomes(), ['old'])
 
     def test_two_cards_with_one_identity_number_show_neither(self):
         _family(phone='0507777777', child_name='אחר')
@@ -633,25 +666,68 @@ class ACardNobodyPaidOnYet(TestCase):
         self.assertEqual(family.phone, '0529999999')
         self.assertIsNone(family.widget_identification_consent_at)
 
-    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
-    def test_a_card_nobody_paid_on_is_never_one_the_form_recognises(self):
-        """Not even with consent on it and a trial booked: it may be a stranger's card."""
+    def _trial(self, child_id):
         from apps.enrollments.models import LessonEnrollment
 
-        first = self._register()
-        self.assertIsNotNone(Family.objects.get(parent_id_number=PARENT_ID).widget_identification_consent_at)
         LessonEnrollment.objects.create(
-            child_id=first.json()['child_id'], lesson=self.lesson, status='active',
-            trial_lesson_date=timezone.localdate(),
+            child_id=child_id, lesson=self.lesson, status='active', trial_lesson_date=timezone.localdate(),
         )
 
+    def _identify(self, phone=PHONE):
         with patch.object(identification, 'MIN_ANSWER_SECONDS', 0):
-            answer = self.client.post(IDENTIFY, {
-                'parent_id_number': PARENT_ID, 'parent_phone': PHONE,
+            return self.client.post(IDENTIFY, {
+                'parent_id_number': PARENT_ID, 'parent_phone': phone,
                 'device_id': 'device-aaaaaaaaaaaaaaaa', 'ticket': _ticket(),
             }, format='json').json()
 
-        self.assertEqual(answer, UNKNOWN)
+    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+    def test_a_family_back_from_a_trial_lesson_is_recognised_by_its_own_phone(self):
+        self._trial(self._register().json()['child_id'])
+
+        answer = self._identify()
+
+        self.assertEqual(answer['status'], 'known')
+        self.assertEqual([child['first_name'] for child in answer['children']], ['מאיה'])
+
+    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+    def test_a_phone_an_identity_number_alone_put_on_the_card_recognises_nobody(self):
+        """Else anybody with a parent's identity number puts his phone on the card and is shown the children."""
+        self._trial(self._register().json()['child_id'])
+
+        self._register(parent_phone='0529999999', child_first_name='אחר', child_id_number='345678903')
+
+        family = Family.objects.get(parent_id_number=PARENT_ID)
+        self.assertEqual(family.phone, '0529999999')
+        self.assertIsNotNone(family.widget_contact_unproven_at)
+        self.assertEqual(self._identify('0529999999'), UNKNOWN)
+        self.assertEqual(self._identify(PHONE), UNKNOWN)
+        self.assertEqual(
+            list(WidgetIdentifyAttempt.objects.order_by('created_at').values_list('outcome', flat=True)),
+            ['unproven_card', 'unproven_card'],
+        )
+
+    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+    def test_the_parent_typing_the_cards_own_phone_again_leaves_no_mark(self):
+        self._trial(self._register().json()['child_id'])
+
+        self._register(child_first_name='נועם', child_id_number='345678903')
+
+        self.assertIsNone(Family.objects.get(parent_id_number=PARENT_ID).widget_contact_unproven_at)
+        self.assertEqual(self._identify()['status'], 'known')
+
+    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+    def test_once_that_family_has_paid_its_card_is_its_own_again(self):
+        self._trial(self._register().json()['child_id'])
+        taken = self._register(parent_phone='0529999999', child_first_name='אחר', child_id_number='345678903')
+        Payment.objects.filter(id=taken.json()['payment_id']).update(status='completed', payment_date=timezone.now())
+
+        self.assertEqual(self._identify('0529999999')['status'], 'known')
+
+    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+    def test_a_registration_never_paid_and_no_trial_is_not_a_customer_yet(self):
+        self._register()
+
+        self.assertEqual(self._identify(), UNKNOWN)
 
 
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
@@ -885,3 +961,50 @@ class AfterARealKeyIsSet(IdentificationCase):
             self.assertEqual(card_replacement.resolve_family_token(sent_now), self.family)
             with self.assertRaises(card_replacement.CardReplacementError):
                 card_replacement.resolve_family_token(sent_before)
+
+
+@override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+@patch.object(identification, 'MIN_ANSWER_SECONDS', 0)
+@patch('apps.enrollments.trial_reminders.stamp_and_notify_trial_enrollment', return_value={'sent': False})
+class BackFromAFreeTrialLesson(TestCase):
+    """The parent the identification is there for: booked a free trial on the form, now comes to register."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        patch.object(identification, '_alert_office').start()
+        self.addCleanup(patch.stopall)
+        self.course = TestDataFactory.create_course(price=Decimal('320.00'))
+        today = timezone.localdate()
+        self.trial_day = today + timedelta(days=((2 - today.weekday()) % 7 or 7))
+        # Lesson days count from Sunday: 3 is a Wednesday, which is weekday() 2.
+        self.lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=3)
+
+    def _book_the_trial(self, phone=PHONE):
+        return self.client.post('/api/v1/customers/widget/trial-register/', {
+            'parent_id_number': PARENT_ID, 'parent_first_name': 'דנה', 'parent_last_name': 'כהן',
+            'parent_phone': phone,
+            'child_first_name': 'מאיה', 'child_last_name': 'כהן', 'child_id_number': '218847366',
+            'child_birth_date': '2018-06-21', 'child_gender': 'female',
+            'course_id': str(self.course.id), 'lesson_id': str(self.lesson.id),
+            'trial_lesson_date': self.trial_day.isoformat(),
+        }, format='json')
+
+    def _identify(self, phone=PHONE):
+        return self.client.post(IDENTIFY, {
+            'parent_id_number': PARENT_ID, 'parent_phone': phone,
+            'device_id': 'device-aaaaaaaaaaaaaaaa', 'ticket': _ticket(),
+        }, format='json').json()
+
+    def test_the_form_recognises_them(self, _notify):
+        self.assertEqual(self._book_the_trial().status_code, 201)
+
+        answer = self._identify()
+
+        self.assertEqual(answer['status'], 'known')
+        self.assertEqual([child['first_name'] for child in answer['children']], ['מאיה'])
+
+    def test_not_by_another_phone(self, _notify):
+        self._book_the_trial()
+
+        self.assertEqual(self._identify('0529999999'), UNKNOWN)
