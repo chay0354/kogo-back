@@ -746,93 +746,109 @@ class WidgetRegisterView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        data = request.data
+        return _register_course(request, request.data)
 
-        required = [
-            'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
-            'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
-            'course_id',
-        ]
-        missing = [f for f in required if not data.get(f)]
-        if missing:
-            return Response(
-                {'error': f'שדות חובה חסרים: {", ".join(missing)}'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
-        course_id = data['course_id']
+def _register_course(request, data, *, rehearsal=False):
+    """
+    One course registration: the family and the child, then the pending payment
+    with its price. WidgetRegisterView answers with this as it is.
+
+    `rehearsal` is the quote's way in (WidgetQuoteView): the very same steps run
+    so the figures are the ones a registration will get, but the caller rolls
+    the whole thing back. In that mode nothing that outlives a rollback happens
+    here — no signature is kept — and no consent is recorded.
+    """
+    required = [
+        'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
+        'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
+        'course_id',
+    ]
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        return Response(
+            {'error': f'שדות חובה חסרים: {", ".join(missing)}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    course_id = data['course_id']
+    try:
+        course = Course.objects.prefetch_related('lessons').get(id=course_id)
+    except Course.DoesNotExist:
+        return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    hidden = _reject_if_hidden_from_widget(course)
+    if hidden:
+        return hidden
+
+    lessons = list(course.lessons.select_related('course__branch').all())
+    if not lessons:
+        return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
+
+    lesson_id = (data.get('lesson_id') or '').strip()
+    if lesson_id:
+        lesson = next((l for l in lessons if str(l.id) == lesson_id), None)
+        if lesson is None:
+            return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        lesson = lessons[0]
+
+    bundle = None
+    bundle_id = (data.get('bundle_id') or '').strip()
+    if bundle_id:
+        bundle = _resolve_widget_bundle(course=course, bundle_id=bundle_id)
+        if bundle is None:
+            return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    price_option_id = (data.get('price_option_id') or '').strip()
+    if price_option_id and bundle:
+        return Response(
+            {'error': 'לא ניתן לשלב מסלול משולב עם מחיר נוסף'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if price_option_id:
         try:
-            course = Course.objects.prefetch_related('lessons').get(id=course_id)
-        except Course.DoesNotExist:
-            return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-        hidden = _reject_if_hidden_from_widget(course)
-        if hidden:
-            return hidden
-
-        lessons = list(course.lessons.select_related('course__branch').all())
-        if not lessons:
-            return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
-
-        lesson_id = (data.get('lesson_id') or '').strip()
-        if lesson_id:
-            lesson = next((l for l in lessons if str(l.id) == lesson_id), None)
-            if lesson is None:
-                return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            lesson = lessons[0]
-
-        bundle = None
-        bundle_id = (data.get('bundle_id') or '').strip()
-        if bundle_id:
-            bundle = _resolve_widget_bundle(course=course, bundle_id=bundle_id)
-            if bundle is None:
-                return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-
-        price_option_id = (data.get('price_option_id') or '').strip()
-        if price_option_id and bundle:
-            return Response(
-                {'error': 'לא ניתן לשלב מסלול משולב עם מחיר נוסף'},
-                status=status.HTTP_400_BAD_REQUEST,
+            LessonPriceOption.objects.get(
+                id=price_option_id,
+                lesson=lesson,
+                is_active=True,
             )
-        if price_option_id:
-            try:
-                LessonPriceOption.objects.get(
-                    id=price_option_id,
-                    lesson=lesson,
-                    is_active=True,
-                )
-            except LessonPriceOption.DoesNotExist:
-                return Response({'error': 'מחיר נוסף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        except LessonPriceOption.DoesNotExist:
+            return Response({'error': 'מחיר נוסף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        try:
-            with transaction.atomic():
-                family, child = _resolve_family_and_child(data, lesson.course.branch)
-        except Exception as exc:
-            return Response(
-                {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    if rehearsal:
+        data = {key: value for key, value in data.items() if key != 'computerized_docs_consent'}
+
+    try:
+        with transaction.atomic():
+            family, child = _resolve_family_and_child(data, lesson.course.branch)
+    except Exception as exc:
+        return Response(
+            {'error': f'שגיאה ביצירת הרשומה: {exc}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    already = _already_registered_response(child, lesson=lesson, bundle=bundle)
+    if already:
+        return already
+
+    # ── 3. Initiate payment (pricing + pending Payment record) ───────
+    try:
+        if bundle:
+            members = list(bundle.lessons.all())
+            first_lesson = lesson if lesson in members else members[0]
+            payment = PaymentService().initiate_subscription_payment(
+                child_id=str(child.id),
+                lesson_id=str(first_lesson.id),
+                success_url=data.get('success_url', ''),
+                error_url=data.get('error_url', ''),
+                callback_url=data.get('callback_url', ''),
+                bundle_id=str(bundle.id),
+                include_registration_fee=True,
+                include_monthly_amount=True,
+                rehearsal=rehearsal,
             )
-
-        already = _already_registered_response(child, lesson=lesson, bundle=bundle)
-        if already:
-            return already
-
-        # ── 3. Initiate payment (pricing + pending Payment record) ───────
-        try:
-            if bundle:
-                members = list(bundle.lessons.all())
-                first_lesson = lesson if lesson in members else members[0]
-                payment = PaymentService().initiate_subscription_payment(
-                    child_id=str(child.id),
-                    lesson_id=str(first_lesson.id),
-                    success_url=data.get('success_url', ''),
-                    error_url=data.get('error_url', ''),
-                    callback_url=data.get('callback_url', ''),
-                    bundle_id=str(bundle.id),
-                    include_registration_fee=True,
-                    include_monthly_amount=True,
-                )
-                payments = [payment]
+            payments = [payment]
+            if not rehearsal:
                 _record_signature(
                     request, family=family, child=child, branch=lesson.course.branch, data=data,
                     refs={
@@ -843,35 +859,37 @@ class WidgetRegisterView(APIView):
                         'trial': False,
                     },
                 )
-                return Response({
-                    'is_bundle': True,
-                    'child_id': str(child.id),
-                    'bundle_id': str(bundle.id),
-                    'payments': payments,
-                    'base_amount': payment['base_amount'],
-                    'discount_amount': payment['discount_amount'],
-                    'prorated_amount': payment['prorated_amount'],
-                    'registration_fee': payment['registration_fee'],
-                    'final_amount': payment['final_amount'],
-                    'monthly_amount': payment['monthly_amount'],
-                    'next_billing_date': payment['next_billing_date'],
-                    'subscription_start_date': payment['subscription_start_date'],
-                    'trial_credit_amount': payment['trial_credit_amount'],
-                    'trial_credit_paid': payment['trial_credit_paid'],
-                    'trial_credit_date': payment['trial_credit_date'],
-                    'trial_credit_reason': payment['trial_credit_reason'],
-                }, status=status.HTTP_201_CREATED)
+            return Response({
+                'is_bundle': True,
+                'child_id': str(child.id),
+                'bundle_id': str(bundle.id),
+                'payments': payments,
+                'base_amount': payment['base_amount'],
+                'discount_amount': payment['discount_amount'],
+                'prorated_amount': payment['prorated_amount'],
+                'registration_fee': payment['registration_fee'],
+                'final_amount': payment['final_amount'],
+                'monthly_amount': payment['monthly_amount'],
+                'next_billing_date': payment['next_billing_date'],
+                'subscription_start_date': payment['subscription_start_date'],
+                'trial_credit_amount': payment['trial_credit_amount'],
+                'trial_credit_paid': payment['trial_credit_paid'],
+                'trial_credit_date': payment['trial_credit_date'],
+                'trial_credit_reason': payment['trial_credit_reason'],
+            }, status=status.HTTP_201_CREATED)
 
-            result = PaymentService().initiate_subscription_payment(
-                child_id=str(child.id),
-                lesson_id=str(lesson.id),
-                success_url=data.get('success_url', ''),
-                error_url=data.get('error_url', ''),
-                callback_url=data.get('callback_url', ''),
-                price_option_id=price_option_id or None,
-                include_registration_fee=bool(data.get('include_registration_fee', True)),
-            )
-            result['child_id'] = str(child.id)
+        result = PaymentService().initiate_subscription_payment(
+            child_id=str(child.id),
+            lesson_id=str(lesson.id),
+            success_url=data.get('success_url', ''),
+            error_url=data.get('error_url', ''),
+            callback_url=data.get('callback_url', ''),
+            price_option_id=price_option_id or None,
+            include_registration_fee=bool(data.get('include_registration_fee', True)),
+            rehearsal=rehearsal,
+        )
+        result['child_id'] = str(child.id)
+        if not rehearsal:
             _record_signature(
                 request, family=family, child=child, branch=lesson.course.branch, data=data,
                 refs={
@@ -881,14 +899,86 @@ class WidgetRegisterView(APIView):
                     'trial': False,
                 },
             )
-            return Response(result, status=status.HTTP_201_CREATED)
-        except ValueError as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as exc:
-            return Response(
-                {'error': f'שגיאה בתהליך התשלום: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        return Response(result, status=status.HTTP_201_CREATED)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as exc:
+        return Response(
+            {'error': f'שגיאה בתהליך התשלום: {exc}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# A form holds a handful of children and lessons; more than this is not a form.
+WIDGET_QUOTE_MAX_ITEMS = 12
+
+# What a quote never returns: rows that no longer exist once it is rolled back.
+_QUOTE_DROPPED_KEYS = ('payment_id', 'payments', 'child_id', 'tranzila_url')
+
+
+class WidgetQuoteView(APIView):
+    """
+    What a registration will cost, shown to the parent before anything is signed.
+
+    POST {"items": [...]} — one item per child × course, in the order the form
+    will register them, each the same payload `widget/register/` takes (no
+    signature needed). An item may carry `same_child_as`: the index of an
+    earlier item for the same child, which is how the form hands the child a
+    first registration returned on to the next one.
+
+    Every item goes through the registration itself (`_register_course`), so
+    the discounts, the yearly fee, a mid-month first month and a paid-trial
+    credit are worked out by the code that will charge them, each item seeing
+    the ones before it. Then the whole transaction is rolled back: no family,
+    child or payment is saved, no consent recorded, no signature kept, and
+    nothing is sent.
+
+    Returns {"items": [...]} with each registration's figures, or the first
+    refusal as {"error", "index"} with the status registration gives it.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        items = request.data.get('items')
+        if (
+            not isinstance(items, list)
+            or not items
+            or len(items) > WIDGET_QUOTE_MAX_ITEMS
+            or not all(isinstance(item, dict) for item in items)
+        ):
+            return Response({'error': 'בקשה לא תקינה'}, status=status.HTTP_400_BAD_REQUEST)
+
+        answers = []
+        refusal = None
+        with transaction.atomic():
+            for index, item in enumerate(items):
+                data = dict(item)
+                earlier = data.pop('same_child_as', None)
+                if isinstance(earlier, int) and not isinstance(earlier, bool) and 0 <= earlier < len(answers):
+                    child_id = answers[earlier].get('child_id')
+                    if child_id:
+                        data['existing_child_id'] = child_id
+                        data['discount_confirmed'] = True
+                response = _register_course(request, data, rehearsal=True)
+                if response.status_code >= 400:
+                    refusal = Response(
+                        {'error': (response.data or {}).get('error') or 'אירעה שגיאה', 'index': index},
+                        status=response.status_code,
+                    )
+                    break
+                answers.append(response.data)
+            # The point of a quote: every row above is undone, whatever happened.
+            transaction.set_rollback(True)
+
+        if refusal is not None:
+            return refusal
+        return Response({
+            'items': [
+                {key: value for key, value in answer.items() if key not in _QUOTE_DROPPED_KEYS}
+                for answer in answers
+            ],
+        })
 
 
 class WidgetTrialRegisterView(APIView):

@@ -913,6 +913,7 @@ class PaymentService:
         include_registration_fee: bool = True,
         include_monthly_amount: bool = True,
         quote_only: bool = False,
+        rehearsal: bool = False,
     ) -> Dict:
         """
         Initiate a recurring subscription payment for a child's lesson enrollment.
@@ -930,6 +931,12 @@ class PaymentService:
         The office's subscription dialog prices a lesson this way; the row it
         used to leave behind on every open carried a registration fee that hid
         the fee from the child's next signup and posed as a sibling signing up.
+
+        `rehearsal` is the registration form's quote (WidgetQuoteView): the
+        whole of this runs, rows included, inside a transaction the caller
+        rolls back, so a basket of several lessons is priced exactly as its
+        registration will be. Nothing differs here but the name in the log,
+        so a rolled-back row is never read as a registration that began.
 
         Args:
             child_id: UUID of child
@@ -1121,7 +1128,7 @@ class PaymentService:
         tranzila_url = None
         if not quote_only:
             log_payment_operation(
-                "SUBSCRIPTION_INITIATED",
+                "SUBSCRIPTION_REHEARSED" if rehearsal else "SUBSCRIPTION_INITIATED",
                 child=child.full_name,
                 payment_id=payment.id,
                 amount=discount_calculation.final_price
