@@ -9,7 +9,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework import status
-from django.db import transaction
+from rest_framework.throttling import ScopedRateThrottle
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import connection, transaction
 from django.db.models import Prefetch, Q
 
 from datetime import date, timedelta
@@ -25,6 +27,18 @@ from apps.customers.child_status import (
 )
 from apps.customers.models import Family, Parent, Child, Payment
 from apps.customers.child_identity import find_existing_child_on_family
+from apps.customers.widget_identification import (
+    EXPIRED_MESSAGE as IDENTIFICATION_EXPIRED_MESSAGE,
+    IdentificationExpired,
+    family_phones,
+    fill_from_identification,
+    guessing_locked,
+    is_established,
+    note_wrong_phone,
+    proves_parent,
+    record_identification_consent,
+)
+from apps.customers.widget_limits import TOO_MANY_MESSAGE, over_limit, too_many
 from apps.customers.widget_course_types import sort_widget_course_types
 from apps.courses.models import Lesson, Course, LessonBundle, LessonPriceOption
 from apps.courses.bundles import catalog_bundles_for_course, resolve_registration_bundle
@@ -52,6 +66,29 @@ STALE_PROCESSING_MESSAGE = (
     'התשלום נבדק מול חברת האשראי. אל תשלמו שוב — המשרד יבדוק ויחזור אליכם.'
 )
 DUPLICATE_PAYMENT_MESSAGE = 'ההרשמה הזו כבר שולמה או נמצאת בתשלום — אין צורך לשלם שוב.'
+
+
+UNEXPECTED_FAILURE_MESSAGE = 'אירעה שגיאה בהרשמה (קוד {code}). נסו שוב, ואם זה חוזר פנו למשרד עם הקוד.'
+
+
+def _unexpected_failure(where: str, exc: Exception):
+    """
+    A registration step failed in a way nobody planned for.
+
+    The parent is told so with a short code and nothing else: the exception's
+    own text used to go out in the answer, and it can carry table and column
+    names or a stored value. The code is written to the log beside the full
+    traceback, so the office can quote it.
+    """
+    import logging
+    import secrets
+
+    code = secrets.token_hex(3).upper()
+    logging.getLogger(__name__).exception('Widget registration failed while %s [code %s]', where, code, exc_info=exc)
+    return Response(
+        {'error': UNEXPECTED_FAILURE_MESSAGE.format(code=code)},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
 
 
 def _twin_payment(payment):
@@ -503,12 +540,118 @@ def _record_signature(request, *, family, child, branch, data, refs):
         )
 
 
-def _resolve_family_and_child(data, branch):
+INVALID_PARENT_ID_MESSAGE = 'מספר תעודת הזהות של ההורה אינו תקין'
+# Registrations from one address in an hour — counted whoever they are for and
+# whatever phone they carry, so the count says nothing about a family. It is
+# there to stop a machine, never a crowd: a whole school behind one address on
+# the day registration opens is nowhere near it.
+WIDGET_REGISTER_HOURLY_LIMIT = 600
+# Children priced in a day for a family by someone who did not type its phone.
+UNPROVEN_QUOTE_DAILY_ITEMS = 24
+
+
+def _valid_parent_id(value) -> bool:
+    """
+    An Israeli identity number, by the rule the form itself checks: digits
+    only, up to nine, with a right check digit.
+
+    The form never sends anything else. A blank or a space used to get as far
+    as the family search, where it matched the first family that has no
+    identity number on its card — and the registration landed on that family.
+    """
+    import re
+
+    digits = str(value or '').strip()
+    # ASCII digits only (other scripts' digits pass isdigit and are no number
+    # here), long enough to be a number, and not a row of zeros.
+    if not re.fullmatch(r'[0-9]{5,9}', digits) or not digits.strip('0'):
+        return False
+    total = 0
+    for index, char in enumerate(digits.zfill(9)):
+        step = int(char) * (2 if index % 2 else 1)
+        total += step - 9 if step > 9 else step
+    return total % 10 == 0
+
+
+def _typed_contact(phone, email) -> str:
+    """What was typed, cut down to what a phone and an email can be — it goes into a message to the office."""
+    import re
+
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())[:15]
+    email = str(email or '').strip()
+    parts = []
+    if digits:
+        parts.append(f'טלפון {digits}')
+    if email and len(email) <= 120 and re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+', email):
+        parts.append(f'דוא״ל {email}')
+    return ', '.join(parts) or 'פרטי קשר אחרים'
+
+
+def _tell_office_of_other_contact(family, phone, email) -> None:
+    """A registration came with a phone that is not the family's: the card is kept, the office is told — once a day."""
+    try:
+        from apps.core.office_alerts import crm_child_link, describe_family, raise_office_alert
+
+        child = family.children.exclude(status='ghost').first()
+        raise_office_alert(
+            kind='widget_other_contact',
+            dedup_key=f'widget-other-contact:{family.id}:{timezone.localdate():%Y%m%d}',
+            title='הרשמה עם טלפון שונה מזה שבכרטיס',
+            where='טופס ההרשמה באתר',
+            what=(
+                f'בהרשמה הוקלד {_typed_contact(phone, email)}. '
+                'הפרטים בכרטיס לא שונו, וההודעות ממשיכות להישלח לטלפון השמור.'
+            ),
+            why='תעודת זהות לבדה לא מספיקה כדי להחליף טלפון או דוא״ל של משפחה. רק המשרד מעדכן אותם.',
+            customer=describe_family(family),
+            action='לוודא מול ההורה מה המספר הנכון, ולעדכן בכרטיס הלקוח אם צריך.',
+            link=crm_child_link(child.id if child else None),
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception('Other-contact alert failed (non-fatal)')
+
+
+def _tell_office_of_new_email(family, old_email, new_email) -> None:
+    """A parent who proved to be the parent replaced the family's email: it is done, and the office is told."""
+    try:
+        from apps.core.office_alerts import crm_child_link, describe_family, raise_office_alert
+
+        child = family.children.exclude(status='ghost').first()
+        raise_office_alert(
+            kind='widget_email_changed',
+            dedup_key=f'widget-email-changed:{family.id}:{timezone.localdate():%Y%m%d}',
+            title='דוא״ל של משפחה הוחלף מטופס ההרשמה',
+            where='טופס ההרשמה באתר',
+            what=f'הדוא״ל בכרטיס היה {old_email}, ובהרשמה הוקלד {_typed_contact("", new_email)}. הכרטיס עודכן.',
+            why='קבלות וחשבוניות נשלחות לדוא״ל שבכרטיס. ההורה הקליד את הטלפון שבכרטיס או זוהה בטופס.',
+            customer=describe_family(family),
+            action='אם ההורה לא ביקש את השינוי — להחזיר את הדוא״ל הקודם בכרטיס הלקוח.',
+            link=crm_child_link(child.id if child else None),
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception('Email-change alert failed (non-fatal)')
+
+
+def _resolve_family_and_child(data, branch, *, identified=False):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
     the Child (existing active child on discount confirmation, or a new record).
     Records the family's consent to computerized documents when the payload
     gives it (`computerized_docs_consent`).
+
+    The phone and email of a family that has paid us (or has a child on a team)
+    change only for a parent who proved to be that parent: one the form
+    identified (`identified`), or one who typed the phone the card already
+    holds. An identity number alone does not: it used to be enough to move a
+    family's WhatsApp messages and receipts to whoever typed it. Otherwise the
+    card is kept and the office is told. A card nobody paid on yet is still
+    corrected by the next registration, as before. The consent to be
+    recognised by the form is recorded only from a parent who proved it, or
+    who opened the card.
 
     Shared by WidgetRegisterView (paid flow) and WidgetTrialRegisterView (trial flow).
     """
@@ -521,6 +664,9 @@ def _resolve_family_and_child(data, branch):
 
     # ── 1. Find or create Family ──────────────────────────────
     family = Family.objects.select_for_update().filter(parent_id_number=parent_id_number).first()
+    # Whoever opens a family's card is its parent; whoever arrives at an
+    # existing one is only taken for the parent with the card's own phone.
+    proven = family is None
     if not family:
         family = Family.objects.create(
             name=data['parent_last_name'].strip(),
@@ -538,27 +684,37 @@ def _resolve_family_and_child(data, branch):
             is_primary=True,
         )
     else:
-        updates = {}
         phone = data['parent_phone'].strip()
-        if phone and family.phone != phone:
-            family.phone = phone
-            updates['phone'] = phone
-        if parent_email and family.email != parent_email:
-            family.email = parent_email
-            updates['email'] = parent_email
-        if updates:
-            family.save(update_fields=list(updates.keys()) + ['updated_at'])
-        primary = family.parents.filter(is_primary=True).first()
-        if primary:
-            parent_updates = {}
-            if phone and primary.phone != phone:
-                primary.phone = phone
-                parent_updates['phone'] = phone
-            if parent_email and primary.email != parent_email:
-                primary.email = parent_email
-                parent_updates['email'] = parent_email
-            if parent_updates:
-                primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
+        proven = identified or proves_parent(family, phone)
+        if not proven and is_established(family):
+            # A family that paid, or has a child on a team: its card is its own.
+            _tell_office_of_other_contact(family, phone, parent_email)
+        else:
+            # The parent — or a card nobody has paid on yet, which the next
+            # registration corrects as it always did: whoever typed it first
+            # may not have been the parent, and must not be left holding it.
+            updates = {}
+            if phone and family.phone != phone:
+                family.phone = phone
+                updates['phone'] = phone
+            if parent_email and family.email != parent_email:
+                if proven and family.email:
+                    _tell_office_of_new_email(family, family.email, parent_email)
+                family.email = parent_email
+                updates['email'] = parent_email
+            if updates:
+                family.save(update_fields=list(updates.keys()) + ['updated_at'])
+            primary = family.parents.filter(is_primary=True).first()
+            if primary:
+                parent_updates = {}
+                if phone and primary.phone != phone:
+                    primary.phone = phone
+                    parent_updates['phone'] = phone
+                if parent_email and primary.email != parent_email:
+                    primary.email = parent_email
+                    parent_updates['email'] = parent_email
+                if parent_updates:
+                    primary.save(update_fields=list(parent_updates.keys()) + ['updated_at'])
 
     # סעיף 18ב(ג): the parent accepted the terms, and their paragraph on
     # computerized documents is the consent to receive invoices, receipts and
@@ -566,6 +722,12 @@ def _resolve_family_and_child(data, branch):
     # without it records nothing — and never withdraws a consent given before.
     if _computerized_docs_consent_given(data):
         record_consent(family, CONSENT_SOURCE_WIDGET)
+        # The same acceptance of the terms is the consent to be recognised next
+        # time, once the terms carry that paragraph — when it is the parent who
+        # accepted. An identity number alone must not be able to give it: it
+        # would open a family to identification on someone else's say-so.
+        if proven:
+            record_identification_consent(family)
 
     # ── 2. Resolve child ──────────────────────────────────────
     child = None
@@ -576,14 +738,14 @@ def _resolve_family_and_child(data, branch):
     if existing_child_id and discount_confirmed:
         try:
             child = Child.objects.get(id=existing_child_id, family=family)
-        except Child.DoesNotExist:
+        except (Child.DoesNotExist, ValueError, DjangoValidationError):
             pass
 
     # Extra lesson in the same checkout: reuse the child just created
     if child is None and existing_child_id:
         try:
             candidate = Child.objects.get(id=existing_child_id, family=family)
-        except Child.DoesNotExist:
+        except (Child.DoesNotExist, ValueError, DjangoValidationError):
             candidate = None
         if candidate is not None and (
             not submitted_id_number or candidate.id_number == submitted_id_number
@@ -632,9 +794,14 @@ class WidgetLookupView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        parent_id_number = (request.data.get('parent_id_number') or '').strip()
-        child_first_name = (request.data.get('child_first_name') or '').strip()
-        child_last_name  = (request.data.get('child_last_name')  or '').strip()
+        # A parent asks once per child; a sweep of identity numbers asks without end.
+        refused = too_many('lookup', request, WIDGET_LOOKUP_HOURLY_LIMIT)
+        if refused is not None:
+            return refused
+
+        parent_id_number = str(request.data.get('parent_id_number') or '').strip()
+        child_first_name = str(request.data.get('child_first_name') or '').strip()
+        child_last_name  = str(request.data.get('child_last_name')  or '').strip()
 
         if not parent_id_number or not child_first_name or not child_last_name:
             return Response(
@@ -642,9 +809,31 @@ class WidgetLookupView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        family = Family.objects.filter(parent_id_number=parent_id_number).first()
+        family = (
+            Family.objects.filter(parent_id_number=parent_id_number).first()
+            if _valid_parent_id(parent_id_number) else None
+        )
 
-        if not family:
+        # Whether a child of that name is with us, and in which lessons, is said
+        # only to whoever also typed the family's phone (`parent_phone`) — and
+        # never for a family the office switched identification off for. An
+        # identity number and a list of common first names used to be enough
+        # to learn a family's children and their timetable. Everyone else gets
+        # the answer a new family gets; registration itself still finds the
+        # child, prices the family's discounts and refuses a double signup.
+        typed_phone = str(request.data.get('parent_phone') or '').strip()
+        knows_the_phone = False
+        if family and not family.widget_identification_blocked_at and typed_phone:
+            # A wrong phone here is a guess like any other at this family's
+            # phone: after five, the look-up answers nobody about the family
+            # for a day — the right phone included, so it confirms nothing.
+            if not guessing_locked(parent_id_number):
+                knows_the_phone = proves_parent(family, typed_phone)
+                # A card with no real mobile on it has nothing to guess at:
+                # its own parent could never type the right one.
+                if not knows_the_phone and family_phones(family):
+                    note_wrong_phone(parent_id_number, family)
+        if not knows_the_phone:
             return Response({
                 'family_status': 'new',
                 'child_status': 'new',
@@ -734,10 +923,10 @@ class WidgetRegisterView(APIView):
         the course's first lesson. Ignored if bundle_id is also provided.
       price_option_id (str) — register at an extra catalog price for the lesson.
         Ignored if bundle_id is provided.
-      include_registration_fee (bool) — optional; defaults to true for a single lesson.
-        The fee is once per child: extra courses in this checkout, and later
-        signups for the same child, skip it. A twice/thrice-a-week bundle also
-        applies the fee only on the first member.
+      (The yearly fee is not the request's to decide: it is charged once per
+        child — extra courses in this checkout, and later signups for the same
+        child, skip it; a twice/thrice-a-week bundle applies it on the first
+        member only. `include_registration_fee` used to be read and is ignored.)
       computerized_docs_consent (bool) — the parent accepted the terms, whose
         paragraph on computerized documents is the consent (סעיף 18ב(ג));
         recorded on the family. False or absent records nothing and withdraws nothing.
@@ -746,93 +935,128 @@ class WidgetRegisterView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        data = request.data
+        return _register_course(request, request.data)
 
-        required = [
-            'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
-            'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
-            'course_id',
-        ]
-        missing = [f for f in required if not data.get(f)]
-        if missing:
+
+def _register_course(request, data, *, rehearsal=False):
+    """
+    One course registration: the family and the child, then the pending payment
+    with its price. WidgetRegisterView answers with this as it is.
+
+    `rehearsal` is the quote's way in (WidgetQuoteView): the very same steps run
+    so the figures are the ones a registration will get, but the caller rolls
+    the whole thing back. In that mode nothing that outlives a rollback happens
+    here — no signature is kept — and no consent is recorded.
+
+    A registration from a parent the form identified carries `identify_token`
+    and sends the hidden details empty; they are completed from the family's
+    card before anything else is looked at.
+    """
+    identified = False
+    if str(data.get('identify_token') or '').strip():
+        try:
+            data = fill_from_identification(data)
+        except IdentificationExpired:
             return Response(
-                {'error': f'שדות חובה חסרים: {", ".join(missing)}'},
+                {'error': IDENTIFICATION_EXPIRED_MESSAGE, 'identification_expired': True},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        identified = True
 
-        course_id = data['course_id']
+    required = [
+        'parent_id_number', 'parent_first_name', 'parent_last_name', 'parent_phone',
+        'child_first_name', 'child_last_name', 'child_id_number', 'child_birth_date', 'child_gender',
+        'course_id',
+    ]
+    missing = [f for f in required if not data.get(f)]
+    if missing:
+        return Response(
+            {'error': f'שדות חובה חסרים: {", ".join(missing)}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not _valid_parent_id(data.get('parent_id_number')):
+        return Response({'error': INVALID_PARENT_ID_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+    if not rehearsal:
+        refused = too_many('register', request, WIDGET_REGISTER_HOURLY_LIMIT)
+        if refused is not None:
+            return refused
+
+    course_id = data['course_id']
+    try:
+        course = Course.objects.prefetch_related('lessons').get(id=course_id)
+    except (Course.DoesNotExist, ValueError, DjangoValidationError):
+        return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    hidden = _reject_if_hidden_from_widget(course)
+    if hidden:
+        return hidden
+
+    lessons = list(course.lessons.select_related('course__branch').all())
+    if not lessons:
+        return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
+
+    lesson_id = str(data.get('lesson_id') or '').strip()
+    if lesson_id:
+        lesson = next((l for l in lessons if str(l.id) == lesson_id), None)
+        if lesson is None:
+            return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        lesson = lessons[0]
+
+    bundle = None
+    bundle_id = str(data.get('bundle_id') or '').strip()
+    if bundle_id:
+        bundle = _resolve_widget_bundle(course=course, bundle_id=bundle_id)
+        if bundle is None:
+            return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+
+    price_option_id = str(data.get('price_option_id') or '').strip()
+    if price_option_id and bundle:
+        return Response(
+            {'error': 'לא ניתן לשלב מסלול משולב עם מחיר נוסף'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if price_option_id:
         try:
-            course = Course.objects.prefetch_related('lessons').get(id=course_id)
-        except Course.DoesNotExist:
-            return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-        hidden = _reject_if_hidden_from_widget(course)
-        if hidden:
-            return hidden
-
-        lessons = list(course.lessons.select_related('course__branch').all())
-        if not lessons:
-            return Response({'error': 'לא נמצאו שיעורים לחוג זה'}, status=status.HTTP_400_BAD_REQUEST)
-
-        lesson_id = (data.get('lesson_id') or '').strip()
-        if lesson_id:
-            lesson = next((l for l in lessons if str(l.id) == lesson_id), None)
-            if lesson is None:
-                return Response({'error': 'שיעור לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            lesson = lessons[0]
-
-        bundle = None
-        bundle_id = (data.get('bundle_id') or '').strip()
-        if bundle_id:
-            bundle = _resolve_widget_bundle(course=course, bundle_id=bundle_id)
-            if bundle is None:
-                return Response({'error': 'מסלול משולב לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
-
-        price_option_id = (data.get('price_option_id') or '').strip()
-        if price_option_id and bundle:
-            return Response(
-                {'error': 'לא ניתן לשלב מסלול משולב עם מחיר נוסף'},
-                status=status.HTTP_400_BAD_REQUEST,
+            LessonPriceOption.objects.get(
+                id=price_option_id,
+                lesson=lesson,
+                is_active=True,
             )
-        if price_option_id:
-            try:
-                LessonPriceOption.objects.get(
-                    id=price_option_id,
-                    lesson=lesson,
-                    is_active=True,
-                )
-            except LessonPriceOption.DoesNotExist:
-                return Response({'error': 'מחיר נוסף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        except (LessonPriceOption.DoesNotExist, ValueError, DjangoValidationError):
+            return Response({'error': 'מחיר נוסף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
-        try:
-            with transaction.atomic():
-                family, child = _resolve_family_and_child(data, lesson.course.branch)
-        except Exception as exc:
-            return Response(
-                {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    if rehearsal:
+        data = {key: value for key, value in data.items() if key != 'computerized_docs_consent'}
+
+    try:
+        with transaction.atomic():
+            family, child = _resolve_family_and_child(data, lesson.course.branch, identified=identified)
+    except Exception as exc:
+        return _unexpected_failure('saving the family and child', exc)
+
+    already = _already_registered_response(child, lesson=lesson, bundle=bundle)
+    if already:
+        return already
+
+    # ── 3. Initiate payment (pricing + pending Payment record) ───────
+    try:
+        if bundle:
+            members = list(bundle.lessons.all())
+            first_lesson = lesson if lesson in members else members[0]
+            payment = PaymentService().initiate_subscription_payment(
+                child_id=str(child.id),
+                lesson_id=str(first_lesson.id),
+                success_url=data.get('success_url', ''),
+                error_url=data.get('error_url', ''),
+                callback_url=data.get('callback_url', ''),
+                bundle_id=str(bundle.id),
+                include_registration_fee=True,
+                include_monthly_amount=True,
+                rehearsal=rehearsal,
             )
-
-        already = _already_registered_response(child, lesson=lesson, bundle=bundle)
-        if already:
-            return already
-
-        # ── 3. Initiate payment (pricing + pending Payment record) ───────
-        try:
-            if bundle:
-                members = list(bundle.lessons.all())
-                first_lesson = lesson if lesson in members else members[0]
-                payment = PaymentService().initiate_subscription_payment(
-                    child_id=str(child.id),
-                    lesson_id=str(first_lesson.id),
-                    success_url=data.get('success_url', ''),
-                    error_url=data.get('error_url', ''),
-                    callback_url=data.get('callback_url', ''),
-                    bundle_id=str(bundle.id),
-                    include_registration_fee=True,
-                    include_monthly_amount=True,
-                )
-                payments = [payment]
+            payments = [payment]
+            if not rehearsal:
                 _record_signature(
                     request, family=family, child=child, branch=lesson.course.branch, data=data,
                     refs={
@@ -843,35 +1067,40 @@ class WidgetRegisterView(APIView):
                         'trial': False,
                     },
                 )
-                return Response({
-                    'is_bundle': True,
-                    'child_id': str(child.id),
-                    'bundle_id': str(bundle.id),
-                    'payments': payments,
-                    'base_amount': payment['base_amount'],
-                    'discount_amount': payment['discount_amount'],
-                    'prorated_amount': payment['prorated_amount'],
-                    'registration_fee': payment['registration_fee'],
-                    'final_amount': payment['final_amount'],
-                    'monthly_amount': payment['monthly_amount'],
-                    'next_billing_date': payment['next_billing_date'],
-                    'subscription_start_date': payment['subscription_start_date'],
-                    'trial_credit_amount': payment['trial_credit_amount'],
-                    'trial_credit_paid': payment['trial_credit_paid'],
-                    'trial_credit_date': payment['trial_credit_date'],
-                    'trial_credit_reason': payment['trial_credit_reason'],
-                }, status=status.HTTP_201_CREATED)
+            return Response({
+                'is_bundle': True,
+                'child_id': str(child.id),
+                'bundle_id': str(bundle.id),
+                'payments': payments,
+                'base_amount': payment['base_amount'],
+                'discount_amount': payment['discount_amount'],
+                'prorated_amount': payment['prorated_amount'],
+                'registration_fee': payment['registration_fee'],
+                'registration_fee_paid_before': payment.get('registration_fee_paid_before', False),
+                'final_amount': payment['final_amount'],
+                'monthly_amount': payment['monthly_amount'],
+                'next_billing_date': payment['next_billing_date'],
+                'subscription_start_date': payment['subscription_start_date'],
+                'trial_credit_amount': payment['trial_credit_amount'],
+                'trial_credit_paid': payment['trial_credit_paid'],
+                'trial_credit_date': payment['trial_credit_date'],
+                'trial_credit_reason': payment['trial_credit_reason'],
+            }, status=status.HTTP_201_CREATED)
 
-            result = PaymentService().initiate_subscription_payment(
-                child_id=str(child.id),
-                lesson_id=str(lesson.id),
-                success_url=data.get('success_url', ''),
-                error_url=data.get('error_url', ''),
-                callback_url=data.get('callback_url', ''),
-                price_option_id=price_option_id or None,
-                include_registration_fee=bool(data.get('include_registration_fee', True)),
-            )
-            result['child_id'] = str(child.id)
+        result = PaymentService().initiate_subscription_payment(
+            child_id=str(child.id),
+            lesson_id=str(lesson.id),
+            success_url=data.get('success_url', ''),
+            error_url=data.get('error_url', ''),
+            callback_url=data.get('callback_url', ''),
+            price_option_id=price_option_id or None,
+            # Whether the yearly fee is charged is the server's to decide (once
+            # per child). The request used to be able to say "no fee" and get it.
+            include_registration_fee=True,
+            rehearsal=rehearsal,
+        )
+        result['child_id'] = str(child.id)
+        if not rehearsal:
             _record_signature(
                 request, family=family, child=child, branch=lesson.course.branch, data=data,
                 refs={
@@ -881,14 +1110,158 @@ class WidgetRegisterView(APIView):
                     'trial': False,
                 },
             )
-            return Response(result, status=status.HTTP_201_CREATED)
-        except ValueError as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as exc:
-            return Response(
-                {'error': f'שגיאה בתהליך התשלום: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        return Response(result, status=status.HTTP_201_CREATED)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as exc:
+        return _unexpected_failure('pricing and opening the payment', exc)
+
+
+# A form holds a handful of children and lessons; more than this is not a form.
+WIDGET_QUOTE_MAX_ITEMS = 12
+# Per address and hour, counted in the database (apps/customers/widget_limits.py).
+# Well above what a family does, and an office registering walk-ins all day.
+WIDGET_QUOTE_HOURLY_LIMIT = 90
+WIDGET_LOOKUP_HOURLY_LIMIT = 120
+
+# What a quote never returns: rows that no longer exist once it is rolled back.
+_QUOTE_DROPPED_KEYS = ('payment_id', 'payments', 'child_id', 'tranzila_url')
+
+
+class WidgetQuoteView(APIView):
+    """
+    What a registration will cost, shown to the parent before anything is signed.
+
+    POST {"items": [...]} — one item per child × course, in the order the form
+    will register them, each the same payload `widget/register/` takes (no
+    signature needed). An item may carry `same_child_as`: the index of an
+    earlier item for the same child, which is how the form hands the child a
+    first registration returned on to the next one.
+
+    Every item goes through the registration itself (`_register_course`), so
+    the discounts, the yearly fee, a mid-month first month and a paid-trial
+    credit are worked out by the code that will charge them, each item seeing
+    the ones before it. Then the whole transaction is rolled back: no family,
+    child or payment is saved, no consent recorded, no signature kept, and
+    nothing is sent.
+
+    Returns {"items": [...]} with each registration's figures, or the first
+    refusal as {"error", "index"} with the status registration gives it.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'widget_quote'
+
+    def post(self, request):
+        refused = too_many('quote', request, WIDGET_QUOTE_HOURLY_LIMIT)
+        if refused is not None:
+            return refused
+        response = self._quote(request)
+        # A price worked out for one family is never a page to be stored.
+        response['Cache-Control'] = 'no-store'
+        return response
+
+    @staticmethod
+    def _too_many_names(items, parent_id):
+        """
+        A price says something of the family — a sibling's discount, a fee
+        already paid, "this child is already in the class". For a parent who
+        typed the card's phone that is theirs to know. For anyone else each
+        priced child is a guess at a family's children, so those are counted
+        per identity number and day: enough for a parent with a new phone,
+        not for a list of names.
+        """
+        family = Family.objects.filter(parent_id_number=parent_id).first()
+        if family is None:
+            return None
+        refused = Response({'error': TOO_MANY_MESSAGE}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        # After five wrong phones for this family, a quote is refused to
+        # everyone for a day — the right phone too, or a refusal would itself
+        # say which phone is right. (The form then goes on without a price.)
+        if guessing_locked(parent_id):
+            return refused
+        if not _quote_is_unproven(items, family):
+            return None
+        if family_phones(family):
+            note_wrong_phone(parent_id, family)
+        if over_limit('unproven-quote', parent_id, UNPROVEN_QUOTE_DAILY_ITEMS, per='day', by=len(items)):
+            return refused
+        return None
+
+    def _quote(self, request):
+        items = request.data.get('items')
+        if (
+            not isinstance(items, list)
+            or not items
+            or len(items) > WIDGET_QUOTE_MAX_ITEMS
+            or not all(isinstance(item, dict) for item in items)
+        ):
+            return Response({'error': 'בקשה לא תקינה'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # One form, one parent.
+        parent_ids = {str(item.get('parent_id_number') or '').strip() for item in items}
+        if len(parent_ids) != 1 or not _valid_parent_id(next(iter(parent_ids))):
+            return Response({'error': INVALID_PARENT_ID_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+        refused = self._too_many_names(items, next(iter(parent_ids)))
+        if refused is not None:
+            return refused
+
+        answers = []
+        refusal = None
+        with transaction.atomic():
+            # A quote must never hold a registration or a charge up: if a row it
+            # needs is busy it gives up, and the form goes on without a quote.
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '3s'")
+            for index, item in enumerate(items):
+                data = dict(item)
+                earlier = data.pop('same_child_as', None)
+                if isinstance(earlier, int) and not isinstance(earlier, bool) and 0 <= earlier < len(answers):
+                    child_id = answers[earlier].get('child_id')
+                    if child_id:
+                        data['existing_child_id'] = child_id
+                        data['discount_confirmed'] = True
+                response = _register_course(request, data, rehearsal=True)
+                if response.status_code >= 400:
+                    refusal = Response(
+                        {'error': (response.data or {}).get('error') or 'אירעה שגיאה', 'index': index},
+                        status=response.status_code,
+                    )
+                    break
+                answers.append(response.data)
+            # The point of a quote: every row above is undone, whatever happened.
+            transaction.set_rollback(True)
+
+        if refusal is not None:
+            return refusal
+        return Response({'items': [_quote_answer(answer) for answer in answers]})
+
+
+def _quote_is_unproven(items, family) -> bool:
+    """
+    Some item of the quote shows nothing of the parent: no token, and not the
+    card's phone. Every item is looked at — one good item in front must not
+    carry eleven guesses behind it. (A token is checked where it is used: one
+    that is not this family's is refused there.)
+    """
+    return any(
+        not str(item.get('identify_token') or '').strip() and not proves_parent(family, item.get('parent_phone'))
+        for item in items
+    )
+
+
+def _quote_answer(answer: dict) -> dict:
+    """A registration's answer without the rows it named — they are gone with the rollback."""
+    quoted = {key: value for key, value in answer.items() if key not in _QUOTE_DROPPED_KEYS}
+    payments = answer.get('payments')
+    if 'discounts_applied' not in quoted and isinstance(payments, list):
+        # A twice-a-week registration lists its discounts on its payments.
+        quoted['discounts_applied'] = [
+            discount for payment in payments for discount in (payment.get('discounts_applied') or [])
+        ]
+    return quoted
 
 
 class WidgetTrialRegisterView(APIView):
@@ -926,11 +1299,16 @@ class WidgetTrialRegisterView(APIView):
                 {'error': f'שדות חובה חסרים: {", ".join(missing)}'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not _valid_parent_id(data.get('parent_id_number')):
+            return Response({'error': INVALID_PARENT_ID_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+        refused = too_many('register', request, WIDGET_REGISTER_HOURLY_LIMIT)
+        if refused is not None:
+            return refused
 
         course_id = data['course_id']
         try:
             course = Course.objects.prefetch_related('lessons').get(id=course_id)
-        except Course.DoesNotExist:
+        except (Course.DoesNotExist, ValueError, DjangoValidationError):
             return Response({'error': 'חוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
         hidden = _reject_if_hidden_from_widget(course)
         if hidden:
@@ -1033,10 +1411,7 @@ class WidgetTrialRegisterView(APIView):
                         description=f"שיעור ניסיון - {course.name} - {child.full_name}",
                     )
             except Exception as exc:
-                return Response(
-                    {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
+                return _unexpected_failure('saving the family and child', exc)
 
             _record_signature(
                 request, family=family, child=child, branch=lesson.course.branch, data=data,
@@ -1087,10 +1462,7 @@ class WidgetTrialRegisterView(APIView):
                         'start_date', 'trial_lesson_date', 'trial_outcome', 'status', 'end_date', 'updated_at',
                     ])
         except Exception as exc:
-            return Response(
-                {'error': f'שגיאה ביצירת הרשומה: {exc}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return _unexpected_failure('saving the family and child', exc)
 
         try:
             whatsapp_result = stamp_and_notify_trial_enrollment(str(enrollment.id))
@@ -1118,7 +1490,10 @@ class WidgetTrialRegisterView(APIView):
             'child_id': str(child.id),
             'trial_lesson_date': trial_date.isoformat(),
             'trial_applied': True,
-            'whatsapp': whatsapp_result,
+            # Whether a message went out, and nothing of where: the full answer
+            # names the phone and the parent on the family's card, to whoever
+            # typed that family's identity number.
+            'whatsapp': {'sent': bool((whatsapp_result or {}).get('sent'))},
         }, status=status.HTTP_201_CREATED)
 
 

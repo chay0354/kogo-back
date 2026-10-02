@@ -182,6 +182,15 @@ class CourseCheckoutTest(TestCase):
         self.assertNotIn('bit_pay', url)
         self.assertEqual(set(str(p.id) for p in checkout.payments.all()), set(ids))
 
+    def test_the_pages_address_carries_nothing_of_the_family(self, *_):
+        """The address goes to whoever holds a payment id — which an identity number alone gives."""
+        from urllib.parse import unquote
+
+        url = unquote(self._start(self._register_cart()).json()['url'])
+
+        for detail in ('Dana', 'Levi', 'parent@example.com', '0501234567', 'contact=', 'email=', 'phone='):
+            self.assertNotIn(detail, url)
+
     def test_a_new_page_replaces_the_open_one(self, *_):
         ids = self._register_cart()
         first = CourseCheckout.objects.get(id=self._start(ids).json()['checkout_id'])

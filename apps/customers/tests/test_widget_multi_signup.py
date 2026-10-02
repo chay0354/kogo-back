@@ -234,7 +234,7 @@ class WidgetRegisterReusesExistingChildTest(TestCase):
         response = self.client.post(
             '/api/v1/customers/widget/lookup/',
             {
-                'parent_id_number': '123456782',
+                'parent_id_number': '123456782', 'parent_phone': '0501234567',
                 'child_first_name': 'Kid',
                 'child_last_name': 'Parent',
             },
@@ -271,7 +271,7 @@ class WidgetRejectsDuplicateLessonSignupTest(TestCase):
         response = self.client.post(
             '/api/v1/customers/widget/lookup/',
             {
-                'parent_id_number': '123456782',
+                'parent_id_number': '123456782', 'parent_phone': '0501234567',
                 'child_first_name': 'Kid',
                 'child_last_name': 'Parent',
                 'lesson_id': str(self.lesson.id),
@@ -287,7 +287,7 @@ class WidgetRejectsDuplicateLessonSignupTest(TestCase):
         response = self.client.post(
             '/api/v1/customers/widget/lookup/',
             {
-                'parent_id_number': '123456782',
+                'parent_id_number': '123456782', 'parent_phone': '0501234567',
                 'child_first_name': 'Kid',
                 'child_last_name': 'Parent',
                 'lesson_id': str(self.other_lesson.id),
@@ -403,7 +403,7 @@ class WidgetRejectsDuplicateLessonSignupTest(TestCase):
         response = self.client.post(
             '/api/v1/customers/widget/lookup/',
             {
-                'parent_id_number': '123456782',
+                'parent_id_number': '123456782', 'parent_phone': '0501234567',
                 'child_first_name': 'Kid',
                 'child_last_name': 'Parent',
                 'lesson_id': str(self.lesson.id),

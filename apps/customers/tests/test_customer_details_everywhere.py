@@ -176,6 +176,8 @@ class EditReachesEveryReaderTests(APITestCase):
         def lookup(parent_id):
             return self.client.post('/api/v1/customers/widget/lookup/', {
                 'parent_id_number': parent_id, 'child_first_name': 'נועה', 'child_last_name': 'כהן',
+                # The look-up answers about a family only to whoever also typed its phone.
+                'parent_phone': NEW_PHONE,
             }, format='json').data['family_status']
         self.assertNotEqual(lookup(NEW_ID), 'new')
         self.assertEqual(lookup(OLD_ID), 'new')

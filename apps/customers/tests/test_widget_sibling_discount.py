@@ -80,7 +80,7 @@ class WidgetSiblingDiscountVisibilityTest(TestCase):
         lookup = self.client.post(
             '/api/v1/customers/widget/lookup/',
             {
-                'parent_id_number': '123456782',
+                'parent_id_number': '123456782', 'parent_phone': '0501234567',
                 'child_first_name': 'Beta',
                 'child_last_name': 'Parent',
             },
