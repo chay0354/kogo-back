@@ -14,7 +14,8 @@ small and the ways to abuse it are closed one by one:
   * off unless WIDGET_IDENTIFICATION_ENABLED;
   * only a family whose parent accepted terms that say so, that was with us in
     the last twelve months, and that the office did not switch off;
-  * five wrong phones for one identity number lock it for a day;
+  * five wrong phones for one identity number lock it for a day, counted one
+    request at a time so sending them together changes nothing;
   * a third family from one device stops identification there for a day, and a
     cap per network, per hour and per day stops a sweep;
   * a silent check that the form was really opened, a moment before asking;
@@ -31,10 +32,12 @@ import hmac
 import logging
 import re
 import time
+import uuid
 from datetime import timedelta
 
 from django.conf import settings
 from django.core import signing
+from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -54,7 +57,7 @@ FORM_SALT = 'widget-identification-form'
 # A registration is filled and paid within one sitting.
 TOKEN_MAX_AGE = 2 * 60 * 60
 NEAR_MAX_AGE = 10 * 60
-FORM_MAX_AGE = 6 * 60 * 60
+FORM_MAX_AGE = 2 * 60 * 60
 # Nobody opens a form and has typed two numbers into it in under this.
 FORM_MIN_AGE = 1.2
 
@@ -64,11 +67,11 @@ WRONG_PHONE_LIMIT = 5
 DEVICE_FAMILY_LIMIT = 2
 # One address can be a whole mobile network, so the bar is higher and it stops
 # only families not yet seen from there.
-NETWORK_FAMILY_LIMIT = 10
+NETWORK_FAMILY_LIMIT = 25
 # Families identified by the whole form, from everywhere: above this it is a
 # sweep and not a registration day, and identification pauses for everyone.
-HOURLY_CAP = 60
-DAILY_CAP = 300
+HOURLY_CAP = 120
+DAILY_CAP = 500
 ACTIVE_WINDOW = timedelta(days=365)
 NOTICE_QUIET = timedelta(minutes=30)
 # Every answer takes at least this long, so a refusal cannot be told from a
@@ -88,7 +91,10 @@ class IdentificationExpired(Exception):
 
 
 def is_enabled() -> bool:
-    return bool(getattr(settings, 'WIDGET_IDENTIFICATION_ENABLED', False))
+    """On by the setting — and never with the repository's own secret key, which anyone can sign with."""
+    return bool(getattr(settings, 'WIDGET_IDENTIFICATION_ENABLED', False)) and not getattr(
+        settings, 'SECRET_KEY_IS_DEFAULT', False,
+    )
 
 
 def form_ticket() -> str:
@@ -189,26 +195,46 @@ def record_identification_consent(family) -> None:
 
 
 def _near(typed: str, stored: str) -> bool:
-    """A digit or two off: a slip of the finger, not another number."""
+    """
+    A slip of the finger: one wrong digit, or two neighbours swapped.
+
+    Kept this narrow on purpose. A similar number is offered the stored one
+    with a press, so every number counted as "similar" is a number that opens
+    the family. Any two wrong digits would make some 2,300 numbers open each
+    family; these two slips make about 80.
+    """
     if len(typed) != len(stored):
         return False
-    return 0 < sum(1 for a, b in zip(typed, stored) if a != b) <= 2
+    wrong = [index for index, (a, b) in enumerate(zip(typed, stored)) if a != b]
+    if len(wrong) == 1:
+        return True
+    return (
+        len(wrong) == 2
+        and wrong[1] == wrong[0] + 1
+        and typed[wrong[0]] == stored[wrong[1]]
+        and typed[wrong[1]] == stored[wrong[0]]
+    )
 
 
 # ── telling people ────────────────────────────────────────────────────────────
 
-def _alert_office(outcome: str, *, key: str, what: str, family=None) -> None:
+def _alert_office(outcome: str, now, *, what: str) -> None:
+    """
+    Tell the office of a block — once an hour for each kind of block, however
+    many there were. Whoever sets blocks off on purpose must not be able to
+    fill the office's WhatsApp with them; the log (WidgetIdentifyAttempt) has
+    every one.
+    """
     try:
-        from apps.core.office_alerts import describe_family, raise_office_alert
+        from apps.core.office_alerts import raise_office_alert
 
         raise_office_alert(
             kind='widget_identification_block',
-            dedup_key=f'widget-identify:{outcome}:{key}:{timezone.localdate():%Y%m%d}',
+            dedup_key=f'widget-identify:{outcome}:{timezone.localtime(now):%Y%m%d%H}',
             title='זיהוי הורים בטופס ההרשמה נחסם',
             where='טופס ההרשמה באתר',
             what=what,
             why='ההגנה על זיהוי הורים עצרה ניסיון שנראה כמו איסוף מידע. ההרשמה עצמה לא נחסמה.',
-            customer=describe_family(family) if family is not None else '',
             action='אם הורה מתקשר ואומר שהטופס לא זיהה אותו, הוא יכול למלא את הפרטים ולהירשם כרגיל.',
         )
     except Exception:
@@ -307,16 +333,29 @@ def identify(data, *, ip: str = '') -> dict:
     return answer
 
 
+def _one_at_a_time(key: str) -> None:
+    """
+    Inside a transaction: wait for anyone else deciding about the same thing.
+
+    The limits are "count, then write". Without this, requests sent together
+    all count before any of them has written, and all pass. The lock is held
+    until the transaction ends and never outlives it.
+    """
+    if connection.vendor != 'postgresql':
+        return
+    number = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big', signed=True)
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_advisory_xact_lock(%s)', [number])
+
+
 def _identify(data, *, ip: str) -> dict:
     if not is_enabled():
         return dict(UNKNOWN)
 
-    now = timezone.now()
-    since = now - WINDOW
     device = str(data.get('device_id') or '').strip()
-    ip_hash = _keyed(ip) if ip else ''
     near_token = str(data.get('near_token') or '').strip()
     parent_id = phone = ''
+    family = None
 
     if near_token:
         # The parent pressed "update" on the similar number offered a moment ago.
@@ -329,35 +368,30 @@ def _identify(data, *, ip: str) -> dict:
         # An offer is taken up only where it was made.
         if family is None or offered.get('d') != _device_mark(device):
             return dict(UNKNOWN)
-        accepted_near = True
     else:
         parent_id = ''.join(ch for ch in str(data.get('parent_id_number') or '') if ch.isdigit())
         phone = normalise_phone(data.get('parent_phone'))
         if not _valid_identity_number(parent_id) or not _MOBILE.match(phone):
             return dict(UNKNOWN)
         id_hash = _keyed(parent_id)
-        family = None
-        accepted_near = False
 
-    keep = dict(id_hash=id_hash, device=device, ip_hash=ip_hash)
+    with transaction.atomic():
+        # One decision at a time for one identity number: five wrong phones are five, however they are sent.
+        _one_at_a_time(f'identify:{id_hash}')
+        return _decide(
+            family=family, parent_id=parent_id, phone=phone, accepted_near=bool(near_token),
+            keep=dict(id_hash=id_hash, device=device, ip_hash=_keyed(ip) if ip else ''), data=data,
+        )
+
+
+def _decide(*, family, parent_id, phone, accepted_near, keep, data) -> dict:
+    now = timezone.now()
+    since = now - WINDOW
+    id_hash, device, ip_hash = keep['id_hash'], keep['device'], keep['ip_hash']
 
     if not _DEVICE_ID.match(device) or not _opened_the_form(data):
         _keep(Attempt.OUTCOME_BOT, **keep)
         return dict(UNKNOWN)
-
-    # Families, not requests: one parent typing again and again is one family.
-    identified = Attempt.objects.filter(outcome__in=(Attempt.OUTCOME_KNOWN, Attempt.OUTCOME_KNOWN_NEAR))
-    for window, cap, key, words in (
-        (timedelta(hours=1), HOURLY_CAP, f'h{now:%H}', 'בשעה אחת'),
-        (WINDOW, DAILY_CAP, 'day', 'ביממה'),
-    ):
-        if identified.filter(created_at__gte=now - window).values('family').distinct().count() >= cap:
-            _keep(Attempt.OUTCOME_CAP, **keep)
-            _alert_office(
-                Attempt.OUTCOME_CAP, key=key,
-                what=f'יותר מ-{cap} משפחות זוהו {words}. הזיהוי נעצר לכולם עד שהקצב יורד, והטופס נפתח ריק.',
-            )
-            return dict(UNKNOWN)
 
     if Attempt.objects.filter(
         id_hash=id_hash, outcome__in=Attempt.WRONG_PHONE, created_at__gte=since,
@@ -365,7 +399,7 @@ def _identify(data, *, ip: str) -> dict:
         locked_family = family or Family.objects.filter(parent_id_number=parent_id).first()
         _keep(Attempt.OUTCOME_LOCKED, family=locked_family, **keep)
         _alert_office(
-            Attempt.OUTCOME_LOCKED, key=id_hash[:16], family=locked_family,
+            Attempt.OUTCOME_LOCKED, now,
             what=f'{WRONG_PHONE_LIMIT} ניסיונות עם טלפון שגוי על אותה תעודת זהות. הזיהוי שלה ננעל ליממה.',
         )
         return dict(UNKNOWN)
@@ -399,22 +433,40 @@ def _identify(data, *, ip: str) -> dict:
             _keep(Attempt.OUTCOME_MISMATCH, family=family, **keep)
             return dict(UNKNOWN)
 
-    # From here something of the family is about to be shown.
+    # From here something of the family is about to be shown. The counts below
+    # are across families, so they are taken one request at a time.
+    _one_at_a_time('identify:reveal')
+
+    # Families, not requests: one parent typing again and again is one family.
+    identified = Attempt.objects.filter(
+        outcome__in=(Attempt.OUTCOME_KNOWN, Attempt.OUTCOME_KNOWN_NEAR),
+    ).exclude(family=family)
+    for window, cap, words in ((timedelta(hours=1), HOURLY_CAP, 'בשעה אחת'), (WINDOW, DAILY_CAP, 'ביממה')):
+        if identified.filter(created_at__gte=now - window).values('family').distinct().count() >= cap:
+            _keep(Attempt.OUTCOME_CAP, family=family, **keep)
+            _alert_office(
+                Attempt.OUTCOME_CAP, now,
+                what=f'יותר מ-{cap} משפחות זוהו {words}. הזיהוי נעצר לכולם עד שהקצב יורד, והטופס נפתח ריק.',
+            )
+            return dict(UNKNOWN)
+
     if Attempt.objects.filter(device_id=device, outcome=Attempt.OUTCOME_DEVICE, created_at__gte=since).exists():
-        _keep(Attempt.OUTCOME_DEVICE, family=family, **keep)
+        # Still inside the day the device was stopped for. Kept under its own
+        # name, so being refused again does not start the day over.
+        _keep(Attempt.OUTCOME_DEVICE_HELD, family=family, **keep)
         return dict(UNKNOWN)
     shown = Attempt.objects.filter(outcome__in=Attempt.REVEALING, created_at__gte=since).exclude(family=family)
     if shown.filter(device_id=device).values('family').distinct().count() >= DEVICE_FAMILY_LIMIT:
         _keep(Attempt.OUTCOME_DEVICE, family=family, **keep)
         _alert_office(
-            Attempt.OUTCOME_DEVICE, key=device[:24], family=family,
+            Attempt.OUTCOME_DEVICE, now,
             what='ממכשיר אחד נבדקו פרטים של הורה שלישי ביממה. הזיהוי נחסם במכשיר הזה ליממה, והטופס נפתח בו ריק.',
         )
         return dict(UNKNOWN)
     if ip_hash and shown.filter(ip_hash=ip_hash).values('family').distinct().count() >= NETWORK_FAMILY_LIMIT:
         _keep(Attempt.OUTCOME_NETWORK, family=family, **keep)
         _alert_office(
-            Attempt.OUTCOME_NETWORK, key=ip_hash[:16], family=family,
+            Attempt.OUTCOME_NETWORK, now,
             what=f'מרשת אחת נבדקו פרטים של יותר מ-{NETWORK_FAMILY_LIMIT} הורים ביממה. הורים נוספים מהרשת הזאת לא מזוהים היום.',
         )
         return dict(UNKNOWN)
@@ -435,6 +487,18 @@ def _identify(data, *, ip: str) -> dict:
         family=family, notice=notice_sent, **keep,
     )
     return _known_answer(family, attempt, device=device, notice_sent=notice_sent)
+
+
+def proves_parent(family, typed_phone) -> bool:
+    """
+    The phone typed is one the family's card holds.
+
+    That, with the identity number, is what the form's identification rests
+    on — and it is the least that is asked before anything about an existing
+    family is said or changed for whoever typed its identity number.
+    """
+    phones = family_phones(family)
+    return bool(phones) and normalise_phone(typed_phone) in phones
 
 
 # ── registration with the token ───────────────────────────────────────────────
@@ -492,7 +556,10 @@ def fill_from_identification(data) -> dict:
 
     child_id = str(data.get('identified_child_id') or '').strip()
     if child_id:
-        child = identifiable_children(family).filter(id=child_id).first()
+        try:
+            child = identifiable_children(family).filter(id=uuid.UUID(child_id)).first()
+        except ValueError:
+            child = None
         if child is None:
             raise IdentificationExpired()
         for key, stored in (

@@ -59,6 +59,30 @@ class WidgetRepeatTrialTests(TestCase):
             'trial_lesson_date': trial_date.isoformat(),
         }, format='json')
 
+    def test_the_answer_says_only_whether_a_message_went_out(self, notify):
+        """The message goes to the phone on the card; the answer must not say which phone that is."""
+        notify.return_value = {
+            'sent': True, 'method': 'flow', 'phone': '0521234567', 'whatsapp_phone': '972521234567',
+            'parent_name': 'רות ניסן', 'child_name': 'נועה ניסן', 'subscriber_id': 77,
+        }
+        self.child.status = 'pending'
+        self.child.trial_classes_attended = 0
+        self.child.save()
+
+        res = self.client.post(TRIAL_URL, {
+            'parent_id_number': '123456782', 'parent_first_name': 'מישהו', 'parent_last_name': 'אחר',
+            'parent_phone': '0529999999',
+            'child_first_name': 'נועה', 'child_last_name': 'ניסן', 'child_id_number': '111111118',
+            'child_birth_date': '2018-05-05', 'child_gender': 'female',
+            'course_id': str(self.course.id), 'lesson_id': str(self.lesson.id),
+            'trial_lesson_date': _wednesday(0).isoformat(),
+        }, format='json')
+
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()['whatsapp'], {'sent': True})
+        for detail in ('0521234567', '972521234567', 'רות'):
+            self.assertNotIn(detail, res.content.decode())
+
     def test_a_child_who_had_a_trial_is_sent_to_the_office(self, notify):
         row = LessonEnrollment.objects.create(
             child=self.child, lesson=self.lesson, status='inactive',
@@ -119,7 +143,7 @@ class WidgetRepeatTrialTests(TestCase):
             trial_lesson_date=_wednesday(-2), trial_outcome='attended',
         )
         res = self.client.post(TRIAL_URL, {
-            'parent_id_number': '987654321', 'parent_first_name': 'דן', 'parent_last_name': 'ניסן',
+            'parent_id_number': '987654324', 'parent_first_name': 'דן', 'parent_last_name': 'ניסן',
             'parent_phone': '0529999999',
             'child_first_name': 'נועה', 'child_last_name': 'ניסן', 'child_id_number': '111111118',
             'child_birth_date': '2018-05-05', 'child_gender': 'female',

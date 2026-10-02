@@ -27,7 +27,12 @@ else:
     ACTIVE_ENV_FILE = 'environment variables (no .env file found)'
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = config('SECRET_KEY', default='django-insecure-development-key-change-in-production')
+_DEFAULT_SECRET_KEY = 'django-insecure-development-key-change-in-production'
+SECRET_KEY = config('SECRET_KEY', default=_DEFAULT_SECRET_KEY)
+# Whoever knows the key can sign what the server signs. With the default one
+# above — public, it is in the repository — nothing that rests on a signature
+# may be trusted: the registration form's identification stays off.
+SECRET_KEY_IS_DEFAULT = SECRET_KEY == _DEFAULT_SECRET_KEY
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # On Vercel, default DEBUG to False unless explicitly enabled.

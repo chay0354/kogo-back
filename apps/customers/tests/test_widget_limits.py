@@ -41,8 +41,8 @@ class WidgetLimitsTest(TestCase):
             'parent_id_number': '123456782', 'child_first_name': 'Kid', 'child_last_name': 'Parent',
         }, format='json', **extra)
 
-    def _item(self):
-        return _payload(course_id=str(self.course.id), lesson_id=str(self.lesson.id))
+    def _item(self, **overrides):
+        return _payload(course_id=str(self.course.id), lesson_id=str(self.lesson.id), **overrides)
 
     def test_lookups_from_one_address_stop_at_the_hourly_count(self):
         with patch('apps.customers.widget_views.WIDGET_LOOKUP_HOURLY_LIMIT', 2):
@@ -98,6 +98,88 @@ class WidgetLimitsTest(TestCase):
         self.assertEqual(quote['Cache-Control'], 'no-store')
         self.assertEqual(self.client.get(IDENTIFY)['Cache-Control'], 'no-store')
         self.assertEqual(self.client.post(IDENTIFY, {}, format='json')['Cache-Control'], 'no-store')
+
+    def test_the_count_can_run_by_day_and_by_more_than_one(self):
+        self.assertFalse(widget_limits.over_limit('names', '123456782', 10, per='day', by=6))
+        self.assertTrue(widget_limits.over_limit('names', '123456782', 10, per='day', by=6))
+        bucket = WidgetRateBucket.objects.get(scope='names')
+        self.assertEqual((bucket.count, bucket.bucket_start.hour, bucket.bucket_start.minute), (12, 0, 0))
+
+    def test_the_address_is_the_one_the_platform_wrote_not_one_a_caller_can_send(self):
+        from rest_framework.test import APIRequestFactory
+
+        request = APIRequestFactory().post(
+            LOOKUP, {}, HTTP_X_FORWARDED_FOR='198.51.100.7', HTTP_X_VERCEL_FORWARDED_FOR='203.0.113.9',
+        )
+        self.assertEqual(widget_limits.request_ip(request), '203.0.113.9')
+        plain = APIRequestFactory().post(LOOKUP, {}, HTTP_X_FORWARDED_FOR='198.51.100.7')
+        self.assertEqual(widget_limits.request_ip(plain), '198.51.100.7')
+
+    def test_a_look_up_says_nothing_of_a_family_without_its_phone(self):
+        """An identity number and a list of first names used to be enough to learn a family's children."""
+        family = TestDataFactory.create_family(parent_id_number='123456782', phone='0501234567')
+        child = TestDataFactory.create_child(family=family, first_name='Kid', last_name='Parent', status='active')
+        from apps.enrollments.models import LessonEnrollment
+        LessonEnrollment.objects.create(child=child, lesson=self.lesson, status='active')
+        body = {'parent_id_number': '123456782', 'child_first_name': 'Kid', 'child_last_name': 'Parent'}
+        new_family = {
+            'family_status': 'new', 'child_status': 'new', 'discount_type': None, 'discount_question': None,
+            'enrolled_lesson_ids': [], 'already_registered': False,
+        }
+
+        self.assertEqual(self.client.post(LOOKUP, body, format='json').json(), new_family)
+        self.assertEqual(
+            self.client.post(LOOKUP, {**body, 'parent_phone': '0529999999'}, format='json').json(), new_family,
+        )
+        known = self.client.post(LOOKUP, {**body, 'parent_phone': '050-1234567'}, format='json').json()
+        self.assertEqual(known['child_id'], str(child.id))
+        self.assertEqual(known['enrolled_lesson_ids'], [str(self.lesson.id)])
+
+        Family.objects.filter(id=family.id).update(widget_identification_blocked_at='2026-10-02T00:00:00Z')
+        self.assertEqual(
+            self.client.post(LOOKUP, {**body, 'parent_phone': '0501234567'}, format='json').json(), new_family,
+        )
+
+    def test_a_blank_identity_number_does_not_land_on_a_family_without_one(self):
+        """A space passed the "required" check and matched the first card with no identity number."""
+        stranger = TestDataFactory.create_family(parent_id_number='', phone='0507777777')
+        for bad in (' ', 'abc', '123456789', '1234567890'):
+            for url in (REGISTER, '/api/v1/customers/widget/trial-register/'):
+                response = self.client.post(url, {**self._item(), 'parent_id_number': bad}, format='json')
+                self.assertEqual(response.status_code, 400, (url, bad, response.content))
+            quote = self.client.post(QUOTE, {'items': [{**self._item(), 'parent_id_number': bad}]}, format='json')
+            self.assertEqual(quote.status_code, 400, bad)
+        self.assertEqual(stranger.children.count(), 0)
+        self.assertEqual(Family.objects.count(), 1)
+
+    def test_the_request_cannot_wave_the_yearly_fee(self):
+        response = self.client.post(REGISTER, {**self._item(), 'include_registration_fee': False}, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()['registration_fee'], 120.0)
+
+    def test_a_quote_is_for_one_parent(self):
+        other = {**self._item(), 'parent_id_number': '222222226'}
+
+        response = self.client.post(QUOTE, {'items': [self._item(), other]}, format='json')
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_guessing_a_familys_children_through_quotes_is_bounded(self):
+        TestDataFactory.create_family(parent_id_number='123456782', phone='0507777777')
+        with patch('apps.customers.widget_views.UNPROVEN_QUOTE_DAILY_ITEMS', 3):
+            two = self.client.post(QUOTE, {'items': [self._item(), self._item(child_first_name='B')]}, format='json')
+            more = self.client.post(QUOTE, {'items': [self._item(), self._item(child_first_name='C')]}, format='json')
+
+        self.assertEqual(two.status_code, 200, two.content)
+        self.assertEqual(more.status_code, 429)
+
+    def test_a_quote_with_the_familys_own_phone_is_never_counted(self):
+        TestDataFactory.create_family(parent_id_number='123456782', phone='0501234567')
+        with patch('apps.customers.widget_views.UNPROVEN_QUOTE_DAILY_ITEMS', 0):
+            response = self.client.post(QUOTE, {'items': [self._item()]}, format='json')
+
+        self.assertEqual(response.status_code, 200, response.content)
 
     def test_an_unexpected_failure_tells_the_parent_a_code_and_not_the_error(self):
         with patch(

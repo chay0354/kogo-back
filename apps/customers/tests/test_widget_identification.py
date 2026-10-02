@@ -114,6 +114,12 @@ class WhoIsRecognised(IdentificationCase):
             self.assertEqual(self.ask(), UNKNOWN)
         self.assertEqual(self.outcomes(), [])
 
+    def test_the_repositorys_own_secret_key_keeps_it_off(self):
+        """A token is only as good as the key that signs it; the default key is public."""
+        with override_settings(SECRET_KEY_IS_DEFAULT=True):
+            self.assertEqual(self.client.get(IDENTIFY).json(), {'enabled': False, 'ticket': ''})
+            self.assertEqual(self.ask(), UNKNOWN)
+
     def test_the_form_is_told_it_is_on_and_given_a_ticket(self):
         answer = self.client.get(IDENTIFY).json()
 
@@ -177,6 +183,20 @@ class ASimilarPhone(IdentificationCase):
     def test_three_digits_off_is_another_number(self):
         self.assertEqual(self.ask(phone='0501234999'), UNKNOWN)
 
+    def test_only_a_slip_of_the_finger_is_similar(self):
+        """One wrong digit, or two neighbours swapped — not any two wrong digits."""
+        near = identification._near
+        self.assertTrue(near('0501234568', '0501234567'))   # one digit
+        self.assertTrue(near('0501234576', '0501234567'))   # neighbours swapped
+        self.assertFalse(near('0501234589', '0501234567'))  # two wrong digits side by side
+        self.assertFalse(near('0511234568', '0501234567'))  # two wrong digits apart
+        self.assertFalse(near('0501234567', '0501234567'))  # the number itself is not "similar"
+        self.assertFalse(near('050123456', '0501234567'))
+
+    def test_two_wrong_digits_are_not_offered_the_stored_number(self):
+        self.assertEqual(self.ask(phone='0511234568'), UNKNOWN)
+        self.assertEqual(self.outcomes(), ['mismatch'])
+
     def test_an_offer_is_taken_up_only_on_the_device_it_was_made_on(self):
         offered = self.ask(phone='0501234576')
 
@@ -219,7 +239,25 @@ class TheLimits(IdentificationCase):
         self.alert.assert_called_once()
         # For a day, on that device, the earlier two are not shown again either.
         self.assertEqual(self.ask(), UNKNOWN)
-        self.assertEqual(self.outcomes(), ['known', 'known', 'device', 'device'])
+        self.assertEqual(self.outcomes(), ['known', 'known', 'device', 'device_held'])
+
+    def test_being_refused_again_does_not_start_the_day_over(self):
+        _family('222222226', '0502222222', child_name='נועה')
+        _family('333333334', '0503333333', child_name='איתי')
+        self.ask()
+        self.ask('222222226', '0502222222')
+        self.ask('333333334', '0503333333')
+        # The block is a day old: the tries made while it held do not extend it.
+        WidgetIdentifyAttempt.objects.filter(outcome='device').update(
+            created_at=timezone.now() - timedelta(hours=25),
+        )
+        WidgetIdentifyAttempt.objects.filter(outcome='known').update(
+            created_at=timezone.now() - timedelta(hours=25),
+        )
+        self.ask()
+        WidgetIdentifyAttempt.objects.filter(outcome='device_held').delete()
+
+        self.assertEqual(self.ask()['status'], 'known')
 
     def test_another_device_is_not_affected(self):
         _family('222222226', '0502222222', child_name='נועה')
@@ -381,11 +419,13 @@ class RegistrationWithTheToken(IdentificationCase):
         self.assertEqual((self.child.last_name, self.child.id_number), ('כהן', '218847366'))
         self.assertEqual(Child.objects.filter(family=self.family).count(), 1)
 
-    def test_an_email_the_identified_parent_retyped_is_kept(self):
-        self.client.post(REGISTER, self._hidden(parent_email='new@example.com'), format='json')
+    def test_an_email_the_identified_parent_retyped_is_kept_and_the_office_is_told(self):
+        with patch('apps.customers.widget_views._tell_office_of_new_email') as told:
+            self.client.post(REGISTER, self._hidden(parent_email='new@example.com'), format='json')
 
         self.family.refresh_from_db()
         self.assertEqual(self.family.email, 'new@example.com')
+        told.assert_called_once_with(self.family, 'dana.cohen@example.com', 'new@example.com')
 
     def test_another_child_is_added_to_the_same_family(self):
         response = self.client.post(REGISTER, self._hidden(
@@ -422,6 +462,12 @@ class RegistrationWithTheToken(IdentificationCase):
             self.assertEqual(response.status_code, 400)
             self.assertTrue(response.json()['identification_expired'])
         self.assertEqual(Payment.objects.count(), 0)
+
+    def test_a_chosen_child_that_is_not_an_id_is_refused_not_an_error(self):
+        response = self.client.post(REGISTER, self._hidden(identified_child_id='not-an-id'), format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.json()['identification_expired'])
 
     def test_a_child_of_another_family_cannot_be_chosen(self):
         _, other = _family('222222226', '0502222222', child_name='נועה')
@@ -485,14 +531,41 @@ class AnIdentityNumberAloneChangesNothing(TestCase):
         self.assertEqual(self.family.email, 'new@example.com')
         self.told.assert_not_called()
 
-    def test_a_card_with_no_phone_takes_the_one_typed(self):
+    def test_a_card_with_no_phone_is_not_given_one_by_an_identity_number(self):
+        """Otherwise: type the number, set a phone, come back with it — and be the parent."""
         Family.objects.filter(id=self.family.id).update(phone='')
         self.family.parents.update(phone='')
 
-        self._register(parent_phone='0529999999')
+        self.assertEqual(self._register(parent_phone='0529999999').status_code, 201)
 
         self.family.refresh_from_db()
-        self.assertEqual(self.family.phone, '0529999999')
+        self.assertEqual(self.family.phone, '')
+        self.told.assert_called_once()
+
+    def test_what_the_office_is_told_carries_a_phone_and_an_email_and_nothing_else(self):
+        from apps.customers.widget_views import _typed_contact
+
+        self.assertEqual(_typed_contact('052-999 9999', 'a@b.co'), 'טלפון 0529999999, דוא״ל a@b.co')
+        self.assertEqual(_typed_contact('התקשרו עכשיו ל-0529999999 דחוף', '<b>x</b>'), 'טלפון 0529999999')
+        self.assertEqual(_typed_contact('', 'x' * 200 + '@b.co'), 'פרטי קשר אחרים')
+
+    def test_a_stream_of_registrations_without_the_familys_phone_is_stopped(self):
+        with patch('apps.customers.widget_views.UNPROVEN_REGISTER_DAILY_LIMIT', 2):
+            first = self._register(parent_phone='0529999999')
+            second = self._register(parent_phone='0529999998', child_first_name='אחר', child_id_number='456789017')
+            third = self._register(parent_phone='0529999997', child_first_name='שלישי', child_id_number='567890124')
+
+        self.assertEqual((first.status_code, second.status_code), (201, 201))
+        self.assertEqual(third.status_code, 429)
+        self.assertEqual(Child.objects.filter(family=self.family).count(), 3)
+
+    def test_the_familys_own_phone_is_never_counted(self):
+        with patch('apps.customers.widget_views.UNPROVEN_REGISTER_DAILY_LIMIT', 0):
+            self.assertEqual(self._register().status_code, 201)
+
+    def test_a_new_family_is_never_counted(self):
+        with patch('apps.customers.widget_views.UNPROVEN_REGISTER_DAILY_LIMIT', 0):
+            self.assertEqual(self._register(parent_id_number='222222226').status_code, 201)
 
 
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
@@ -530,6 +603,24 @@ class TheConsent(TestCase):
         self.assertEqual(self._register(computerized_docs_consent=False).status_code, 201)
 
         self.assertIsNone(Family.objects.get(parent_id_number=PARENT_ID).widget_identification_consent_at)
+
+    def test_an_identity_number_alone_cannot_give_a_familys_consent(self):
+        """It would open the family to identification on a stranger's say-so."""
+        self.assertEqual(self._register(computerized_docs_consent=False).status_code, 201)
+
+        response = self._register(
+            parent_phone='0529999999', child_first_name='אחר', child_id_number='345678903',
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertIsNone(Family.objects.get(parent_id_number=PARENT_ID).widget_identification_consent_at)
+
+    def test_the_parent_with_the_cards_phone_gives_it_on_a_later_registration(self):
+        self.assertEqual(self._register(computerized_docs_consent=False).status_code, 201)
+
+        self._register(child_first_name='אחר', child_id_number='345678903')
+
+        self.assertIsNotNone(Family.objects.get(parent_id_number=PARENT_ID).widget_identification_consent_at)
 
     def test_a_quote_records_nothing(self):
         body = self._register  # noqa: F841 — the payload builder only
@@ -599,6 +690,35 @@ class TheOfficeSwitch(TestCase):
         self.assertFalse(body['blocked'])
         self.assertIsNotNone(body['consent_at'])
         self.assertEqual(body['history'], [])
+
+    def test_a_partner_may_switch_off_but_only_a_manager_switches_back_on(self):
+        from apps.core.models import UserProfile
+
+        partner_user = TestDataFactory.create_user('partner@example.com', role=UserProfile.ROLE_PARTNER)
+        profile = UserProfile.objects.get(user=partner_user)
+        profile.assigned_branches.add(self.family.branch)
+        partner = APIClient()
+        partner.force_authenticate(get_user_model().objects.get(pk=partner_user.pk))
+
+        off = partner.post(self.url, {'blocked': True, 'reason': 'בקשת ההורה'}, format='json')
+        on = partner.post(self.url, {'blocked': False, 'reason': 'סתם'}, format='json')
+
+        self.assertEqual(off.status_code, 200, off.content)
+        self.assertEqual(on.status_code, 403)
+        self.family.refresh_from_db()
+        self.assertIsNotNone(self.family.widget_identification_blocked_at)
+        self.assertEqual(
+            self.client.post(self.url, {'blocked': False, 'reason': 'בדיקה'}, format='json').status_code, 200,
+        )
+
+    def test_the_reason_is_not_in_every_list_of_families(self):
+        self.client.post(self.url, {'blocked': True, 'reason': 'צו הרחקה'}, format='json')
+
+        listed = self.client.get(f'/api/v1/customers/families/{self.family.id}/').json()
+
+        self.assertNotIn('widget_identification_blocked_reason', listed)
+        self.assertNotIn('צו הרחקה', str(listed))
+        self.assertIsNotNone(listed['widget_identification_blocked_at'])
 
     def test_an_instructor_cannot_touch_it(self):
         from apps.core.models import UserProfile

@@ -143,6 +143,12 @@ class FamilyViewSet(viewsets.ModelViewSet):
                 return Response({'error': 'יש לכתוב סיבה'}, status=status.HTTP_400_BAD_REQUEST)
             if blocked == bool(family.widget_identification_blocked_at):
                 return Response({'error': 'המתג כבר במצב הזה'}, status=status.HTTP_400_BAD_REQUEST)
+            # Anyone who sees the family may switch it off; what the office
+            # switched off, only a manager switches back on.
+            if not blocked and not IsManager().has_permission(request, self):
+                return Response(
+                    {'error': 'רק מנהל יכול להפעיל מחדש את הזיהוי'}, status=status.HTTP_403_FORBIDDEN,
+                )
             with transaction.atomic():
                 family.widget_identification_blocked_at = timezone.now() if blocked else None
                 family.widget_identification_blocked_reason = reason if blocked else None

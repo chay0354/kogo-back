@@ -31,6 +31,7 @@ class WidgetIdentifyAttempt(models.Model):
     OUTCOME_DUPLICATE = 'duplicate'
     OUTCOME_LOCKED = 'locked'
     OUTCOME_DEVICE = 'device'
+    OUTCOME_DEVICE_HELD = 'device_held'
     OUTCOME_NETWORK = 'network'
     OUTCOME_CAP = 'cap'
     OUTCOME_BOT = 'bot'
@@ -46,6 +47,7 @@ class WidgetIdentifyAttempt(models.Model):
         (OUTCOME_DUPLICATE, 'שתי משפחות עם אותה ת.ז.'),
         (OUTCOME_LOCKED, 'ת.ז. ננעלה אחרי ניסיונות שגויים'),
         (OUTCOME_DEVICE, 'יותר מדי הורים מאותו מכשיר'),
+        (OUTCOME_DEVICE_HELD, 'מכשיר שנחסם היום'),
         (OUTCOME_NETWORK, 'יותר מדי הורים מאותה רשת'),
         (OUTCOME_CAP, 'נעצר: יותר מדי זיהויים בשעה'),
         (OUTCOME_BOT, 'נראה כמו רובוט'),
