@@ -113,6 +113,21 @@ class BusinessChargeTests(TestCase):
         self.assertEqual(issue_business_charge_document(payment.id).id, document.id)
         self.assertEqual(FormalDocument.objects.filter(document_type='combined').count(), 1)
 
+    def test_the_document_names_the_card_not_tranzilas_code(self):
+        """The notify carries cardtype '2'; IRM-2026-000001 printed "סוג כרטיס: 2" (1.10.2026)."""
+        from apps.payment_links.business_charge import card_brand_name
+
+        payment = self.completed_payment(self.create_link())
+        PaymentLinkPayment.objects.filter(pk=payment.pk).update(card_type='2')
+        document = issue_business_charge_document(payment.id)
+        self.assertEqual(document.payments.get().card_brand, 'ויזה')
+        self.assertEqual(card_brand_name('1'), 'מאסטרקארד')
+        self.assertEqual(card_brand_name('5'), 'ישראכרט')
+        # A name, or a code Tranzila adds one day, is kept as it came.
+        self.assertEqual(card_brand_name('Visa'), 'Visa')
+        self.assertEqual(card_brand_name('9'), '9')
+        self.assertEqual(card_brand_name(''), '')
+
     def test_tax_invoice_is_closed_by_a_receipt(self):
         invoice = self.invoice('tax_invoice', 'TI-TEST-1')
         payment = self.completed_payment(self.create_link(target_invoice_id=str(invoice.id)))

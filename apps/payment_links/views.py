@@ -5,8 +5,8 @@ from django.db import transaction
 from django.db.models import Count, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from rest_framework import status, viewsets
-from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from apps.core.permissions import IsManager
@@ -121,3 +121,27 @@ class PaymentLinkViewSet(viewsets.ModelViewSet):
         row.refresh_from_db()
         code = status.HTTP_200_OK if row.formal_document_id else status.HTTP_409_CONFLICT
         return Response(PaymentLinkPaymentSerializer(row).data, status=code)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def cron_business_invoices(request):
+    """
+    The open tax invoice of every business charge left unpaid for a day
+    (business_charge.issue_overdue_business_invoices).
+
+    The courses' cron auth: X-Cron-Token, ?token= or a Bearer matching
+    CRON_TOKEN / CRON_SECRET. GET as well as POST: Vercel Cron calls with GET.
+    ?limit= bounds the invoices issued in one run (default 20).
+    """
+    from apps.customers.views import _cron_request_authorized
+    from apps.payment_links.business_charge import issue_overdue_business_invoices
+
+    if not _cron_request_authorized(request):
+        return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+    try:
+        limit = int(request.query_params.get('limit') or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    summary = issue_overdue_business_invoices(limit=limit)
+    return Response({'ok': not summary['errors'], 'summary': summary})

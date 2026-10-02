@@ -135,6 +135,10 @@ class PaymentLinkPayment(models.Model):
         (STATUS_FAILED, 'נכשל'),
         (STATUS_REVIEW, 'לבדיקה'),
     ]
+    # failure_reason of a business charge's attempt the customer started and
+    # never finished (business_charge.abandon_stale_attempts). An approved
+    # notify that arrives for it later is still settled by the callback.
+    REASON_ABANDONED = 'abandoned'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     link = models.ForeignKey(PaymentLink, on_delete=models.PROTECT, related_name='payments')

@@ -36,6 +36,10 @@
     {
       "path": "/api/v1/documents/cron/daily-backup/",
       "schedule": "30 0 * * *"
+    },
+    {
+      "path": "/api/v1/payment-links/cron/business-invoices/",
+      "schedule": "20 * * * *"
     }
   ]
 }
