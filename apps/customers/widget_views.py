@@ -955,6 +955,7 @@ def _register_course(request, data, *, rehearsal=False):
                 'discount_amount': payment['discount_amount'],
                 'prorated_amount': payment['prorated_amount'],
                 'registration_fee': payment['registration_fee'],
+                'registration_fee_paid_before': payment.get('registration_fee_paid_before', False),
                 'final_amount': payment['final_amount'],
                 'monthly_amount': payment['monthly_amount'],
                 'next_billing_date': payment['next_billing_date'],
@@ -1072,12 +1073,19 @@ class WidgetQuoteView(APIView):
 
         if refusal is not None:
             return refusal
-        return Response({
-            'items': [
-                {key: value for key, value in answer.items() if key not in _QUOTE_DROPPED_KEYS}
-                for answer in answers
-            ],
-        })
+        return Response({'items': [_quote_answer(answer) for answer in answers]})
+
+
+def _quote_answer(answer: dict) -> dict:
+    """A registration's answer without the rows it named — they are gone with the rollback."""
+    quoted = {key: value for key, value in answer.items() if key not in _QUOTE_DROPPED_KEYS}
+    payments = answer.get('payments')
+    if 'discounts_applied' not in quoted and isinstance(payments, list):
+        # A twice-a-week registration lists its discounts on its payments.
+        quoted['discounts_applied'] = [
+            discount for payment in payments for discount in (payment.get('discounts_applied') or [])
+        ]
+    return quoted
 
 
 class WidgetTrialRegisterView(APIView):

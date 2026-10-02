@@ -234,13 +234,28 @@ class TheLimits(IdentificationCase):
         for _ in range(4):
             self.assertEqual(self.ask()['status'], 'known')
 
-    def test_too_many_identifications_in_an_hour_stop_it_for_everyone(self):
+    def test_too_many_families_in_an_hour_stop_it_for_everyone(self):
+        _family('222222226', '0502222222', child_name='נועה')
+        _family('333333334', '0503333333', child_name='איתי')
         with patch.object(identification, 'HOURLY_CAP', 2):
             self.ask()
-            self.ask(device='device-bbbbbbbbbbbbbbbb')
+            self.ask('222222226', '0502222222', device='device-bbbbbbbbbbbbbbbb')
 
-            self.assertEqual(self.ask(device='device-cccccccccccccccc'), UNKNOWN)
+            self.assertEqual(self.ask('333333334', '0503333333', device='device-cccccccccccccccc'), UNKNOWN)
         self.assertEqual(self.outcomes()[-1], 'cap')
+
+    def test_too_many_families_in_a_day_stop_it_too(self):
+        _family('222222226', '0502222222', child_name='נועה')
+        with patch.object(identification, 'DAILY_CAP', 1):
+            self.ask()
+
+            self.assertEqual(self.ask('222222226', '0502222222', device='device-bbbbbbbbbbbbbbbb'), UNKNOWN)
+        self.assertEqual(self.outcomes()[-1], 'cap')
+
+    def test_one_parent_asking_again_and_again_does_not_use_up_the_cap(self):
+        with patch.object(identification, 'HOURLY_CAP', 2):
+            for _ in range(5):
+                self.assertEqual(self.ask()['status'], 'known')
 
     def test_a_network_is_stopped_only_for_families_not_yet_seen_from_it(self):
         _family('222222226', '0502222222', child_name='נועה')

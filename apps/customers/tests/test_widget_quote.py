@@ -188,3 +188,54 @@ class WidgetQuoteTest(TestCase):
         for body in ({}, {'items': []}, {'items': 'x'}, {'items': [1]}, {'items': [self._item()] * 13}):
             response = self.client.post(QUOTE, body, format='json')
             self.assertEqual(response.status_code, 400, body)
+
+
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
+class FeePaidBeforeTest(TestCase):
+    """The form says "already paid" for the yearly fee only when the child really paid it."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.course = TestDataFactory.create_course(price=Decimal('350.00'))
+        self.lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=0)
+        self.other = TestDataFactory.create_lesson(course=self.course, day_of_week=3)
+
+    def _quote(self, lesson, **extra):
+        item = _payload(course_id=str(self.course.id), lesson_id=str(lesson.id), **extra)
+        return self.client.post(QUOTE, {'items': [item]}, format='json').json()['items'][0]
+
+    def test_a_new_child_pays_the_fee_and_nothing_is_said(self):
+        quoted = self._quote(self.lesson)
+
+        self.assertEqual(quoted['registration_fee'], 120.0)
+        self.assertFalse(quoted['registration_fee_paid_before'])
+
+    def test_a_child_who_paid_it_is_told_so_on_the_next_course(self):
+        registered = self.client.post(
+            REGISTER, _payload(course_id=str(self.course.id), lesson_id=str(self.lesson.id)), format='json',
+        ).json()
+        Payment.objects.filter(id=registered['payment_id']).update(status='completed')
+
+        quoted = self._quote(self.other)
+
+        self.assertEqual(quoted['registration_fee'], 0.0)
+        self.assertTrue(quoted['registration_fee_paid_before'])
+
+    def test_a_fee_still_in_flight_is_not_called_paid(self):
+        """An unpaid first course hides the fee from the second, but nobody paid anything yet."""
+        self.client.post(
+            REGISTER, _payload(course_id=str(self.course.id), lesson_id=str(self.lesson.id)), format='json',
+        )
+
+        quoted = self._quote(self.other)
+
+        self.assertEqual(quoted['registration_fee'], 0.0)
+        self.assertFalse(quoted['registration_fee_paid_before'])
+
+    @override_settings(REGISTRATION_FEE_ILS=0)
+    def test_no_fee_at_all_is_not_a_fee_paid_before(self):
+        quoted = self._quote(self.lesson)
+
+        self.assertEqual(quoted['registration_fee'], 0.0)
+        self.assertFalse(quoted['registration_fee_paid_before'])

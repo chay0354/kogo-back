@@ -518,12 +518,14 @@ MANYCHAT_RENTAL_CARD_UPDATE_FLOW_NS = config('MANYCHAT_RENTAL_CARD_UPDATE_FLOW_N
 MANYCHAT_OFFICE_ALERT_FLOW_NS = config('MANYCHAT_OFFICE_ALERT_FLOW_NS', default='')
 OFFICE_ALERT_PHONES = config('OFFICE_ALERT_PHONES', default='')
 # The registration form recognising a returning parent by identity number and
-# phone (apps/customers/widget_identification.py). Off: the form asks and is
-# always told "not known", so it opens empty for everyone, as it did before.
-# Turn on only once the terms carry the identification paragraph (core
-# migration 0028 adds it) and the owner has decided to — the answer shows
-# children's first names to whoever holds a parent's identity number and phone.
-WIDGET_IDENTIFICATION_ENABLED = config('WIDGET_IDENTIFICATION_ENABLED', default=False, cast=bool)
+# phone (apps/customers/widget_identification.py). On by the owner's decision
+# (2.10.2026: "upload everything but the WhatsApp"). Set to False to switch it
+# off at once: the form is then always told "not known" and opens empty for
+# everyone, as it did before. On, the answer shows children's first names to
+# whoever holds a parent's identity number and phone — and only for a family
+# whose parent accepted terms carrying the identification paragraph (core
+# migration 0028), so nobody is recognised before they sign again.
+WIDGET_IDENTIFICATION_ENABLED = config('WIDGET_IDENTIFICATION_ENABLED', default=True, cast=bool)
 # The short WhatsApp to the parent on every identification ("a registration
 # began with your details. Not you? Call the office."). It is a real send, so
 # it has its own switch and needs an approved template: the flow's ns here.

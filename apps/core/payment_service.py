@@ -143,6 +143,20 @@ def child_already_has_registration_fee(child, current_lesson=None) -> bool:
     ).exists()
 
 
+def child_paid_registration_fee_before(child) -> bool:
+    """
+    The child is already a paying student, so the yearly fee is behind them.
+
+    For the form's wording only ("כבר שולמו"): it reads the same facts as
+    `child_already_has_registration_fee`, minus a row still in flight — a fee
+    not yet charged is not one that was paid — and decides nothing about money.
+    """
+    payments = Payment.objects.filter(child=child, status='completed')
+    if payments.filter(Q(registration_fee__gt=0) | Q(payment_type='recurring_subscription')).exists():
+        return True
+    return RecurringPayment.objects.filter(child=child, status__in=('active', 'paused')).exists()
+
+
 def resolve_include_registration_fee(child, lesson, requested: bool) -> bool:
     """Honor an explicit opt-out, otherwise charge only if this child has not paid yet."""
     if not requested:
@@ -1143,6 +1157,14 @@ class PaymentService:
             'discount_amount': float(discount_calculation.total_discount_amount),
             'prorated_amount': float(prorated_lesson),
             'registration_fee': float(registration_fee),
+            # No fee on this registration because the child paid it before (the
+            # form then says so instead of leaving the line out).
+            'registration_fee_paid_before': bool(
+                include_registration_fee
+                and registration_fee == 0
+                and registration_fee_amount(lesson.course) > 0
+                and child_paid_registration_fee_before(child)
+            ),
             'final_amount': float(prorated_final),
             **describe_trial_credit(trial_credit),
             'prorate_factor': float(prorate_factor),

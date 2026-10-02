@@ -16,7 +16,7 @@ small and the ways to abuse it are closed one by one:
     the last twelve months, and that the office did not switch off;
   * five wrong phones for one identity number lock it for a day;
   * a third family from one device stops identification there for a day, and a
-    cap per network and per hour stops a sweep;
+    cap per network, per hour and per day stops a sweep;
   * a silent check that the form was really opened, a moment before asking;
   * the same answer — "not known" — for an unknown parent, a wrong phone and
     every block, so nothing is learned from being refused;
@@ -65,7 +65,10 @@ DEVICE_FAMILY_LIMIT = 2
 # One address can be a whole mobile network, so the bar is higher and it stops
 # only families not yet seen from there.
 NETWORK_FAMILY_LIMIT = 10
+# Families identified by the whole form, from everywhere: above this it is a
+# sweep and not a registration day, and identification pauses for everyone.
 HOURLY_CAP = 60
+DAILY_CAP = 300
 ACTIVE_WINDOW = timedelta(days=365)
 NOTICE_QUIET = timedelta(minutes=30)
 # Every answer takes at least this long, so a refusal cannot be told from a
@@ -342,15 +345,19 @@ def _identify(data, *, ip: str) -> dict:
         _keep(Attempt.OUTCOME_BOT, **keep)
         return dict(UNKNOWN)
 
-    if Attempt.objects.filter(
-        outcome__in=(Attempt.OUTCOME_KNOWN, Attempt.OUTCOME_KNOWN_NEAR), created_at__gte=now - timedelta(hours=1),
-    ).count() >= HOURLY_CAP:
-        _keep(Attempt.OUTCOME_CAP, **keep)
-        _alert_office(
-            Attempt.OUTCOME_CAP, key=f'{now:%H}',
-            what=f'יותר מ-{HOURLY_CAP} זיהויים בשעה אחת. הזיהוי נעצר לכולם עד שהקצב יורד, והטופס נפתח ריק.',
-        )
-        return dict(UNKNOWN)
+    # Families, not requests: one parent typing again and again is one family.
+    identified = Attempt.objects.filter(outcome__in=(Attempt.OUTCOME_KNOWN, Attempt.OUTCOME_KNOWN_NEAR))
+    for window, cap, key, words in (
+        (timedelta(hours=1), HOURLY_CAP, f'h{now:%H}', 'בשעה אחת'),
+        (WINDOW, DAILY_CAP, 'day', 'ביממה'),
+    ):
+        if identified.filter(created_at__gte=now - window).values('family').distinct().count() >= cap:
+            _keep(Attempt.OUTCOME_CAP, **keep)
+            _alert_office(
+                Attempt.OUTCOME_CAP, key=key,
+                what=f'יותר מ-{cap} משפחות זוהו {words}. הזיהוי נעצר לכולם עד שהקצב יורד, והטופס נפתח ריק.',
+            )
+            return dict(UNKNOWN)
 
     if Attempt.objects.filter(
         id_hash=id_hash, outcome__in=Attempt.WRONG_PHONE, created_at__gte=since,
