@@ -68,15 +68,30 @@ class TheEvent(TestCase):
 
         self.assertEqual(event.title, 'שיעור ניסיון בריקוד - 16:45')
 
-    def test_the_notes_are_a_few_short_lines_the_most_needed_first(self):
+    def test_the_notes_open_with_what_to_bring_then_the_details_with_a_line_between(self):
         self.assertEqual(trial_calendar.plain_notes(self.event).split('\n'), [
-            '🕒 יום שני 5.10, 16:45–17:30 (45 דקות)',
-            '👤 בהדרכת ביגי סתיו',
-            '🎒 להביא: מכנס ארוך. בשיעור מורידים נעליים.',
-            '📍 מינץ 24, פתח תקווה',
-            'נכנסים לחניה של סופר טל, והסטודיו משמאל.',
+            '🎒 מה להביא',
+            'מכנס ארוך. בשיעור מורידים נעליים.',
+            '',
+            '──────────',
+            '📋 פרטים נוספים',
+            'מתי: יום שני 5.10, 16:45–17:30 (45 דקות)',
+            'בהדרכת: ביגי סתיו',
+            'איפה: מינץ 24, פתח תקווה',
+            'הגעה: נכנסים לחניה של סופר טל, והסטודיו משמאל.',
+            '',
+            '──────────',
             '📞 שאלות? משרד קוגומלו 050-9424755',
         ])
+
+    def test_only_a_heading_carries_a_sign(self):
+        for line in trial_calendar.plain_notes(self.event).split('\n'):
+            signs = [sign for sign in ('🎒', '📋', '📞', '🕒', '👤', '📍') if sign in line]
+            if signs:
+                self.assertTrue(line.startswith(signs[0]), line)
+        self.assertEqual(
+            [section.sign for section in self.event.sections], ['🎒', '📋', '📞'],
+        )
 
     def test_the_address_and_the_city_stand_in_the_location(self):
         self.assertEqual(self.event.location, 'מינץ 24, פתח תקווה')
@@ -100,8 +115,11 @@ class TheEvent(TestCase):
         event = trial_calendar.build_trial_event(self.lesson, MONDAY, today=TODAY)
 
         self.assertEqual(trial_calendar.plain_notes(event).split('\n'), [
-            '🕒 יום שני 5.10, 16:45–17:30 (45 דקות)',
-            '📍 מינץ 24, פתח תקווה',
+            '📋 פרטי השיעור',
+            'מתי: יום שני 5.10, 16:45–17:30 (45 דקות)',
+            'איפה: מינץ 24, פתח תקווה',
+            '',
+            '──────────',
             '📞 שאלות? משרד קוגומלו 050-9424755',
         ])
 
@@ -146,16 +164,22 @@ class ForGoogle(TestCase):
 
         self.assertEqual(query['dates'][0], '20261102T144500Z/20261102T153000Z')
 
-    def test_the_notes_are_set_in_bold_where_it_helps_with_a_line_break_between_lines(self):
+    def test_headings_and_labels_are_set_in_bold_with_a_line_break_between_lines(self):
         details = self.query['details']
 
         self.assertEqual(details.split('<br>'), [
-            '🕒 <b>יום שני 5.10, 16:45–17:30</b> (45 דקות)',
-            '👤 בהדרכת <b>ביגי סתיו</b>',
-            '🎒 <b>להביא:</b> מכנס ארוך. בשיעור מורידים נעליים.',
-            '📍 <b>מינץ 24, פתח תקווה</b>',
-            'נכנסים לחניה של סופר טל, והסטודיו משמאל.',
-            '📞 <b>שאלות?</b> משרד קוגומלו <a href="tel:0509424755">050-9424755</a>',
+            '<b>🎒 מה להביא</b>',
+            'מכנס ארוך. בשיעור מורידים נעליים.',
+            '',
+            '──────────',
+            '<b>📋 פרטים נוספים</b>',
+            '<b>מתי:</b> יום שני 5.10, 16:45–17:30 (45 דקות)',
+            '<b>בהדרכת:</b> ביגי סתיו',
+            '<b>איפה:</b> מינץ 24, פתח תקווה',
+            '<b>הגעה:</b> נכנסים לחניה של סופר טל, והסטודיו משמאל.',
+            '',
+            '──────────',
+            '<b>📞 שאלות?</b> משרד קוגומלו <a href="tel:0509424755">050-9424755</a>',
         ])
 
     def test_markup_in_a_name_is_written_as_text(self):
@@ -174,7 +198,7 @@ class ForGoogle(TestCase):
 
         details = trial_calendar.google_notes(trial_calendar.build_trial_event(lesson, MONDAY, today=TODAY))
 
-        self.assertIn("<b>גראנג'י סתיו</b>", details)
+        self.assertIn("<b>בהדרכת:</b> גראנג'י סתיו", details)
 
 
 class ForAppleAndTheRest(TestCase):
@@ -213,9 +237,10 @@ class ForAppleAndTheRest(TestCase):
 
     def test_commas_and_new_lines_are_escaped(self):
         self.assertIn('LOCATION:מינץ 24\\, פתח תקווה', self.lines)
-        description = next(line for line in self.lines if line.startswith('DESCRIPTION:🕒'))
-        self.assertIn('16:45–17:30 (45 דקות)\\n👤 בהדרכת ביגי סתיו\\n', description)
+        description = next(line for line in self.lines if line.startswith('DESCRIPTION:🎒'))
+        self.assertIn('16:45–17:30 (45 דקות)\\nבהדרכת: ביגי סתיו\\n', description)
         self.assertIn('נכנסים לחניה של סופר טל\\, והסטודיו משמאל.', description)
+        self.assertIn('\\n\\n──────────\\n📋 פרטים נוספים\\n', description)
 
     def test_the_same_lesson_on_the_same_day_is_the_same_event(self):
         self.assertIn(f'UID:trial-{self.event.uid.split("-", 1)[1]}', self.lines)
@@ -303,6 +328,13 @@ class WhatTheOwnerDictated(TestCase):
         self.assertIn('אולם הספורט', shoham.arrival_directions)
         self.assertIsNone(other.arrival_directions)
         self.assertEqual(kept.arrival_directions, 'כבר נכתב')
+
+        importlib.import_module('apps.core.migrations.0030_em_hamoshavot_directions').fill(django_apps, None)
+
+        other.refresh_from_db()
+        mintz.refresh_from_db()
+        self.assertEqual(other.arrival_directions, 'קניון ספיר, קומה 1.')
+        self.assertIn('סופר טל', mintz.arrival_directions)
 
     def test_each_field_gets_what_to_come_with(self):
         names = ['קפוארה', 'היפהופ - מחול', 'אקרובטיקה אווירית', 'אקרודאנס', 'ברייקדאנס']
