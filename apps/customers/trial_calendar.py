@@ -85,6 +85,8 @@ def takes_place_on(lesson, on: date) -> bool:
 def duration_words(minutes: int) -> str:
     if minutes == 60:
         return 'שעה'
+    if minutes == 75:
+        return 'שעה ורבע'
     if minutes == 90:
         return 'שעה וחצי'
     if minutes == 120:
@@ -176,6 +178,11 @@ def plain_notes(event: TrialEvent) -> str:
     return '\n'.join(out)
 
 
+def _as_text(value: str) -> str:
+    """Markup in a name is written as text. Quotes are left alone: "גראנג'י" is a name, not an attribute."""
+    return html_escape(value, quote=False)
+
+
 def google_notes(event: TrialEvent) -> str:
     """The same notes with the markup Google keeps: bold, a line break, a phone link."""
     out = []
@@ -184,13 +191,13 @@ def google_notes(event: TrialEvent) -> str:
         for word in _words(line):
             if not word:
                 continue
-            words.append(f'<b>{html_escape(word)}</b>' if word == line.strong else html_escape(word))
+            words.append(f'<b>{_as_text(word)}</b>' if word == line.strong else _as_text(word))
         if line.phone:
             digits = ''.join(ch for ch in line.phone if ch.isdigit())
-            words.append(f'<a href="tel:{digits}">{html_escape(line.phone)}</a>')
+            words.append(f'<a href="tel:{digits}">{_as_text(line.phone)}</a>')
         out.append(f'{line.sign} {" ".join(words)}')
         if line.under:
-            out.append(html_escape(line.under))
+            out.append(_as_text(line.under))
     return '<br>'.join(out)
 
 
