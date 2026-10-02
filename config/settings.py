@@ -33,6 +33,12 @@ SECRET_KEY = config('SECRET_KEY', default=_DEFAULT_SECRET_KEY)
 # above — public, it is in the repository — nothing that rests on a signature
 # may be trusted: the registration form's identification stays off.
 SECRET_KEY_IS_DEFAULT = SECRET_KEY == _DEFAULT_SECRET_KEY
+# The day a real key is set, the links already in parents' hands (card update,
+# card replacement) were signed with the default one — and a link we sent must
+# keep opening. So an earlier signature is still read; everything new is signed
+# with the real key only. The registration form's identification never reads
+# the earlier one (see widget_identification._read_signed).
+SECRET_KEY_FALLBACKS = [] if SECRET_KEY_IS_DEFAULT else [_DEFAULT_SECRET_KEY]
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # On Vercel, default DEBUG to False unless explicitly enabled.
