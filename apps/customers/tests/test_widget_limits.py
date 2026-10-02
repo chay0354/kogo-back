@@ -64,7 +64,7 @@ class WidgetLimitsTest(TestCase):
             self.assertEqual(self.client.post(QUOTE, {'items': [self._item()]}, format='json').status_code, 200)
             self.assertEqual(self.client.post(QUOTE, {'items': [self._item()]}, format='json').status_code, 429)
 
-    def test_registration_itself_is_never_stopped_by_the_count(self):
+    def test_registration_itself_is_never_stopped_by_the_look_up_and_quote_counts(self):
         with patch('apps.customers.widget_views.WIDGET_LOOKUP_HOURLY_LIMIT', 0), \
                 patch('apps.customers.widget_views.WIDGET_QUOTE_HOURLY_LIMIT', 0):
             self.assertEqual(self._lookup().status_code, 429)
@@ -173,6 +173,66 @@ class WidgetLimitsTest(TestCase):
 
         self.assertEqual(two.status_code, 200, two.content)
         self.assertEqual(more.status_code, 429)
+
+    def test_a_quote_cannot_hide_guesses_behind_one_good_item(self):
+        """Every item is looked at: the card's phone on the first must not carry wrong ones behind it."""
+        TestDataFactory.create_family(parent_id_number='123456782', phone='0501234567')
+        guess = self._item(parent_phone='0529999999', child_first_name='B')
+        with patch('apps.customers.widget_views.UNPROVEN_QUOTE_DAILY_ITEMS', 1):
+            response = self.client.post(QUOTE, {'items': [self._item(), guess]}, format='json')
+
+        self.assertEqual(response.status_code, 429)
+
+    def test_five_wrong_phones_silence_the_look_up_and_the_quote_for_the_right_one_too(self):
+        """Otherwise "known" or "refused" would say which phone is the family's."""
+        from apps.customers.identification_models import WidgetIdentifyAttempt
+
+        family = TestDataFactory.create_family(parent_id_number='123456782', phone='0501234567')
+        TestDataFactory.create_child(family=family, first_name='Kid', last_name='Parent', status='active')
+        body = {'parent_id_number': '123456782', 'child_first_name': 'Kid', 'child_last_name': 'Parent'}
+        for last in range(5):
+            self.client.post(LOOKUP, {**body, 'parent_phone': f'052999999{last}'}, format='json')
+        self.assertEqual(WidgetIdentifyAttempt.objects.filter(outcome='mismatch').count(), 5)
+
+        look = self.client.post(LOOKUP, {**body, 'parent_phone': '0501234567'}, format='json').json()
+        quote = self.client.post(QUOTE, {'items': [self._item()]}, format='json')
+
+        self.assertEqual(look['family_status'], 'new')
+        self.assertEqual(quote.status_code, 429)
+        # Registration itself goes on.
+        self.assertEqual(self.client.post(REGISTER, self._item(), format='json').status_code, 201)
+
+    def test_a_look_up_without_a_phone_is_not_a_guess(self):
+        """The form as it was sends no phone; it is told nothing and counted as nothing."""
+        from apps.customers.identification_models import WidgetIdentifyAttempt
+
+        TestDataFactory.create_family(parent_id_number='123456782', phone='0501234567')
+        for _ in range(8):
+            self._lookup()
+
+        self.assertEqual(WidgetIdentifyAttempt.objects.count(), 0)
+
+    def test_registrations_from_one_address_stop_at_the_hourly_count_whatever_the_phone(self):
+        with patch('apps.customers.widget_views.WIDGET_REGISTER_HOURLY_LIMIT', 1):
+            first = self.client.post(REGISTER, self._item(), format='json')
+            second = self.client.post(REGISTER, self._item(child_first_name='B', child_id_number='345678903'), format='json')
+
+        self.assertEqual((first.status_code, second.status_code), (201, 429))
+
+    def test_an_identity_number_is_plain_digits_and_not_a_row_of_zeros(self):
+        from apps.customers.widget_views import _valid_parent_id
+
+        for good in ('123456782', '000000018', '12344'):
+            self.assertTrue(_valid_parent_id(good), good)
+        for bad in ('', ' ', '0', '000000000', '²²²²²²²²²', '١٢٣٤٥٦٧٨٢', '1234', '123456789', None, 123):
+            self.assertFalse(_valid_parent_id(bad), bad)
+
+    def test_one_household_on_ipv6_is_one_address(self):
+        from rest_framework.test import APIRequestFactory
+
+        one = APIRequestFactory().post(LOOKUP, {}, HTTP_X_VERCEL_FORWARDED_FOR='2001:db8:1:2:aaaa::1')
+        two = APIRequestFactory().post(LOOKUP, {}, HTTP_X_VERCEL_FORWARDED_FOR='2001:db8:1:2:bbbb::9')
+        self.assertEqual(widget_limits.request_ip(one), widget_limits.request_ip(two))
 
     def test_a_quote_with_the_familys_own_phone_is_never_counted(self):
         TestDataFactory.create_family(parent_id_number='123456782', phone='0501234567')

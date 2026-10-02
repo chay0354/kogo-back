@@ -153,31 +153,41 @@ def stored_parent(family) -> dict:
 
 
 def family_phones(family) -> set:
-    """Every phone on the card that proves the parent: the family's and the primary parent's."""
+    """
+    The phones on the card that prove the parent: the family's and the primary
+    parent's — when they are a real mobile number. A placeholder on a card
+    (zeros, a landline) proves nobody: anybody can guess it.
+    """
     primary = family.parents.filter(is_primary=True).first()
     phones = {normalise_phone(family.phone), normalise_phone(primary.phone if primary else '')}
-    phones.discard('')
-    return phones
+    return {phone for phone in phones if _MOBILE.match(phone) and len(set(phone[2:])) > 1}
 
 
 def identifiable_children(family):
     return family.children.exclude(status='ghost').order_by('created_at')
 
 
+def _paid(family):
+    return Payment.objects.filter(Q(family=family) | Q(child__family=family), status='completed')
+
+
+def is_established(family) -> bool:
+    """
+    The family has paid us, or has a child on a team: its card is its own.
+
+    Until then a card is only what somebody typed — a registration never paid,
+    a free trial booked — and whoever typed it may not have been the parent.
+    So an unpaid card is corrected by the next registration, as it always was,
+    and is never a card the form recognises anyone by.
+    """
+    return family.children.filter(status__in=ACTIVE_CHILD_STATUSES).exists() or _paid(family).exists()
+
+
 def _recently_active(family, now) -> bool:
-    """A paying child today, or a payment or a trial lesson in the last twelve months."""
-    since = now - ACTIVE_WINDOW
+    """A paying child today, or a payment in the last twelve months."""
     if family.children.filter(status__in=ACTIVE_CHILD_STATUSES).exists():
         return True
-    if Payment.objects.filter(
-        Q(family=family) | Q(child__family=family), status='completed', payment_date__gte=since,
-    ).exists():
-        return True
-    from apps.enrollments.models import LessonEnrollment
-
-    return LessonEnrollment.objects.filter(
-        child__family=family, trial_lesson_date__gte=since.date(),
-    ).exists()
+    return _paid(family).filter(payment_date__gte=now - ACTIVE_WINDOW).exists()
 
 
 def terms_carry_the_paragraph() -> bool:
@@ -348,6 +358,41 @@ def _one_at_a_time(key: str) -> None:
         cursor.execute('SELECT pg_advisory_xact_lock(%s)', [number])
 
 
+def _never_wait_long() -> None:
+    """Inside a transaction: give up on a lock after a moment rather than queue behind it."""
+    if connection.vendor != 'postgresql':
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SET LOCAL lock_timeout = '3s'")
+
+
+def guessing_locked(parent_id: str) -> bool:
+    """Five wrong phones were tried for this identity number today — anywhere the form takes a phone."""
+    if not parent_id:
+        return False
+    return Attempt.objects.filter(
+        id_hash=_keyed(parent_id), outcome__in=Attempt.WRONG_PHONE, created_at__gte=timezone.now() - WINDOW,
+    ).count() >= WRONG_PHONE_LIMIT
+
+
+def note_wrong_phone(parent_id: str, family) -> None:
+    """
+    A phone that is not the card's was typed with a family's identity number,
+    somewhere other than the identification itself (the look-up, the quote).
+
+    Counted with the identification's own wrong tries. Otherwise those other
+    doors answer "right" or "wrong" to as many guesses as one cares to send,
+    and the five-tries lock on identification locks nothing.
+    """
+    try:
+        with transaction.atomic():
+            _never_wait_long()
+            _one_at_a_time(f'identify:{_keyed(parent_id)}')
+            _keep(Attempt.OUTCOME_MISMATCH, id_hash=_keyed(parent_id), family=family)
+    except Exception:
+        logger.exception('A wrong phone could not be counted (non-fatal)')
+
+
 def _identify(data, *, ip: str) -> dict:
     if not is_enabled():
         return dict(UNKNOWN)
@@ -376,15 +421,27 @@ def _identify(data, *, ip: str) -> dict:
         id_hash = _keyed(parent_id)
 
     with transaction.atomic():
+        _never_wait_long()
         # One decision at a time for one identity number: five wrong phones are five, however they are sent.
         _one_at_a_time(f'identify:{id_hash}')
-        return _decide(
+        decided = _decide(
             family=family, parent_id=parent_id, phone=phone, accepted_near=bool(near_token),
             keep=dict(id_hash=id_hash, device=device, ip_hash=_keyed(ip) if ip else ''), data=data,
         )
+    if isinstance(decided, dict):
+        return decided
+
+    # A known parent. The message to them is sent with every lock let go: it
+    # is two calls to another company, and nobody else should wait on those.
+    family, attempt = decided
+    notice_sent = _send_notice(family, stored_parent(family)['phone'], timezone.now())
+    if notice_sent:
+        Attempt.objects.filter(pk=attempt.pk).update(notice_sent=True)
+    return _known_answer(family, attempt, device=device, notice_sent=notice_sent)
 
 
-def _decide(*, family, parent_id, phone, accepted_near, keep, data) -> dict:
+def _decide(*, family, parent_id, phone, accepted_near, keep, data):
+    """The answer — or, for a known parent, the family and the kept attempt, for the caller to finish."""
     now = timezone.now()
     since = now - WINDOW
     id_hash, device, ip_hash = keep['id_hash'], keep['device'], keep['ip_hash']
@@ -481,12 +538,7 @@ def _decide(*, family, parent_id, phone, accepted_near, keep, data) -> dict:
             ),
         }
 
-    notice_sent = _send_notice(family, stored_parent(family)['phone'], now)
-    attempt = _keep(
-        Attempt.OUTCOME_KNOWN_NEAR if accepted_near else Attempt.OUTCOME_KNOWN,
-        family=family, notice=notice_sent, **keep,
-    )
-    return _known_answer(family, attempt, device=device, notice_sent=notice_sent)
+    return family, _keep(Attempt.OUTCOME_KNOWN_NEAR if accepted_near else Attempt.OUTCOME_KNOWN, family=family, **keep)
 
 
 def proves_parent(family, typed_phone) -> bool:
@@ -533,6 +585,11 @@ def fill_from_identification(data) -> dict:
     """
     family = family_of_token(data.get('identify_token'), data.get('device_id'))
     if family is None:
+        raise IdentificationExpired()
+    # A token speaks for its own family only: with another identity number
+    # typed beside it, it is not this registration's token.
+    typed_id = str(data.get('parent_id_number') or '').strip()
+    if typed_id and typed_id != family.parent_id_number:
         raise IdentificationExpired()
     filled = {
         key: value for key, value in data.items()

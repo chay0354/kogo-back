@@ -87,15 +87,25 @@ def request_ip(request) -> str:
     from apps.signatures.capture import client_ip
 
     meta = getattr(request, 'META', {}) or {}
+    found = ''
     for header in ('HTTP_X_VERCEL_FORWARDED_FOR', 'HTTP_X_REAL_IP'):
         candidate = (meta.get(header) or '').split(',')[0].strip()
         if not candidate:
             continue
         try:
-            return str(ipaddress.ip_address(candidate))
+            found = str(ipaddress.ip_address(candidate))
+            break
         except ValueError:
             continue
-    return client_ip(request) or ''
+    found = found or client_ip(request) or ''
+    # One household holds a whole /64 of IPv6 addresses: counted as one.
+    try:
+        address = ipaddress.ip_address(found)
+        if address.version == 6:
+            return str(ipaddress.ip_network(f'{found}/64', strict=False).network_address)
+    except ValueError:
+        pass
+    return found
 
 
 def too_many(scope: str, request, limit: int):

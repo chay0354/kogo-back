@@ -31,6 +31,9 @@ from apps.customers.widget_identification import (
     EXPIRED_MESSAGE as IDENTIFICATION_EXPIRED_MESSAGE,
     IdentificationExpired,
     fill_from_identification,
+    guessing_locked,
+    is_established,
+    note_wrong_phone,
     proves_parent,
     record_identification_consent,
 )
@@ -537,9 +540,11 @@ def _record_signature(request, *, family, child, branch, data, refs):
 
 
 INVALID_PARENT_ID_MESSAGE = 'מספר תעודת הזהות של ההורה אינו תקין'
-# A parent whose phone is not the card's still registers — a handful of times a
-# day. Past that it is someone trying names and numbers against a family.
-UNPROVEN_REGISTER_DAILY_LIMIT = 20
+# Registrations from one address in an hour — counted whoever they are for and
+# whatever phone they carry, so the count says nothing about a family. Far
+# above a family, and above an office registering walk-ins all day.
+WIDGET_REGISTER_HOURLY_LIMIT = 120
+# Children priced in a day for a family by someone who did not type its phone.
 UNPROVEN_QUOTE_DAILY_ITEMS = 24
 
 
@@ -552,8 +557,12 @@ def _valid_parent_id(value) -> bool:
     as the family search, where it matched the first family that has no
     identity number on its card — and the registration landed on that family.
     """
+    import re
+
     digits = str(value or '').strip()
-    if not digits.isdigit() or len(digits) > 9:
+    # ASCII digits only (other scripts' digits pass isdigit and are no number
+    # here), long enough to be a number, and not a row of zeros.
+    if not re.fullmatch(r'[0-9]{5,9}', digits) or not digits.strip('0'):
         return False
     total = 0
     for index, char in enumerate(digits.zfill(9)):
@@ -625,26 +634,6 @@ def _tell_office_of_new_email(family, old_email, new_email) -> None:
         logging.getLogger(__name__).exception('Email-change alert failed (non-fatal)')
 
 
-def _unproven_parent_refusal(data, *, identified: bool):
-    """
-    Too many registrations today for an existing family by someone who did not
-    type its phone: a 429, else None.
-
-    Such a registration is allowed — a parent changes numbers — and each one
-    tells the office. A stream of them is someone learning about a family by
-    its identity number alone, or filling it with children that are not there.
-    """
-    if identified:
-        return None
-    parent_id = str(data.get('parent_id_number') or '').strip()
-    family = Family.objects.filter(parent_id_number=parent_id).first()
-    if family is None or proves_parent(family, data.get('parent_phone')):
-        return None
-    if over_limit('unproven-register', parent_id, UNPROVEN_REGISTER_DAILY_LIMIT, per='day'):
-        return Response({'error': TOO_MANY_MESSAGE}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-    return None
-
-
 def _resolve_family_and_child(data, branch, *, identified=False):
     """
     Find-or-create the Family/Parent for `data['parent_id_number']`, then resolve
@@ -652,12 +641,15 @@ def _resolve_family_and_child(data, branch, *, identified=False):
     Records the family's consent to computerized documents when the payload
     gives it (`computerized_docs_consent`).
 
-    A known family's phone and email change only for a parent who proved to be
-    that parent: one the form identified (`identified`), or one who typed the
-    phone the card already holds. An identity number alone does not: it used to
-    be enough to move a family's WhatsApp messages and receipts to whoever
-    typed it. Otherwise the card is kept and the office is told. The consent
-    to be recognised by the form is recorded on the same terms.
+    The phone and email of a family that has paid us (or has a child on a team)
+    change only for a parent who proved to be that parent: one the form
+    identified (`identified`), or one who typed the phone the card already
+    holds. An identity number alone does not: it used to be enough to move a
+    family's WhatsApp messages and receipts to whoever typed it. Otherwise the
+    card is kept and the office is told. A card nobody paid on yet is still
+    corrected by the next registration, as before. The consent to be
+    recognised by the form is recorded only from a parent who proved it, or
+    who opened the card.
 
     Shared by WidgetRegisterView (paid flow) and WidgetTrialRegisterView (trial flow).
     """
@@ -692,15 +684,19 @@ def _resolve_family_and_child(data, branch, *, identified=False):
     else:
         phone = data['parent_phone'].strip()
         proven = identified or proves_parent(family, phone)
-        if not proven:
+        if not proven and is_established(family):
+            # A family that paid, or has a child on a team: its card is its own.
             _tell_office_of_other_contact(family, phone, parent_email)
         else:
+            # The parent — or a card nobody has paid on yet, which the next
+            # registration corrects as it always did: whoever typed it first
+            # may not have been the parent, and must not be left holding it.
             updates = {}
             if phone and family.phone != phone:
                 family.phone = phone
                 updates['phone'] = phone
             if parent_email and family.email != parent_email:
-                if family.email:
+                if proven and family.email:
                     _tell_office_of_new_email(family, family.email, parent_email)
                 family.email = parent_email
                 updates['email'] = parent_email
@@ -740,14 +736,14 @@ def _resolve_family_and_child(data, branch, *, identified=False):
     if existing_child_id and discount_confirmed:
         try:
             child = Child.objects.get(id=existing_child_id, family=family)
-        except Child.DoesNotExist:
+        except (Child.DoesNotExist, ValueError, DjangoValidationError):
             pass
 
     # Extra lesson in the same checkout: reuse the child just created
     if child is None and existing_child_id:
         try:
             candidate = Child.objects.get(id=existing_child_id, family=family)
-        except Child.DoesNotExist:
+        except (Child.DoesNotExist, ValueError, DjangoValidationError):
             candidate = None
         if candidate is not None and (
             not submitted_id_number or candidate.id_number == submitted_id_number
@@ -823,11 +819,17 @@ class WidgetLookupView(APIView):
         # to learn a family's children and their timetable. Everyone else gets
         # the answer a new family gets; registration itself still finds the
         # child, prices the family's discounts and refuses a double signup.
-        if (
-            not family
-            or family.widget_identification_blocked_at
-            or not proves_parent(family, request.data.get('parent_phone'))
-        ):
+        typed_phone = str(request.data.get('parent_phone') or '').strip()
+        knows_the_phone = False
+        if family and not family.widget_identification_blocked_at and typed_phone:
+            # A wrong phone here is a guess like any other at this family's
+            # phone: after five, the look-up answers nobody about the family
+            # for a day — the right phone included, so it confirms nothing.
+            if not guessing_locked(parent_id_number):
+                knows_the_phone = proves_parent(family, typed_phone)
+                if not knows_the_phone:
+                    note_wrong_phone(parent_id_number, family)
+        if not knows_the_phone:
             return Response({
                 'family_status': 'new',
                 'child_status': 'new',
@@ -972,7 +974,7 @@ def _register_course(request, data, *, rehearsal=False):
     if not _valid_parent_id(data.get('parent_id_number')):
         return Response({'error': INVALID_PARENT_ID_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
     if not rehearsal:
-        refused = _unproven_parent_refusal(data, identified=identified)
+        refused = too_many('register', request, WIDGET_REGISTER_HOURLY_LIMIT)
         if refused is not None:
             return refused
 
@@ -1017,7 +1019,7 @@ def _register_course(request, data, *, rehearsal=False):
                 lesson=lesson,
                 is_active=True,
             )
-        except LessonPriceOption.DoesNotExist:
+        except (LessonPriceOption.DoesNotExist, ValueError, DjangoValidationError):
             return Response({'error': 'מחיר נוסף לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
 
     if rehearsal:
@@ -1166,10 +1168,20 @@ class WidgetQuoteView(APIView):
         per identity number and day: enough for a parent with a new phone,
         not for a list of names.
         """
-        if not _quote_is_unproven(items):
+        family = Family.objects.filter(parent_id_number=parent_id).first()
+        if family is None:
             return None
+        refused = Response({'error': TOO_MANY_MESSAGE}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        # After five wrong phones for this family, a quote is refused to
+        # everyone for a day — the right phone too, or a refusal would itself
+        # say which phone is right. (The form then goes on without a price.)
+        if guessing_locked(parent_id):
+            return refused
+        if not _quote_is_unproven(items, family):
+            return None
+        note_wrong_phone(parent_id, family)
         if over_limit('unproven-quote', parent_id, UNPROVEN_QUOTE_DAILY_ITEMS, per='day', by=len(items)):
-            return Response({'error': TOO_MANY_MESSAGE}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return refused
         return None
 
     def _quote(self, request):
@@ -1222,14 +1234,17 @@ class WidgetQuoteView(APIView):
         return Response({'items': [_quote_answer(answer) for answer in answers]})
 
 
-def _quote_is_unproven(items) -> bool:
-    """The quote is about an existing family, and nothing in it shows the parent: no token, not the card's phone."""
-    first = items[0]
-    if str(first.get('identify_token') or '').strip():
-        # A token that is not good is refused inside, with its own answer.
-        return False
-    family = Family.objects.filter(parent_id_number=str(first.get('parent_id_number') or '').strip()).first()
-    return family is not None and not proves_parent(family, first.get('parent_phone'))
+def _quote_is_unproven(items, family) -> bool:
+    """
+    Some item of the quote shows nothing of the parent: no token, and not the
+    card's phone. Every item is looked at — one good item in front must not
+    carry eleven guesses behind it. (A token is checked where it is used: one
+    that is not this family's is refused there.)
+    """
+    return any(
+        not str(item.get('identify_token') or '').strip() and not proves_parent(family, item.get('parent_phone'))
+        for item in items
+    )
 
 
 def _quote_answer(answer: dict) -> dict:
@@ -1281,7 +1296,7 @@ class WidgetTrialRegisterView(APIView):
             )
         if not _valid_parent_id(data.get('parent_id_number')):
             return Response({'error': INVALID_PARENT_ID_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
-        refused = _unproven_parent_refusal(data, identified=False)
+        refused = too_many('register', request, WIDGET_REGISTER_HOURLY_LIMIT)
         if refused is not None:
             return refused
 

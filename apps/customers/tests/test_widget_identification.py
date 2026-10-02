@@ -477,6 +477,17 @@ class RegistrationWithTheToken(IdentificationCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Payment.objects.count(), 0)
 
+    def test_a_token_speaks_for_its_own_family_only(self):
+        """One family's token in front of another family's identity number is not that family's."""
+        _family('222222226', '0502222222', child_name='נועה')
+
+        response = self.client.post(
+            REGISTER, self._hidden(parent_id_number='222222226', identified_child_id=''), format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.json()['identification_expired'])
+
     def test_a_token_stops_working_once_the_office_switches_the_family_off(self):
         Family.objects.filter(id=self.family.id).update(widget_identification_blocked_at=timezone.now())
 
@@ -549,23 +560,98 @@ class AnIdentityNumberAloneChangesNothing(TestCase):
         self.assertEqual(_typed_contact('התקשרו עכשיו ל-0529999999 דחוף', '<b>x</b>'), 'טלפון 0529999999')
         self.assertEqual(_typed_contact('', 'x' * 200 + '@b.co'), 'פרטי קשר אחרים')
 
-    def test_a_stream_of_registrations_without_the_familys_phone_is_stopped(self):
-        with patch('apps.customers.widget_views.UNPROVEN_REGISTER_DAILY_LIMIT', 2):
-            first = self._register(parent_phone='0529999999')
-            second = self._register(parent_phone='0529999998', child_first_name='אחר', child_id_number='456789017')
-            third = self._register(parent_phone='0529999997', child_first_name='שלישי', child_id_number='567890124')
+    def test_a_placeholder_phone_on_the_card_proves_nobody(self):
+        """Zeros on a card are a phone anybody can guess."""
+        for placeholder in ('0000000000', '0500000000', '0', '03-1234567'):
+            Family.objects.filter(id=self.family.id).update(phone=placeholder)
+            self.family.parents.update(phone=placeholder)
+            self.family.refresh_from_db()
+            self.assertFalse(identification.proves_parent(self.family, placeholder), placeholder)
 
-        self.assertEqual((first.status_code, second.status_code), (201, 201))
-        self.assertEqual(third.status_code, 429)
-        self.assertEqual(Child.objects.filter(family=self.family).count(), 3)
+    def test_the_answer_is_the_same_whichever_phone_was_typed(self):
+        """No refusal that the right phone escapes: that would say which phone is right."""
+        right = self._register(child_first_name='א', child_id_number='456789017')
+        wrong = self._register(parent_phone='0529999999', child_first_name='ב', child_id_number='567890124')
 
-    def test_the_familys_own_phone_is_never_counted(self):
-        with patch('apps.customers.widget_views.UNPROVEN_REGISTER_DAILY_LIMIT', 0):
-            self.assertEqual(self._register().status_code, 201)
+        self.assertEqual((right.status_code, wrong.status_code), (201, 201))
+        self.assertEqual(set(right.json()), set(wrong.json()))
 
-    def test_a_new_family_is_never_counted(self):
-        with patch('apps.customers.widget_views.UNPROVEN_REGISTER_DAILY_LIMIT', 0):
-            self.assertEqual(self._register(parent_id_number='222222226').status_code, 201)
+
+@override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
+class ACardNobodyPaidOnYet(TestCase):
+    """
+    Whoever types an identity number first opens the card. Until the family
+    pays, the next registration corrects the card — as it always did — so a
+    stranger who got there first is not left holding the family's messages.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.course = TestDataFactory.create_course(price=Decimal('350.00'))
+        self.lesson = TestDataFactory.create_lesson(course=self.course, day_of_week=0)
+        self.told = patch('apps.customers.widget_views._tell_office_of_other_contact').start()
+        self.addCleanup(patch.stopall)
+
+    def _register(self, **overrides):
+        body = {
+            'parent_id_number': PARENT_ID, 'parent_first_name': 'דנה', 'parent_last_name': 'כהן',
+            'parent_phone': PHONE, 'parent_email': 'dana.cohen@example.com',
+            'child_first_name': 'מאיה', 'child_last_name': 'כהן', 'child_id_number': '218847366',
+            'child_birth_date': '2018-06-21', 'child_gender': 'female',
+            'course_id': str(self.course.id), 'lesson_id': str(self.lesson.id),
+            'computerized_docs_consent': True,
+        }
+        body.update(overrides)
+        return self.client.post(REGISTER, body, format='json')
+
+    def test_the_real_parent_takes_the_card_back_from_whoever_typed_it_first(self):
+        self._register(parent_phone='0529999999', parent_email='stranger@example.com',
+                       child_first_name='בדוי', child_id_number='345678903')
+
+        self.assertEqual(self._register().status_code, 201)
+
+        family = Family.objects.get(parent_id_number=PARENT_ID)
+        self.assertEqual((family.phone, family.email), (PHONE, 'dana.cohen@example.com'))
+        self.told.assert_not_called()
+
+    def test_once_the_family_paid_the_card_is_its_own(self):
+        first = self._register()
+        Payment.objects.filter(id=first.json()['payment_id']).update(status='completed', payment_date=timezone.now())
+
+        self._register(parent_phone='0529999999', child_first_name='אחר', child_id_number='345678903')
+
+        self.assertEqual(Family.objects.get(parent_id_number=PARENT_ID).phone, PHONE)
+        self.told.assert_called_once()
+
+    def test_taking_a_card_over_is_not_a_consent_to_be_identified(self):
+        self._register(computerized_docs_consent=False)
+
+        self._register(parent_phone='0529999999', child_first_name='אחר', child_id_number='345678903')
+
+        family = Family.objects.get(parent_id_number=PARENT_ID)
+        self.assertEqual(family.phone, '0529999999')
+        self.assertIsNone(family.widget_identification_consent_at)
+
+    @override_settings(WIDGET_IDENTIFICATION_ENABLED=True)
+    def test_a_card_nobody_paid_on_is_never_one_the_form_recognises(self):
+        """Not even with consent on it and a trial booked: it may be a stranger's card."""
+        from apps.enrollments.models import LessonEnrollment
+
+        first = self._register()
+        self.assertIsNotNone(Family.objects.get(parent_id_number=PARENT_ID).widget_identification_consent_at)
+        LessonEnrollment.objects.create(
+            child_id=first.json()['child_id'], lesson=self.lesson, status='active',
+            trial_lesson_date=timezone.localdate(),
+        )
+
+        with patch.object(identification, 'MIN_ANSWER_SECONDS', 0):
+            answer = self.client.post(IDENTIFY, {
+                'parent_id_number': PARENT_ID, 'parent_phone': PHONE,
+                'device_id': 'device-aaaaaaaaaaaaaaaa', 'ticket': _ticket(),
+            }, format='json').json()
+
+        self.assertEqual(answer, UNKNOWN)
 
 
 @override_settings(REGISTRATION_FEE_ILS=120, SUBSCRIPTION_FIRST_CHARGE_DATE='')
