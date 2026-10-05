@@ -295,7 +295,8 @@ class StoreSaleDesignTests(MandatoryMarkingsMixin, TestCase):
         self.assertIn('חשבונית עסקה', pdf_text(pdf))
         self.assertIn('ST-2026-000047', pdf_text(pdf))
 
-    def test_many_lines_flow_onto_a_second_page_with_the_header_repeated(self):
+    def test_many_lines_stay_on_the_one_page(self):
+        """Forty lines used to run onto a second page; a document is one page (the owner's rule)."""
         invoice = self.make_invoice(
             invoice_number='ST-2026-000048', total_amount=Decimal('1960.00'),
             amount_paid=Decimal('1960.00'),
@@ -310,13 +311,11 @@ class StoreSaleDesignTests(MandatoryMarkingsMixin, TestCase):
         pdf = generate_store_invoice_pdf(invoice)
         save_sample('11-store-sale-many-lines', pdf)
 
-        self.assertGreater(page_count(pdf), 1, 'forty lines should run onto a second page')
-        pages = PdfReader(io.BytesIO(pdf)).pages
-        for number, page in enumerate(pages, start=1):
-            page_text = re.sub(r'\s+', '', page.extract_text() or '')
-            self.assertIn('כמות', page_text, f'the table header is missing on page {number}')
-            self.assertIn(re.sub(r'\s+', '', ISSUER_NAME), page_text,
-                          f'the footer is missing on page {number}')
+        self.assertEqual(page_count(pdf), 1, 'forty lines must still be one page')
+        tight = squashed(pdf)
+        self.assertEqual(tight.count('כמות'), 1, 'the table header is drawn once')
+        self.assertEqual(tight.count(re.sub(r'\s+', '', self.product.name)), 40, 'a line is missing')
+        self.assertIn(re.sub(r'\s+', '', ISSUER_NAME), tight, 'the footer is missing')
         self.assert_statutory_markings(pdf, 'ST-2026-000048', 'חשבונית מס / קבלה')
 
 
@@ -530,7 +529,7 @@ class HandIssuedDocumentDesignTests(MandatoryMarkingsMixin, TestCase):
         self.assertIn('טיוטה', text)
         self.assertNotIn(ORIGINAL_MARK, text, 'a draft must not be marked מקור')
 
-    def test_a_document_with_many_lines_repeats_the_table_header(self):
+    def test_a_document_with_many_long_lines_stays_on_the_one_page(self):
         doc = self.make_document(
             document_number='TI-2026-000080',
             subtotal=Decimal('4000.00'), vat_amount=Decimal('720.00'),
@@ -547,10 +546,12 @@ class HandIssuedDocumentDesignTests(MandatoryMarkingsMixin, TestCase):
         pdf = generate_document_pdf(doc)
         save_sample('16-hand-issued-many-lines', pdf)
 
-        self.assertGreater(page_count(pdf), 1)
-        for number, page in enumerate(PdfReader(io.BytesIO(pdf)).pages, start=1):
-            page_text = re.sub(r'\s+', '', page.extract_text() or '')
-            self.assertIn('כמות', page_text, f'the table header is missing on page {number}')
+        self.assertEqual(page_count(pdf), 1)
+        tight = squashed(pdf)
+        self.assertEqual(tight.count('כמות'), 1, 'the table header is drawn once')
+        # (pypdf drops the Latin SKU inside a Hebrew line; the Hebrew of each line is counted.)
+        self.assertEqual(tight.count('שורתשירותמספר'), 35, 'a line is missing')
+        self.assertEqual(tight.count('מק"ט'), 35, "a line's SKU row is missing")
 
     def test_a_vat_exempt_document_says_so(self):
         doc = self.make_document(
