@@ -266,17 +266,26 @@ class DiscountService:
         Check if additional lesson discount applies.
         
         Logic:
-        - Child must have status='active'
-        - Re-billing a lesson the child already sits on (card link, replaced
-          card): this lesson must NOT be the first lesson (by enrollment
-          creation date) — the first lesson stays at full price.
-        - Buying the lesson (widget / CRM signup): its enrollment is only
-          created once the payment completes, so the lesson is additional when
-          the child already pays for another lesson, or a payment for another
-          lesson is in flight from the same checkout — the same way the lesson
-          price tiers count it. Without this the discount the CRM configures
-          never reached a signup, only a later card link, and the same lesson
-          was billed at two prices.
+        - A child on a team (status='active'):
+          - Re-billing a lesson the child already sits on (card link, replaced
+            card): this lesson must NOT be the first lesson (by enrollment
+            creation date) — the first lesson stays at full price.
+          - Buying the lesson (widget / CRM signup): its enrollment is only
+            created once the payment completes, so the lesson is additional
+            when the child already pays for another lesson, or a payment for
+            another lesson is in flight from the same checkout — the same way
+            the lesson price tiers count it. Without this the discount the CRM
+            configures never reached a signup, only a later card link, and the
+            same lesson was billed at two prices.
+        - A child who is not on a team yet — one being signed up right now, who
+          becomes active only when the first payment completes: the lesson is
+          additional when a payment for another lesson is in flight from the
+          same checkout. A child who starts with two classes used to pay full
+          price for both, because "active" was asked before anything else;
+          the second child of a new family already got the sibling discount
+          this way (check_second_child_discount). Nothing older than this
+          checkout counts for such a child: not an enrollment left on a child
+          who stopped, not a signup abandoned hours ago.
 
         Args:
             child_id: UUID of the child
@@ -290,21 +299,21 @@ class DiscountService:
 
             child = Child.objects.get(id=child_id)
 
-            # Check if child is active
             if child.status != 'active':
-                return None
-
-            # Get all active lesson enrollments for this child
-            enrollments = LessonEnrollment.objects.filter(
-                child=child,
-                status='active'
-            ).order_by('created_at')
-
-            own = enrollments.filter(lesson_id=lesson_id).first()
-            if own is not None:
-                is_additional = enrollments.filter(created_at__lt=own.created_at).exists()
+                # Being signed up now: only another class of this same checkout counts.
+                is_additional = self._another_lesson_in_flight(child, lesson_id)
             else:
-                is_additional = self._child_pays_for_another_lesson(child, lesson_id)
+                # Get all active lesson enrollments for this child
+                enrollments = LessonEnrollment.objects.filter(
+                    child=child,
+                    status='active'
+                ).order_by('created_at')
+
+                own = enrollments.filter(lesson_id=lesson_id).first()
+                if own is not None:
+                    is_additional = enrollments.filter(created_at__lt=own.created_at).exists()
+                else:
+                    is_additional = self._child_pays_for_another_lesson(child, lesson_id)
 
             if is_additional:
                 return Discount.objects.filter(
@@ -319,11 +328,10 @@ class DiscountService:
         except Child.DoesNotExist:
             return None
 
-    @staticmethod
-    def _child_pays_for_another_lesson(child: Child, lesson_id: str) -> bool:
+    @classmethod
+    def _child_pays_for_another_lesson(cls, child: Child, lesson_id: str) -> bool:
         """Another lesson the child is signed to (not a trial) or is paying for right now."""
         from apps.enrollments.models import LessonEnrollment
-        from apps.customers.models import Payment
 
         if LessonEnrollment.objects.filter(
             child=child,
@@ -331,6 +339,13 @@ class DiscountService:
             trial_lesson_date__isnull=True,
         ).exclude(lesson_id=lesson_id).exists():
             return True
+        return cls._another_lesson_in_flight(child, lesson_id)
+
+    @staticmethod
+    def _another_lesson_in_flight(child: Child, lesson_id: str) -> bool:
+        """A payment for another lesson of this child opened by the same checkout, not yet settled."""
+        from apps.customers.models import Payment
+
         recent = timezone.now() - timedelta(hours=2)
         return Payment.objects.filter(
             child=child,
