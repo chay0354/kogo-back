@@ -305,6 +305,55 @@ class DoubleChargeTest(FlagsTestCase):
         self.assertNotIn(problem_flags.DOUBLE_CHARGE, self.codes(child))
 
 
+class TextTheCardDrawsTest(FlagsTestCase):
+    """
+    The card shows the title alone and opens the two texts under it (owner,
+    6.10.2026). They carry two marks: **bold**, and "• " at the head of a list
+    line. The title carries neither.
+    """
+
+    def double_charge(self):
+        kept = self.child(paid_until_date=TODAY + timedelta(days=12))
+        leftover = self.child(status='pending')
+        self.place(kept)
+        last_month = month_before(THIS_MONTH)
+        self.charge(kept, at(a_day_in(last_month, 1)))
+        self.charge(leftover, at(a_day_in(last_month, 1)))
+        return next(p for p in self.found(kept) if p.code == problem_flags.DOUBLE_CHARGE)
+
+    def test_each_charge_is_a_line_of_its_own_with_the_sum_in_bold(self):
+        problem = self.double_charge()
+
+        first, *charges = problem.what.split('\n')
+        self.assertIn('**2 חיובים חודשיים**', first)
+        self.assertEqual(len(charges), 2)
+        for line in charges:
+            self.assertTrue(line.startswith('• '), line)
+            self.assertIn('**₪260**', line)
+
+    def test_each_thing_to_do_is_a_line_of_its_own(self):
+        problem = self.double_charge()
+
+        steps = problem.action.split('\n')
+        self.assertEqual(len(steps), 2)
+        self.assertTrue(steps[0].startswith('• **לזכות את החיוב המיותר**'), steps[0])
+
+    def test_the_marks_are_always_closed_and_the_title_has_none(self):
+        child = self.child(status='payment_problem')
+        self.place(child)
+        self.standing_order(child, status='failed', next_billing_date=month_before(THIS_MONTH))
+        problems = self.found(child) + [self.double_charge()]
+
+        self.assertTrue(problems)
+        for problem in problems:
+            self.assertNotIn('**', problem.title)
+            self.assertNotIn('•', problem.title)
+            for text in (problem.what, problem.action):
+                for line in text.split('\n'):
+                    self.assertEqual(line.count('**') % 2, 0, line)
+                    self.assertTrue(line.strip(), text)
+
+
 class UnpaidTest(FlagsTestCase):
     def test_a_failed_order_says_how_much_is_open(self):
         child = self.child(status='payment_problem')
@@ -316,6 +365,7 @@ class UnpaidTest(FlagsTestCase):
         self.assertIn(problem_flags._month_label(month_before(THIS_MONTH)), problem.what)
         self.assertIn(problem_flags._month_label(THIS_MONTH), problem.what)
         self.assertIn('₪520', problem.what)
+        self.assertIn('פתוח לתשלום', problem.what)
         self.assertIn('החלפת כרטיס אשראי', problem.action)
 
     def test_a_child_moved_to_another_class_keeps_the_order_of_the_first(self):
@@ -347,7 +397,7 @@ class UnpaidTest(FlagsTestCase):
 
         problem = next(p for p in self.found(kept) if p.code == problem_flags.STANDING_ORDER_FAILED)
 
-        self.assertNotIn('פתוח:', problem.what)
+        self.assertNotIn('פתוח לתשלום', problem.what)
 
     def test_an_order_days_late_is_a_problem(self):
         child = self.child()
@@ -402,7 +452,7 @@ class UnpaidTest(FlagsTestCase):
 
         problem = next(p for p in self.found(child) if p.code == problem_flags.NO_STANDING_ORDER)
 
-        self.assertIn('לא נגבה ממנו אף תשלום', problem.what)
+        self.assertIn('לא נגבה אף תשלום', problem.what)
 
     def test_cash_is_a_way_of_paying(self):
         child = self.child()
