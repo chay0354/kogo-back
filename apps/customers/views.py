@@ -331,7 +331,7 @@ class ChildViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """
         USAGE: Applies filters and annotations for child listing
-        Filters: branch, course, course_type, instructor, age range, status
+        Filters: branch, course, course_type, the course's age group, instructor, age range, status
         Adds annotations for attendance_total and attendance_present
         """
         queryset = super().get_queryset()
@@ -389,14 +389,34 @@ class ChildViewSet(viewsets.ModelViewSet):
                 lesson_enrollments__status='active'
             ).distinct()
 
-        # Filter by course type / תחום
+        # Filter by course type / תחום, and by the course's age group — its
+        # min_age–max_age on the 1–16 age-group scale, written 'low-high' as the
+        # invoices page writes it. Not the child's own age: that is `age`, below.
+        # One filter() for the two, so both are asked of the same course: a child
+        # in capoeira for the small ones and in dance for the grades is not in
+        # "dance for the small ones".
         course_type_id = self.request.query_params.get('course_type')
+        age_group = self.request.query_params.get('age_group')
+        in_course = Q()
         if course_type_id and course_type_id != 'all':
-            queryset = queryset.filter(
-                lesson_enrollments__lesson__course__course_type_id=course_type_id,
-                lesson_enrollments__status='active',
-            ).distinct()
-        
+            in_course &= Q(lesson_enrollments__lesson__course__course_type_id=course_type_id)
+        if age_group and age_group != 'all':
+            from apps.core.ledger_dimensions import parse_age_key
+
+            low, high = parse_age_key(age_group)
+            if low is None and high is None:
+                queryset = queryset.none()
+            else:
+                # A bound of 0 is written like a missing one, so a missing bound matches both.
+                in_course &= Q(lesson_enrollments__lesson__course__min_age=low) if low is not None else (
+                    Q(lesson_enrollments__lesson__course__min_age__isnull=True)
+                    | Q(lesson_enrollments__lesson__course__min_age=0))
+                in_course &= Q(lesson_enrollments__lesson__course__max_age=high) if high is not None else (
+                    Q(lesson_enrollments__lesson__course__max_age__isnull=True)
+                    | Q(lesson_enrollments__lesson__course__max_age=0))
+        if in_course:
+            queryset = queryset.filter(in_course, lesson_enrollments__status='active').distinct()
+
         # Filter by instructor
         instructor_id = self.request.query_params.get('instructor')
         if instructor_id and instructor_id != 'all':
