@@ -208,7 +208,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             return Response({'trial_lesson_date': 'תאריך שיעור הניסיון אינו זמין'}, status=status.HTTP_400_BAD_REQUEST)
         if not lesson.room:
             return Response({'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'}, status=status.HTTP_400_BAD_REQUEST)
-        capacity = min(c for c in (lesson.course.capacity, lesson.room.capacity) if c)
+        capacity = min(c for c in (lesson.capacity, lesson.course.capacity, lesson.room.capacity) if c)
         if count_capacity_enrollments(
             lesson=lesson, occurrence_date=trial_date, include_trials=True,
         ) >= capacity:

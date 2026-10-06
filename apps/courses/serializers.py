@@ -205,7 +205,11 @@ class LessonWithEnrollmentsSerializer(serializers.ModelSerializer):
                   'room', 'instructor', 'enrolled_count', 'total_students_count',
                   'active_students_count',
                   'price', 'lesson_price_override', 'additional_course_prices',
-                  'instructor_salary_override', 'status', 'is_recurring', 'notes']
+                  'instructor_salary_override', 'status', 'is_recurring', 'notes',
+                  # What the lesson edit window shows and sends back whole. Left out of
+                  # here, the window opened without them and saving any other change
+                  # wiped them: a lesson closed to trials went back to the general rule.
+                  'trial_registration_open', 'capacity']
 
     def validate_additional_course_prices(self, value):
         return _normalize_additional_course_prices(value)
@@ -472,6 +476,7 @@ class LessonSerializer(serializers.ModelSerializer):
     enrolled_students_count = serializers.SerializerMethodField()
     external_students_count = serializers.SerializerMethodField()
     room_capacity = serializers.SerializerMethodField()
+    effective_capacity = serializers.SerializerMethodField()
 
     class Meta:
         model = Lesson
@@ -482,7 +487,7 @@ class LessonSerializer(serializers.ModelSerializer):
                   'instructor', 'instructor_name', 'day_of_week', 'day_name',
                   'start_time', 'end_time', 'lesson_date', 'price', 'lesson_price_override',
                   'additional_course_prices', 'instructor_salary_override', 'is_recurring',
-                  'trial_registration_open',
+                  'trial_registration_open', 'capacity', 'effective_capacity',
                   'status', 'notes', 'enrolled_students_count', 'external_students_count', 'room_capacity',
                   'created_at', 'updated_at']
         read_only_fields = ['id', 'instructor_salary_override', 'created_at', 'updated_at']
@@ -540,6 +545,16 @@ class LessonSerializer(serializers.ModelSerializer):
     def get_room_capacity(self, obj):
         """Get room capacity for this lesson"""
         return obj.room.capacity if obj.room else None
+
+    def get_effective_capacity(self, obj):
+        """What the lesson really takes: the tightest of its own limit, the group's and the room's."""
+        from apps.enrollments.enrollment_counts import resolve_lesson_capacity
+
+        return resolve_lesson_capacity(obj)
+
+    def validate_capacity(self, value):
+        """Empty or 0 = the lesson has no limit of its own."""
+        return value or None
 
 
 class LessonBundleLessonSerializer(serializers.ModelSerializer):

@@ -58,6 +58,8 @@ def matching_bundle(course, lessons: list[Lesson]) -> LessonBundle | None:
 
 def _lesson_has_room(lesson: Lesson, child_id) -> str | None:
     caps = []
+    if lesson.capacity:
+        caps.append(int(lesson.capacity))
     if lesson.course.capacity:
         caps.append(int(lesson.course.capacity))
     if lesson.room_id and lesson.room and lesson.room.capacity:
