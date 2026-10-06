@@ -553,7 +553,24 @@ class ChildViewSet(viewsets.ModelViewSet):
         """
         from apps.customers.problem_flags import child_problem_detail
 
-        return Response(child_problem_detail(self.get_object(), branch_ids=self._problem_branch_ids()))
+        detail = child_problem_detail(self.get_object(), branch_ids=self._problem_branch_ids())
+
+        # The other cards' standing orders ride along, in the shape the card
+        # already draws its own in. Read here and not through
+        # customers/recurring-payments/: every read of that route first writes
+        # the monthly amounts that have come due. Scoped as that route scopes.
+        other_ids = [card['id'] for card in detail['duplicate_cards']]
+        orders_by_card: dict = {}
+        if other_ids:
+            orders = scope_courses(
+                RecurringPaymentViewSet.queryset.filter(child_id__in=other_ids),
+                request.user, 'initial_payment__lesson__course',
+            ).order_by('-created_at')
+            for row in RecurringPaymentSerializer(orders, many=True).data:
+                orders_by_card.setdefault(str(row['child']), []).append(row)
+        for card in detail['duplicate_cards']:
+            card['standing_orders'] = orders_by_card.get(card['id'], [])
+        return Response(detail)
     
     @action(detail=False, methods=['get'], url_path='ids')
     def ids(self, request):

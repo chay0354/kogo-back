@@ -264,6 +264,18 @@ class DoubleChargeTest(FlagsTestCase):
 
         self.assertNotIn(problem_flags.DOUBLE_CHARGE, self.codes(child))
 
+    def test_a_charge_the_card_company_refused_took_no_money_and_is_not_a_second_charge(self):
+        child = self.child()
+        self.place(child)
+        self.charge(child, at(a_day_in(month_before(self.last_month), 1)))
+        self.charge(child, at(a_day_in(self.last_month, 1)), code='141')
+        self.charge(child, at(a_day_in(self.last_month, 2)))
+
+        codes = self.codes(child)
+
+        self.assertNotIn(problem_flags.DOUBLE_CHARGE, codes)
+        self.assertIn(problem_flags.DECLINED_RECORDED_PAID, codes)
+
     def test_the_registration_fee_is_not_a_month(self):
         child = self.child()
         self.place(child)
@@ -648,6 +660,32 @@ class ListAndCardApiTest(FlagsTestCase):
         self.assertEqual(problem['code'], problem_flags.STATUS_MISMATCH)
         self.assertEqual(response.data['duplicate_cards'], [])
 
+    def test_the_other_cards_standing_orders_come_with_the_answer_and_nothing_is_written(self):
+        """
+        The card lists the other card's standing orders without asking
+        customers/recurring-payments/ — whose every read writes amounts due.
+        """
+        kept = self.child(paid_until_date=TODAY + timedelta(days=12))
+        leftover = self.child(status='pending')
+        self.place(kept)
+        self.standing_order(kept)
+        theirs = self.standing_order(leftover)
+        # An amount due to take effect: the writing route would promote it.
+        RecurringPayment.objects.filter(pk=theirs.pk).update(
+            pending_amount=Decimal('300.00'), pending_amount_effective_date=TODAY - timedelta(days=1),
+        )
+
+        response = self.client.get(f'/api/v1/customers/children/{kept.id}/problems/')
+
+        (card,) = response.data['duplicate_cards']
+        (order,) = card['standing_orders']
+        self.assertEqual(order['id'], str(theirs.id))
+        self.assertEqual(order['status'], 'active')
+        self.assertEqual(order['amount'], '260.00')
+        theirs.refresh_from_db()
+        self.assertEqual(theirs.amount, Decimal('260.00'))
+        self.assertEqual(theirs.pending_amount, Decimal('300.00'))
+
     def test_the_list_costs_the_same_for_two_children_and_for_twelve(self):
         def populate(count, prefix):
             for index in range(count):
@@ -669,6 +707,34 @@ class ListAndCardApiTest(FlagsTestCase):
 
         self.assertEqual(for_two, for_twelve)
         self.assertLessEqual(for_twelve, 16)
+
+    def test_everyone_at_once_gives_the_same_answers_as_a_page(self):
+        """The filter asks about every child: past a size the tables are read whole, not by ids."""
+        kept = self.child(paid_until_date=TODAY + timedelta(days=12))
+        leftover = self.child(status='pending')
+        self.place(kept)
+        last_month = month_before(THIS_MONTH)
+        for each in (kept, leftover):
+            self.standing_order(each)
+            self.charge(each, at(a_day_in(last_month, 1)))
+        other_family = TestDataFactory.create_family(name='משפחה אחרת', branch=self.branch)
+        failed = self.child(family=other_family, first='שחר', status='payment_problem')
+        self.place(failed)
+        self.standing_order(failed, status='failed', next_billing_date=last_month)
+        fine = self.child(family=other_family, first='גיל', paid_until_date=TODAY + timedelta(days=12))
+        children = [kept, failed, fine]
+
+        def answers():
+            found = problem_flags.problems_for_children(children)
+            return {child.id: [(p.code, p.what) for p in found[child.id]] for child in children}
+
+        by_ids = answers()
+        with patch.object(problem_flags, 'READ_WHOLE_ABOVE', 0):
+            read_whole = answers()
+
+        self.assertEqual(read_whole, by_ids)
+        self.assertTrue(by_ids[kept.id] and by_ids[failed.id])
+        self.assertEqual(by_ids[fine.id], [])
 
     def test_a_break_in_the_flags_does_not_take_the_list_down(self):
         child = self.child()

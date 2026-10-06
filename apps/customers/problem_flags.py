@@ -190,6 +190,9 @@ def _is_monthly_charge(payment: _Payment) -> bool:
         return False
     if payment.final_amount <= 0:
         return False
+    if recorded_decline_code(payment.response_code):
+        # Written down as paid and refused by the card company: no money, so not a charge.
+        return False
     # payment_service.payment_is_fee_only: the trial credit lowered the charge, not the month.
     return payment.final_amount - payment.registration_fee + payment.trial_credit_amount > 0
 
@@ -966,7 +969,7 @@ def _duplicate_cards(person, viewer, records) -> list[Problem]:
         branch_ids.discard(None)
         problems.append(Problem(
             code=DUPLICATE_CARD,
-            title='לילד יש כרטיס נוסף עם תשלומים',
+            title='לילד יש כרטיס נוסף במערכת',
             what=(
                 f'לילד יש כרטיס נוסף במערכת (סטטוס "{summary["status_label"]}"{opened}) שלא מופיע '
                 f'ברשימת הלקוחות. רשומים עליו: {", ".join(holds)}.'
