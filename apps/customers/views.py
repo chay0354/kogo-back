@@ -1850,6 +1850,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         reason = request.data.get('reason', 'זיכוי')
         amount = request.data.get('amount')  # Optional partial refund
+        # Only an explicit true (6.10.2026): the office ticked "cancel the
+        # standing order too". Left out — as every screen before it does — the
+        # refund touches no standing order, as before.
+        cancel_standing_order = request.data.get('cancel_standing_order') is True
         
         # Call payment service to handle refund
         from apps.core.payment_service import PaymentService
@@ -1858,20 +1862,68 @@ class PaymentViewSet(viewsets.ModelViewSet):
         result = payment_service.refund_payment(
             payment_id=str(payment.id),
             reason=reason,
-            amount=Decimal(str(amount)) if amount else None
+            amount=Decimal(str(amount)) if amount else None,
+            cancel_standing_order=cancel_standing_order,
         )
         
         if result['success']:
-            return Response({
+            body = {
                 'success': True,
                 'message': result.get('message', 'התשלום זוכה בהצלחה'),
                 'transaction_id': result.get('transaction_id')
-            })
+            }
+            if cancel_standing_order:
+                body['standing_order_cancelled'] = bool(result.get('standing_order_cancelled'))
+                body['standing_orders_cancelled'] = result.get('standing_orders_cancelled') or []
+            return Response(body)
         else:
             return Response({
                 'error': result.get('error', 'שגיאה בזיכוי התשלום'),
                 'uncertain': bool(result.get('uncertain')),
+                'declined': bool(result.get('declined')),
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'], url_path='refund-info')
+    def refund_info(self, request, pk=None):
+        """
+        GET /api/v1/customers/payments/{id}/refund-info/ — what the refund
+        window needs before anyone confirms. Reads only; nothing is sent to
+        Tranzila.
+
+        `blocked_reason` says, in Hebrew, why this charge cannot be refunded
+        (it was declined and never collected; it is not a completed charge).
+        `standing_orders` are the live standing orders that will charge the
+        same lesson again next month — the window offers to cancel them.
+        """
+        from apps.core.payment_service import refund_refused_as_declined, standing_orders_behind_payment
+
+        payment = self.get_object()
+        declined = refund_refused_as_declined(payment) if payment.status == 'completed' else ''
+        blocked = declined or ('' if payment.status == 'completed' else 'ניתן לזכות רק תשלומים שהושלמו')
+        orders = [] if blocked else list(standing_orders_behind_payment(payment))
+
+        def course_name(order):
+            initial = order.initial_payment
+            lesson = initial.lesson if initial is not None and initial.lesson_id else None
+            return lesson.course.name if lesson is not None and lesson.course_id else ''
+
+        return Response({
+            'payment_id': str(payment.id),
+            'status': payment.status,
+            'refundable': not blocked,
+            'declined': bool(declined),
+            'blocked_reason': blocked,
+            'max_amount': str(payment.final_amount),
+            'standing_orders': [
+                {
+                    'id': str(order.id),
+                    'amount': str(order.amount),
+                    'next_billing_date': order.next_billing_date.isoformat() if order.next_billing_date else None,
+                    'course_name': course_name(order),
+                }
+                for order in orders
+            ],
+        })
 
     @action(detail=True, methods=['get'], url_path='invoice')
     def invoice(self, request, pk=None):
