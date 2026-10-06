@@ -108,6 +108,14 @@ _NAMED_MONTH = re.compile(r'מנוי חודשי (\d{2})/(\d{4})')
 
 @dataclass
 class Problem:
+    """
+    One thing wrong with a child, in words the office reads.
+
+    The card shows the title alone; `what` and `action` open under it (owner,
+    6.10.2026: short lines, the point of each in bold). The two texts carry two
+    marks and nothing else: **…** is bold, and a line starting with "• " is an
+    item of a list. The title carries neither — the list's tooltip shows it.
+    """
     code: str
     title: str
     what: str
@@ -172,6 +180,21 @@ def _money(value) -> str:
     if amount == amount.to_integral_value():
         return f'₪{int(amount):,}'
     return f'₪{amount:,.2f}'
+
+
+def _b(text) -> str:
+    """Bold, in the mark the card draws (Problem)."""
+    return f'**{text}**'
+
+
+def _lines(*lines) -> str:
+    """The lines that say something, one under the other."""
+    return '\n'.join(line for line in lines if line)
+
+
+def _items(*items) -> str:
+    """A list: one item to a line."""
+    return '\n'.join(f'• {item}' for item in items if item)
 
 
 def identity_key(child) -> tuple:
@@ -471,20 +494,21 @@ def _double_standing_orders(person, viewer, records) -> list[Problem]:
             continue
         reported.add(cluster)
         lesson = records.lesson(lesson_id)
-        lines = '; '.join(
-            f'{_money(order.amount)} לחודש, מ־{_day_label(order.start_date)}{_where(order.child_id, viewer)}'
-            for order in orders
-        )
         problems.append(Problem(
             code=DOUBLE_STANDING_ORDER,
             title='שתי הוראות קבע על אותו חוג',
-            what=(
-                f'יש {len(orders)} הוראות קבע פעילות על {lesson.course_name or "אותו חוג"}: {lines}. '
-                'כל אחת מהן מחויבת בכל חודש.'
+            what=_lines(
+                f'על {lesson.course_name or "אותו חוג"} יש {_b(f"{len(orders)} הוראות קבע פעילות")}, '
+                'וכל אחת מחויבת בכל חודש:',
+                _items(*(
+                    f'{_b(_money(order.amount))} לחודש, מ־{_day_label(order.start_date)}'
+                    f'{_where(order.child_id, viewer)}'
+                    for order in orders
+                )),
             ),
-            action=(
-                'לבטל את המיותרת (בכרטיס הילד, לשונית "תשלומים", תחת "הוראות קבע"), '
-                'ולזכות את החיובים הכפולים שכבר ירדו.'
+            action=_items(
+                f'{_b("לבטל את הוראת הקבע המיותרת")} — לשונית "תשלומים", תחת "הוראות קבע".',
+                f'{_b("לזכות את החיובים הכפולים")} שכבר ירדו — לשונית "תשלומים", כפתור "זיכוי".',
             ),
             branch_ids={lesson.branch_id} if lesson.branch_id else set(),
         ))
@@ -569,20 +593,21 @@ def _double_charges(person, viewer, records, today: date) -> list[Problem]:
                 if len(rows) - 1 <= _owed_before(month, charged, floor):
                     continue
             lesson = records.lesson(lesson_id)
-            lines = '; '.join(
-                f'{_day_label(_paid_on(row))} {_money(row.final_amount)}{_where(row.child_id, viewer)}'
-                for row in sorted(rows, key=_paid_on)
-            )
             problems.append(Problem(
                 code=DOUBLE_CHARGE,
                 title='חיוב כפול באותו חודש',
-                what=(
-                    f'ב{_month_label(month)} נגבו {len(rows)} חיובים חודשיים על '
-                    f'{lesson.course_name or "אותו חוג"}: {lines}.'
+                what=_lines(
+                    f'ב{_month_label(month)} ירדו {_b(f"{len(rows)} חיובים חודשיים")} על '
+                    f'{lesson.course_name or "אותו חוג"}:',
+                    _items(*(
+                        f'{_day_label(_paid_on(row))} — {_b(_money(row.final_amount))}'
+                        f'{_where(row.child_id, viewer)}'
+                        for row in sorted(rows, key=_paid_on)
+                    )),
                 ),
-                action=(
-                    'לזכות את החיוב המיותר (בכרטיס הילד, לשונית "תשלומים", כפתור "זיכוי"). '
-                    'אם יש לילד שתי הוראות קבע על החוג — לבטל אחת, כדי שזה לא יחזור בחודש הבא.'
+                action=_items(
+                    f'{_b("לזכות את החיוב המיותר")} — לשונית "תשלומים", כפתור "זיכוי".',
+                    f'אם יש שתי הוראות קבע על החוג — {_b("לבטל אחת")}, כדי שזה לא יחזור בחודש הבא.',
                 ),
                 branch_ids={lesson.branch_id} if lesson.branch_id else set(),
             ))
@@ -604,14 +629,16 @@ def _declined_recorded_paid(person, viewer, records) -> list[Problem]:
             problems.append(Problem(
                 code=DECLINED_RECORDED_PAID,
                 title='חיוב שנדחה ורשום כשולם',
-                what=(
-                    f'החיוב מ־{_day_label(_paid_on(payment))} בסך {_money(payment.final_amount)}{subject}'
-                    f'{_where(payment.child_id, viewer)} רשום "הושלם", אבל טרנזילה דחתה אותו '
-                    f'(קוד {code}). הכסף לא נגבה.'
+                what=_lines(
+                    f'החיוב מ־{_day_label(_paid_on(payment))} בסך {_b(_money(payment.final_amount))}{subject}'
+                    f'{_where(payment.child_id, viewer)} רשום "הושלם", אבל {_b("טרנזילה דחתה אותו")} '
+                    f'(קוד {code}).',
+                    _b('הכסף לא נגבה.'),
                 ),
-                action=(
-                    'לבדוק בטרנזילה ולגבות את הסכום מההורה. לא לזכות את החיוב הזה — אין מה להחזיר, '
-                    'והמערכת תסרב. הסימון יישאר עד שרישום התשלום יתוקן.'
+                action=_items(
+                    f'{_b("לגבות את הסכום מההורה")}, אחרי בדיקה בטרנזילה שהחיוב באמת לא עבר.',
+                    f'{_b("לא לזכות")} את החיוב הזה: אין מה להחזיר, והמערכת תסרב.',
+                    'הסימון נשאר עד שרישום התשלום יתוקן.',
                 ),
                 branch_ids={lesson.branch_id} if lesson.branch_id else set(),
             ))
@@ -641,17 +668,20 @@ def _stuck_charges(person, viewer, records, now) -> list[Problem]:
             lesson = records.lesson(payment.lesson_id)
             subject = f' על {lesson.course_name}' if lesson.course_name else ''
             state = 'בבדיקה' if payment.status == 'processing' else 'ממתין'
+            state_text = _b(f'"{state}"')
             problems.append(Problem(
                 code=STUCK_CHARGE,
                 title='חיוב תקוע',
-                what=(
-                    f'חיוב של {_money(payment.final_amount)}{subject}{_where(payment.child_id, viewer)} '
-                    f'נמצא במצב "{state}" מאז {_day_label(_local(since))}. ייתכן שהכסף ירד בטרנזילה '
-                    'והמערכת לא רשמה זאת.'
+                what=_lines(
+                    f'חיוב של {_b(_money(payment.final_amount))}{subject}{_where(payment.child_id, viewer)} '
+                    f'נמצא במצב {state_text} מאז {_b(_day_label(_local(since)))}.',
+                    'ייתכן שהכסף ירד בטרנזילה והמערכת לא רשמה זאת.',
                 ),
-                action=(
-                    'לבדוק בטרנזילה אם החיוב עבר. עבר — לא לחייב שוב את אותו חודש; '
-                    'לא עבר — לגבות מחדש. עד הבדיקה לא לזכות ולא לחייב שוב.'
+                action=_items(
+                    f'{_b("לבדוק בטרנזילה")} אם החיוב עבר.',
+                    f'עבר — {_b("לא לחייב שוב")} את אותו חודש.',
+                    f'לא עבר — {_b("לגבות מחדש")}.',
+                    'עד הבדיקה: לא לזכות ולא לחייב שוב.',
                 ),
                 branch_ids={lesson.branch_id} if lesson.branch_id else set(),
             ))
@@ -754,13 +784,14 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
             problems.append(Problem(
                 code=STANDING_ORDER_NO_CARD,
                 title='הוראת קבע בלי כרטיס',
-                what=(
-                    f'הוראת הקבע על {subject}{where} ({_money(order.amount)} לחודש) פעילה, '
-                    'אבל אין מאחוריה כרטיס שמור. היא לא תחויב.'
+                what=_lines(
+                    f'הוראת הקבע על {subject}{where} ({_b(_money(order.amount))} לחודש) פעילה, '
+                    f'אבל {_b("אין מאחוריה כרטיס שמור")}.',
+                    'היא לא תחויב.',
                 ),
-                action=(
-                    'לשלוח להורה קישור להזנת כרטיס (בכרטיס הילד, לשונית "תשלומים", '
-                    '"קישור להזנת כרטיס"), או לרשום תשלום במזומן.'
+                action=_items(
+                    f'{_b("לשלוח להורה קישור להזנת כרטיס")} — לשונית "תשלומים", "קישור להזנת כרטיס".',
+                    f'או {_b("לרשום תשלום במזומן")}.',
                 ),
                 branch_ids=branch_ids,
             ))
@@ -776,13 +807,15 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
             problems.append(Problem(
                 code=STANDING_ORDER_FAILED,
                 title='הכרטיס נדחה — החודש לא שולם',
-                what=(
-                    f'החיוב החודשי על {subject}{where} נדחה, והוראת הקבע ({_money(order.amount)} לחודש) '
-                    f'עצרה. {open_text or "היא לא תחויב שוב עד שיוחלף הכרטיס."}'
+                what=_lines(
+                    f'{_b(f"החיוב החודשי על {subject} נדחה")}{where}, והוראת הקבע '
+                    f'({_b(_money(order.amount))} לחודש) עצרה.',
+                    open_text or 'היא לא תחויב שוב עד שיוחלף הכרטיס.',
                 ),
-                action=(
-                    'להחליף את הכרטיס (בכרטיס הילד, לשונית "תשלומים", "החלפת כרטיס אשראי") — '
-                    'ההחלפה גובה גם את החודשים הפתוחים. אפשר גם לשלוח להורה קישור לעדכון הכרטיס.'
+                action=_items(
+                    f'{_b("להחליף את הכרטיס")} — לשונית "תשלומים", "החלפת כרטיס אשראי". '
+                    'ההחלפה גובה גם את החודשים הפתוחים.',
+                    f'אפשר גם {_b("לשלוח להורה קישור")} לעדכון הכרטיס.',
                 ),
                 branch_ids=branch_ids,
             ))
@@ -794,12 +827,15 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
             problems.append(Problem(
                 code=STANDING_ORDER_OVERDUE,
                 title='החיוב החודשי נעצר',
-                what=(
-                    f'ניסיון החיוב על {subject}{where} מ־{_day_label(_local(held_since))} לא קיבל תשובה '
-                    f'מטרנזילה, והמערכת לא תחייב שוב עד שמישהו יבדוק. {open_text}'
-                ).strip(),
+                what=_lines(
+                    f'ניסיון החיוב על {subject}{where} מ־{_b(_day_label(_local(held_since)))} '
+                    f'{_b("לא קיבל תשובה מטרנזילה")}.',
+                    'המערכת לא תחייב שוב עד שמישהו יבדוק.',
+                    open_text,
+                ),
                 action=(
-                    'לבדוק בטרנזילה אם הכסף ירד באותו יום. עד שזה מוסדר, הוראת הקבע הזאת לא תחויב.'
+                    f'{_b("לבדוק בטרנזילה")} אם הכסף ירד באותו יום. '
+                    'עד שזה מוסדר, הוראת הקבע הזאת לא תחויב.'
                 ),
                 branch_ids=branch_ids,
             ))
@@ -807,13 +843,15 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
             problems.append(Problem(
                 code=STANDING_ORDER_OVERDUE,
                 title='הוראת הקבע לא חויבה',
-                what=(
-                    f'הוראת הקבע על {subject}{where} הייתה אמורה לרדת ב־{_day_label(order.next_billing_date)} '
-                    f'ולא חויבה. {open_text}'
+                what=_lines(
+                    f'הוראת הקבע על {subject}{where} הייתה אמורה לרדת ב־'
+                    f'{_b(_day_label(order.next_billing_date))} {_b("ולא חויבה")}.',
+                    open_text,
                 ),
-                action=(
-                    'לבדוק בבריף הבוקר למה החיוב לא יצא (מפתחות המסוף, תוקף הכרטיס), '
-                    'ובטרנזילה שהכסף לא ירד. אם הכרטיס לא תקין — להחליף אותו מכרטיס הילד.'
+                action=_items(
+                    f'{_b("לבדוק בבריף הבוקר")} למה החיוב לא יצא (מפתחות המסוף, תוקף הכרטיס).',
+                    f'{_b("לבדוק בטרנזילה")} שהכסף לא ירד.',
+                    f'אם הכרטיס לא תקין — {_b("להחליף אותו")} מכרטיס הילד.',
                 ),
                 branch_ids=branch_ids,
             ))
@@ -836,19 +874,22 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
     last = max(course_money, key=_paid_on) if course_money else None
     history = (
         f'התשלום האחרון על חוג: {_day_label(_paid_on(last))}, {_money(last.final_amount)}.'
-        if last else 'לא נגבה ממנו אף תשלום על חוג.'
+        if last else 'עד היום לא נגבה אף תשלום על חוג.'
     )
     branch_ids = {records.lesson(place.lesson_id).branch_id for place in places} - {None}
     return [Problem(
         code=NO_STANDING_ORDER,
         title='אין הוראת קבע — החודש לא שולם',
-        what=(
-            f'רשום ל{" ול".join(courses) if courses else "חוג"}, ואין לו הוראת קבע עם כרטיס, '
-            f'מזומן או צ׳קים. לא נרשם תשלום על {_month_label(_month(today))}. {history}'
+        what=_lines(
+            f'יש רישום ל{" ול".join(courses) if courses else "חוג"}, אבל {_b("אין הוראת קבע")} — '
+            'לא בכרטיס, לא במזומן ולא בצ׳קים.',
+            _b(f'לא נרשם תשלום על {_month_label(_month(today))}.'),
+            history,
         ),
-        action=(
-            'לשלוח להורה קישור להזנת כרטיס (בכרטיס הילד, לשונית "תשלומים", "קישור להזנת כרטיס"), '
-            'או לרשום תשלום במזומן. אם הילד כבר לא בחוג — להסיר אותו מהחוג.'
+        action=_items(
+            f'{_b("לשלוח להורה קישור להזנת כרטיס")} — לשונית "תשלומים", "קישור להזנת כרטיס".',
+            f'או {_b("לרשום תשלום במזומן")}.',
+            f'אם הילד כבר לא בחוג — {_b("להסיר אותו מהחוג")}.',
         ),
         branch_ids=branch_ids,
     )]
@@ -860,8 +901,8 @@ def _open_months(due) -> str:
     total = sum((row.amount for row in due), Decimal('0.00'))
     months = ', '.join(f'{_month_label(row.month)} {_money(row.amount)}' for row in due)
     if len(due) == 1:
-        return f'פתוח: {months}.'
-    return f'פתוח: {months} — סך הכול {_money(total)}.'
+        return f'פתוח לתשלום: {_b(months)}.'
+    return f'פתוח לתשלום: {months} — {_b(f"סך הכול {_money(total)}")}.'
 
 
 _STATUS_WHY = {
@@ -909,17 +950,24 @@ def _status_problem(card, records, today: date) -> list[Problem]:
     current, target, why = found
     recorded = status_label(current) if current else f'{card.status} (סטטוס ישן)'
     by_hand = records.set_by_hand.get(card.id)
-    hand_note = f' הסטטוס נקבע ביד במשרד ("{by_hand[:120]}").' if by_hand else ''
+    hand_note = f'הסטטוס נקבע ביד במשרד ("{by_hand[:120]}").' if by_hand else ''
+    should_be = status_label(target)
+    recorded_text = _b(f'"{recorded}"')
+    should_be_text = _b(f'"{should_be}"')
+    change_text = _b(f'לשנות את הסטטוס ל"{should_be}"')
     return [Problem(
         code=STATUS_MISMATCH,
         title='הסטטוס לא תואם את הרישומים',
-        what=(
-            f'הסטטוס הרשום הוא "{recorded}", ולפי התשלומים וההרשמות הוא אמור להיות '
-            f'"{status_label(target)}". {why}{hand_note}'
-        ).strip(),
-        action=(
-            f'לבדוק את הכרטיס. אם הרישומים נכונים — לשנות את הסטטוס ל"{status_label(target)}" '
-            '(לחיצה על הסטטוס ברשימת הלקוחות, עם סיבה). אם הסטטוס הוא הנכון — לתקן את מה שחסר ברישומים.'
+        what=_lines(
+            f'הסטטוס הרשום: {recorded_text}.',
+            f'לפי התשלומים וההרשמות הוא אמור להיות: {should_be_text}.',
+            why,
+            hand_note,
+        ),
+        action=_items(
+            f'אם הרישומים נכונים — {change_text}: '
+            'לחיצה על הסטטוס ברשימת הלקוחות, עם סיבה.',
+            f'אם הסטטוס הוא הנכון — {_b("לתקן את מה שחסר ברישומים")}.',
         ),
     )]
 
@@ -959,15 +1007,15 @@ def _duplicate_cards(person, viewer, records) -> list[Problem]:
         if summary['payments_count']:
             count = summary['payments_count']
             holds.append(
-                ('חיוב אחד' if count == 1 else f'{count} חיובים')
+                _b('חיוב אחד' if count == 1 else f'{count} חיובים')
                 + f' (שהושלמו: {_money(summary["completed_total"])})'
             )
         if summary['standing_orders_count']:
             count = summary['standing_orders_count']
-            holds.append('הוראת קבע' if count == 1 else f'{count} הוראות קבע')
+            holds.append(_b('הוראת קבע' if count == 1 else f'{count} הוראות קבע'))
         if summary['documents_count']:
             count = summary['documents_count']
-            holds.append('מסמך אחד' if count == 1 else f'{count} מסמכים')
+            holds.append(_b('מסמך אחד' if count == 1 else f'{count} מסמכים'))
         opened = f', נפתח ב־{_day_label(_local(card.created_at))}' if card.created_at else ''
         branch_ids = set()
         for payment in records.payments.get(card.id, ()):
@@ -978,15 +1026,16 @@ def _duplicate_cards(person, viewer, records) -> list[Problem]:
         problems.append(Problem(
             code=DUPLICATE_CARD,
             title='לילד יש כרטיס נוסף במערכת',
-            what=(
-                f'לילד יש כרטיס נוסף במערכת (סטטוס "{summary["status_label"]}"{opened}) שלא מופיע '
-                f'ברשימת הלקוחות. רשומים עליו: {", ".join(holds)}.'
+            what=_lines(
+                f'יש במערכת {_b("כרטיס נוסף על אותו שם")} (סטטוס "{summary["status_label"]}"{opened}), '
+                'והוא לא מופיע ברשימת הלקוחות.',
+                f'רשומים עליו: {", ".join(holds)}.',
             ),
-            action=(
-                f'החיובים, המסמכים והוראות הקבע שלו מוצגים בלשונית "תשלומים" של הכרטיס הזה, מסומנים '
-                f'"{OTHER_CARD_LABEL}". לבדוק שאין חיוב כפול ושאין הוראת קבע מיותרת. '
-                'הסימון נשאר כל עוד יש שני כרטיסים: כשלשניהם יש כסף המערכת לא מאחדת אותם לבד, '
-                'והאיחוד נעשה ידנית על ידי מי שמתחזק את המערכת.'
+            action=_items(
+                f'{_b("לבדוק שאין חיוב כפול ושאין הוראת קבע מיותרת")}: החיובים, המסמכים והוראות הקבע '
+                f'שלו מוצגים כאן, בלשונית "תשלומים", מסומנים "{OTHER_CARD_LABEL}".',
+                'הסימון נשאר עד שהכרטיסים יאוחדו. כשלשניהם יש כסף, האיחוד נעשה ידנית '
+                'על ידי מי שמתחזק את המערכת.',
             ),
             branch_ids=branch_ids,
         ))
