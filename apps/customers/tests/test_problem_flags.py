@@ -318,6 +318,26 @@ class UnpaidTest(FlagsTestCase):
         self.assertIn('₪520', problem.what)
         self.assertIn('החלפת כרטיס אשראי', problem.action)
 
+    def test_a_child_moved_to_another_class_keeps_the_order_of_the_first(self):
+        """The order still names the class they signed up to; it is the one paying for the new one."""
+        other_course = TestDataFactory.create_course(name='ריקוד', branch=self.branch)
+        other_lesson = TestDataFactory.create_lesson(course=other_course, branch=self.branch)
+        child = self.child(status='payment_problem')
+        self.place(child, lesson=other_lesson)
+        self.standing_order(child, status='failed', next_billing_date=THIS_MONTH)
+
+        self.assertIn(problem_flags.STANDING_ORDER_FAILED, self.codes(child))
+
+    def test_an_order_left_from_a_class_the_child_left_is_not_chased(self):
+        other_course = TestDataFactory.create_course(name='ריקוד', branch=self.branch)
+        other_lesson = TestDataFactory.create_lesson(course=other_course, branch=self.branch)
+        child = self.child(paid_until_date=TODAY + timedelta(days=10))
+        self.place(child)
+        self.standing_order(child)
+        self.standing_order(child, status='failed', lesson=other_lesson, next_billing_date=THIS_MONTH)
+
+        self.assertEqual(self.codes(child), [])
+
     def test_a_month_the_other_card_paid_is_not_open(self):
         kept = self.child(status='payment_problem')
         leftover = self.child(status='pending')

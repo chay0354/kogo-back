@@ -696,9 +696,6 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
     facts = [records.facts(card) for card in person]
     if any(f.plan_running() or f.plan_covers_this_month(today) for f in facts):
         return []
-    place_lessons = {place.lesson_id for place in places}
-    place_courses = {records.lesson(place.lesson_id).course_id for place in places}
-    place_bundles = {place.bundle_id for place in places if place.bundle_id}
 
     # Which months each lesson was paid for, on any card of the child.
     paid = defaultdict(set)
@@ -711,104 +708,115 @@ def _unpaid(person, viewer, records, today: date) -> list[Problem]:
                 when = _local(payment.payment_date)
                 paid[payment.lesson_id].add((when.year, when.month))
 
-    def about_a_place(order) -> bool:
-        """The standing order bills a class the child is still in (change_course.recurring_payments_for_unit)."""
+    def bills(order, place) -> bool:
+        """The standing order bills this place: its lesson, its bundle or its course (change_course.recurring_payments_for_unit)."""
         initial = order.initial_payment
         if initial is None:
             return False
-        if initial.bundle_id and initial.bundle_id in place_bundles:
+        if initial.bundle_id and initial.bundle_id == place.bundle_id:
             return True
         covered = records.covered_lessons(order)
-        if covered & place_lessons:
+        if place.lesson_id in covered:
             return True
-        return any(records.lesson(lesson_id).course_id in place_courses for lesson_id in covered)
+        course_id = records.lesson(place.lesson_id).course_id
+        return any(records.lesson(lesson_id).course_id == course_id for lesson_id in covered)
+
+    live_orders = [
+        order for card in person for order in records.standing_orders.get(card.id, ())
+        if order.status in REPLACEABLE_STATUSES
+    ]
+    # A child moved to another class keeps the standing order of the class they
+    # signed up to — the order still names the old lesson. So when some place
+    # has no order naming it, the orders that name no place are taken to be
+    # paying for it. When every place has its own, an order naming none is
+    # left over from a class the child is no longer in, and is not chased.
+    every_place_has_one = all(any(bills(order, place) for order in live_orders) for place in places)
 
     problems = []
     usable = False
-    for card in person:
-        for order in records.standing_orders.get(card.id, ()):
-            if order.status not in REPLACEABLE_STATUSES:
-                continue
-            managed_by_tranzila = bool((order.tranzila_recurring_index or '').strip())
-            has_card = bool((order.tranzila_token or '').strip())
-            if has_card or managed_by_tranzila:
-                usable = True
-            if managed_by_tranzila or order.status == 'paused' or not about_a_place(order):
-                continue
-            initial = order.initial_payment
-            lesson_id = initial.lesson_id if initial is not None else None
-            lesson = records.lesson(lesson_id)
-            subject = lesson.course_name or 'החוג'
-            where = _where(order.child_id, viewer)
-            branch_ids = {lesson.branch_id} if lesson.branch_id else set()
+    for order in live_orders:
+        managed_by_tranzila = bool((order.tranzila_recurring_index or '').strip())
+        has_card = bool((order.tranzila_token or '').strip())
+        if has_card or managed_by_tranzila:
+            usable = True
+        if managed_by_tranzila or order.status == 'paused':
+            continue
+        if every_place_has_one and not any(bills(order, place) for place in places):
+            continue
+        initial = order.initial_payment
+        lesson_id = initial.lesson_id if initial is not None else None
+        lesson = records.lesson(lesson_id)
+        subject = lesson.course_name or 'החוג'
+        where = _where(order.child_id, viewer)
+        branch_ids = {lesson.branch_id} if lesson.branch_id else set()
 
-            if order.status == 'active' and not has_card:
-                problems.append(Problem(
-                    code=STANDING_ORDER_NO_CARD,
-                    title='הוראת קבע בלי כרטיס',
-                    what=(
-                        f'הוראת הקבע על {subject}{where} ({_money(order.amount)} לחודש) פעילה, '
-                        'אבל אין מאחוריה כרטיס שמור. היא לא תחויב.'
-                    ),
-                    action=(
-                        'לשלוח להורה קישור להזנת כרטיס (בכרטיס הילד, לשונית "תשלומים", '
-                        '"קישור להזנת כרטיס"), או לרשום תשלום במזומן.'
-                    ),
-                    branch_ids=branch_ids,
-                ))
-                continue
+        if order.status == 'active' and not has_card:
+            problems.append(Problem(
+                code=STANDING_ORDER_NO_CARD,
+                title='הוראת קבע בלי כרטיס',
+                what=(
+                    f'הוראת הקבע על {subject}{where} ({_money(order.amount)} לחודש) פעילה, '
+                    'אבל אין מאחוריה כרטיס שמור. היא לא תחויב.'
+                ),
+                action=(
+                    'לשלוח להורה קישור להזנת כרטיס (בכרטיס הילד, לשונית "תשלומים", '
+                    '"קישור להזנת כרטיס"), או לרשום תשלום במזומן.'
+                ),
+                branch_ids=branch_ids,
+            ))
+            continue
 
-            due = months_outstanding(
-                order, today=today, paid_months=paid.get(lesson_id, set()),
-                overrides=records.overrides.get(order.id, {}),
-            ) if lesson_id else []
-            open_text = _open_months(due)
+        due = months_outstanding(
+            order, today=today, paid_months=paid.get(lesson_id, set()),
+            overrides=records.overrides.get(order.id, {}),
+        ) if lesson_id else []
+        open_text = _open_months(due)
 
-            if order.status == 'failed':
-                problems.append(Problem(
-                    code=STANDING_ORDER_FAILED,
-                    title='הכרטיס נדחה — החודש לא שולם',
-                    what=(
-                        f'החיוב החודשי על {subject}{where} נדחה, והוראת הקבע ({_money(order.amount)} לחודש) '
-                        f'עצרה. {open_text or "היא לא תחויב שוב עד שיוחלף הכרטיס."}'
-                    ),
-                    action=(
-                        'להחליף את הכרטיס (בכרטיס הילד, לשונית "תשלומים", "החלפת כרטיס אשראי") — '
-                        'ההחלפה גובה גם את החודשים הפתוחים. אפשר גם לשלוח להורה קישור לעדכון הכרטיס.'
-                    ),
-                    branch_ids=branch_ids,
-                ))
-                continue
+        if order.status == 'failed':
+            problems.append(Problem(
+                code=STANDING_ORDER_FAILED,
+                title='הכרטיס נדחה — החודש לא שולם',
+                what=(
+                    f'החיוב החודשי על {subject}{where} נדחה, והוראת הקבע ({_money(order.amount)} לחודש) '
+                    f'עצרה. {open_text or "היא לא תחויב שוב עד שיוחלף הכרטיס."}'
+                ),
+                action=(
+                    'להחליף את הכרטיס (בכרטיס הילד, לשונית "תשלומים", "החלפת כרטיס אשראי") — '
+                    'ההחלפה גובה גם את החודשים הפתוחים. אפשר גם לשלוח להורה קישור לעדכון הכרטיס.'
+                ),
+                branch_ids=branch_ids,
+            ))
+            continue
 
-            held_since = records.held.get(str(order.id))
-            late = bool(order.next_billing_date) and order.next_billing_date < today - timedelta(days=OVERDUE_GRACE_DAYS)
-            if held_since is not None:
-                problems.append(Problem(
-                    code=STANDING_ORDER_OVERDUE,
-                    title='החיוב החודשי נעצר',
-                    what=(
-                        f'ניסיון החיוב על {subject}{where} מ־{_day_label(_local(held_since))} לא קיבל תשובה '
-                        f'מטרנזילה, והמערכת לא תחייב שוב עד שמישהו יבדוק. {open_text}'
-                    ).strip(),
-                    action=(
-                        'לבדוק בטרנזילה אם הכסף ירד באותו יום. עד שזה מוסדר, הוראת הקבע הזאת לא תחויב.'
-                    ),
-                    branch_ids=branch_ids,
-                ))
-            elif late and due:
-                problems.append(Problem(
-                    code=STANDING_ORDER_OVERDUE,
-                    title='הוראת הקבע לא חויבה',
-                    what=(
-                        f'הוראת הקבע על {subject}{where} הייתה אמורה לרדת ב־{_day_label(order.next_billing_date)} '
-                        f'ולא חויבה. {open_text}'
-                    ),
-                    action=(
-                        'לבדוק בבריף הבוקר למה החיוב לא יצא (מפתחות המסוף, תוקף הכרטיס), '
-                        'ובטרנזילה שהכסף לא ירד. אם הכרטיס לא תקין — להחליף אותו מכרטיס הילד.'
-                    ),
-                    branch_ids=branch_ids,
-                ))
+        held_since = records.held.get(str(order.id))
+        late = bool(order.next_billing_date) and order.next_billing_date < today - timedelta(days=OVERDUE_GRACE_DAYS)
+        if held_since is not None:
+            problems.append(Problem(
+                code=STANDING_ORDER_OVERDUE,
+                title='החיוב החודשי נעצר',
+                what=(
+                    f'ניסיון החיוב על {subject}{where} מ־{_day_label(_local(held_since))} לא קיבל תשובה '
+                    f'מטרנזילה, והמערכת לא תחייב שוב עד שמישהו יבדוק. {open_text}'
+                ).strip(),
+                action=(
+                    'לבדוק בטרנזילה אם הכסף ירד באותו יום. עד שזה מוסדר, הוראת הקבע הזאת לא תחויב.'
+                ),
+                branch_ids=branch_ids,
+            ))
+        elif late and due:
+            problems.append(Problem(
+                code=STANDING_ORDER_OVERDUE,
+                title='הוראת הקבע לא חויבה',
+                what=(
+                    f'הוראת הקבע על {subject}{where} הייתה אמורה לרדת ב־{_day_label(order.next_billing_date)} '
+                    f'ולא חויבה. {open_text}'
+                ),
+                action=(
+                    'לבדוק בבריף הבוקר למה החיוב לא יצא (מפתחות המסוף, תוקף הכרטיס), '
+                    'ובטרנזילה שהכסף לא ירד. אם הכרטיס לא תקין — להחליף אותו מכרטיס הילד.'
+                ),
+                branch_ids=branch_ids,
+            ))
 
     if problems or usable:
         return problems
