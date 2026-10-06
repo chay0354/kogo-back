@@ -493,7 +493,84 @@ class ChildViewSet(viewsets.ModelViewSet):
             ).values('pk')
             queryset = queryset.filter(pk__in=winner_ids)
 
+            # "רק עם תקלות": the children, out of the ones the other filters
+            # left, that problem_flags finds something wrong with. Asked last,
+            # of the rows already narrowed and already one per child.
+            has_problems = (self.request.query_params.get('has_problems') or '').strip().lower()
+            if has_problems in ('1', 'true', 'yes'):
+                from apps.customers.problem_flags import child_ids_with_problems
+
+                narrowed = Child.objects.filter(pk__in=queryset.values('pk')).only(
+                    'id', 'family_id', 'first_name', 'last_name', 'status', 'paid_until_date', 'created_at',
+                )
+                queryset = queryset.filter(
+                    pk__in=child_ids_with_problems(narrowed, branch_ids=self._problem_branch_ids()),
+                )
+
         return queryset
+
+    def _problem_branch_ids(self):
+        """A partner's branches, for problem_flags; None for a manager (everything)."""
+        if is_scoped_partner(self.request.user):
+            return partner_branch_ids(self.request.user)
+        return None
+
+    def list(self, request, *args, **kwargs):
+        """
+        The list as before, with each row's problems worked out for the whole
+        page at once (problems_count, problem_titles).
+
+        A failure there must not take the customers list down with it: the
+        rows then go out without the two fields, and the screen shows no light.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        rows = page if page is not None else list(queryset)
+
+        context = self.get_serializer_context()
+        try:
+            from apps.customers.problem_flags import problems_for_children
+
+            context['problems_by_child'] = problems_for_children(rows, branch_ids=self._problem_branch_ids())
+        except Exception:
+            logger.exception('Customer problem flags failed for the list (rows sent without them)')
+
+        serializer = self.get_serializer_class()(rows, many=True, context=context)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='problems')
+    def problems(self, request, pk=None):
+        """
+        GET /api/v1/customers/children/{id}/problems/ — what is wrong with this
+        child, in full: for each problem what happened (sums, dates) and what
+        to do. Also the child's other cards on the family (the same name), so
+        the card can list their charges and documents beside its own.
+
+        Reads only. Scoped like the list: a partner reaches only a child of
+        their branches, and sees only what touches them.
+        """
+        from apps.customers.problem_flags import child_problem_detail
+
+        detail = child_problem_detail(self.get_object(), branch_ids=self._problem_branch_ids())
+
+        # The other cards' standing orders ride along, in the shape the card
+        # already draws its own in. Read here and not through
+        # customers/recurring-payments/: every read of that route first writes
+        # the monthly amounts that have come due. Scoped as that route scopes.
+        other_ids = [card['id'] for card in detail['duplicate_cards']]
+        orders_by_card: dict = {}
+        if other_ids:
+            orders = scope_courses(
+                RecurringPaymentViewSet.queryset.filter(child_id__in=other_ids),
+                request.user, 'initial_payment__lesson__course',
+            ).order_by('-created_at')
+            for row in RecurringPaymentSerializer(orders, many=True).data:
+                orders_by_card.setdefault(str(row['child']), []).append(row)
+        for card in detail['duplicate_cards']:
+            card['standing_orders'] = orders_by_card.get(card['id'], [])
+        return Response(detail)
     
     @action(detail=False, methods=['get'], url_path='ids')
     def ids(self, request):
@@ -1018,8 +1095,17 @@ class ChildViewSet(viewsets.ModelViewSet):
         # the same row the table does. The save may have folded a duplicate of
         # this child into another record (signals.py), in which case it is gone.
         fresh = self.get_queryset().filter(pk=child.pk).first()
+        context = self.get_serializer_context()
+        if fresh is not None:
+            # The row replaces the list's own, so it carries the same light.
+            try:
+                from apps.customers.problem_flags import problems_for_children
+
+                context['problems_by_child'] = problems_for_children([fresh], branch_ids=self._problem_branch_ids())
+            except Exception:
+                logger.exception('Customer problem flags failed for the saved card (row sent without them)')
         row = (
-            ChildWithDetailsSerializer(fresh, context=self.get_serializer_context()).data
+            ChildWithDetailsSerializer(fresh, context=context).data
             if fresh is not None else None
         )
         return Response({'child': row, 'changes': changes})
@@ -1781,6 +1867,10 @@ class PaymentViewSet(viewsets.ModelViewSet):
         
         reason = request.data.get('reason', 'זיכוי')
         amount = request.data.get('amount')  # Optional partial refund
+        # Only an explicit true (6.10.2026): the office ticked "cancel the
+        # standing order too". Left out — as every screen before it does — the
+        # refund touches no standing order, as before.
+        cancel_standing_order = request.data.get('cancel_standing_order') is True
         
         # Call payment service to handle refund
         from apps.core.payment_service import PaymentService
@@ -1789,20 +1879,68 @@ class PaymentViewSet(viewsets.ModelViewSet):
         result = payment_service.refund_payment(
             payment_id=str(payment.id),
             reason=reason,
-            amount=Decimal(str(amount)) if amount else None
+            amount=Decimal(str(amount)) if amount else None,
+            cancel_standing_order=cancel_standing_order,
         )
         
         if result['success']:
-            return Response({
+            body = {
                 'success': True,
                 'message': result.get('message', 'התשלום זוכה בהצלחה'),
                 'transaction_id': result.get('transaction_id')
-            })
+            }
+            if cancel_standing_order:
+                body['standing_order_cancelled'] = bool(result.get('standing_order_cancelled'))
+                body['standing_orders_cancelled'] = result.get('standing_orders_cancelled') or []
+            return Response(body)
         else:
             return Response({
                 'error': result.get('error', 'שגיאה בזיכוי התשלום'),
                 'uncertain': bool(result.get('uncertain')),
+                'declined': bool(result.get('declined')),
             }, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'], url_path='refund-info')
+    def refund_info(self, request, pk=None):
+        """
+        GET /api/v1/customers/payments/{id}/refund-info/ — what the refund
+        window needs before anyone confirms. Reads only; nothing is sent to
+        Tranzila.
+
+        `blocked_reason` says, in Hebrew, why this charge cannot be refunded
+        (it was declined and never collected; it is not a completed charge).
+        `standing_orders` are the live standing orders that will charge the
+        same lesson again next month — the window offers to cancel them.
+        """
+        from apps.core.payment_service import refund_refused_as_declined, standing_orders_behind_payment
+
+        payment = self.get_object()
+        declined = refund_refused_as_declined(payment) if payment.status == 'completed' else ''
+        blocked = declined or ('' if payment.status == 'completed' else 'ניתן לזכות רק תשלומים שהושלמו')
+        orders = [] if blocked else list(standing_orders_behind_payment(payment))
+
+        def course_name(order):
+            initial = order.initial_payment
+            lesson = initial.lesson if initial is not None and initial.lesson_id else None
+            return lesson.course.name if lesson is not None and lesson.course_id else ''
+
+        return Response({
+            'payment_id': str(payment.id),
+            'status': payment.status,
+            'refundable': not blocked,
+            'declined': bool(declined),
+            'blocked_reason': blocked,
+            'max_amount': str(payment.final_amount),
+            'standing_orders': [
+                {
+                    'id': str(order.id),
+                    'amount': str(order.amount),
+                    'next_billing_date': order.next_billing_date.isoformat() if order.next_billing_date else None,
+                    'course_name': course_name(order),
+                }
+                for order in orders
+            ],
+        })
 
     @action(detail=True, methods=['get'], url_path='invoice')
     def invoice(self, request, pk=None):

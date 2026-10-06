@@ -327,6 +327,42 @@ def _late_issue(invoice) -> dict:
     return {'issued_late': False, 'paid_at': _iso_date(paid_at) if paid_at else ''}
 
 
+def _receipt_refund(invoice) -> dict:
+    """
+    The charge behind a lesson receipt, for the documents tab's "זיכוי" (6.10.2026).
+
+    `payment_refundable` is true only when the button can do what it says: the
+    receipt stands for one charge, that charge is completed (a refunded one is
+    not offered again), it took money, and Tranzila did not decline it. A
+    family checkout's receipt covers several charges — each is refunded from
+    the payments tab, by its own row.
+    """
+    from apps.core.tranzila_service import recorded_decline_code
+    from apps.customers.checkout_invoice import CHECKOUT_LINES_ACTION, checkout_log_payment_ids
+
+    payment = invoice.payment if invoice.payment_id else None
+    if payment is None:
+        return {'payment_id': None, 'payment_refundable': False}
+    covered = 1
+    for log in invoice.activity_logs.all():
+        if log.action == CHECKOUT_LINES_ACTION:
+            covered = max(covered, len(checkout_log_payment_ids(log.details)))
+    txn = payment.tranzila_transaction
+    refundable = (
+        covered == 1
+        and payment.status == 'completed'
+        and payment.final_amount > 0
+        and txn is not None
+        and not recorded_decline_code(txn.response_code)
+    )
+    return {
+        'payment_id': str(payment.id),
+        'payment_refundable': refundable,
+        'payment_amount': _parse_amount(payment.final_amount),
+        'payment_is_monthly': payment.payment_type == 'recurring_subscription',
+    }
+
+
 def _local_crm_invoice_rows(start: date, end: date, branch_ids=None) -> list[dict]:
     from apps.customers.financial_models import Invoice
 
@@ -381,6 +417,7 @@ def _local_crm_invoice_rows(start: date, end: date, branch_ids=None) -> list[dic
             'payment_method_label': PAYMENT_METHOD_LABELS.get(inv.payment_method, inv.payment_method or ''),
             **row_dimensions(lesson=_invoice_lesson(inv), branch=inv.branch),
             **_late_issue(inv),
+            **_receipt_refund(inv),
             'branch': inv.branch.name if inv.branch_id else '',
             'branch_id': str(inv.branch_id) if inv.branch_id else None,
         })
@@ -481,6 +518,9 @@ def _merge_documents(*groups: list[dict]) -> list[dict]:
                         existing['business_customer_id'] = row['business_customer_id']
                     if not existing.get('lesson_invoice_id') and row.get('lesson_invoice_id'):
                         existing['lesson_invoice_id'] = row['lesson_invoice_id']
+                    if not existing.get('payment_id') and row.get('payment_id'):
+                        for key in ('payment_id', 'payment_refundable', 'payment_amount', 'payment_is_monthly'):
+                            existing[key] = row.get(key)
                 continue
             for key in keys:
                 if key:

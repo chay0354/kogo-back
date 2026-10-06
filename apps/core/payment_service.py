@@ -828,6 +828,51 @@ REFUND_UNCERTAIN = (
 )
 
 
+REFUND_OF_DECLINED_CHARGE = 'החיוב הזה נדחה בטרנזילה ולא נגבה — אין מה לזכות'
+
+
+def refund_refused_as_declined(payment) -> str:
+    """
+    Why this payment cannot be refunded although it reads 'completed', or ''.
+
+    Its own Tranzila row carries the card company's refusal (recorded_decline_code):
+    the charge was written down as made and no money came. A refund of it is a
+    credit of money that was never taken — in production one such ₪120 went back
+    to a card (found 5.10.2026). An empty code is an old row, not a refusal.
+    """
+    from apps.core.tranzila_service import recorded_decline_code
+
+    txn = getattr(payment, 'tranzila_transaction', None)
+    code = recorded_decline_code(txn.response_code) if txn is not None else ''
+    return f'{REFUND_OF_DECLINED_CHARGE} (קוד {code}).' if code else ''
+
+
+def standing_orders_behind_payment(payment):
+    """
+    The live standing orders that will charge this again next month: the same
+    child, and the lesson (or bundle) this charge was for.
+
+    Matched as card_details_for_payment_refund finds the card — the order this
+    payment opened, or the one billing the same lesson; a monthly charge the
+    cron made is nobody's initial payment.
+    """
+    if not getattr(payment, 'child_id', None) or payment.payment_type != 'recurring_subscription':
+        return RecurringPayment.objects.none()
+    match = Q(initial_payment_id=payment.id)
+    if payment.lesson_id:
+        match |= Q(initial_payment__lesson_id=payment.lesson_id)
+    if payment.bundle_id:
+        match |= Q(initial_payment__bundle_id=payment.bundle_id)
+    return (
+        RecurringPayment.objects
+        .filter(child_id=payment.child_id, status='active')
+        .filter(match)
+        .select_related('initial_payment', 'initial_payment__lesson', 'initial_payment__lesson__course')
+        .order_by('created_at')
+        .distinct()
+    )
+
+
 def _claim_refund(key: str, *, terminal: str, request_data: dict):
     """
     The row that holds a refund while it runs, or None when another holds it.
@@ -3273,11 +3318,58 @@ class PaymentService:
             branch_id=invoice.branch_id,
         )
 
+    def _cancel_standing_orders_after_refund(self, payment: Payment, reason: str) -> Dict:
+        """
+        The office asked that the refunded charge not come back next month.
+
+        Runs only after the refund is on record. The money is already back with
+        the card, so whatever happens here the refund stays a success: the
+        answer says whether the standing order was cancelled, and why not.
+        Through cancel_subscription, like every other cancellation.
+        """
+        cancelled, manual, failed = [], False, ''
+        try:
+            orders = list(standing_orders_behind_payment(payment))
+        except Exception as exc:  # noqa: BLE001 — the refund already happened
+            logger.exception('Standing orders of refunded payment %s could not be read', payment.id)
+            orders, failed = [], str(exc)
+        for order in orders:
+            try:
+                result = self.cancel_subscription(
+                    recurring_payment_id=str(order.id),
+                    cancellation_reason=f'בוטלה עם זיכוי החיוב: {reason}'[:500],
+                )
+            except Exception as exc:  # noqa: BLE001 — the refund already happened
+                logger.exception('Standing order %s not cancelled after refund of %s', order.id, payment.id)
+                failed = str(exc)
+                continue
+            if result.get('success'):
+                cancelled.append(str(order.id))
+                manual = manual or bool(result.get('manual_cancellation_required'))
+            else:
+                failed = str(result.get('error') or 'הביטול נכשל')
+
+        if failed:
+            note = 'התשלום זוכה, אבל הוראת הקבע לא בוטלה — יש לבטל אותה ידנית, אחרת החיוב יחזור בחודש הבא.'
+        elif not orders:
+            note = 'התשלום זוכה. לא נמצאה הוראת קבע פעילה על החוג הזה, כך שאין מה לבטל.'
+        elif manual:
+            note = 'התשלום זוכה והוראת הקבע בוטלה במערכת. בטרנזילה יש לוודא ידנית שהיא בוטלה.'
+        else:
+            note = 'התשלום זוכה והוראת הקבע בוטלה — לא יהיה חיוב בחודש הבא.'
+        return {
+            'message': note,
+            'standing_order_cancelled': bool(cancelled) and not failed,
+            'standing_orders_cancelled': cancelled,
+            'standing_order_error': failed,
+        }
+
     def refund_payment(
         self,
         payment_id: str,
         reason: str = 'זיכוי',
-        amount: Optional[Decimal] = None
+        amount: Optional[Decimal] = None,
+        cancel_standing_order: bool = False,
     ) -> Dict:
         """
         Refund a customer payment (lessons/subscriptions).
@@ -3286,6 +3378,10 @@ class PaymentService:
             payment_id: UUID of Payment
             reason: Refund reason
             amount: Optional amount for partial refund (None = full refund)
+            cancel_standing_order: after the refund has gone through, also cancel
+                the standing order that would charge the same lesson again next
+                month (standing_orders_behind_payment). Never before, and never
+                when the refund did not succeed.
             
         Returns:
             Dict with refund result
@@ -3318,6 +3414,15 @@ class PaymentService:
                 'error': 'לא נמצא מזהה עסקת טרנזילה'
             }
         
+        # Recorded as paid, refused by the card company: nothing was collected,
+        # so there is nothing to give back. Stopped here — before the claim and
+        # before anything is sent to Tranzila.
+        declined = refund_refused_as_declined(payment)
+        if declined:
+            logger.warning("Refund of payment %s refused: the charge was declined (%s)",
+                           payment_id, payment.tranzila_transaction.response_code)
+            return {'success': False, 'declined': True, 'error': declined}
+
         transaction_id = payment.tranzila_transaction.transaction_id
         authorization_number = payment.tranzila_transaction.confirmation_code
         
@@ -3460,13 +3565,16 @@ class PaymentService:
             except Exception:
                 logger.exception('Credit note failed for payment %s (non-fatal)', payment_id)
 
-            return {
+            outcome = {
                 'success': True,
                 'message': 'התשלום זוכה בהצלחה',
                 'transaction_id': result.get('transaction_id', ''),
                 'original_transaction_id': transaction_id,
                 'refund_amount': float(refund_amount)
             }
+            if cancel_standing_order:
+                outcome.update(self._cancel_standing_orders_after_refund(payment, reason))
+            return outcome
         else:
             _drop_refund_claim(claim)
             error_msg = result.get('error', 'שגיאה בזיכוי התשלום')
