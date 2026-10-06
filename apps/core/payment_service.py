@@ -666,6 +666,8 @@ def validate_bundle_capacity(bundle: 'LessonBundle', *, seated_child=None) -> No
         if not lesson.room:
             raise ValueError(f"לא ניתן להירשם למסלול — לשיעור {lesson} אין חדר מוגדר")
         caps = []
+        if lesson.capacity:
+            caps.append(int(lesson.capacity))
         if lesson.course and lesson.course.capacity:
             caps.append(int(lesson.course.capacity))
         if lesson.room.capacity:

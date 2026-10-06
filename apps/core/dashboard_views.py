@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from django.db import models
 from django.db.models import Sum, Count, Q, Avg, Max, F
-from django.db.models.functions import Least, TruncMonth
+from django.db.models.functions import Least, NullIf, TruncMonth
 from django.utils import timezone
 from datetime import datetime, timedelta, date
 from decimal import Decimal
@@ -1018,13 +1018,14 @@ class DashboardViewSet(viewsets.ViewSet):
         if latest_month:
             # Seats are summed over the same rows as the students, so a course
             # running two groups is measured against two groups' worth of
-            # capacity. Per lesson the real limit is the smaller of the course
-            # capacity and the room it sits in -- the same rule the widget uses
-            # in _resolve_lesson_capacity. LEAST ignores a NULL room.
+            # capacity. Per lesson the real limit is the smallest of the lesson's
+            # own limit, the course capacity and the room it sits in -- the same
+            # rule the widget uses in _resolve_lesson_capacity. LEAST ignores a
+            # NULL room and a lesson with no limit of its own.
             seats_by_course = {
                 row['course_id']: row['seats'] or 0
                 for row in snapshots.filter(month=latest_month).values('course_id').annotate(
-                    seats=Sum(Least('course__capacity', 'lesson__room__capacity')),
+                    seats=Sum(Least('course__capacity', 'lesson__room__capacity', NullIf('lesson__capacity', 0))),
                 )
             }
             students_by_course = {

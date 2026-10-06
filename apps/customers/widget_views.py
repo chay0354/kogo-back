@@ -277,10 +277,15 @@ TRIAL_FULL_ERROR = 'התפוסה מלאה לשיעור ניסיון'
 
 def _resolve_lesson_capacity(lesson, course):
     """Kept as a thin wrapper: the rule itself is shared with the schedule now."""
-    from apps.enrollments.enrollment_counts import resolve_lesson_capacity
+    from apps.enrollments.enrollment_counts import resolve_lesson_capacity, tightest_capacity
 
-    caps = [int(c) for c in (course.capacity, getattr(getattr(lesson, 'room', None), 'capacity', None)) if c]
-    return min(caps) if caps else resolve_lesson_capacity(lesson)
+    # `course` is the one the caller already holds; asking the lesson for it would be a query per lesson.
+    capacity = tightest_capacity(
+        getattr(lesson, 'capacity', None),
+        course.capacity,
+        getattr(getattr(lesson, 'room', None), 'capacity', None),
+    )
+    return capacity if capacity is not None else resolve_lesson_capacity(lesson)
 
 
 def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, occurrence_context=None):

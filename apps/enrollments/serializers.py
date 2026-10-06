@@ -92,7 +92,7 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
                 'lesson': 'לא ניתן להירשם לשיעור ללא חדר מוגדר'
             })
 
-        capacity = min(c for c in (lesson.course.capacity, lesson.room.capacity) if c)
+        capacity = min(c for c in (lesson.capacity, lesson.course.capacity, lesson.room.capacity) if c)
         # A paying place is measured against the payers; a trial is a body in the
         # room that day and is measured against the payers plus that day's trials.
         current = count_capacity_enrollments(

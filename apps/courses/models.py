@@ -203,6 +203,17 @@ class Lesson(models.Model):
             "Used by get_lesson_price_for_course_index to pick a discounted/different price per tier."
         ),
     )
+    # How many children this one lesson takes, when that is fewer than the
+    # group and the studio allow. Empty = no limit of its own. The group's
+    # capacity is one figure for all its days, so closing one day by lowering
+    # it closed the others too (owner, 6.10.2026: a Wednesday shown as full at
+    # 6 because the group had been capped to close its Sunday).
+    capacity = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="קיבולת לשיעור",
+        help_text="ריק = לפי קיבולת הקבוצה והחדר. מספר = השיעור הזה מתמלא בו, גם אם בקבוצה ובחדר יש מקום.",
+    )
     instructor_salary_override = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="שכר מדריך מותאם")
     is_recurring = models.BooleanField(default=True, verbose_name="חוזר שבועית")
     # Whether the widget may book a trial on this lesson. NULL follows the

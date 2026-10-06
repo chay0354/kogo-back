@@ -27,20 +27,28 @@ def resolve_lesson_capacity(lesson) -> Optional[int]:
     """
     How many children this lesson can actually hold.
 
-    The smaller of what the course allows and what the room fits, because both
-    are real limits and the tighter one wins. A course capped at twenty in a
-    room that holds nineteen takes nineteen.
+    The smallest of what the lesson itself is limited to, what the course
+    allows and what the room fits: all are real limits and the tightest one
+    wins. A course capped at twenty in a room that holds nineteen takes
+    nineteen; a lesson limited to six takes six, and the course's other days
+    keep their twenty. A lesson with no limit of its own adds nothing.
 
     It lives here because three callers had each worked it out for themselves —
     the widget, the trial-seat counter and the schedule — and the schedule's
     version read the course figure alone, so twelve lessons in a nineteen-seat
     studio were shown with twenty places.
     """
-    caps = []
     course = getattr(lesson, 'course', None)
-    for value in (getattr(course, 'capacity', None), getattr(getattr(lesson, 'room', None), 'capacity', None)):
-        if value:
-            caps.append(int(value))
+    return tightest_capacity(
+        getattr(lesson, 'capacity', None),
+        getattr(course, 'capacity', None),
+        getattr(getattr(lesson, 'room', None), 'capacity', None),
+    )
+
+
+def tightest_capacity(*limits) -> Optional[int]:
+    """The smallest of the limits that are set; None when none is. Zero and empty are "not set"."""
+    caps = [int(value) for value in limits if value]
     return min(caps) if caps else None
 
 
