@@ -493,7 +493,67 @@ class ChildViewSet(viewsets.ModelViewSet):
             ).values('pk')
             queryset = queryset.filter(pk__in=winner_ids)
 
+            # "רק עם תקלות": the children, out of the ones the other filters
+            # left, that problem_flags finds something wrong with. Asked last,
+            # of the rows already narrowed and already one per child.
+            has_problems = (self.request.query_params.get('has_problems') or '').strip().lower()
+            if has_problems in ('1', 'true', 'yes'):
+                from apps.customers.problem_flags import child_ids_with_problems
+
+                narrowed = Child.objects.filter(pk__in=queryset.values('pk')).only(
+                    'id', 'family_id', 'first_name', 'last_name', 'status', 'paid_until_date', 'created_at',
+                )
+                queryset = queryset.filter(
+                    pk__in=child_ids_with_problems(narrowed, branch_ids=self._problem_branch_ids()),
+                )
+
         return queryset
+
+    def _problem_branch_ids(self):
+        """A partner's branches, for problem_flags; None for a manager (everything)."""
+        if is_scoped_partner(self.request.user):
+            return partner_branch_ids(self.request.user)
+        return None
+
+    def list(self, request, *args, **kwargs):
+        """
+        The list as before, with each row's problems worked out for the whole
+        page at once (problems_count, problem_titles).
+
+        A failure there must not take the customers list down with it: the
+        rows then go out without the two fields, and the screen shows no light.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        rows = page if page is not None else list(queryset)
+
+        context = self.get_serializer_context()
+        try:
+            from apps.customers.problem_flags import problems_for_children
+
+            context['problems_by_child'] = problems_for_children(rows, branch_ids=self._problem_branch_ids())
+        except Exception:
+            logger.exception('Customer problem flags failed for the list (rows sent without them)')
+
+        serializer = self.get_serializer_class()(rows, many=True, context=context)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='problems')
+    def problems(self, request, pk=None):
+        """
+        GET /api/v1/customers/children/{id}/problems/ — what is wrong with this
+        child, in full: for each problem what happened (sums, dates) and what
+        to do. Also the child's other cards on the family (the same name), so
+        the card can list their charges and documents beside its own.
+
+        Reads only. Scoped like the list: a partner reaches only a child of
+        their branches, and sees only what touches them.
+        """
+        from apps.customers.problem_flags import child_problem_detail
+
+        return Response(child_problem_detail(self.get_object(), branch_ids=self._problem_branch_ids()))
     
     @action(detail=False, methods=['get'], url_path='ids')
     def ids(self, request):
@@ -1018,8 +1078,17 @@ class ChildViewSet(viewsets.ModelViewSet):
         # the same row the table does. The save may have folded a duplicate of
         # this child into another record (signals.py), in which case it is gone.
         fresh = self.get_queryset().filter(pk=child.pk).first()
+        context = self.get_serializer_context()
+        if fresh is not None:
+            # The row replaces the list's own, so it carries the same light.
+            try:
+                from apps.customers.problem_flags import problems_for_children
+
+                context['problems_by_child'] = problems_for_children([fresh], branch_ids=self._problem_branch_ids())
+            except Exception:
+                logger.exception('Customer problem flags failed for the saved card (row sent without them)')
         row = (
-            ChildWithDetailsSerializer(fresh, context=self.get_serializer_context()).data
+            ChildWithDetailsSerializer(fresh, context=context).data
             if fresh is not None else None
         )
         return Response({'child': row, 'changes': changes})

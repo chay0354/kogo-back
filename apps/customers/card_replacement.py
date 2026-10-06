@@ -154,7 +154,13 @@ def family_standing_orders(family) -> list[RecurringPayment]:
     )
 
 
-def months_outstanding(recurring: RecurringPayment, *, today: date | None = None) -> list[MonthDue]:
+def months_outstanding(
+    recurring: RecurringPayment,
+    *,
+    today: date | None = None,
+    paid_months: set | None = None,
+    overrides: dict | None = None,
+) -> list[MonthDue]:
     """
     Months this standing order should have billed and did not.
 
@@ -163,6 +169,11 @@ def months_outstanding(recurring: RecurringPayment, *, today: date | None = None
     nobody paid for. A month is dropped when a completed subscription payment
     for that child and lesson already exists — which is what makes running this
     twice harmless.
+
+    `paid_months` ({(year, month)}) and `overrides` ({first of month: unspent
+    override}) are for a caller that has already read them for many standing
+    orders at once (the customers list's problem flags). Left out, they are
+    read here, as before.
     """
     today = today or _today()
     lesson = recurring.initial_payment.lesson if recurring.initial_payment else None
@@ -174,21 +185,26 @@ def months_outstanding(recurring: RecurringPayment, *, today: date | None = None
     if recurring.end_date:
         limit = min(limit, month_start(recurring.end_date))
 
-    paid_months = {
-        (row.year, row.month)
-        for row in Payment.objects.filter(
-            child_id=recurring.child_id,
-            lesson=lesson,
-            payment_type='recurring_subscription',
-            status='completed',
-            payment_date__isnull=False,
-        ).values_list('payment_date', flat=True)
-    }
+    if paid_months is None:
+        paid_months = {
+            (row.year, row.month)
+            for row in Payment.objects.filter(
+                child_id=recurring.child_id,
+                lesson=lesson,
+                payment_type='recurring_subscription',
+                status='completed',
+                payment_date__isnull=False,
+            ).values_list('payment_date', flat=True)
+        }
 
     due: list[MonthDue] = []
     while cursor <= limit and len(due) < MAX_ARREARS_MONTHS:
         if (cursor.year, cursor.month) not in paid_months:
-            amount, override = amount_for_charge(recurring, on_date=cursor)
+            if overrides is None:
+                amount, override = amount_for_charge(recurring, on_date=cursor)
+            else:
+                override = overrides.get(cursor)
+                amount = Decimal(str(override.amount if override else recurring.amount)).quantize(Decimal('0.01'))
             if amount >= Decimal('1.00'):
                 due.append(MonthDue(
                     month=cursor,

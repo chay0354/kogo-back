@@ -305,6 +305,26 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     # Brothers and sisters on the same family, so the office can move between the
     # children of one household without going back through the search.
     siblings = serializers.SerializerMethodField()
+    # What problem_flags found for this row (6.10.2026): how many problems, and
+    # their short titles. Null when they were not worked out for this response —
+    # the list hands them in for the whole page; other callers do not.
+    problems_count = serializers.SerializerMethodField()
+    problem_titles = serializers.SerializerMethodField()
+
+    def _problems(self, obj):
+        by_child = self.context.get('problems_by_child')
+        if by_child is None:
+            return None
+        from apps.customers.problem_flags import list_fields
+        return list_fields(by_child.get(obj.pk, []))
+
+    def get_problems_count(self, obj):
+        fields = self._problems(obj)
+        return None if fields is None else fields['problems_count']
+
+    def get_problem_titles(self, obj):
+        fields = self._problems(obj)
+        return None if fields is None else fields['problem_titles']
 
     def get_siblings(self, obj):
         family = obj.family
@@ -346,6 +366,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'created_at',
             'siblings',
             'search_match',
+            'problems_count', 'problem_titles',
         ]
 
     def _partner_branch_ids(self):

@@ -176,6 +176,27 @@ def request_rejected_message(error_code, tranzila_message: str = '') -> str:
 # carries, and '000' — the processor's approval (see rental_billing.billing).
 TRANZILA_NOT_A_DECLINE_CODES = frozenset({'', '999', 'N/A', 'NONE', '000'})
 
+
+def recorded_decline_code(response_code) -> str:
+    """
+    The decline a stored Tranzila response code stands for, or ''.
+
+    Until 25.8.2026 (8ed9b9b) a charge counted as made when Tranzila's REST
+    envelope said so, and the card company's own answer was stored as the
+    response code — so a refused card (141, 004, 006…) sits on a payment marked
+    completed. An approval is '000' (or '0'); an empty code is an old row or a
+    claim and says nothing; '999', 'N/A' and 'NONE' are failures built here,
+    not the card company's (TRANZILA_NOT_A_DECLINE_CODES).
+    """
+    code = str(response_code or '').strip().upper()
+    if code in TRANZILA_NOT_A_DECLINE_CODES or is_tranzila_approved(code):
+        return ''
+    if not code.strip('0'):
+        # Any run of zeros is an approval, however many were written.
+        return ''
+    return code
+
+
 TOKEN_CHARGED = 'charged'
 TOKEN_DECLINED = 'declined'
 TOKEN_SETUP_PROBLEM = 'setup'
