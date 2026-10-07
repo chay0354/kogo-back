@@ -347,6 +347,9 @@ class CardsOnlyTests(ImportFixture, APITestCase):
         self.assertEqual(len(legacy_import.rows), 5)
         self.assertTrue(legacy_import.result['documents']['imported'])
 
+    def test_the_server_says_it_can_keep_cards_alone(self):
+        self.assertIs(self.client.get(f'{BASE}sources/').data['cards_only'], True)
+
     def test_importing_nothing_is_refused(self):
         legacy_import = self.stored_import(self.rows())
         res = self.cards_only(legacy_import, create_customers=False)

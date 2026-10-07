@@ -70,6 +70,10 @@ class LegacyImportViewSet(viewsets.GenericViewSet):
             'sources': source_registry.known_sources_payload(),
             'formats': list(source_registry.FORMATS),
             'fields': table_columns.fields_payload(),
+            # This server keeps no document when a commit says import_documents=false.
+            # The screen asks before offering "cards only": a server from before
+            # that would ignore the flag and import every document.
+            'cards_only': True,
         })
 
     @action(detail=False, methods=['post'])
