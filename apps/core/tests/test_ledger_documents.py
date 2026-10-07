@@ -123,3 +123,160 @@ class CancelledReceiptIsNotADebtTest(TestCase):
         )
 
         self.assertEqual(row['open_balance'], 0.0)
+
+
+class WhatWentOutLastComesFirstTest(TestCase):
+    """
+    The documents page lists the newest document first (owner, 7.10.2026).
+
+    A document's date is a day and its number runs in its own type's series, so
+    neither says which of the day's documents went out last: a tax invoice
+    issued a minute ago stood under the morning's store receipts. Every row now
+    carries the moment it was issued, and the list is ordered by it.
+    """
+
+    def setUp(self):
+        from datetime import datetime, time
+
+        from apps.documents.models import FormalDocument
+
+        self.today = timezone.localdate()
+
+        def at(hour, minute=0):
+            return timezone.make_aware(datetime.combine(self.today, time(hour, minute)))
+
+        # A store sale of the morning: its number sorts above the others' as text.
+        morning = StoreInvoice.objects.create(
+            invoice_number='ST-900', customer_name='קונה', total_amount=Decimal('49.00'),
+            payment_method='cash', payment_status='completed',
+        )
+        StoreInvoice.objects.filter(pk=morning.pk).update(issue_date=at(8))
+        # A tax invoice at noon, and a receipt a minute ago — in two other series.
+        FormalDocument.objects.create(
+            document_number='IN-0007', document_type='tax_invoice', client_type='new',
+            document_date=self.today, subtotal=Decimal('100'), vat_amount=Decimal('18'),
+            total_amount=Decimal('118'), issued_at=at(12),
+        )
+        FormalDocument.objects.create(
+            document_number='CR-0002', document_type='receipt', client_type='new',
+            document_date=self.today, subtotal=Decimal('50'), vat_amount=Decimal('0'),
+            total_amount=Decimal('50'), issued_at=at(15, 30),
+        )
+        # Issued this afternoon for yesterday's date: it went out after the noon invoice.
+        FormalDocument.objects.create(
+            document_number='IN-0006', document_type='tax_invoice', client_type='new',
+            document_date=self.today - timedelta(days=1), subtotal=Decimal('100'),
+            vat_amount=Decimal('18'), total_amount=Decimal('118'), issued_at=at(14),
+        )
+
+    def _rows(self):
+        return list_ledger_documents(
+            start_date=self.today - timedelta(days=7), end_date=self.today, local_only=True,
+        )['documents']
+
+    def test_the_list_runs_from_the_last_document_issued_to_the_first(self):
+        self.assertEqual(
+            [row['document_number'] for row in self._rows()],
+            ['CR-0002', 'IN-0006', 'IN-0007', 'ST-900'],
+        )
+
+    def test_every_row_says_when_it_went_out_as_one_comparable_moment(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        moments = [row['issued_at'] for row in self._rows()]
+
+        self.assertTrue(all(moments), moments)
+        parsed = [datetime.fromisoformat(moment) for moment in moments]
+        self.assertTrue(all(moment.utcoffset() == dt_timezone.utc.utcoffset(None) for moment in parsed))
+        self.assertEqual(parsed, sorted(parsed, reverse=True))
+
+    def test_a_document_issued_before_the_moment_was_kept_shows_when_its_row_was_made(self):
+        from apps.documents.models import FormalDocument
+
+        old = FormalDocument.objects.create(
+            document_number='IN-0001', document_type='tax_invoice', client_type='new',
+            document_date=self.today, subtotal=Decimal('10'), vat_amount=Decimal('1.8'),
+            total_amount=Decimal('11.8'),
+        )
+
+        row = next(row for row in self._rows() if row['document_number'] == 'IN-0001')
+
+        self.assertIsNone(old.issued_at)
+        self.assertTrue(row['issued_at'])
+
+
+class TheMomentOfADocumentTest(TestCase):
+    def test_a_time_with_no_zone_is_the_studios_own(self):
+        from apps.core.tranzila_ledger import _issued_at
+
+        # Tranzila's list gives "2026-10-07 09:15:00": Israel time, three hours ahead of UTC in October.
+        self.assertEqual(_issued_at('2026-10-07 09:15:00'), '2026-10-07T06:15:00+00:00')
+
+    def test_a_bare_day_or_nothing_is_no_moment(self):
+        from apps.core.tranzila_ledger import _issued_at
+
+        self.assertEqual(_issued_at('2026-10-07'), '')
+        self.assertEqual(_issued_at(''), '')
+        self.assertEqual(_issued_at(None), '')
+        self.assertEqual(_issued_at(timezone.localdate()), '')
+
+
+class ARowNamesItsSignedOriginalTest(TestCase):
+    """
+    The file the documents page hands out is a copy, and a copy carries no seal.
+    The owner issued a tax invoice, opened it from the page and saw no signature
+    (7.10.2026) — the original had been signed and mailed that same second. Each
+    row now says which signed original is its own, so the page can show it.
+    """
+
+    def setUp(self):
+        from apps.documents.models import FormalDocument, SignedOriginal
+
+        self.today = timezone.localdate()
+        self.SignedOriginal = SignedOriginal
+        for number in ('TI-1', 'TI-2', 'TI-3', 'TI-4'):
+            FormalDocument.objects.create(
+                document_number=number, document_type='tax_invoice', client_type='new',
+                document_date=self.today, subtotal=Decimal('100'), vat_amount=Decimal('18'),
+                total_amount=Decimal('118'),
+            )
+        # A signed row carries its bytes and their fingerprint (the table's own rule).
+        signed_file = {'signed_at': timezone.now(), 'pdf': b'%PDF-signed', 'size': 11, 'sha256': 'a' * 64}
+        self.signed = SignedOriginal.objects.create(number='TI-1', kind='formal', source_id='a', **signed_file)
+        # Waiting to be signed; and a copy made for the archive, which is not an original.
+        SignedOriginal.objects.create(number='TI-2', kind='formal', source_id='b')
+        SignedOriginal.objects.create(
+            number='TI-3', kind='formal', source_id='c', purpose=SignedOriginal.PURPOSE_ARCHIVE, **signed_file,
+        )
+
+    def _rows(self, **more):
+        rows = list_ledger_documents(
+            start_date=self.today - timedelta(days=1), end_date=self.today, local_only=True, **more,
+        )['documents']
+        return {row['document_number']: row for row in rows}
+
+    def test_a_signed_original_is_named_with_the_moment_it_was_signed(self):
+        row = self._rows()['TI-1']
+
+        self.assertEqual(row['signed_original_id'], str(self.signed.id))
+        self.assertTrue(row['signed_at'].endswith('+00:00'), row['signed_at'])
+
+    def test_an_unsigned_one_an_archive_copy_and_a_document_with_none_are_not(self):
+        rows = self._rows()
+
+        for number in ('TI-2', 'TI-3', 'TI-4'):
+            self.assertIsNone(rows[number]['signed_original_id'], number)
+            self.assertEqual(rows[number]['signed_at'], '', number)
+
+    def test_a_partners_list_names_none(self):
+        """The signed file is handed out to the office only."""
+        from apps.core.models import Branch
+
+        branch = Branch.objects.create(name='סניף של שותף')
+
+        rows = list_ledger_documents(
+            start_date=self.today - timedelta(days=1), end_date=self.today, local_only=True,
+            branch_ids=[branch.id],
+        )['documents']
+
+        self.assertTrue(all('signed_original_id' not in row for row in rows))

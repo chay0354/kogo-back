@@ -110,6 +110,33 @@ def _iso_datetime(value) -> str:
     return parsed.isoformat() if parsed else text
 
 
+def _issued_at(value) -> str:
+    """
+    The moment a document went out, as one comparable instant (UTC, ISO) — ''
+    when only a day is known.
+
+    The documents page lists what went out last first (owner, 7.10.2026). A
+    document's date is a day, and its number runs in its own type's series, so
+    neither says which of the day's documents is the newest: a tax invoice
+    issued a minute ago stood under the morning's receipts. Every source keeps
+    the hour — it is handed over here in one form, whatever zone it was kept in.
+    A time with no zone (Tranzila's own list) is the studio's local time.
+    """
+    from datetime import datetime, timezone as dt_timezone
+
+    if not value:
+        return ''
+    if isinstance(value, str):
+        text = value.strip().replace(' ', 'T')
+        # A bare day reads as its midnight, which is no hour anybody issued at.
+        value = parse_datetime(text) if 'T' in text else None
+    if not isinstance(value, datetime):
+        return ''
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value)
+    return value.astimezone(dt_timezone.utc).isoformat()
+
+
 def _default_range(start: Optional[date], end: Optional[date]) -> tuple[date, date]:
     today = timezone.localdate()
     return (start or (today - timedelta(days=90)), end or today)
@@ -140,6 +167,7 @@ def normalize_tranzila_document(row: dict, customer_name: str = '') -> dict:
         'id': f'tranzila-doc-{doc_id or number}',
         'document_number': number or doc_id,
         'issue_date': _iso_date(created),
+        'issued_at': _issued_at(created),
         'customer_name': customer_name or str(row.get('client_name') or row.get('contact') or ''),
         'document_type': TRANZILA_DOC_TYPE_LABELS.get(doc_type, doc_type or 'מסמך טרנזילה'),
         'document_type_code': doc_type,
@@ -258,6 +286,8 @@ def _local_formal_rows(start: date, end: date, branch_ids=None) -> list[dict]:
             'id': str(doc.id),
             'document_number': doc.document_number,
             'issue_date': _iso_date(doc.document_date),
+            # A draft, and a document from before issued_at existed, show when the row was made.
+            'issued_at': _issued_at(doc.issued_at or doc.created_at),
             'customer_name': customer,
             'document_type': LOCAL_DOC_TYPE_LABELS.get(doc.document_type, doc.get_document_type_display()),
             'document_type_code': doc.document_type,
@@ -396,6 +426,7 @@ def _local_crm_invoice_rows(start: date, end: date, branch_ids=None) -> list[dic
             'id': f'crm-inv-{inv.id}',
             'document_number': inv.invoice_number,
             'issue_date': _iso_date(inv.invoice_date),
+            'issued_at': _issued_at(inv.invoice_date),
             'customer_name': inv.payer_name or (inv.family.name if inv.family_id else ''),
             'document_type': 'חשבונית מס/קבלה',
             'document_type_code': 'IR',
@@ -462,6 +493,7 @@ def _local_store_invoice_rows(start: date, end: date, branch_ids=None) -> list[d
             'id': str(inv.id),
             'document_number': inv.invoice_number,
             'issue_date': _iso_date(inv.issue_date),
+            'issued_at': _issued_at(inv.issue_date),
             'customer_name': customer,
             # Paid on the spot (card or cash) is a receipt; monthly billing is not paid yet.
             'document_type': 'חשבונית עסקה' if inv.payment_method == 'monthly_billing' else 'חשבונית מס/קבלה',
@@ -526,8 +558,42 @@ def _merge_documents(*groups: list[dict]) -> list[dict]:
                 if key:
                     seen.add(key)
             merged.append(row)
-    merged.sort(key=lambda row: row.get('issue_date') or '', reverse=True)
+    # What went out last comes first; a row that only knows its day stands by that day.
+    merged.sort(key=lambda row: row.get('issued_at') or row.get('issue_date') or '', reverse=True)
     return merged
+
+
+def _name_signed_originals(rows: list[dict]) -> None:
+    """
+    On each row whose original was signed: `signed_original_id` and `signed_at`.
+
+    The file the documents page hands out is a copy, and a copy carries no
+    seal — the signed original is one file, and it went to the customer. The
+    owner issued a tax invoice, opened it from the page and saw no signature
+    (7.10.2026), although the original had been signed and mailed the same
+    second. With the original's id the page can show that file itself (the
+    office's own logged look at it, signing/originals/<id>/file/), and say
+    when it was signed. One query for the whole list; an archive copy is not
+    an original and is never named here.
+    """
+    from apps.documents.models import SignedOriginal
+
+    numbers = [row['document_number'] for row in rows if row.get('document_number')]
+    if not numbers:
+        return
+    signed = {
+        number: (original_id, signed_at)
+        for number, original_id, signed_at in (
+            SignedOriginal.objects
+            .exclude(purpose=SignedOriginal.PURPOSE_ARCHIVE)
+            .filter(number__in=numbers, signed_at__isnull=False)
+            .values_list('number', 'id', 'signed_at')
+        )
+    }
+    for row in rows:
+        found = signed.get(row.get('document_number'))
+        row['signed_original_id'] = str(found[0]) if found else None
+        row['signed_at'] = _issued_at(found[1]) if found else ''
 
 
 def list_ledger_documents(
@@ -576,6 +642,10 @@ def list_ledger_documents(
         _local_crm_invoice_rows(start, end, branch_ids),
         _local_store_invoice_rows(start, end, branch_ids),
     )
+    if branch_ids is None:
+        # The office's list. A partner's has no use for the ids: the signed
+        # file is handed out to the office only.
+        _name_signed_originals(documents)
     return {
         'documents': documents,
         'source': source,
