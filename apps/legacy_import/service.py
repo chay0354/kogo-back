@@ -24,6 +24,11 @@ card their documents were linked to last time, then by ח"פ/ת"ז, email, and
 phone with name. Committing the same file again finds everything it wrote and
 changes nothing; committing a newer export updates what changed.
 
+A commit may also write the cards alone (import_documents=False): the business
+starts its own numbering in kogo and wants its customers remembered, not the
+old software's documents. No LegacyDocument is written then, and the rows the
+preview stored are dropped once the cards exist.
+
 Two things are decided when the file is read, and stored with its rows
 (parser.prepare_rows): an invoice the old software still shows as open is not
 imported — it is listed beside the preview instead — and a company number the
@@ -84,7 +89,10 @@ MAX_UNPACKED_BYTES = 40_000_000
 GZIP_MAGIC = b'\x1f\x8b'
 # How many open invoices the preview lists; the count and the total cover all of them.
 OPEN_INVOICES_LIMIT = 500
-# In a commit's result: customer key -> the card of a customer none of whose documents were imported.
+# In a commit's result: customer key -> the card of a customer none of whose
+# documents were imported — all they had was an open invoice, or the commit
+# wrote cards only. With no document to carry the link, this is what finds the
+# same card again on the next import.
 DOCUMENT_LESS_CARDS = 'document_less_cards'
 
 NOTE_PREFIX = 'יובא מהתוכנה הקודמת:'
@@ -615,12 +623,19 @@ def split_name(first: str, last: str) -> tuple:
     return first[:100], last[:100]
 
 
-def import_note(customer: Customer, source_system: str = SOURCE_TAZMAN) -> str:
+def import_note(customer: Customer, source_system: str = SOURCE_TAZMAN, documents_imported: bool = True) -> str:
     latest = customer.latest
     if not customer.documents:
         # All the file has of them is an invoice still open in the old software.
         return f"{note_prefix(source_system)} פרטי הלקוח בלבד — החשבונית הפתוחה שלו נשארה בתוכנה הקודמת"
     when = date.fromisoformat(latest['date']).strftime('%d/%m/%Y')
+    if not documents_imported:
+        # Cards only: the documents stayed in the old software; the card says they exist there.
+        return (
+            f"{note_prefix(source_system)} פרטי הלקוח בלבד, בלי המסמכים. "
+            f"בתוכנה הקודמת הופקו לו {customer.documents} מסמכים, "
+            f"אחרון {latest['type_label']} {latest['number']} מ-{when}"
+        )
     return (
         f"{note_prefix(source_system)} {customer.documents} מסמכים, "
         f"אחרון {latest['type_label']} {latest['number']} מ-{when}"
@@ -660,7 +675,8 @@ def _card_state(card) -> tuple:
     return tuple(getattr(card, field) for field in CARD_FIELDS)
 
 
-def _update_card(card, customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN) -> None:
+def _update_card(card, customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN,
+                 documents_imported: bool = True) -> None:
     """Fill the card's blanks, give it the newest name, and file it where the newest document was."""
     card.first_name, card.last_name = split_name(customer.first_name, customer.last_name)
     if not card.email and customer.email:
@@ -677,14 +693,15 @@ def _update_card(card, customer: Customer, target: Target | None, source_system:
     notes = card.notes or ''
     if not notes.strip() and customer.customer_notes:
         notes = customer.customer_notes
-    card.notes = _notes_with(notes, import_note(customer, source_system), source_system)
+    card.notes = _notes_with(notes, import_note(customer, source_system, documents_imported), source_system)
 
 
-def _new_card(customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN):
+def _new_card(customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN,
+              documents_imported: bool = True):
     from apps.customers.models import BusinessCustomer
 
     card = BusinessCustomer(first_name='', last_name='', notes='')
-    _update_card(card, customer, target, source_system)
+    _update_card(card, customer, target, source_system, documents_imported)
     return card
 
 
@@ -738,15 +755,22 @@ DOCUMENT_UPDATE_FIELDS = [
 
 
 def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
-           create_customers: bool = True) -> dict:
+           create_customers: bool = True, import_documents: bool = True) -> dict:
     """
     Write the import. Returns what was done; raises CommitInputError, LegacyImport.DoesNotExist.
 
     create_customers=False keeps the documents as history only: no card is
     opened or changed, and a document is linked to a card only when it is the
     same person (a card linked before, or the same ח"פ/ת"ז).
+
+    import_documents=False opens and updates the cards only: not one document
+    is written, and the stored rows — every document of every customer in the
+    file — are dropped with the commit, since nothing will read them again.
     """
     from apps.customers.models import BusinessCustomer
+
+    if not create_customers and not import_documents:
+        raise CommitInputError('לא נבחר מה לייבא: כרטיסי לקוחות, מסמכים, או שניהם')
 
     with transaction.atomic():
         # Two clicks on "import" wait for each other instead of creating each card twice.
@@ -754,6 +778,9 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
         source_system = legacy_import.source_system or SOURCE_TAZMAN
         mapping = resolve_mapping(mapping_payload)
         rows = legacy_import.rows or []
+        if not rows and legacy_import.status == LegacyImport.STATUS_COMMITTED:
+            # A cards-only commit dropped the rows: there is nothing left to import from.
+            raise CommitInputError('הייבוא הזה כבר בוצע, והשורות שלו לא נשמרו. כדי לייבא שוב, העלו את הקובץ מחדש.')
         customers = customers_from_rows(rows)
 
         cards = _load_cards()
@@ -775,14 +802,14 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
             card, _how = _find_card(customer, linked, index)
             target = mapping.get(customer.latest['location'])
             if card is None:
-                card = _new_card(customer, target, source_system)
+                card = _new_card(customer, target, source_system, import_documents)
                 created.append(card)
                 index.add(card)
             else:
                 # Compared against the card as it was before this commit, so a
                 # card two customers share is "changed" only if it ends up different.
                 initial.setdefault(card.pk, _card_state(card))
-                _update_card(card, customer, target, source_system)
+                _update_card(card, customer, target, source_system, import_documents)
             cards_by_key[customer.key] = card
 
         # A customer who is not being made a card (a parent left out, or one
@@ -797,6 +824,8 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
                 continue
             if create_customers and customer.deleted and (customer.kind == 'business' or include_subscription_parents):
                 counts['skipped_deleted'] += 1
+            if not import_documents:
+                continue  # no document will be written, so there is nothing to link
             card, how = _find_card(customer, linked, index)
             if card is not None and how in SAME_CUSTOMER:
                 cards_by_key[customer.key] = card
@@ -822,7 +851,9 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
         # document with the same type and number is a different document.
         # An invoice still open in the old software is not history yet: it is not written.
         open_count = sum(1 for row in rows if row.get('open'))
-        rows = [row for row in rows if not row.get('open')]
+        in_file = len(rows)
+        # Cards only: every row is left where it came from, in the old software.
+        rows = [row for row in rows if not row.get('open')] if import_documents else []
         existing = {}
         for doc_type in TYPE_ORDER:
             numbers = [row['number'] for row in rows if row['doc_type'] == doc_type]
@@ -882,10 +913,14 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
                 'unchanged': doc_counts['unchanged'],
                 'linked_to_customers': doc_counts['linked'],
                 'total': len(rows),
-                'open_skipped': open_count,
+                'open_skipped': open_count if import_documents else 0,
+                # False for a cards-only commit, and then how many documents the file had and kogo left out.
+                'imported': bool(import_documents),
+                'left_in_previous_software': 0 if import_documents else in_file,
             },
             DOCUMENT_LESS_CARDS: {
-                key: str(card.pk) for key, card in cards_by_key.items() if not customers[key].documents
+                key: str(card.pk) for key, card in cards_by_key.items()
+                if not import_documents or not customers[key].documents
             },
         }
         legacy_import.status = LegacyImport.STATUS_COMMITTED
@@ -894,9 +929,14 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
         legacy_import.result = result
         legacy_import.committed_at = now
         legacy_import.committed_by = user if getattr(user, 'is_authenticated', False) else None
-        legacy_import.save(update_fields=[
-            'status', 'mapping', 'include_subscription_parents', 'result', 'committed_at', 'committed_by',
-        ])
+        fields = ['status', 'mapping', 'include_subscription_parents', 'result', 'committed_at', 'committed_by']
+        if not import_documents:
+            # The rows are every document of every customer in the file — parents'
+            # receipts included. Nothing reads them after a cards-only commit, so
+            # they are not kept.
+            legacy_import.rows = []
+            fields.append('rows')
+        legacy_import.save(update_fields=fields)
     logger.info('Legacy import %s committed: %s', legacy_import.pk, result)
     return result
 

@@ -70,6 +70,10 @@ class LegacyImportViewSet(viewsets.GenericViewSet):
             'sources': source_registry.known_sources_payload(),
             'formats': list(source_registry.FORMATS),
             'fields': table_columns.fields_payload(),
+            # This server keeps no document when a commit says import_documents=false.
+            # The screen asks before offering "cards only": a server from before
+            # that would ignore the flag and import every document.
+            'cards_only': True,
         })
 
     @action(detail=False, methods=['post'])
@@ -106,10 +110,12 @@ class LegacyImportViewSet(viewsets.GenericViewSet):
         legacy_import = self.get_object()
         include_parents = _flag(request.data.get('include_subscription_parents', False))
         create_customers = _flag(request.data.get('create_customers', True))
+        # False: the customers' cards only — not one document of the previous software is kept.
+        import_documents = _flag(request.data.get('import_documents', True))
         try:
             result = service.commit(
                 legacy_import.pk, request.data.get('mapping') or {}, include_parents, request.user,
-                create_customers=create_customers,
+                create_customers=create_customers, import_documents=import_documents,
             )
         except service.CommitInputError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
