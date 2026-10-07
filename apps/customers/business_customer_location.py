@@ -37,6 +37,17 @@ SCOPE_ALL = BusinessCustomerLocationChange.SCOPE_ALL
 SCOPES = (SCOPE_FUTURE, SCOPE_ALL)
 
 BRANCHES_CATEGORY = 'סניפים'
+# The business that means "one of our branches" (owner, 7.10.2026). Chosen as
+# the business itself, it asks for the branch right away — the income is then
+# the branch's — and a category in it is an extra the office may add, not a
+# condition. The older way in, a category named סניפים under another business,
+# still works.
+BRANCHES_BUSINESS = 'סניפים'
+
+
+def is_branches_business(business) -> bool:
+    """Whether this is the business whose documents belong to a branch."""
+    return business is not None and (getattr(business, 'name', '') or '').strip() == BRANCHES_BUSINESS
 
 
 class LocationError(ValueError):
@@ -114,6 +125,13 @@ def resolve_location(business_id, category_id, branch_id) -> Location:
     branch = find(Branch, branch_id, 'הסניף')
     if business is None:
         raise LocationError('יש לבחור עסק')
+    if is_branches_business(business):
+        # The branch is the point of this business; a category is optional.
+        if branch is None:
+            raise LocationError('יש לבחור סניף')
+        if category is not None and category.business_id != business.pk:
+            raise LocationError('הקטגוריה אינה שייכת לעסק שנבחר')
+        return Location(business, category, branch)
     if category is None:
         raise LocationError('יש לבחור קטגוריה')
     if category.business_id != business.pk:
@@ -172,7 +190,14 @@ def change_location(customer, location: Location, *, scope: str | None = None, u
 
         first = not has_location(customer)
         if not first and not scope:
-            raise ScopeNeeded(customer, movable_documents(customer).count(), previous.as_dict(), location.as_dict())
+            issued = movable_documents(customer).count()
+            if issued:
+                raise ScopeNeeded(customer, issued, previous.as_dict(), location.as_dict())
+            # Nothing was issued to the customer yet, so "from now on" and
+            # "backwards too" are the same answer and there is nothing to ask.
+            # (A branch chosen, and a category marked a moment later, used to
+            # stop on this question with no document it could be about.)
+            scope = SCOPE_FUTURE
         applied = BusinessCustomerLocationChange.SCOPE_FIRST if first else scope
 
         moved = []
@@ -200,7 +225,8 @@ def change_location(customer, location: Location, *, scope: str | None = None, u
         customer.business = location.business
         customer.business_type = location.business.name[:100]
         customer.business_category = location.category
-        customer.category = location.category.name[:100]
+        # Under the business סניפים a category is optional: the card then names none.
+        customer.category = location.category.name[:100] if location.category else ''
         customer.branch = location.branch
         customer.save(update_fields=[
             'business', 'business_type', 'business_category', 'category', 'branch', 'updated_at',

@@ -235,3 +235,122 @@ class ImportedCardTests(LocationFixture, APITestCase):
 
         res = self.file(self.at_north(), customer=card)
         self.assertEqual((res.status_code, res.data['scope']), (200, 'first'))
+
+
+class TheBranchesBusinessTests(LocationFixture, APITestCase):
+    """
+    "סניפים" chosen as the business itself (owner, 7.10.2026).
+
+    Choosing a business for a business customer, the office picks "סניפים",
+    then the branch — and the customer, with the income of the documents issued
+    to them, is that branch's. A category under it is something the office may
+    add in the settings; it is never a condition.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The migration adds the business; a category for branches is the office's own.
+        self.our_branches = Business.objects.get(name='סניפים')
+        self.events, _ = BusinessCategory.objects.get_or_create(business=self.our_branches, name='אירועים')
+
+    def at_branch(self, branch, category=None):
+        return {'business_id': str(self.our_branches.pk),
+                'business_category_id': str(category.pk) if category else None,
+                'branch_id': str(branch.pk) if branch else None}
+
+    def test_the_business_exists_and_is_on(self):
+        self.assertTrue(self.our_branches.is_active)
+
+    def test_the_customer_is_filed_under_the_branch_with_no_category(self):
+        answer = self.file(self.at_branch(self.north))
+
+        self.assertEqual(answer.status_code, 200, answer.content)
+        self.customer.refresh_from_db()
+        self.assertEqual(
+            (self.customer.business, self.customer.business_category, self.customer.branch),
+            (self.our_branches, None, self.north),
+        )
+        self.assertEqual(answer.json()['location']['label'], 'סניפים · סניף צפון')
+
+    def test_a_category_of_the_branches_business_may_be_marked_too(self):
+        answer = self.file(self.at_branch(self.south, self.events))
+
+        self.assertEqual(answer.status_code, 200, answer.content)
+        self.customer.refresh_from_db()
+        self.assertEqual((self.customer.business_category, self.customer.branch), (self.events, self.south))
+
+    def test_a_category_marked_after_the_branch_is_saved_without_a_question(self):
+        """The branch files the card; the category comes a moment later. Nothing was issued, so nothing is asked."""
+        self.assertEqual(self.file(self.at_branch(self.north)).status_code, 200)
+
+        answer = self.file(self.at_branch(self.north, self.events))
+
+        self.assertEqual(answer.status_code, 200, answer.content)
+        self.assertEqual((answer.json()['changed'], answer.json()['scope']), (True, 'future'))
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.business_category, self.events)
+
+    def test_once_documents_were_issued_a_change_is_still_asked_about(self):
+        self.file(self.at_branch(self.north))
+        self.document('TI-BR-9', business=self.our_branches, branch=self.north)
+
+        answer = self.file(self.at_branch(self.south))
+
+        self.assertEqual(answer.status_code, 409)
+        self.assertEqual((answer.json()['needs_scope'], answer.json()['documents']), (True, 1))
+
+    def test_without_a_branch_it_is_refused(self):
+        answer = self.file(self.at_branch(None, self.events))
+
+        self.assertEqual(answer.status_code, 400)
+        self.assertEqual(answer.json()['error'], 'יש לבחור סניף')
+
+    def test_a_category_of_another_business_is_refused(self):
+        answer = self.file(self.at_branch(self.north, self.general))
+
+        self.assertEqual(answer.status_code, 400)
+        self.assertEqual(answer.json()['error'], 'הקטגוריה אינה שייכת לעסק שנבחר')
+
+    def test_every_other_business_keeps_its_rules(self):
+        """A category is still asked for, and a branch only under the category סניפים."""
+        no_category = self.file({'business_id': str(self.shows.pk), 'business_category_id': None, 'branch_id': None})
+        self.assertEqual(no_category.json()['error'], 'יש לבחור קטגוריה')
+        stray_branch = self.file({**self.at_shows(), 'branch_id': str(self.north.pk)})
+        self.assertEqual(stray_branch.json()['error'], 'סניף נבחר רק תחת הקטגוריה סניפים')
+        self.assertEqual(self.file(self.at_north()).status_code, 200)
+
+    def test_a_document_with_no_branch_named_takes_the_cards_branch(self):
+        from apps.documents.service import _branch_for
+
+        self.file(self.at_branch(self.north))
+
+        self.assertEqual(_branch_for({'business_customer_id': str(self.customer.pk)}), self.north.pk)
+        # A branch that was named is kept, and another business's customer gets none.
+        self.assertEqual(
+            _branch_for({'business_customer_id': str(self.customer.pk), 'branch_id': str(self.south.pk)}),
+            str(self.south.pk),
+        )
+        other = BusinessCustomer.objects.create(
+            first_name='תיאטרון', last_name='הדגמה', business=self.shows, business_category=self.general,
+            branch=self.south,
+        )
+        self.assertIsNone(_branch_for({'business_customer_id': str(other.pk)}))
+
+    def test_the_income_lands_on_the_branchs_line(self):
+        """One "סניפים" line, a row for the branch — beside its courses, rentals and pickup sales."""
+        from apps.core.revenue_service import aggregate_income_by_business
+
+        self.document('TI-BR-1', business=self.our_branches, business_category=self.events, branch=self.north)
+        self.document('TI-BR-2', business=self.our_branches, branch=self.north)
+        self.document('TI-SH-1', business=self.shows, business_category=self.general)
+
+        buckets = {bucket['business_name']: bucket for bucket in aggregate_income_by_business(date(2026, 10, 1), date(2026, 10, 31))}
+
+        branches = buckets['סניפים']
+        self.assertEqual(branches['business_id'], 'branches')
+        self.assertEqual(
+            [(row['category_name'], row['revenue']) for row in branches['categories']],
+            [('סניף צפון', 236.0)],
+        )
+        self.assertEqual(buckets['הצגות חיצוניות']['revenue'], 118.0)
+        self.assertEqual(len([name for name in buckets if name == 'סניפים']), 1)
