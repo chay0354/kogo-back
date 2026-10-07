@@ -319,6 +319,18 @@ def _notes(doc: FormalDocument, *, signed: bool = False, closing: tuple[Note, ..
     return notes
 
 
+def _allocation_headline(doc: FormalDocument) -> str:
+    """
+    The allocation number in large type at the top, from the moment the
+    document carries one (owner, 7.10.2026). Before that there is nothing to
+    show there: that one is needed and still missing is said in the small print.
+    """
+    number = (doc.allocation_number or '').strip()
+    if not number or doc.document_type not in TAX_DOCUMENT_TYPES:
+        return ''
+    return f'מספר הקצאה: {number}'
+
+
 def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bool = False,
                           archive: bool = False) -> InvoiceLayout:
     """
@@ -338,6 +350,7 @@ def build_document_layout(doc: FormalDocument, *, copy: bool = False, signed: bo
     print_as = edition(copy=copy, signed=signed, archive=archive)
     return InvoiceLayout(
         title=f'{label} - {doc.document_number}',
+        headline=_allocation_headline(doc),
         copy_mark='טיוטה — אינו מסמך מס' if is_draft else print_as.copy_mark,
         document_fields=_document_fields(doc),
         business_fields=business_fields(),

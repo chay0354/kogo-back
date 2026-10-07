@@ -30,7 +30,6 @@ from dataclasses import dataclass, field as dataclass_field
 from decimal import Decimal
 from xml.sax.saxutils import escape
 
-from bidi.algorithm import get_display
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -42,6 +41,7 @@ from reportlab.platypus import (
     KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
+from apps.core.direction_marks import strip_direction_marks, visual_order
 from apps.documents.issuer import ISSUER_COMPANY_NUMBER, ISSUER_NAME
 from apps.documents.signature_seal import SignatureSeal
 
@@ -149,7 +149,7 @@ def ensure_fonts_registered() -> None:
 
 def rtl(text: str) -> str:
     """Bidi-reorder one short string that is known to fit on a single line."""
-    return get_display(str(text or ''))
+    return visual_order(text)
 
 
 def money(amount: Decimal | float | int | str) -> str:
@@ -188,7 +188,9 @@ def wrapped_lines(
     shares that line, so the rest of it has less room than the ones below.
     """
     lines: list[str] = []
-    for source_line in str(text or '').splitlines() or ['']:
+    # Measured and broken without the invisible direction marks a pasted phone
+    # or name carries: a line that kept half a pair of them cannot be reordered.
+    for source_line in strip_direction_marks(text).splitlines() or ['']:
         current: list[str] = []
         for word in source_line.split(' '):
             room = usable if (lines or current) else (first_usable or usable)
@@ -218,7 +220,7 @@ def para(text: str, style: ParagraphStyle, width: float) -> Paragraph:
     """
     usable = max(width - 4, 10)
     lines = wrapped_lines(text, style.fontName, style.fontSize, usable)
-    return Paragraph('<br/>'.join(escape(get_display(line)) for line in lines), style)
+    return Paragraph('<br/>'.join(escape(visual_order(line)) for line in lines), style)
 
 
 # --- the data a document hands to the drawing ---------------------------------
@@ -256,6 +258,9 @@ class Note:
 @dataclass
 class InvoiceLayout:
     title: str                                   # "חשבונית מס/קבלה - IR-2026-000123"
+    # A line in large type right under the title: the allocation number, once
+    # the document carries one (owner, 7.10.2026: "בגדול למעלה"). '' draws nothing.
+    headline: str = ''
     copy_mark: str = 'מקור'
     document_fields: list[Field] = dataclass_field(default_factory=list)
     business_fields: list[Field] = dataclass_field(default_factory=list)
@@ -287,6 +292,10 @@ def _styles() -> dict[str, ParagraphStyle]:
     return {
         'title': ParagraphStyle(
             'InvTitle', fontName=FONT_BOLD, fontSize=18.5, leading=24,
+            textColor=TITLE_COLOR, alignment=TA_CENTER,
+        ),
+        'headline': ParagraphStyle(
+            'InvHeadline', fontName=FONT_BOLD, fontSize=15, leading=20,
             textColor=TITLE_COLOR, alignment=TA_CENTER,
         ),
         'copy_mark': ParagraphStyle(
@@ -721,13 +730,13 @@ def _note_paragraph(note: Note, style: ParagraphStyle, width: float) -> Paragrap
     )
     out: list[str] = []
     for index, line in enumerate(lines):
-        visual = escape(get_display(line)) if line else ''
+        visual = escape(visual_order(line)) if line else ''
         if index == 0 and lead:
             # An explicit face and colour, rather than <b>: it cannot depend on
             # a font family mapping being registered.
             tail = (
                 f'<font name="{FONT_BOLD}" color="#{NOTE_STRONG.hexval()[2:]}">'
-                f'{escape(get_display(lead))}</font>'
+                f'{escape(visual_order(lead))}</font>'
             )
             visual = f'{visual} {tail}' if visual else tail
         out.append(visual)
@@ -777,8 +786,13 @@ def _notes_block(layout: InvoiceLayout, styles: dict) -> list:
 
 def build_story(layout: InvoiceLayout) -> list:
     styles = _styles()
+    headline = (
+        [Spacer(1, 4), para(layout.headline, styles['headline'], CONTENT_WIDTH)]
+        if layout.headline.strip() else []
+    )
     story: list = [
         para(layout.title, styles['title'], CONTENT_WIDTH),
+        *headline,
         Spacer(1, 7),
         para(layout.copy_mark, styles['copy_mark'], CONTENT_WIDTH),
         Spacer(1, 20),

@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+from apps.core.direction_marks import strip_direction_marks
 from apps.legacy_import.reader import ImportFileError, Sheet
 
 # field -> the header(s) the old software writes for it. Matched after
@@ -171,14 +172,18 @@ def normalise_header(value) -> str:
 
 
 def clean_text(value) -> str:
-    """A cell as text: entities decoded (&#34; -> "), whitespace collapsed."""
+    """
+    A cell as text: entities decoded (&#34; -> "), whitespace collapsed, and
+    the invisible direction marks a pasted phone or name carries taken out
+    (apps/core/direction_marks).
+    """
     if value is None:
         return ''
     if isinstance(value, float):
         return str(int(value)) if value.is_integer() else str(value)
     if isinstance(value, (datetime, date)):
         return value.strftime('%d/%m/%Y')
-    return _SPACES.sub(' ', html.unescape(str(value))).strip()
+    return _SPACES.sub(' ', strip_direction_marks(html.unescape(str(value)))).strip()
 
 
 def _dash_is_empty(value) -> str:
