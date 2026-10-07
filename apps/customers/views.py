@@ -12,6 +12,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from apps.core.manychat_service import ManyChatService
 from django.db.models import Q, Prefetch, Count, Sum, Value, CharField, ProtectedError
 from django.db.models.functions import Concat
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -2552,6 +2553,80 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
         customer = self.get_object()
         include_legacy = IsManager().has_permission(request, self)
         return Response(business_customer_summary(customer, request.user, include_legacy=include_legacy))
+
+    @action(detail=False, methods=['get'], url_path='duplicates',
+            permission_classes=[IsAuthenticated, IsManager])
+    def duplicates(self, request):
+        """
+        GET /api/v1/customers/business-customers/duplicates/
+
+        Cards that may be one customer — the same name once the branch is
+        taken off, the same ח"פ/ת"ז, the same phone — for the office to merge
+        or to say are different customers. Looks only; managers only.
+        """
+        from apps.customers.business_customer_cleanup import suggest_groups
+
+        return Response({'groups': suggest_groups()})
+
+    @action(detail=True, methods=['post'], url_path='merge',
+            permission_classes=[IsAuthenticated, IsManager])
+    def merge(self, request, pk=None):
+        """
+        POST /api/v1/customers/business-customers/{id}/merge/  {merge_ids: [...], name?: "…"}
+
+        Make the cards in `merge_ids` part of this one: their documents,
+        payment links, signatures, tenancies and history move here, the blanks
+        here are filled from them, and they are deleted — each kept whole in
+        the record of the merge. `name` renames the card that stays. Managers only.
+        """
+        from apps.customers.business_customer_cleanup import CleanupError, merge
+
+        survivor = self.get_object()
+        ids = request.data.get('merge_ids')
+        if not isinstance(ids, list) or not ids:
+            return Response({'error': 'יש לבחור לפחות כרטיס אחד לאיחוד'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            others = list(BusinessCustomer.objects.filter(pk__in=ids))
+        except (ValueError, DjangoValidationError):
+            return Response({'error': 'מזהה כרטיס לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(others) != len(set(map(str, ids))):
+            return Response({'error': 'אחד הכרטיסים כבר לא קיים. רעננו את הרשימה.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name = request.data.get('name')
+        try:
+            result = merge(survivor, others, name=name if isinstance(name, str) else None, user=request.user)
+        except CleanupError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info(
+            'Business customers merged into %s (%s): %s cards, moved %s, by %s',
+            result['customer_id'], result['name'], result['merged'], result['moved'],
+            getattr(request.user, 'email', request.user),
+        )
+        survivor.refresh_from_db()
+        return Response({**result, 'customer': BusinessCustomerSerializer(survivor).data})
+
+    @action(detail=False, methods=['post'], url_path='keep-apart',
+            permission_classes=[IsAuthenticated, IsManager])
+    def keep_apart(self, request):
+        """
+        POST /api/v1/customers/business-customers/keep-apart/  {card_ids: [...]}
+
+        The office looked at a suggested group and these are different
+        customers: they are not suggested together again. Managers only.
+        """
+        from apps.customers.business_customer_cleanup import CleanupError, keep_apart
+
+        ids = request.data.get('card_ids')
+        if not isinstance(ids, list):
+            return Response({'error': 'יש לבחור לפחות שני כרטיסים'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            cards = list(BusinessCustomer.objects.filter(pk__in=ids))
+            keep_apart(cards, user=request.user)
+        except (ValueError, DjangoValidationError):
+            return Response({'error': 'מזהה כרטיס לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        except CleanupError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'kept_apart': len(cards)})
 
     @action(detail=True, methods=['post'], url_path='location')
     def location(self, request, pk=None):
