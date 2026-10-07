@@ -19,6 +19,10 @@ stays — documents, payment links, signatures, tenancies, standing orders, the
 previous software's history, location changes — fills the blanks the survivor
 has from what the others knew, records the whole of each card that goes away
 (BusinessCustomerCleanup), and only then deletes them.
+
+set_aside() is for a card that is no business customer at all: a pupil of the
+lessons, on the list because the previous software billed them by hand. It
+goes only if it holds nothing, and it too is recorded whole first.
 """
 from __future__ import annotations
 
@@ -380,6 +384,58 @@ def keep_apart(cards, *, user=None) -> BusinessCustomerCleanup:
         decided_by=user if _actor_name(user) else None,
         decided_by_name=_actor_name(user),
     )
+
+
+def _holds(card) -> list:
+    """What a card holds besides its own details, in words; empty when it holds nothing."""
+    held = []
+    for relation in card._meta.related_objects:
+        model = relation.related_model
+        if model._default_manager.filter(**{relation.field.name: card}).exists():
+            held.append(str(model._meta.verbose_name_plural))
+    return held
+
+
+def set_aside(cards, *, user=None) -> dict:
+    """
+    Take cards that are not business customers off the list — a pupil of the
+    lessons whom the previous software billed by hand. Returns
+    {removed: [{id, name}], refused: [{id, name, holds}]}.
+
+    Only a card that holds nothing goes: no document, payment link, signature,
+    rental agreement, standing order, history or filing the office did. A card
+    that holds something was used as a business customer, and stays — it is
+    returned in `refused` with what it holds. Each card that goes is kept whole
+    in one BusinessCustomerCleanup.
+    """
+    from apps.customers.models import BusinessCustomer
+
+    ids = {card.pk for card in cards}
+    if not ids:
+        raise CleanupError('יש לבחור לפחות כרטיס אחד')
+
+    removed, refused, snapshots = [], [], []
+    with transaction.atomic():
+        locked = list(BusinessCustomer.objects.select_for_update().filter(pk__in=ids).order_by('pk'))
+        if len(locked) != len(ids):
+            raise CleanupError('אחד הכרטיסים כבר לא קיים. רעננו את הרשימה.')
+        for card in locked:
+            holds = _holds(card)
+            if holds:
+                refused.append({'id': str(card.pk), 'name': card.full_name, 'holds': holds})
+                continue
+            removed.append({'id': str(card.pk), 'name': card.full_name})
+            snapshots.append(_snapshot(card))
+        if removed:
+            BusinessCustomerCleanup.objects.create(
+                action=BusinessCustomerCleanup.ACTION_REMOVED,
+                card_ids=sorted(row['id'] for row in removed),
+                merged_cards=snapshots,
+                decided_by=user if _actor_name(user) else None,
+                decided_by_name=_actor_name(user),
+            )
+            BusinessCustomer.objects.filter(pk__in=[row['id'] for row in removed]).delete()
+    return {'removed': removed, 'refused': refused}
 
 
 def office_named_cards() -> set:

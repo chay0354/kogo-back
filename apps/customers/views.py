@@ -2622,11 +2622,46 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
         try:
             cards = list(BusinessCustomer.objects.filter(pk__in=ids))
             keep_apart(cards, user=request.user)
-        except (ValueError, DjangoValidationError):
-            return Response({'error': 'מזהה כרטיס לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
         except CleanupError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except (ValueError, DjangoValidationError):
+            return Response({'error': 'מזהה כרטיס לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'kept_apart': len(cards)})
+
+    @action(detail=False, methods=['post'], url_path='not-business',
+            permission_classes=[IsAuthenticated, IsManager])
+    def not_business(self, request):
+        """
+        POST /api/v1/customers/business-customers/not-business/  {card_ids: [...]}
+
+        Take cards that are not business customers off the list — pupils of the
+        lessons the previous software billed by hand. A card that holds
+        anything (a document, a rental agreement, a filing) stays and comes
+        back in `refused`; each card that goes is recorded whole. Managers only.
+
+        200 {removed: [{id, name}], refused: [{id, name, holds: [...]}]}
+        """
+        from apps.customers.business_customer_cleanup import CleanupError, set_aside
+
+        ids = request.data.get('card_ids')
+        if not isinstance(ids, list) or not ids:
+            return Response({'error': 'יש לבחור לפחות כרטיס אחד'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            cards = list(BusinessCustomer.objects.filter(pk__in=ids))
+            if len(cards) != len(set(map(str, ids))):
+                return Response(
+                    {'error': 'אחד הכרטיסים כבר לא קיים. רעננו את הרשימה.'}, status=status.HTTP_400_BAD_REQUEST,
+                )
+            result = set_aside(cards, user=request.user)
+        except CleanupError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except (ValueError, DjangoValidationError):
+            return Response({'error': 'מזהה כרטיס לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        logger.info(
+            'Business customers set aside as not business: %s removed, %s refused, by %s',
+            len(result['removed']), len(result['refused']), getattr(request.user, 'email', request.user),
+        )
+        return Response(result)
 
     @action(detail=True, methods=['post'], url_path='location')
     def location(self, request, pk=None):

@@ -131,6 +131,10 @@ OPEN_TYPES = frozenset({'tax_invoice', 'transaction_invoice'})
 RENTAL_DETAILS = re.compile(r'השכר|שכירות')
 STANDING_ORDER = 'הוראת קבע'
 
+# A lesson registration, as the office writes it in a document's details:
+# "25-26 רישום לשיעור בשבוע (מינץ) - מנוי שנתי", "דמי רישום לשנת 25-26".
+LESSON_DETAILS = re.compile(r'רישום|מנוי')
+
 # A company number shared by several of the old software's customers: each is
 # keyed '<ח"פ>/ext:<customer number>'.
 SHARED_KEY_SEPARATOR = '/ext:'
@@ -526,7 +530,8 @@ def classify(customer: Customer, rows: list) -> tuple[str, list]:
     organisation's name. Everyone else paid for lessons by card through the old
     software's subscriptions — a parent, who is (or will be) a family in kogo
     rather than a business customer. A credit note alone changes nothing: it
-    is a refund to that parent.
+    is a refund to that parent. Neither does the way a pupil paid: somebody
+    billed mostly for lesson registrations is a parent as well.
     """
     reasons = []
     if any(row['doc_type'] in BUSINESS_TYPES for row in rows):
@@ -546,6 +551,14 @@ def classify(customer: Customer, rows: list) -> tuple[str, list]:
         reasons.append('organisation_name')
     if customer.dealer_number:
         reasons.append('dealer_number')
+    # A pupil. Most of what they were billed for is a lesson registration, so
+    # they belong with the families however the office took the money — an
+    # invoice typed by hand, cash, a cheque — and whatever digit their ID
+    # begins with. An organisation that pays for registrations, a licensed
+    # dealer and a tenant stay business customers.
+    lessons = [row for row in rows if LESSON_DETAILS.search(row['details'])]
+    if 2 * len(lessons) > len(rows) and not {'rental', 'organisation_name', 'dealer_number'} & set(reasons):
+        return 'parent', []
     return ('business', reasons) if reasons else ('parent', [])
 
 
