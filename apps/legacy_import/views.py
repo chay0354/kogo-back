@@ -106,10 +106,12 @@ class LegacyImportViewSet(viewsets.GenericViewSet):
         legacy_import = self.get_object()
         include_parents = _flag(request.data.get('include_subscription_parents', False))
         create_customers = _flag(request.data.get('create_customers', True))
+        # False: the customers' cards only — not one document of the previous software is kept.
+        import_documents = _flag(request.data.get('import_documents', True))
         try:
             result = service.commit(
                 legacy_import.pk, request.data.get('mapping') or {}, include_parents, request.user,
-                create_customers=create_customers,
+                create_customers=create_customers, import_documents=import_documents,
             )
         except service.CommitInputError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

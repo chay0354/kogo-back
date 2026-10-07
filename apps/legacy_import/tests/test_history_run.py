@@ -265,6 +265,104 @@ class HistoryRunCommitTests(ImportFixture, APITestCase):
         self.assertEqual((series['receipt']['last_number'], series['receipt']['last_not_imported']), (33001, False))
 
 
+class CardsOnlyTests(ImportFixture, APITestCase):
+    """The business starts its own numbering in kogo: the customers come over, the documents stay behind."""
+
+    def rows(self):
+        return prepared([
+            centre('21', 'מתנ"ס צפון', number=1, date='2025-01-01', location='כפר סבא', email='north@example.test'),
+            centre('21', 'מתנ"ס צפון', number=2, date='2025-06-01', location=''),
+            centre('24', 'מתנ"ס דרום', number=3, date='2025-03-01', status='פתוחה'),
+            # A tenant with nothing to find them by but the old software's customer number.
+            row(ext_number='77', number=4, details='השכרת סטודיו', remark='תשלום בהוראת קבע #9',
+                first_name='שוכרת', last_name='הדגמה'),
+            # A parent: no card, cards-only or not.
+            row(ext_number='88', number=5, first_name='הורה', last_name='בדיקה'),
+        ])
+
+    def cards_only(self, legacy_import, mapping=None, **extra):
+        return self.client.post(
+            f'{BASE}{legacy_import.pk}/commit/',
+            {'mapping': mapping or {}, 'import_documents': False, **extra}, format='json',
+        )
+
+    def test_the_cards_are_opened_and_not_one_document_is_kept(self):
+        legacy_import = self.stored_import(self.rows())
+
+        res = self.cards_only(legacy_import, {'כפר סבא': self.branch_target(self.kfar_saba)})
+
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['customers']['created'], 3)
+        self.assertEqual(
+            (res.data['documents']['imported'], res.data['documents']['created'], res.data['documents']['total'],
+             res.data['documents']['left_in_previous_software']),
+            (False, 0, 0, 5),
+        )
+        self.assertEqual(LegacyDocument.objects.count(), 0)
+        north = BusinessCustomer.objects.get(last_name='מתנ"ס צפון')
+        self.assertEqual((north.company_number, north.email), (NETWORK, 'north@example.test'))
+        # Filed where the last document that named a location was.
+        self.assertEqual((north.business, north.business_category, north.branch),
+                         (self.lessons, self.branches_category, self.kfar_saba))
+        self.assertIn('פרטי הלקוח בלבד, בלי המסמכים', north.notes)
+        self.assertIn('הופקו לו 2 מסמכים', north.notes)
+        # A customer whose only document is an open invoice gets a card too.
+        self.assertTrue(BusinessCustomer.objects.filter(last_name='מתנ"ס דרום').exists())
+        self.assertFalse(BusinessCustomer.objects.filter(last_name='בדיקה').exists())
+
+    def test_the_rows_are_dropped_and_the_same_import_cannot_be_run_again(self):
+        legacy_import = self.stored_import(self.rows())
+        self.cards_only(legacy_import)
+        legacy_import.refresh_from_db()
+        self.assertEqual((legacy_import.rows, legacy_import.status), ([], LegacyImport.STATUS_COMMITTED))
+
+        again = self.cards_only(legacy_import)
+        self.assertEqual(again.status_code, 400)
+        self.assertIn('העלו את הקובץ מחדש', again.data['error'])
+        self.assertEqual(BusinessCustomer.objects.count(), 3)
+
+    def test_the_same_file_uploaded_again_finds_every_card_it_opened(self):
+        self.cards_only(self.stored_import(self.rows()))
+        cards = set(BusinessCustomer.objects.values_list('pk', flat=True))
+
+        res = self.cards_only(self.stored_import(self.rows()))
+
+        self.assertEqual((res.data['customers']['created'], res.data['customers']['updated']), (0, 0))
+        self.assertEqual(set(BusinessCustomer.objects.values_list('pk', flat=True)), cards)
+
+    def test_a_later_import_with_documents_links_them_to_the_cards_already_there(self):
+        self.cards_only(self.stored_import(self.rows()))
+        tenant = BusinessCustomer.objects.get(first_name='שוכרת')
+
+        res = self.commit(self.stored_import(self.rows()))
+
+        self.assertEqual((res.data['customers']['created'], res.data['documents']['created']), (0, 4))
+        self.assertEqual(LegacyDocument.objects.get(number=4).business_customer, tenant)
+        self.assertEqual(BusinessCustomer.objects.count(), 3)
+
+    def test_an_import_with_documents_still_keeps_its_rows(self):
+        legacy_import = self.stored_import(self.rows())
+        self.commit(legacy_import)
+        legacy_import.refresh_from_db()
+        self.assertEqual(len(legacy_import.rows), 5)
+        self.assertTrue(legacy_import.result['documents']['imported'])
+
+    def test_importing_nothing_is_refused(self):
+        legacy_import = self.stored_import(self.rows())
+        res = self.cards_only(legacy_import, create_customers=False)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('לא נבחר מה לייבא', res.data['error'])
+        self.assertEqual((BusinessCustomer.objects.count(), LegacyDocument.objects.count()), (0, 0))
+
+    def test_cards_only_leaves_the_numbering_screen_nothing_to_continue(self):
+        legacy_import = LegacyImport.objects.create(
+            file_name='t.xls', sha256='2' * 64, row_count=5, rows=self.rows(),
+            summary=service.build_summary(self.rows(), []),
+        )
+        self.cards_only(legacy_import)
+        self.assertEqual(self.client.get(f'{BASE}series/').data['series'], [])
+
+
 class PackedUploadTests(ImportFixture, APITestCase):
     def packed(self, content=None, name='export_invoices.xls.gz'):
         return SimpleUploadedFile(name, gzip.compress(content or CORRUPT_XLS.read_bytes()),
