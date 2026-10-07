@@ -2553,6 +2553,55 @@ class BusinessCustomerViewSet(viewsets.ModelViewSet):
         include_legacy = IsManager().has_permission(request, self)
         return Response(business_customer_summary(customer, request.user, include_legacy=include_legacy))
 
+    @action(detail=True, methods=['post'], url_path='location')
+    def location(self, request, pk=None):
+        """
+        POST /api/v1/customers/business-customers/{id}/location/
+             {business_id, business_category_id, branch_id, scope?}
+
+        File the customer under a business, a category and (under סניפים) a
+        branch. A card with no location yet is simply filed. Changing a
+        location that was already set needs `scope`: "future" — the card only,
+        documents already issued stay where they were — or "all" — every
+        document issued to the customer moves too (managers only: it changes
+        where issued income is counted). Without `scope` the answer is 409
+        with {needs_scope, documents, previous, location}, for the screen to
+        ask. Answers with the customer and what was done.
+        """
+        from apps.customers.business_customer_location import (
+            SCOPE_ALL, LocationError, ScopeNeeded, change_location, resolve_location,
+        )
+
+        customer = self.get_object()
+        data = request.data
+        scope = (data.get('scope') or '').strip() or None
+        if scope == SCOPE_ALL and not IsManager().has_permission(request, self):
+            raise PermissionDenied('רק מנהל משנה את השיוך של מסמכים שכבר הופקו')
+        try:
+            location = resolve_location(
+                data.get('business_id'), data.get('business_category_id'), data.get('branch_id'),
+            )
+            # A scoped partner files a merchant under their own branch only.
+            branch = self._partner_branch(location.branch)
+            if branch is not location.branch:
+                location = type(location)(location.business, location.category, branch)
+            result = change_location(customer, location, scope=scope, user=request.user)
+        except LocationError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except ScopeNeeded as ask:
+            return Response(
+                {'needs_scope': True, 'documents': ask.documents, 'previous': ask.previous, 'location': ask.new},
+                status=status.HTTP_409_CONFLICT,
+            )
+        customer.refresh_from_db()
+        if result['changed']:
+            logger.info(
+                'Business customer %s location: %s -> %s (%s, %s documents) by %s',
+                customer.pk, result['previous']['label'] or '-', result['location']['label'],
+                result['scope'], result['documents_changed'], getattr(request.user, 'email', request.user),
+            )
+        return Response({**result, 'customer': BusinessCustomerSerializer(customer).data})
+
     def destroy(self, request, *args, **kwargs):
         from apps.customers.document_retention import BUSINESS_REFUSAL, business_customer_holds_documents
 
