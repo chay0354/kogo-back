@@ -272,6 +272,38 @@ class CardLinkUnderBranchesTests(Fixture):
         CardLink.objects.filter(pk=link.pk).update(payment=payment)
         self.assertEqual(self.branches_bucket(), {'סניף צפון': 150.0})
 
+    def paid_one_time(self, amount, *, branch, **tags):
+        link = CardLink.objects.create(
+            kind=CardLink.KIND_ONE_TIME, child=self.child, amount=Decimal(amount), description='חולצה',
+            branch=branch, created_by=self.manager, **tags,
+        )
+        payment = Payment.objects.create(
+            child=self.child, family=self.family, branch=branch, payment_type='one_time', status='completed',
+            base_amount=Decimal(amount), discount_amount=0, final_amount=Decimal(amount), payment_date=timezone.now(),
+        )
+        CardLink.objects.filter(pk=link.pk).update(payment=payment)
+
+    def test_a_one_time_charge_with_no_business_is_the_branchs(self):
+        """ "ללא (סניף)" in the window: the branch's line, no longer "ללא שיוך" (owner, 7.10.2026)."""
+        self.paid_one_time('80.00', branch=self.north)
+        self.paid_one_time('40.00', branch=self.south)
+        self.paid_one_time('30.00', branch=self.north, business=self.shows, business_category=self.general)
+
+        self.assertEqual(self.branches_bucket(), {'סניף צפון': 80.0, 'סניף דרום': 40.0})
+        out = aggregate_income_by_business(*self.today_range())
+        self.assertEqual(
+            sorted(bucket['business_name'] for bucket in out), sorted([BRANCHES_BUSINESS_LABEL, 'תיאטרון הדגמה']),
+        )
+        # A partner of the north branch sees the north's line only.
+        self.assertEqual(self.branches_bucket(branch_ids=[self.north.id]), {'סניף צפון': 80.0})
+
+    def test_a_payment_link_with_no_business_stays_where_it_was(self):
+        """Only the family's card link is worded "ללא (סניף)"; a payment link always names a business."""
+        link = PaymentLink.objects.create(title='ישן', branch=self.north)
+        PaymentLinkPayment.objects.create(link=link, amount=25, payer_name='a', status='completed', paid_at=timezone.now())
+        out = aggregate_income_by_business(*self.today_range())
+        self.assertEqual([(bucket['business_id'], bucket['business_name']) for bucket in out], [(None, 'ללא שיוך')])
+
 
 class ReportsUnderBranchesTests(Fixture):
     """The period report and the income-without-a-document report follow the same line."""

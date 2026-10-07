@@ -14,11 +14,11 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 
-from bidi.algorithm import get_display
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
+from apps.core.direction_marks import visual_order
 from apps.core.vat import (
     DOCUMENT_TITLE, VAT_PERCENT_DISPLAY, split_vat_inclusive, split_vat_inclusive_lines,
 )
@@ -69,7 +69,7 @@ def _ensure_fonts_registered() -> None:
 
 
 def _rtl(text: str) -> str:
-    return get_display(text or '')
+    return visual_order(text)
 
 
 def _money(amount: Decimal | float) -> str:

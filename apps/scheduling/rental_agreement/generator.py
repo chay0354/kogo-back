@@ -37,7 +37,6 @@ from decimal import Decimal
 from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
 
-from bidi.algorithm import get_display
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -49,6 +48,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak,
 )
+
+from apps.core.direction_marks import strip_direction_marks, visual_order
 
 from . import content
 from .terms import KIND_ONE_TIME, KIND_WEEKLY, PERIOD_ONCE, event_terms, terms_sha256
@@ -163,7 +164,7 @@ def _ensure_fonts_registered() -> None:
 
 def _rtl_line(text: str) -> str:
     """Bidi-reorder a single line/short string (must already fit on one line)."""
-    return get_display(text)
+    return visual_order(text)
 
 
 def _rtl_wrapped(text: str, font_name: str, font_size: float, max_width: float) -> str:
@@ -173,7 +174,7 @@ def _rtl_wrapped(text: str, font_name: str, font_size: float, max_width: float) 
 
     Each line is XML-escaped after it is measured and reordered: Paragraph
     reads its text as markup, and a tenant's name or address may hold & or <."""
-    words = text.split(' ')
+    words = strip_direction_marks(text).split(' ')
     lines: list[str] = []
     current: list[str] = []
     for word in words:

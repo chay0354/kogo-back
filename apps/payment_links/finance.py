@@ -25,7 +25,7 @@ def completed_link_payments(date_from: date, date_to: date, *, branch_id=None, b
     return qs
 
 
-def _link_income_row(link, branch, amount) -> dict:
+def _link_income_row(link, branch, amount, *, untagged_is_the_branchs: bool = False) -> dict:
     """
     One payment taken through a link, as an income row.
 
@@ -34,11 +34,18 @@ def _link_income_row(link, branch, amount) -> dict:
     a document filed there does (revenue_service._document_income_row) — not on
     a second "סניפים" line of its own. Any other link stays under its own
     business and category.
+
+    `untagged_is_the_branchs`: a link that names no business at all is the
+    branch's too. True for a family's one-time card link, whose window words
+    that choice "ללא (סניף)" (owner, 7.10.2026: "תעביר לשורת הסניף") — it used
+    to land under "ללא שיוך".
     """
     from apps.core.revenue_service import branch_income_row
     from apps.customers.business_customer_location import is_branches_business
 
     if link.business_id and is_branches_business(link.business):
+        return branch_income_row(branch, amount)
+    if untagged_is_the_branchs and not link.business_id:
         return branch_income_row(branch, amount)
     return {
         'business_id': str(link.business_id) if link.business_id else '',
@@ -61,8 +68,9 @@ def aggregate_payment_link_revenue(date_from: date, date_to: date, branch_id=Non
 def card_link_one_time_rows(date_from: date, date_to: date, branch_id=None, branch_ids=None) -> list:
     """
     One-time charges taken through a card link, tagged by the link's business
-    and category. Such a Payment has no lesson, so the lesson aggregation never
-    sees it; without this it would be missing from the dashboard.
+    and category — and, with no business chosen, the branch's own. Such a
+    Payment has no lesson, so the lesson aggregation never sees it; without
+    this it would be missing from the dashboard.
     """
     from apps.customers.models import Payment
 
@@ -84,5 +92,6 @@ def card_link_one_time_rows(date_from: date, date_to: date, branch_id=None, bran
         # one the branch filter above narrows on.
         rows.append(_link_income_row(
             payment.card_link, payment.branch if payment.branch_id else None, Decimal(payment.final_amount),
+            untagged_is_the_branchs=True,
         ))
     return rows

@@ -500,6 +500,51 @@ class HandIssuedDocumentDesignTests(MandatoryMarkingsMixin, TestCase):
         note = ' '.join(f'{n.lead} {n.text}' for n in build_document_layout(doc).notes)
         self.assertIn('5,000', note)
 
+    def test_the_allocation_number_stands_in_large_type_at_the_top_once_entered(self):
+        """Owner, 7.10.2026: "בגדול למעלה ברגע שהוא מוזן"."""
+        from apps.documents.document_pdf import build_document_layout
+        from apps.documents.invoice_layout import _styles, build_story
+
+        doc = self.make_document(
+            document_number='TI-2026-000080', document_type='tax_invoice',
+            subtotal=Decimal('9000.00'), vat_amount=Decimal('1620.00'), total_amount=Decimal('10620.00'),
+        )
+        # Waiting for its number: nothing at the top yet, and the page is as it was.
+        self.assertEqual(build_document_layout(doc).headline, '')
+        pages_before = page_count(generate_document_pdf(doc, copy=True))
+
+        doc.allocation_number = '280071970'
+        doc.save(update_fields=['allocation_number'])
+
+        for kwargs in ({'copy': True}, {'signed': True}):
+            layout = build_document_layout(doc, **kwargs)
+            self.assertEqual(layout.headline, 'מספר הקצאה: 280071970')
+            # Right under the title, before the copy mark, in the title's own weight.
+            first_three = [flowable for flowable in build_story(layout) if hasattr(flowable, 'style')][:3]
+            self.assertEqual([flowable.style.name for flowable in first_three],
+                             ['InvTitle', 'InvHeadline', 'InvCopyMark'])
+        styles = _styles()
+        self.assertGreater(styles['headline'].fontSize, 1.5 * styles['value'].fontSize)
+
+        pdf = generate_document_pdf(doc, copy=True)
+        save_sample('14-hand-issued-allocation-number-at-the-top', pdf)
+        self.assertIn('280071970', squashed(pdf))
+        self.assertEqual(page_count(pdf), pages_before)
+
+    def test_nothing_stands_at_the_top_of_a_document_that_carries_no_number(self):
+        from apps.documents.document_pdf import build_document_layout
+        from apps.documents.invoice_layout import build_story
+
+        doc = self.make_document(document_number='TI-2026-000081', document_type='tax_invoice')
+        layout = build_document_layout(doc)
+        self.assertEqual(layout.headline, '')
+        names = [flowable.style.name for flowable in build_story(layout) if hasattr(flowable, 'style')][:2]
+        self.assertEqual(names, ['InvTitle', 'InvCopyMark'])
+        # A receipt is not a tax invoice: a number left on it is not printed large.
+        receipt = self.make_document(document_number='RC-2026-000009', document_type='receipt',
+                                     allocation_number='123456789')
+        self.assertEqual(build_document_layout(receipt).headline, '')
+
     def test_a_document_for_a_child_with_no_family_details_renders(self):
         family = Family.objects.create(name='משפחה', branch=self.branch)
         child = Child.objects.create(

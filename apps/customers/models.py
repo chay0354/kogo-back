@@ -990,6 +990,18 @@ class BusinessCustomer(models.Model):
         verbose_name_plural = "לקוחות עסקיים"
         ordering = ['last_name', 'first_name']
 
+    # What a person typed or pasted in. A phone copied from a chat or a contact
+    # card comes with invisible direction marks; the card is kept without them
+    # (apps/core/direction_marks — they took down the PDFs of two invoices).
+    PASTED_TEXT_FIELDS = ('first_name', 'last_name', 'email', 'phone', 'id_number', 'company_number', 'address')
+
+    def save(self, *args, **kwargs):
+        from apps.core.direction_marks import strip_direction_marks
+
+        for name in self.PASTED_TEXT_FIELDS:
+            setattr(self, name, strip_direction_marks(getattr(self, name)))
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.full_name
 
