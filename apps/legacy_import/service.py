@@ -676,9 +676,16 @@ def _card_state(card) -> tuple:
 
 
 def _update_card(card, customer: Customer, target: Target | None, source_system: str = SOURCE_TAZMAN,
-                 documents_imported: bool = True) -> None:
-    """Fill the card's blanks, give it the newest name, and file it where the newest document was."""
-    card.first_name, card.last_name = split_name(customer.first_name, customer.last_name)
+                 documents_imported: bool = True, keep_name: bool = False) -> None:
+    """
+    Fill the card's blanks, give it the newest name, and file it where the newest document was.
+
+    keep_name: the office named this card itself, merging the customer's cards
+    into one (customers.business_customer_cleanup) — the file's name for one
+    of them must not take that back.
+    """
+    if not keep_name:
+        card.first_name, card.last_name = split_name(customer.first_name, customer.last_name)
     if not card.email and customer.email:
         card.email = customer.email[:254]
     if not card.phone and customer.phone:
@@ -787,6 +794,9 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
         index = CustomerIndex(cards.values())
         linked = _previously_linked(customers.keys(), cards)
         created, initial, counts, cards_by_key = [], {}, Counter(), {}
+        # Cards the office merged and named: they keep that name.
+        from apps.customers.business_customer_cleanup import office_named_cards
+        office_named = office_named_cards()
 
         ordered = sorted(customers.values(), key=_latest_order)
         # Deleted in the old software: the owner already decided this customer
@@ -809,7 +819,8 @@ def commit(import_id, mapping_payload, include_subscription_parents: bool, user,
                 # Compared against the card as it was before this commit, so a
                 # card two customers share is "changed" only if it ends up different.
                 initial.setdefault(card.pk, _card_state(card))
-                _update_card(card, customer, target, source_system, import_documents)
+                _update_card(card, customer, target, source_system, import_documents,
+                             keep_name=card.pk in office_named)
             cards_by_key[customer.key] = card
 
         # A customer who is not being made a card (a parent left out, or one
