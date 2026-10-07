@@ -295,3 +295,104 @@ class MergeTests(CleanupFixture, APITestCase):
                                      format='json').status_code, 403,
                 )
         self.assertEqual(BusinessCustomer.objects.count(), 3)
+
+
+class SetAsideTests(CleanupFixture, APITestCase):
+    """A pupil of the lessons is not a business customer: the card goes, kept whole."""
+
+    def setUp(self):
+        super().setUp()
+        self.pupil = card('נועה', 'תלמידה', '28/07/2026', id_number='301000002', phone='0500000004',
+                          email='parent@example.test')
+        self.brother = card('איתי', 'תלמיד', '01/07/2025', id_number='301000003', phone='0500000004')
+        self.studio = card('אולפן', 'הדגמה', '31/07/2026', company_number='558000001')
+
+    def set_aside(self, *cards):
+        return self.client.post(f'{URL}not-business/', {'card_ids': [str(c.pk) for c in cards]}, format='json')
+
+    def test_the_cards_go_and_each_is_kept_whole_in_one_record(self):
+        res = self.set_aside(self.pupil, self.brother)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(sorted(row['name'] for row in res.data['removed']), ['איתי תלמיד', 'נועה תלמידה'])
+        self.assertEqual(res.data['refused'], [])
+        self.assertEqual(list(BusinessCustomer.objects.values_list('pk', flat=True)), [self.studio.pk])
+
+        record = BusinessCustomerCleanup.objects.get()
+        self.assertEqual(record.action, BusinessCustomerCleanup.ACTION_REMOVED)
+        self.assertEqual(record.card_ids, sorted([str(self.pupil.pk), str(self.brother.pk)]))
+        self.assertEqual(record.decided_by, self.manager)
+        kept = next(row for row in record.merged_cards if row['id'] == str(self.pupil.pk))
+        self.assertEqual(
+            (kept['name'], kept['id_number'], kept['phone'], kept['email'], kept['notes']),
+            ('נועה תלמידה', '301000002', '0500000004', 'parent@example.test', self.pupil.notes),
+        )
+        # A removal is neither a merge whose name an import must keep, nor a "different customers".
+        self.assertEqual(self.groups(), [])
+
+    def test_a_card_that_holds_anything_stays_and_is_named_with_what_it_holds(self):
+        from apps.customers.business_customer_location import Location, change_location
+
+        city = City.objects.create(name='עיר')
+        branch = Branch.objects.create(name='סניף צפון', city=city)
+        lessons, _ = Business.objects.get_or_create(name='חוגים')
+        branches, _ = BusinessCategory.objects.get_or_create(business=lessons, name='סניפים')
+        FormalDocument.objects.create(
+            document_number='TI-2026-000002', document_type='tax_invoice', client_type='business',
+            business_customer=self.pupil, document_date=date(2026, 10, 7), total_amount=Decimal('118.00'),
+        )
+        # The office filed this one itself: it was treated as a business customer.
+        change_location(self.studio, Location(business=lessons, category=branches, branch=branch), user=self.manager)
+
+        res = self.set_aside(self.pupil, self.brother, self.studio)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual([row['name'] for row in res.data['removed']], ['איתי תלמיד'])
+        refused = {row['name']: row['holds'] for row in res.data['refused']}
+        self.assertEqual(set(refused), {'נועה תלמידה', 'אולפן הדגמה'})
+        self.assertTrue(all(refused.values()))
+        self.assertEqual(
+            set(BusinessCustomer.objects.values_list('pk', flat=True)), {self.pupil.pk, self.studio.pk},
+        )
+        self.assertEqual(FormalDocument.objects.get().business_customer, self.pupil)
+        self.assertEqual(BusinessCustomerCleanup.objects.get().card_ids, [str(self.brother.pk)])
+
+    def test_when_every_card_holds_something_nothing_is_recorded(self):
+        FormalDocument.objects.create(
+            document_number='TI-2026-000003', document_type='tax_invoice', client_type='business',
+            business_customer=self.pupil, document_date=date(2026, 10, 7), total_amount=Decimal('118.00'),
+        )
+        res = self.set_aside(self.pupil)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['removed'], [])
+        self.assertEqual(len(res.data['refused']), 1)
+        self.assertFalse(BusinessCustomerCleanup.objects.exists())
+        self.assertEqual(BusinessCustomer.objects.count(), 3)
+
+    def test_what_cannot_be_done_is_refused_and_nothing_changes(self):
+        cases = {
+            'nothing chosen': self.client.post(f'{URL}not-business/', {'card_ids': []}, format='json'),
+            'no list': self.client.post(f'{URL}not-business/', {}, format='json'),
+            'a card that is gone': self.client.post(
+                f'{URL}not-business/',
+                {'card_ids': [str(self.pupil.pk), '00000000-0000-0000-0000-000000000000']}, format='json',
+            ),
+            'not an id': self.client.post(f'{URL}not-business/', {'card_ids': ['x']}, format='json'),
+        }
+        for name, res in cases.items():
+            with self.subTest(name):
+                self.assertEqual(res.status_code, 400, res.data)
+                self.assertIn('error', res.data)
+        self.assertEqual(BusinessCustomer.objects.count(), 3)
+        self.assertFalse(BusinessCustomerCleanup.objects.exists())
+
+    def test_only_a_manager_takes_a_card_off_the_list(self):
+        for role in (UserProfile.ROLE_PARTNER, UserProfile.ROLE_WORKER):
+            with self.subTest(role=role):
+                self.client.force_authenticate(make_user(f'{role}-aside@test', role))
+                self.assertEqual(self.set_aside(self.pupil).status_code, 403)
+        self.assertEqual(BusinessCustomer.objects.count(), 3)
+
+    def test_too_few_cards_to_keep_apart_is_said_in_the_office_s_words(self):
+        res = self.client.post(f'{URL}keep-apart/', {'card_ids': [str(self.pupil.pk)]}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['error'], 'יש לבחור לפחות שני כרטיסים')
+

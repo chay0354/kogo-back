@@ -6,6 +6,10 @@ the name they trade under. The office merges those into one card — or says
 they are different customers after all. Each decision is kept here: a merge
 with everything the cards that went away carried, so nothing a card knew is
 lost with it; a "different customers" so the same question is not asked again.
+
+A card that was never a business customer — a pupil of the lessons the
+previous software had billed by hand — is taken off the list the same way: the
+whole card is kept here, and only then does it go.
 """
 import uuid
 
@@ -18,9 +22,11 @@ class BusinessCustomerCleanup(models.Model):
 
     ACTION_MERGED = 'merged'
     ACTION_KEPT_APART = 'kept_apart'
+    ACTION_REMOVED = 'removed'
     ACTION_CHOICES = [
         (ACTION_MERGED, 'אוחדו לכרטיס אחד'),
         (ACTION_KEPT_APART, 'לקוחות שונים'),
+        (ACTION_REMOVED, 'אינם לקוחות עסקיים'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -32,7 +38,7 @@ class BusinessCustomerCleanup(models.Model):
     )
     # Every card of the group, the survivor included, as ids — what "kept apart" is matched by.
     card_ids = models.JSONField(default=list, verbose_name="הכרטיסים")
-    # A merge: each card that went away, every field it had, and its name.
+    # A merge or a removal: each card that went away, every field it had, and its name.
     merged_cards = models.JSONField(default=list, blank=True, verbose_name="הכרטיסים שאוחדו")
     # A merge: how many rows of each kind moved to the survivor — {'documents.FormalDocument': 3, …}.
     moved = models.JSONField(default=dict, blank=True, verbose_name="מה עבר לכרטיס שנשאר")

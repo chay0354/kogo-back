@@ -171,6 +171,50 @@ class ClassificationTests(SimpleTestCase):
         self.assertEqual(self.kind(row(payment_type='העברה בנקאית')), 'business')
         self.assertEqual(self.kind(row(payment_type='')), 'business')
 
+    def test_a_pupil_billed_for_lesson_registrations_is_a_parent_however_they_paid(self):
+        registration = '25-26 רישום לשיעור בשבוע (מינץ) - מנוי שנתי'
+        # An invoice the office typed each month, and a receipt at the end.
+        self.assertEqual(self.kind(
+            row(doc_type='tax_invoice', details=registration), row(doc_type='tax_invoice', details=registration),
+            row(doc_type='receipt', details=registration),
+        ), 'parent')
+        # Cash or a cheque instead of a card.
+        self.assertEqual(self.kind(row(payment_type='מזומן', details='דמי רישום לשנת 25-26')), 'parent')
+        self.assertEqual(self.kind(row(payment_type="צ'ק", details=registration)), 'parent')
+        # An ID that happens to begin with 5.
+        self.assertEqual(self.kind(row(id_number='507000001', doc_type='tax_invoice', details=registration)), 'parent')
+        # Registrations, and a pair of trousers bought on the way.
+        self.assertEqual(self.kind(
+            row(doc_type='tax_invoice', details=registration), row(details=registration),
+            row(doc_type='tax_invoice', details='מכנסי קפוארה'),
+        ), 'parent')
+
+    def test_who_stays_a_business_customer_although_registrations_were_billed(self):
+        registration = '25-26 רישום לשיעור בשבוע (מינץ) - מנוי שנתי'
+        # An organisation that pays for its pupils.
+        self.assertEqual(self.kind(
+            row(first_name='מתנ"ס הדגמה', last_name='', doc_type='tax_invoice', details=registration),
+        ), 'business')
+        # A licensed dealer.
+        self.assertEqual(self.kind(row(dealer_number='301000001', doc_type='tax_invoice', details=registration)), 'business')
+        # A tenant who also registered a child: most of the documents are rent.
+        self.assertEqual(self.kind(
+            row(details='השכרת סטודיו'), row(details='שכירות מינץ'), row(details='השכרת סטודיו'),
+            row(doc_type='tax_invoice', details=registration),
+        ), 'business')
+        # An instructor: a subscription of their own, but mostly expenses settled by transfer.
+        self.assertEqual(self.kind(
+            row(details='מנוי מדריכים 25-26'),
+            row(payment_type='העברה בנקאית', details='החזר הוצאות יולי'),
+            row(payment_type='העברה בנקאית', details='החזר הוצאות אוגוסט'),
+        ), 'business')
+        # Half and half is not "mostly".
+        self.assertEqual(self.kind(
+            row(doc_type='tax_invoice', details=registration), row(doc_type='tax_invoice', details='הופעה'),
+        ), 'business')
+        # Something bought for cash, and no lesson at all.
+        self.assertEqual(self.kind(row(payment_type='מזומן', details='תחפושת')), 'business')
+
     def test_a_company_number(self):
         self.assertEqual(self.kind(row(id_number='512345678')), 'business')
         self.assertEqual(self.kind(row(id_number='312345678')), 'parent')
