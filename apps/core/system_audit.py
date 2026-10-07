@@ -433,21 +433,30 @@ def probe_recurring_integrity() -> ProbeResult:
 
 
 def probe_payment_links() -> ProbeResult:
-    """An active payment link has to land money on a live business and category."""
+    """
+    An active payment link has to land money on a live business and category.
+
+    Under the business סניפים the line is the branch: such a link needs a
+    branch, and a category is an extra it may go without.
+    """
     from django.db.models import Q
 
+    from apps.customers.business_customer_location import BRANCHES_BUSINESS
     from apps.payment_links.models import PaymentLink
 
+    for_a_branch = Q(business__name=BRANCHES_BUSINESS)
     broken = (
         PaymentLink.objects.filter(is_active=True)
         .filter(Q(business__isnull=True) | Q(business__is_active=False)
-                | Q(business_category__isnull=True) | Q(business_category__is_active=False))
+                | (Q(business_category__isnull=True) & ~for_a_branch)
+                | Q(business_category__is_active=False)
+                | (for_a_branch & Q(branch__isnull=True)))
     )
     count = broken.count()
     if not count:
         return ProbeResult('payment_links', 'קישורי תשלום', 'green', 'כל קישור פעיל מוביל לעסק ולקטגוריה פעילים.')
     return ProbeResult('payment_links', 'קישורי תשלום', 'red',
-                       f'{count} קישורי תשלום פעילים מפנים לעסק או לקטגוריה שאינם פעילים.',
+                       f'{count} קישורי תשלום פעילים מפנים לעסק או לקטגוריה שאינם פעילים, או ל"סניפים" בלי סניף.',
                        _rows(broken, lambda l: l.title or l.slug, lambda l: f'/{l.slug}'))
 
 

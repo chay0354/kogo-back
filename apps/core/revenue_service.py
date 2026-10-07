@@ -576,6 +576,20 @@ def rental_income_rows(rental) -> list:
     } for row in rental.get('rows', []) if row.is_tagged]
 
 
+def branch_income_row(branch, amount) -> dict:
+    """
+    Income that is a branch's, as an income row: the branch's line of the
+    branches business, beside its courses, rentals and pickup sales.
+    """
+    return {
+        'business_id': BRANCHES_BUSINESS_KEY,
+        'business_name': BRANCHES_BUSINESS_LABEL,
+        'category_id': str(branch.pk) if branch is not None else '',
+        'category_name': branch.name if branch is not None else UNTAGGED_LABEL,
+        'amount': amount,
+    }
+
+
 def _document_income_row(doc) -> dict:
     """
     One business-customer document as an income row.
@@ -589,13 +603,7 @@ def _document_income_row(doc) -> dict:
 
     amount = -doc.total_amount if doc.document_type == 'credit_invoice' else doc.total_amount
     if doc.business_id and is_branches_business(doc.business):
-        return {
-            'business_id': BRANCHES_BUSINESS_KEY,
-            'business_name': BRANCHES_BUSINESS_LABEL,
-            'category_id': str(doc.branch_id) if doc.branch_id else '',
-            'category_name': doc.branch.name if doc.branch_id else UNTAGGED_LABEL,
-            'amount': amount,
-        }
+        return branch_income_row(doc.branch if doc.branch_id else None, amount)
     return {
         'business_id': str(doc.business_id) if doc.business_id else '',
         'business_name': doc.business.name if doc.business_id else '',

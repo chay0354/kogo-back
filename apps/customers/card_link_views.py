@@ -29,6 +29,7 @@ from apps.core.frontend_url import public_frontend_url
 from apps.core.models import Branch, Business, BusinessCategory
 from apps.core.permissions import IsManager
 from apps.courses.models import Lesson, LessonBundle
+from apps.customers.business_customer_location import is_branches_business
 from apps.customers.card_link import (
     PROCESSING_STALE_AFTER,
     CardLinkError,
@@ -372,6 +373,10 @@ class CardLinkListCreateView(APIView):
             category = BusinessCategory.objects.filter(id=data.get('business_category_id')).first() if data.get('business_category_id') else None
             if category is not None and (business is None or category.business_id != business.id):
                 return Response({'error': 'הקטגוריה אינה שייכת לעסק שנבחר'}, status=status.HTTP_400_BAD_REQUEST)
+            # Under the business סניפים the money is a branch's: one was chosen,
+            # or the family has one. With neither there is no line to put it on.
+            if is_branches_business(business) and link.branch is None:
+                return Response({'error': 'יש לבחור סניף'}, status=status.HTTP_400_BAD_REQUEST)
             link.business = business
             link.business_category = category
         link.save()

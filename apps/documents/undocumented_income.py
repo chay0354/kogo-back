@@ -354,11 +354,18 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
     return rows
 
 
-def _card_link_tags(invoice) -> dict:
-    """A one-time charge through a card link carries the link's tags, not a course's."""
-    payment = getattr(invoice, 'payment', None)
-    link = getattr(payment, 'card_link', None) if payment is not None else None
-    if link is None:
+def _link_tags(link) -> dict:
+    """
+    The business and category a link's money is filed under.
+
+    A link under the business סניפים (owner, 7.10.2026) collects for a branch,
+    so it carries no tag of its own: its row then lands where an untagged
+    charge of that branch does — the branch's line of the branches business —
+    and not on a second "סניפים" line.
+    """
+    from apps.customers.business_customer_location import is_branches_business
+
+    if link.business_id and is_branches_business(link.business):
         return {}
     tags = {}
     if link.business_id:
@@ -368,6 +375,15 @@ def _card_link_tags(invoice) -> dict:
         tags['category_id'] = link.business_category_id
         tags['category_name'] = link.business_category.name
     return tags
+
+
+def _card_link_tags(invoice) -> dict:
+    """A one-time charge through a card link carries the link's tags, not a course's."""
+    payment = getattr(invoice, 'payment', None)
+    link = getattr(payment, 'card_link', None) if payment is not None else None
+    if link is None:
+        return {}
+    return _link_tags(link)
 
 
 def _store_rows(branch_ids, start: date, end: date, delivery: dict) -> list:
@@ -534,13 +550,7 @@ def _payment_link_rows(branch_ids, start: date, end: date) -> list:
     for payment in qs:
         link = payment.link
         branch_id, branch_name = _branch_of(link.branch)
-        tags = {}
-        if link.business_id:
-            tags['business_id'] = link.business_id
-            tags['business_name'] = link.business.name
-        if link.business_category_id:
-            tags['category_id'] = link.business_category_id
-            tags['category_name'] = link.business_category.name
+        tags = _link_tags(link)
         rows.append(UndocumentedRow(
             source=SOURCE_PAYMENT_LINKS,
             customer=payment.payer_name or 'ללא שם',
