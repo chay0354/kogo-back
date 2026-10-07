@@ -88,7 +88,7 @@ class PublicPaymentStartView(_PublicView):
     def post(self, request, slug: str):
         link = (
             PaymentLink.objects.prefetch_related('options')
-            .select_related('business_customer', 'business_category', 'target_invoice')
+            .select_related('business_customer', 'business', 'business_category', 'target_invoice')
             .filter(slug=slug).first()
         )
         if link is None:

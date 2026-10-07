@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from django.db import transaction
 
+from apps.customers.business_customer_location import is_branches_business
 from apps.documents import service as document_service
 from apps.documents.numbering import israel_today
 from apps.documents.settlement import balance_of, settle_on_issue
@@ -30,9 +31,15 @@ def validate_business_charge_link(link: PaymentLink, amount: Decimal) -> None:
         raise BusinessChargeDocumentError('זה אינו קישור גבייה עסקית')
     if not link.business_customer_id:
         raise BusinessChargeDocumentError('לא נבחר לקוח עסקי')
-    if not link.business_id or not link.business_category_id:
+    if not link.business_id:
         raise BusinessChargeDocumentError('יש לבחור עסק וקטגוריה')
-    if link.business_category.business_id != link.business_id:
+    if is_branches_business(link.business):
+        # The branch files the charge; a category under סניפים is an extra.
+        if not link.branch_id:
+            raise BusinessChargeDocumentError('יש לבחור סניף')
+    elif not link.business_category_id:
+        raise BusinessChargeDocumentError('יש לבחור עסק וקטגוריה')
+    if link.business_category_id and link.business_category.business_id != link.business_id:
         raise BusinessChargeDocumentError('הקטגוריה אינה שייכת לעסק שנבחר')
     if link.target_invoice_id:
         invoice = link.target_invoice

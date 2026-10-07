@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 from rest_framework import serializers
 
 from apps.core.models import Branch, Business, BusinessCategory
+from apps.customers.business_customer_location import is_branches_business
 from apps.customers.models import BusinessCustomer
 from apps.documents.models import FormalDocument
 from apps.payment_links.models import PaymentLink, PaymentLinkOption, PaymentLinkPayment
@@ -66,6 +67,14 @@ class PaymentLinkSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'business': 'יש לבחור עסק — כל תשלום משויך לעסק'})
         if category is not None and category.business_id != business.id:
             raise serializers.ValidationError({'business_category': 'הקטגוריה אינה שייכת לעסק שנבחר'})
+        # Under the business סניפים the money is a branch's, so the link must
+        # name one. Asked when the link's place is being set — a link is still
+        # closed or renamed as it stands.
+        placing = self.instance is None or 'business' in data or 'branch' in data
+        if placing and is_branches_business(business):
+            branch = data.get('branch', getattr(self.instance, 'branch', None))
+            if branch is None:
+                raise serializers.ValidationError({'branch': 'יש לבחור סניף'})
         options = data.get('options')
         if options is not None:
             active = [o for o in options if o.get('is_active', True)]
@@ -156,8 +165,10 @@ class BusinessChargeCreateSerializer(serializers.Serializer):
         source='business_customer', queryset=BusinessCustomer.objects.all(),
     )
     business_id = serializers.PrimaryKeyRelatedField(source='business', queryset=Business.objects.all())
+    # Required, except under the business סניפים — there the branch is what
+    # files the charge and a category is an extra (validate below).
     business_category_id = serializers.PrimaryKeyRelatedField(
-        source='business_category', queryset=BusinessCategory.objects.all(),
+        source='business_category', queryset=BusinessCategory.objects.all(), required=False, allow_null=True,
     )
     branch_id = serializers.PrimaryKeyRelatedField(
         source='branch', queryset=Branch.objects.filter(is_active=True), required=False, allow_null=True,
@@ -171,15 +182,21 @@ class BusinessChargeCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         business = attrs['business']
-        category = attrs['business_category']
+        category = attrs.get('business_category')
         customer = attrs['business_customer']
         invoice = attrs.get('target_invoice')
         if not business.is_active:
             raise serializers.ValidationError({'business_id': 'העסק אינו פעיל'})
-        if not category.is_active:
-            raise serializers.ValidationError({'business_category_id': 'הקטגוריה אינה פעילה'})
-        if category.business_id != business.id:
-            raise serializers.ValidationError({'business_category_id': 'הקטגוריה אינה שייכת לעסק שנבחר'})
+        if is_branches_business(business):
+            if attrs.get('branch') is None:
+                raise serializers.ValidationError({'branch_id': 'יש לבחור סניף'})
+        elif category is None:
+            raise serializers.ValidationError({'business_category_id': 'יש לבחור קטגוריה'})
+        if category is not None:
+            if not category.is_active:
+                raise serializers.ValidationError({'business_category_id': 'הקטגוריה אינה פעילה'})
+            if category.business_id != business.id:
+                raise serializers.ValidationError({'business_category_id': 'הקטגוריה אינה שייכת לעסק שנבחר'})
         if not (customer.company_number or customer.id_number):
             raise serializers.ValidationError({
                 'business_customer_id': 'לחיוב עסקי נדרש ח.פ, ע.מ או מספר מזהה של הלקוח',

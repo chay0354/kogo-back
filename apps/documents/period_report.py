@@ -19,11 +19,13 @@ from decimal import Decimal
 
 from django.db.models import Q
 
+from apps.core.revenue_service import BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL
 from apps.core.scoping import (
     ACTIVE_ENROLLMENT_STATUSES,
     is_scoped_partner,
     partner_branch_ids,
 )
+from apps.customers.business_customer_location import is_branches_business
 from apps.documents.models import DOCUMENT_TYPE_CHOICES, FormalDocument
 from apps.documents.numbering import is_rental_number
 
@@ -510,6 +512,12 @@ def build_report(
     documents = list(qs.order_by('document_date', 'document_number'))
     enrollment_map = _enrollment_branch_map(documents)
 
+    def for_a_branch(doc) -> bool:
+        # A document under the business סניפים (owner, 7.10.2026) is a branch's
+        # income: it goes on the line the branch's own receipts are on — the
+        # keys are the ones _group_key gives those — not on a second "סניפים".
+        return bool(doc.business_id) and is_branches_business(doc.business)
+
     placed = []  # (row, group key, group title, is the catch-all bucket)
     manual_rows = {}
     for doc in documents:
@@ -521,15 +529,22 @@ def build_report(
             key, title = branch_key, branch_title
             unassigned = key is None
         elif group_by == GROUP_BY_UNIT:
-            key = doc.business_id
-            title = doc.business.name if doc.business_id else UNTAGGED_BUSINESS_LABEL
+            if for_a_branch(doc):
+                key, title = BRANCHES_BUSINESS_KEY, BRANCHES_BUSINESS_LABEL
+            else:
+                key = doc.business_id
+                title = doc.business.name if doc.business_id else UNTAGGED_BUSINESS_LABEL
             unassigned = key is None
         elif group_by == GROUP_BY_CATEGORY:
-            key = doc.business_category_id
-            if doc.business_category_id:
-                title = f'{doc.business.name} · {doc.business_category.name}'
+            if for_a_branch(doc) and branch_key is not None:
+                key = f'{BRANCHES_BUSINESS_KEY}:{branch_key}'
+                title = f'{BRANCHES_BUSINESS_LABEL} · {branch_title}'
             else:
-                title = UNTAGGED_CATEGORY_LABEL
+                key = doc.business_category_id
+                if doc.business_category_id:
+                    title = f'{doc.business.name} · {doc.business_category.name}'
+                else:
+                    title = UNTAGGED_CATEGORY_LABEL
             unassigned = key is None
         else:
             if doc.business_customer_id:
