@@ -34,12 +34,29 @@ def _generate_draft_number() -> str:
 
 
 def _branch_for(data: dict):
-    """A private client's document belongs to the family's branch unless one was chosen."""
-    if data.get('branch_id') or not data.get('child_id'):
+    """
+    A private client's document belongs to the family's branch unless one was chosen.
+
+    A business customer filed under the business סניפים (owner, 7.10.2026) is a
+    branch's customer: a document issued to them with no branch named takes the
+    card's branch, so the income is the branch's whichever screen issued it.
+    """
+    if data.get('branch_id'):
         return data.get('branch_id')
-    from apps.customers.models import Child
-    child = Child.objects.select_related('family').filter(pk=data['child_id']).only('family__branch_id').first()
-    return child.family.branch_id if child and child.family_id else None
+    if data.get('child_id'):
+        from apps.customers.models import Child
+        child = Child.objects.select_related('family').filter(pk=data['child_id']).only('family__branch_id').first()
+        return child.family.branch_id if child and child.family_id else None
+    if data.get('business_customer_id'):
+        from apps.customers.business_customer_location import is_branches_business
+        from apps.customers.models import BusinessCustomer
+        customer = (
+            BusinessCustomer.objects.select_related('business')
+            .filter(pk=data['business_customer_id']).first()
+        )
+        if customer and customer.branch_id and is_branches_business(customer.business):
+            return customer.branch_id
+    return None
 
 
 def _income_tags(data: dict) -> dict:

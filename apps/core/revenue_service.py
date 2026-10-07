@@ -576,6 +576,35 @@ def rental_income_rows(rental) -> list:
     } for row in rental.get('rows', []) if row.is_tagged]
 
 
+def _document_income_row(doc) -> dict:
+    """
+    One business-customer document as an income row.
+
+    A document filed under the business סניפים (owner, 7.10.2026) is a branch's
+    income: it lands on that branch's line of the branches business, beside the
+    branch's courses, rentals and pickup sales — not on a second "סניפים" line
+    of its own. Every other document stays under its business and category.
+    """
+    from apps.customers.business_customer_location import is_branches_business
+
+    amount = -doc.total_amount if doc.document_type == 'credit_invoice' else doc.total_amount
+    if doc.business_id and is_branches_business(doc.business):
+        return {
+            'business_id': BRANCHES_BUSINESS_KEY,
+            'business_name': BRANCHES_BUSINESS_LABEL,
+            'category_id': str(doc.branch_id) if doc.branch_id else '',
+            'category_name': doc.branch.name if doc.branch_id else UNTAGGED_LABEL,
+            'amount': amount,
+        }
+    return {
+        'business_id': str(doc.business_id) if doc.business_id else '',
+        'business_name': doc.business.name if doc.business_id else '',
+        'category_id': str(doc.business_category_id) if doc.business_category_id else '',
+        'category_name': doc.business_category.name if doc.business_category_id else '',
+        'amount': amount,
+    }
+
+
 def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=None) -> list:
     """Lesson, rental, store and business-customer income, each under its business and category."""
     from apps.core.models import Branch, Business
@@ -592,18 +621,12 @@ def aggregate_income_by_business(date_from, date_to, branch_id=None, branch_ids=
         document_type__in=('tax_invoice', 'combined', 'credit_invoice'),
         document_date__gte=date_from,
         document_date__lte=date_to,
-    ).select_related('business', 'business_category')
+    ).select_related('business', 'business_category', 'branch')
     if branch_id and branch_id != 'all':
         docs = docs.filter(branch_id=branch_id)
     elif branch_ids is not None:
         docs = docs.filter(branch_id__in=branch_ids)
-    document_rows = [{
-        'business_id': str(d.business_id) if d.business_id else '',
-        'business_name': d.business.name if d.business_id else '',
-        'category_id': str(d.business_category_id) if d.business_category_id else '',
-        'category_name': d.business_category.name if d.business_category_id else '',
-        'amount': -d.total_amount if d.document_type == 'credit_invoice' else d.total_amount,
-    } for d in docs]
+    document_rows = [_document_income_row(d) for d in docs]
 
     # Payment-link money carries the link's own business and category.
     from apps.payment_links.finance import aggregate_payment_link_revenue, card_link_one_time_rows
