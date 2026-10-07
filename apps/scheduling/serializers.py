@@ -73,6 +73,11 @@ class LessonDetailSerializer(serializers.ModelSerializer):
         from apps.enrollments.enrollment_counts import resolve_lesson_capacity
 
         return resolve_lesson_capacity(obj)
+    # The lesson's own limit — null when it has none — so the schedule's lesson
+    # window can show it and the office can change it there (owner, 7.10.2026).
+    # `room_capacity` above stays the limit that applies. Read here only: it is
+    # written through courses/lessons, which checks who may.
+    capacity = serializers.IntegerField(read_only=True, allow_null=True)
     enrollments = serializers.SerializerMethodField()
     attendance = serializers.SerializerMethodField()
     cancellation_reason = serializers.SerializerMethodField()
@@ -82,7 +87,7 @@ class LessonDetailSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'course_name', 'course_display_id', 'course_type_name',
             'instructor_id', 'instructor_name', 'instructor_email',
-            'branch_id', 'branch_name', 'city_id', 'city_name', 'room_name', 'room_capacity',
+            'branch_id', 'branch_name', 'city_id', 'city_name', 'room_name', 'room_capacity', 'capacity',
             'day_of_week', 'start_time', 'end_time',
             'lesson_date', 'status', 'cancellation_reason', 'cancelled_at', 'notes', 'is_recurring',
             'enrollments', 'attendance', 'created_at', 'updated_at'
