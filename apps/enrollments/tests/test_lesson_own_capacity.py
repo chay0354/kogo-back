@@ -236,3 +236,38 @@ class ALessonWithItsOwnLimit(TestCase):
         self.assertEqual(answer.status_code, 200, answer.content)
         body = answer.json()
         self.assertEqual((body['capacity'], body['effective_capacity'], body['room_capacity']), (4, 4, 20))
+
+    # ── the schedule's lesson window ─────────────────────────────────────────
+
+    def schedule_window(self, lesson):
+        # A weekly lesson is opened on one of its days: 11.10.2026 is a Sunday, 14.10 a Wednesday.
+        day = date(2026, 10, 11) if lesson.day_of_week == SUNDAY else date(2026, 10, 14)
+        answer = self.office.get(f'/api/v1/scheduling/lessons/{lesson.id}/', {'date': day.isoformat()})
+        self.assertEqual(answer.status_code, 200, answer.content)
+        return answer.json()
+
+    def test_the_schedule_window_is_handed_the_lessons_own_limit(self):
+        """What applies, and the lesson's own figure beside it — the window changes the second."""
+        sunday = self.schedule_window(self.sunday)
+        self.assertEqual((sunday['capacity'], sunday['room_capacity']), (4, 4))
+        wednesday = self.schedule_window(self.wednesday)
+        self.assertEqual((wednesday['capacity'], wednesday['room_capacity']), (None, 20))
+
+    def test_a_limit_changed_from_the_schedule_window_shows_there_at_once(self):
+        """The window saves through courses/lessons, as the catalog's windows do."""
+        saved = self.office.patch(f'/api/v1/courses/lessons/{self.wednesday.id}/', {'capacity': 7}, format='json')
+        self.assertEqual(saved.status_code, 200, saved.content)
+        self.assertEqual((saved.json()['capacity'], saved.json()['effective_capacity']), (7, 7))
+        after = self.schedule_window(self.wednesday)
+        self.assertEqual((after['capacity'], after['room_capacity']), (7, 7))
+
+        cleared = self.office.patch(f'/api/v1/courses/lessons/{self.wednesday.id}/', {'capacity': None}, format='json')
+        self.assertEqual(cleared.status_code, 200, cleared.content)
+        after = self.schedule_window(self.wednesday)
+        self.assertEqual((after['capacity'], after['room_capacity']), (None, 20))
+
+    def test_the_schedule_itself_does_not_take_a_limit(self):
+        """It is read there, never written: the schedule's own address ignores the field."""
+        self.office.patch(f'/api/v1/scheduling/lessons/{self.wednesday.id}/', {'capacity': 2}, format='json')
+        self.wednesday.refresh_from_db()
+        self.assertIsNone(self.wednesday.capacity)
