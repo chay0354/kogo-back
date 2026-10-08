@@ -595,7 +595,7 @@ class SignupDeclinedTest(FlagsTestCase):
         problem, = self.light(child)
 
         self.assertEqual(problem.title, 'ניסה להירשם — החיוב נכשל')
-        self.assertIn('קפואירה צעירים', problem.what)
+        self.assertIn('לחוג קפואירה צעירים', problem.what)
         self.assertIn('**₪182.50**', problem.what)
         self.assertIn('חברת האשראי סירבה לעסקה (קוד 141).', problem.what)
         self.assertNotIn('אפשר לנסות כרטיס אחר', problem.what)
@@ -642,6 +642,7 @@ class SignupDeclinedTest(FlagsTestCase):
         problem, = self.light(child)
 
         self.assertEqual(problem.title, 'ניסה להזמין שיעור ניסיון — החיוב נכשל')
+        self.assertIn('בחוג קפואירה צעירים', problem.what)
         self.assertIn('**₪30**', problem.what)
         self.assertIn('להזמין את שיעור הניסיון', problem.action)
 
