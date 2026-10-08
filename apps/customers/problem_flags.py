@@ -51,6 +51,7 @@ from apps.customers.child_status import (
     STATUS_TRIAL_COMPLETED,
     STATUS_TRIAL_SIGNED,
     LoadedFacts,
+    _bought_a_month,
     canonical_status,
     resolve_child_status,
     status_label,
@@ -295,6 +296,14 @@ class _Records:
             enrollments=[
                 (e.status, e.trial_lesson_date, e.trial_held_on, e.trial_outcome, e.end_date)
                 for e in self.enrollments.get(child.id, ())
+            ],
+            course_months=[
+                (p.status, _billing_month(p))
+                for p in self.payments.get(child.id, ())
+                if p.status in ('completed', 'refunded') and _bought_a_month(
+                    p.payment_type, p.lesson_id, p.trial_lesson_date,
+                    p.final_amount, p.registration_fee, p.trial_credit_amount,
+                )
             ],
         )
 

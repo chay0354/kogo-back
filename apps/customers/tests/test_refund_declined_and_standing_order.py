@@ -361,3 +361,57 @@ class DocumentsTabRowTest(RefundTestCase):
         row = self.rows()[receipt.invoice_number]
 
         self.assertFalse(row['payment_refundable'])
+
+
+class RefundAfterCancellingTheCourseTest(RefundTestCase):
+    """
+    Owner, 8.10.2026: the course was cancelled and the month refunded — the
+    child must be לא פעיל now, not when the refunded month would have ended.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from apps.enrollments.models import LessonEnrollment
+
+        today = timezone.localdate()
+        month_end = (today.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        self.child.paid_until_date = month_end
+        self.child.save(update_fields=['paid_until_date'])
+        self.row = LessonEnrollment.objects.create(
+            lesson=self.lesson, child=self.child, status='active', start_date=today - timedelta(days=40),
+        )
+        self.payment = self.charge(payment_date=timezone.now(), description='מנוי חודשי - חוג')
+
+    def cancel_the_course(self):
+        self.row.status, self.row.end_date = 'inactive', timezone.localdate()
+        self.row.save(update_fields=['status', 'end_date'])
+
+    def test_cancelled_then_refunded_is_inactive_at_once(self):
+        self.cancel_the_course()
+
+        response = self.refund(self.payment, reason='ביטול חוג')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'inactive')
+        line = self.child.status_history.order_by('-changed_at').first()
+        self.assertIn('התשלום זוכה', line.reason)
+
+    def test_refunded_while_still_in_the_class_stays_a_student(self):
+        response = self.refund(self.payment, reason='מחווה')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'active')
+
+    def test_a_child_the_office_already_set_inactive_is_not_put_back(self):
+        """In production the refund answered פעיל two minutes after the office wrote לא פעיל."""
+        self.cancel_the_course()
+        self.child.status = 'inactive'
+        self.child.save(update_fields=['status'])
+
+        response = self.refund(self.payment, reason='ביטול חוג')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.status, 'inactive')
