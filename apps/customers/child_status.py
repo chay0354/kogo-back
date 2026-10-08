@@ -31,6 +31,7 @@ alongside them.
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
 STATUS_ACTIVE = 'active'
@@ -119,6 +120,31 @@ def status_label(status: str) -> str:
     return CHILD_STATUS_LABELS.get(status, 'לא מוגדר')
 
 
+# A catch-up charge from a card replacement names the month it is for
+# (card_replacement._charge_one_month): "מנוי חודשי 09/2026 - …".
+_NAMED_MONTH = re.compile(r'מנוי חודשי (\d{2})/(\d{4})')
+
+
+def billing_month(description, moment) -> date:
+    """The month a course charge is for: the one its description names, else the one it was taken in (Israel time)."""
+    from django.utils import timezone
+
+    named = _NAMED_MONTH.search(description or '')
+    if named:
+        month, year = int(named.group(1)), int(named.group(2))
+        if 1 <= month <= 12:
+            return date(year, month, 1)
+    local = timezone.localtime(moment) if timezone.is_aware(moment) else moment
+    return date(local.year, local.month, 1)
+
+
+def _bought_a_month(payment_type, lesson_id, trial_lesson_date, final_amount, registration_fee, trial_credit_amount) -> bool:
+    """A charge for a month of a course — not a trial, not a fee alone (payment_service.payment_is_fee_only)."""
+    if payment_type != 'recurring_subscription' or lesson_id is None or trial_lesson_date is not None:
+        return False
+    return final_amount > 0 and final_amount - registration_fee + trial_credit_amount > 0
+
+
 class RecordedFacts:
     """
     What the rule below asks about one child, answered by the database.
@@ -199,6 +225,39 @@ class RecordedFacts:
         """A standing order whose charge was declined."""
         return self.child.recurring_payments.filter(status='failed').exists()
 
+    def course_months(self) -> list:
+        """
+        [(status, month)] for every charge that bought a month of a course and
+        was kept ('completed') or given back ('refunded').
+
+        Read off `payments.all()`, in Python: the morning routine walks every
+        child with their payments already fetched, and almost none of them has
+        a refund — so the question costs them nothing.
+        """
+        return [
+            (payment.status, billing_month(payment.description, payment.payment_date or payment.created_at))
+            for payment in self.child.payments.all()
+            if payment.status in ('completed', 'refunded') and _bought_a_month(
+                payment.payment_type, payment.lesson_id, payment.trial_lesson_date,
+                payment.final_amount, payment.registration_fee, payment.trial_credit_amount,
+            )
+        ]
+
+    def last_course_month_refunded(self) -> bool:
+        """
+        The last course month this child paid for was given back, and no month
+        from it on is still paid.
+
+        A refund of an older month, or of one of two charges for the same
+        month (a double charge put right), leaves a paid month standing.
+        """
+        months = self.course_months()
+        refunded = [month for status, month in months if status == 'refunded']
+        if not refunded:
+            return False
+        latest = max(refunded)
+        return not any(status == 'completed' and month >= latest for status, month in months)
+
     def on_a_regular_place(self) -> bool:
         """Still in a course — a regular place; a trial row is not a course they are paying for."""
         return self.child.lesson_enrollments.filter(
@@ -254,8 +313,11 @@ class LoadedFacts(RecordedFacts):
     (test_problem_flags.LoadedFactsAgreeTest).
     """
 
-    def __init__(self, child, *, cash_plans=(), check_plans=(), payments=(), standing_orders=(), enrollments=()):
+    def __init__(self, child, *, cash_plans=(), check_plans=(), payments=(), standing_orders=(), enrollments=(),
+                 course_months=()):
         super().__init__(child)
+        # (status, month) of every kept or refunded charge that bought a course month
+        self._course_months = list(course_months)
         # (status, [due dates of the plan's months / cheques])
         self.cash_plans = list(cash_plans)
         self.check_plans = list(check_plans)
@@ -289,6 +351,9 @@ class LoadedFacts(RecordedFacts):
 
     def card_failed(self) -> bool:
         return any(status == 'failed' for status, _token in self.standing_orders)
+
+    def course_months(self) -> list:
+        return self._course_months
 
     def on_a_regular_place(self) -> bool:
         return any(
@@ -345,7 +410,7 @@ def _has_money_in(child, facts=None) -> bool:
     """
     facts = facts or RecordedFacts(child)
     today = date.today()
-    if child.paid_until_date and child.paid_until_date >= today:
+    if child.paid_until_date and child.paid_until_date >= today and not _left_with_the_money_back(child, facts):
         return True
     if facts.plan_running():
         return True
@@ -354,6 +419,31 @@ def _has_money_in(child, facts=None) -> bool:
     if child.paid_until_date:
         return False
     return facts.registration_paid()
+
+
+def _left_with_the_money_back(child, facts=None) -> bool:
+    """
+    The course was cancelled and the month paid for was refunded.
+
+    A child who cancels keeps פעיל until the date they paid up to. But that
+    date is only worth what stands behind it: once the office also gives the
+    month back, nothing does (owner, 8.10.2026 — "ביטלתי ללקוח את החוג וגם
+    זיכיתי אותו על החודש, אני צריך שהוא יעבור ללא פעיל"). The date itself is
+    left as it was written; it is the rule that stops trusting it.
+
+    Both halves are needed, in either order. A refund to a child who stays in
+    the class — a month given as a gesture, a class that did not take place —
+    does not take their place away; and a cancellation alone leaves them the
+    month they paid for.
+
+    It used to work against the office: a child set לא פעיל by hand was put
+    back on פעיל by the refund itself, because the recheck that follows a
+    refund read the paid-until date and nothing else.
+    """
+    facts = facts or RecordedFacts(child)
+    if not facts.last_course_month_refunded():
+        return False
+    return not facts.on_a_regular_place()
 
 
 def _card_failed_on_a_course(child, facts=None) -> bool:
@@ -391,6 +481,12 @@ def resolve_child_status(child, facts=None) -> str:
 
     if _has_money_in(child, facts):
         return STATUS_ACTIVE
+
+    # Cancelled and refunded: out now, not on the day the refunded month would
+    # have ended. A trial booked ahead means they are on their way back.
+    if _left_with_the_money_back(child, facts):
+        trial_ahead, _trial_held = facts.trial_dates()
+        return STATUS_TRIAL_SIGNED if trial_ahead else STATUS_INACTIVE
 
     # Money ran out. What that means depends on whether they left first.
     #

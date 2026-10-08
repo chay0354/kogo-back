@@ -140,6 +140,10 @@ class LoadedFactsAgreeSeptember27Test(LoadedFactsAgreeMixin, canonical.StatusRul
     pass
 
 
+class LoadedFactsAgreeCancelledAndRefundedTest(LoadedFactsAgreeMixin, canonical.CancelledAndRefundedTest):
+    pass
+
+
 class DoubleStandingOrderTest(FlagsTestCase):
     def test_two_live_orders_on_one_lesson_of_one_card(self):
         child = self.child()

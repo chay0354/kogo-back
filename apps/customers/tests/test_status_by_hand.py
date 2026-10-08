@@ -199,7 +199,10 @@ class MoneyStoppedTests(TestCase):
 
         self.assertTrue(PaymentService().refund_payment(str(payment.id), reason='ביטול')['success'])
         child.refresh_from_db()
-        self.assertEqual(child.status, 'pending')
+        # Paid for a course and had it given back, with no place in any class:
+        # לא פעיל — they had something and it was undone (owner, 8.10.2026). It
+        # used to read בתהליך רישום, as if they had never paid.
+        self.assertEqual(child.status, 'inactive')
         self.assertIn('התשלום זוכה', ChildStatusHistory.objects.get(child=child).reason)
 
     def test_cancelling_a_cheque_plan_rechecks_the_status_at_once(self):

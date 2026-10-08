@@ -610,6 +610,208 @@ class StatusRulesOfSeptember27Test(TestCase):
         self.assertEqual(resolve_child_status(child), 'trial_signed')
 
 
+class CancelledAndRefundedTest(TestCase):
+    """
+    Owner, 8.10.2026: "ביטלתי ללקוח את החוג וגם זיכיתי אותו על החודש — אני
+    צריך שהוא יעבור ללא פעיל."
+
+    A child who cancels keeps פעיל until the date they paid up to. Once the
+    month is also given back nothing stands behind that date, and they are out
+    now. In production one child stayed פעיל with both payments refunded, and
+    another — set לא פעיל by hand — was put back on פעיל by the refund itself.
+    """
+
+    def setUp(self):
+        self.branch = TestDataFactory.create_branch()
+        self.family = TestDataFactory.create_family(branch=self.branch)
+        self.lesson = TestDataFactory.create_lesson(course=TestDataFactory.create_course(branch=self.branch))
+        self.this_month = TODAY.replace(day=1)
+        self.month_end = (self.this_month + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+    def make_child(self, **over):
+        fields = dict(
+            family=self.family, first_name='ילדה', last_name='בדיקה', birth_date=date(2015, 1, 1),
+            gender='female', status='active', paid_until_date=self.month_end,
+        )
+        fields.update(over)
+        return Child.objects.create(**fields)
+
+    def month_paid(self, child, *, status='completed', day=None, lesson='same', **over):
+        from django.utils import timezone
+
+        day = day or self.this_month
+        fields = dict(
+            child=child, family=self.family, lesson=self.lesson if lesson == 'same' else lesson,
+            payment_type='recurring_subscription', status=status, base_amount=Decimal('250'),
+            final_amount=Decimal('250'), description='מנוי חודשי - חוג',
+            payment_date=timezone.make_aware(timezone.datetime(day.year, day.month, day.day, 12)),
+        )
+        fields.update(over)
+        return Payment.objects.create(**fields)
+
+    def place(self, child, *, status='active', **over):
+        fields = dict(lesson=self.lesson, child=child, status=status, start_date=TODAY - timedelta(days=40))
+        if status == 'inactive':
+            fields['end_date'] = TODAY
+        fields.update(over)
+        return LessonEnrollment.objects.create(**fields)
+
+    def last_month(self):
+        return (self.this_month - timedelta(days=1)).replace(day=1)
+
+    # --- out now ---------------------------------------------------------------
+
+    def test_cancelled_and_the_month_given_back(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded')
+
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_every_month_given_back(self):
+        """The child the owner named: two months paid, both refunded, no place left."""
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded', day=self.last_month())
+        self.month_paid(child, status='refunded')
+
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_card_problem_child_who_cancelled_and_was_refunded(self):
+        child = self.make_child(status='payment_problem')
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded')
+
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    def test_a_status_set_by_hand_is_not_put_back(self):
+        """The office wrote לא פעיל, then refunded: the refund's recheck used to answer פעיל."""
+        from apps.customers.child_status import recheck_after_money_stopped
+
+        child = self.make_child(status='inactive')
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded')
+
+        recheck_after_money_stopped(child, reason='התשלום זוכה')
+
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'inactive')
+        self.assertFalse(child.status_history.exists())
+
+    def test_the_refunds_recheck_moves_the_child_and_says_why(self):
+        from apps.customers.child_status import recheck_after_money_stopped
+
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded')
+
+        recheck_after_money_stopped(child, reason='התשלום זוכה')
+
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'inactive')
+        line = child.status_history.get()
+        self.assertEqual((line.previous_status, line.new_status), ('active', 'inactive'))
+        self.assertIn('התשלום זוכה', line.reason)
+        # The date is not rewritten: the rule stopped trusting it.
+        self.assertEqual(child.paid_until_date, self.month_end)
+
+    def test_a_trial_booked_ahead_means_they_are_coming_back(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded')
+        elsewhere = TestDataFactory.create_lesson(course=TestDataFactory.create_course(branch=self.branch))
+        self.place(child, lesson=elsewhere, start_date=TODAY + timedelta(days=5),
+                   trial_lesson_date=TODAY + timedelta(days=5))
+
+        self.assertEqual(resolve_child_status(child), 'trial_signed')
+
+    # --- either half alone changes nothing -------------------------------------
+
+    def test_cancelled_only_keeps_the_month_that_was_paid_for(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child)
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_refunded_only_keeps_the_place(self):
+        """A month given as a gesture, a class that did not take place: still a student."""
+        child = self.make_child()
+        self.place(child)
+        self.month_paid(child, status='refunded')
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_refund_first_and_cancel_after(self):
+        child = self.make_child()
+        row = self.place(child)
+        self.month_paid(child, status='refunded')
+        self.assertEqual(resolve_child_status(child), 'active')
+
+        row.status, row.end_date = 'inactive', TODAY
+        row.save(update_fields=['status', 'end_date'])
+
+        self.assertEqual(resolve_child_status(child), 'inactive')
+
+    # --- a paid month that still stands -----------------------------------------
+
+    def test_an_older_month_given_back_leaves_this_month_paid(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded', day=self.last_month())
+        self.month_paid(child)
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_double_charge_put_right_leaves_the_month_paid(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child)
+        self.month_paid(child, status='refunded')
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_catch_up_charge_counts_for_the_month_it_names(self):
+        """Taken this month for last month, then refunded; this month's own charge stands."""
+        child = self.make_child()
+        self.place(child, status='inactive')
+        last = self.last_month()
+        self.month_paid(child, status='refunded', description=f'מנוי חודשי {last.month:02d}/{last.year} - חוג')
+        self.month_paid(child)
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_refunded_registration_fee_is_not_a_month(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child)
+        self.month_paid(child, status='refunded', final_amount=Decimal('120'), registration_fee=Decimal('120'))
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_a_refunded_paid_trial_is_not_a_month(self):
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child)
+        self.month_paid(child, status='refunded', payment_type='one_time', final_amount=Decimal('30'),
+                        trial_lesson_date=TODAY - timedelta(days=20))
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+    def test_cash_still_running_is_money_whatever_the_card_gave_back(self):
+        from apps.documents.models import CashPlan
+
+        child = self.make_child()
+        self.place(child, status='inactive')
+        self.month_paid(child, status='refunded')
+        CashPlan.objects.create(
+            child=child, lesson=self.lesson, status='active',
+            total_amount=Decimal('500'), monthly_amount=Decimal('250'),
+        )
+
+        self.assertEqual(resolve_child_status(child), 'active')
+
+
 class MarkTrialSignedTest(TestCase):
     """A trial booking marks נרשם לניסיון only over the statuses that are less than a student."""
 
