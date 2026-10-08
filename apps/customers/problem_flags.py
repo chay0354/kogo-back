@@ -63,6 +63,7 @@ DOUBLE_STANDING_ORDER = 'double_standing_order'
 DOUBLE_CHARGE = 'double_charge'
 DECLINED_RECORDED_PAID = 'declined_recorded_paid'
 STUCK_CHARGE = 'stuck_charge'
+SIGNUP_DECLINED = 'signup_declined'
 STANDING_ORDER_FAILED = 'standing_order_failed'
 STANDING_ORDER_OVERDUE = 'standing_order_overdue'
 STANDING_ORDER_NO_CARD = 'standing_order_no_card'
@@ -71,7 +72,7 @@ STATUS_MISMATCH = 'status_mismatch'
 DUPLICATE_CARD = 'duplicate_card'
 
 ORDER = (
-    DOUBLE_STANDING_ORDER, DOUBLE_CHARGE, DECLINED_RECORDED_PAID, STUCK_CHARGE,
+    DOUBLE_STANDING_ORDER, DOUBLE_CHARGE, DECLINED_RECORDED_PAID, STUCK_CHARGE, SIGNUP_DECLINED,
     STANDING_ORDER_FAILED, STANDING_ORDER_OVERDUE, STANDING_ORDER_NO_CARD, NO_STANDING_ORDER,
     STATUS_MISMATCH, DUPLICATE_CARD,
 )
@@ -88,6 +89,10 @@ STUCK_AFTER = timedelta(hours=24)
 
 # A double charge older than this is history, not something to put right now.
 DOUBLE_CHARGE_LOOKBACK_MONTHS = 12
+
+# A sign-up whose charge failed is somebody to phone for this long. After it
+# the parent has moved on, and a light that never goes out is not read.
+SIGNUP_DECLINED_LOOKBACK_DAYS = 60
 
 # Above this many children the rows are read whole instead of by a list of ids.
 READ_WHOLE_ABOVE = 800
@@ -132,6 +137,11 @@ _Payment = namedtuple('_Payment', (
     'id', 'child_id', 'status', 'payment_type', 'lesson_id', 'bundle_id', 'final_amount',
     'registration_fee', 'trial_credit_amount', 'trial_lesson_date', 'payment_date',
     'created_at', 'updated_at', 'description', 'response_code',
+))
+# A charge that did not go through: a sign-up or a paid trial the parent tried.
+_FailedCharge = namedtuple('_FailedCharge', (
+    'id', 'child_id', 'lesson_id', 'final_amount', 'trial_lesson_date', 'created_at',
+    'failure_code', 'failure_reason',
 ))
 _Enrollment = namedtuple('_Enrollment', (
     'child_id', 'lesson_id', 'bundle_id', 'status', 'trial_lesson_date', 'trial_held_on',
@@ -244,6 +254,7 @@ class _Records:
         self.people: dict = defaultdict(list)       # identity key -> [Child]
         self.standing_orders: dict = defaultdict(list)
         self.payments: dict = defaultdict(list)
+        self.failed_charges: dict = defaultdict(list)   # child id -> charges that did not go through, lately
         self.enrollments: dict = defaultdict(list)
         self.cash_plans: dict = defaultdict(list)
         self.check_plans: dict = defaultdict(list)
@@ -347,6 +358,16 @@ def _load(children) -> _Records:
         if payment.child_id in records.cards:
             records.payments[payment.child_id].append(payment)
 
+    # Charges that did not go through, kept apart: no other rule reads them.
+    since = timezone.now() - timedelta(days=SIGNUP_DECLINED_LOOKBACK_DAYS)
+    for row in scoped(Payment.objects.filter(status='failed', created_at__gte=since)).order_by('created_at').values_list(
+        'id', 'child_id', 'lesson_id', 'final_amount', 'trial_lesson_date', 'created_at',
+        'failure_code', 'failure_reason',
+    ):
+        failed = _FailedCharge(*row)
+        if failed.child_id in records.cards:
+            records.failed_charges[failed.child_id].append(failed)
+
     for row in scoped(LessonEnrollment.objects.all()).values_list(
         'child_id', 'lesson_id', 'bundle_id', 'status', 'trial_lesson_date', 'trial_held_on',
         'trial_outcome', 'end_date',
@@ -373,6 +394,7 @@ def _load(children) -> _Records:
     orders = [order for group in records.standing_orders.values() for order in group]
     lesson_ids = {p.lesson_id for group in records.payments.values() for p in group if p.lesson_id}
     lesson_ids |= {e.lesson_id for group in records.enrollments.values() for e in group if e.lesson_id}
+    lesson_ids |= {f.lesson_id for group in records.failed_charges.values() for f in group if f.lesson_id}
     bundle_ids = set()
     for order in orders:
         initial = order.initial_payment
@@ -685,6 +707,122 @@ def _stuck_charges(person, viewer, records, now) -> list[Problem]:
                 ),
                 branch_ids={lesson.branch_id} if lesson.branch_id else set(),
             ))
+    return problems
+
+
+def _why_it_failed(failed: _FailedCharge) -> str:
+    """The reason the charge did not go through, as it was recorded — in the office's words."""
+    reason = (failed.failure_reason or '').strip()
+    if not reason or reason == 'Success':
+        # An answer whose refusal code was not kept (before 27.9.2026).
+        return 'טרנזילה דחתה את החיוב (הקוד לא נשמר).'
+    if 'validation schema' in reason:
+        return 'תקלה בבקשה ששלחנו לטרנזילה — לא בעיה בכרטיס.'
+    if 'fetching failed' in reason:
+        return 'טרנזילה לא הצליחה לקרוא את פרטי הכרטיס.'
+    # Ours are written as "<what happened> (קוד NNN). <what was done>": the first sentence says it.
+    first = reason.split('. ')[0].strip().rstrip('.')
+    return f'{first[:140]}.'
+
+
+def _signup_declined(person, viewer, records, now) -> list[Problem]:
+    """
+    A sign-up — to a course, or to a paid trial lesson — whose charge did not
+    go through, with nothing after it (owner, 8.10.2026).
+
+    The parent reached the card and it stopped there. The child keeps the
+    status they had (a trial child stays a trial child, a new one is בתהליך
+    רישום), and until now nothing on the screen said they had tried: the office
+    saw it only in the card company's own system. This is somebody to phone.
+
+    It is over — and the light goes out — once the person paid for a course
+    sign-up after the failure, holds a student's place in that course, or, for
+    a trial, has a trial booked or paid there. A customer who already paid for
+    this very course is not a sign-up: their failed month is the standing
+    order's rules' to say. And after SIGNUP_DECLINED_LOOKBACK_DAYS it is history.
+    """
+    failures = [failed for card in person for failed in records.failed_charges.get(card.id, ())]
+    if not failures:
+        return []
+    cutoff = now - timedelta(days=SIGNUP_DECLINED_LOOKBACK_DAYS)
+    payments = [payment for card in person for payment in records.payments.get(card.id, ())]
+    enrollments = [enrollment for card in person for enrollment in records.enrollments.get(card.id, ())]
+    orders = [order for card in person for order in records.standing_orders.get(card.id, ())]
+
+    def took_money(payment: _Payment) -> bool:
+        return (
+            payment.status == 'completed' and payment.final_amount > 0 and payment.lesson_id is not None
+            and not recorded_decline_code(payment.response_code)
+        )
+
+    def course_of(lesson_id):
+        return records.lesson(lesson_id).course_id or lesson_id
+
+    course_paid = [p for p in payments if took_money(p) and p.trial_lesson_date is None]
+    trial_paid = [p for p in payments if took_money(p) and p.trial_lesson_date is not None]
+    student_in = {
+        course_of(e.lesson_id) for e in enrollments
+        if e.status in LIVE_ENROLLMENT_STATUSES and e.trial_lesson_date is None
+    }
+    trial_in = {course_of(e.lesson_id) for e in enrollments if e.trial_lesson_date is not None and e.status != 'cancelled'}
+
+    # One light for each thing they tried: the last failure of each course, sign-up and trial apart.
+    last: dict = {}
+    tries: dict = defaultdict(int)
+    for failed in failures:
+        if failed.lesson_id is None or failed.created_at is None or failed.created_at < cutoff:
+            continue
+        key = (course_of(failed.lesson_id), failed.trial_lesson_date is not None)
+        tries[key] += 1
+        if key not in last or failed.created_at > last[key].created_at:
+            last[key] = failed
+
+    problems = []
+    for (course, is_trial), failed in sorted(last.items(), key=lambda item: item[1].created_at):
+        paid_this_course = [p for p in course_paid if course_of(p.lesson_id) == course]
+        if any(p.created_at <= failed.created_at for p in paid_this_course):
+            continue    # already a customer of this course: a failed month, not a failed sign-up
+        if paid_this_course or course in student_in:
+            continue    # they got in after all
+        if is_trial:
+            if course in trial_in or any(course_of(p.lesson_id) == course for p in trial_paid):
+                continue    # the trial was booked in the end
+        if any(
+            p.created_at > failed.created_at and not _is_standing_order_charge(p, orders, records)
+            for p in course_paid
+        ):
+            continue    # they signed up to another course instead
+        lesson = records.lesson(failed.lesson_id)
+        course_name = lesson.course_name or 'חוג'
+        when = _day_label(_local(failed.created_at))
+        count = tries[(course, is_trial)]
+        again = f'זה קרה {_b(f"{count} פעמים")}; האחרונה ב־{when}.' if count > 1 else ''
+        if is_trial:
+            title = 'ניסה להזמין שיעור ניסיון — החיוב נכשל'
+            tried = f'ב־{when} ניסו להזמין לו {_b("שיעור ניסיון")} ב{course_name}{_where(failed.child_id, viewer)}.'
+            after = f'מאז {_b("לא הוזמן שיעור ניסיון")} בחוג הזה.'
+            help_with = 'להזמין את שיעור הניסיון'
+        else:
+            title = 'ניסה להירשם — החיוב נכשל'
+            tried = f'ב־{when} ניסו {_b("לרשום אותו")} ל{course_name}{_where(failed.child_id, viewer)}.'
+            after = f'מאז {_b("לא נרשם תשלום")} על החוג הזה.'
+            help_with = 'להשלים את ההרשמה'
+        problems.append(Problem(
+            code=SIGNUP_DECLINED,
+            title=title,
+            what=_lines(
+                tried,
+                f'החיוב של {_b(_money(failed.final_amount))} {_b("לא עבר")}: {_why_it_failed(failed)}',
+                again,
+                after,
+            ),
+            action=_items(
+                f'{_b("להתקשר להורה")} ולעזור לו {help_with}.',
+                'אפשר לשלוח לו קישור להזנת כרטיס, מלשונית התשלומים בכרטיס הילד.',
+                f'הסימון יורד כשההרשמה מושלמת, או אחרי {SIGNUP_DECLINED_LOOKBACK_DAYS} יום.',
+            ),
+            branch_ids={lesson.branch_id} if lesson.branch_id else set(),
+        ))
     return problems
 
 
@@ -1053,6 +1191,7 @@ def _problems_of(card, records, today: date, now) -> list[Problem]:
     problems += _double_charges(person, card, records, today)
     problems += _declined_recorded_paid(person, card, records)
     problems += _stuck_charges(person, card, records, now)
+    problems += _signup_declined(person, card, records, now)
     problems += _unpaid(person, card, records, today)
     problems += _status_problem(card, records, today)
     problems += _duplicate_cards(person, card, records)
@@ -1091,9 +1230,16 @@ def problems_for_children(children, *, branch_ids=None, today: date | None = Non
     return found
 
 
-def child_ids_with_problems(children, *, branch_ids=None) -> list:
-    """The ids, out of these children, that have at least one problem — for the list's filter."""
-    return [child_id for child_id, problems in problems_for_children(children, branch_ids=branch_ids).items() if problems]
+def child_ids_with_problems(children, *, branch_ids=None, code: str | None = None) -> list:
+    """
+    The ids, out of these children, that have at least one problem — for the
+    list's filter. With `code`, only a problem of that kind counts (the list of
+    people to phone: SIGNUP_DECLINED).
+    """
+    return [
+        child_id for child_id, problems in problems_for_children(children, branch_ids=branch_ids).items()
+        if (any(problem.code == code for problem in problems) if code else problems)
+    ]
 
 
 def child_problem_detail(child, *, branch_ids=None) -> dict:
