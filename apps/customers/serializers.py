@@ -782,19 +782,27 @@ class SecondChildDiscountSerializer(serializers.ModelSerializer):
 
 
 class AdditionalLessonDiscountSerializer(serializers.ModelSerializer):
-    """הנחת שיעור נוסף - Simplified for additional lesson discount"""
-    
+    """
+    הנחת שיעור נוסף - Simplified for additional lesson discount.
+
+    Two ways to say it (owner, 8.10.2026): `fixed` — shekels off every extra
+    class, whatever the course costs, added to the family's other discounts;
+    `fixed_final_price` — the price of the extra class itself, which is final.
+    """
+    discount_type = serializers.ChoiceField(choices=['fixed', 'fixed_final_price'], required=False)
+
     class Meta:
         model = Discount
-        fields = ['id', 'value', 'is_active']
+        fields = ['id', 'discount_type', 'value', 'is_active']
         read_only_fields = ['id']
     
     def validate(self, data):
         """Validate additional lesson discount"""
-        value = data.get('value', 0)
-        if value <= 0:
+        value = data.get('value', getattr(self.instance, 'value', 0))
+        if value is None or value <= 0:
+            kind = data.get('discount_type', getattr(self.instance, 'discount_type', 'fixed_final_price'))
             raise serializers.ValidationError(
-                "מחיר שיעור נוסף חייב להיות גדול מ-0"
+                "סכום ההנחה חייב להיות גדול מ-0" if kind == 'fixed' else "מחיר שיעור נוסף חייב להיות גדול מ-0"
             )
         return data
 

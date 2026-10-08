@@ -61,6 +61,11 @@ def _another_class(value='200.00'):
     return _discount('הנחת שיעור נוסף לילד פעיל', value, 'fixed_final_price')
 
 
+def _another_class_off(value='10.00'):
+    """The same discount said as shekels off every extra class (owner, 8.10.2026)."""
+    return _discount('הנחת שיעור נוסף לילד פעיל', value, 'fixed')
+
+
 @override_settings(WIDGET_IDENTIFICATION_ENABLED=True, REGISTRATION_FEE_ILS=0, SUBSCRIPTION_FIRST_CHARGE_DATE='')
 @patch.object(identification, 'MIN_ANSWER_SECONDS', 0)
 class AFamilyNobodyKnowsYet(TestCase):
@@ -289,6 +294,113 @@ class AFamilyNobodyKnowsYet(TestCase):
             ['additional_lesson'],
         ])
         self.assertEqual([item['registration_fee'] for item in shown], [120.0, 0.0, 120.0, 0.0])
+
+    # ── an amount off every extra class (owner, 8.10.2026) ───────────────────
+
+    def test_the_second_class_takes_ten_shekels_off_whatever_the_class_costs(self):
+        """ "הנחה של 10 שקלים מכל סוגי החוגים": off the class's own price, not a price of its own."""
+        _another_class_off()
+        cheaper = TestDataFactory.create_course(price=Decimal('260.00'))
+        cheaper_lesson = TestDataFactory.create_lesson(course=cheaper, day_of_week=2)
+
+        shown = self._shown_then_charged([
+            self._item(MAYA, self.capoeira_lesson),
+            self._item(MAYA, self.hiphop_lesson, same_child_as=0),
+            self._item(MAYA, cheaper_lesson, same_child_as=0),
+        ])
+
+        self.assertEqual(self._prices(shown), [(350.0, 0.0, 350.0), (350.0, 10.0, 340.0), (260.0, 10.0, 250.0)])
+        self.assertEqual([self._types(item) for item in shown], [[], ['additional_lesson'], ['additional_lesson']])
+
+    def test_a_brother_and_a_second_class_get_both_discounts(self):
+        """The owner's own example: "אם יש לו לדוגמה אח וגם חוג נוסף" — both come off."""
+        _second_child('10.00')
+        _another_class_off('10.00')
+
+        shown = self._shown_then_charged([
+            self._item(MAYA, self.capoeira_lesson),
+            self._item(MAYA, self.hiphop_lesson, same_child_as=0),
+            self._item(NOAM, self.capoeira_lesson),
+            self._item(NOAM, self.hiphop_lesson, same_child_as=2),
+        ])
+
+        self.assertEqual(self._prices(shown), [
+            (350.0, 0.0, 350.0),      # the first child's first class: full price
+            (350.0, 10.0, 340.0),     # her second class
+            (350.0, 10.0, 340.0),     # her brother's first class
+            (350.0, 20.0, 330.0),     # his second class: a brother and another class
+        ])
+        self.assertEqual([self._types(item) for item in shown], [
+            [], ['additional_lesson'], ['second_child'], ['additional_lesson', 'second_child'],
+        ])
+        # Each discount is a line of its own, by its own name and sum.
+        both = {line['name']: line['value'] for line in shown[3]['discounts_applied']}
+        self.assertEqual(both, {'הנחת שיעור נוסף לילד פעיל': 10.0, 'הנחת ילד שני': 10.0})
+
+    def test_early_signup_adds_up_with_the_other_two(self):
+        today = date.today()
+        _second_child('10.00')
+        _another_class_off('10.00')
+        Discount.objects.create(
+            name='רישום מוקדם', discount_type='fixed', value=Decimal('15.00'), applies_to='family',
+            promotion_type='temporary', start_date=today - timedelta(days=7), end_date=today + timedelta(days=7),
+            is_active=True, is_built_in=True,
+        )
+
+        shown = self._shown_then_charged([
+            self._item(MAYA, self.capoeira_lesson),
+            self._item(NOAM, self.capoeira_lesson),
+            self._item(NOAM, self.hiphop_lesson, same_child_as=1),
+        ])
+
+        self.assertEqual(self._prices(shown)[2], (350.0, 35.0, 315.0))
+        self.assertEqual(self._types(shown[2]), ['additional_lesson', 'early_signup', 'second_child'])
+
+    def test_an_amount_off_left_at_zero_shows_nothing(self):
+        _another_class_off('0.00')
+
+        shown = self._shown_then_charged([
+            self._item(MAYA, self.capoeira_lesson),
+            self._item(MAYA, self.hiphop_lesson, same_child_as=0),
+        ])
+
+        self.assertEqual(self._prices(shown), [(350.0, 0.0, 350.0), (350.0, 0.0, 350.0)])
+
+    # ── the price set on one lesson itself ─────────────────────────────────────
+
+    def test_a_lessons_own_second_class_price_and_a_brother(self):
+        """
+        "ישירות משיעור ספציפי": the lesson says what it costs as a second class.
+        That is the lesson's price, so the general amount off is not taken a
+        second time — and the brother's discount still comes off it.
+        """
+        _second_child('10.00')
+        _another_class_off('10.00')
+        self.hiphop_lesson.additional_course_prices = [{'course_index': 2, 'price': 300}]
+        self.hiphop_lesson.save(update_fields=['additional_course_prices'])
+
+        shown = self._shown_then_charged([
+            self._item(MAYA, self.capoeira_lesson),
+            self._item(MAYA, self.hiphop_lesson, same_child_as=0),
+            self._item(NOAM, self.capoeira_lesson),
+            self._item(NOAM, self.hiphop_lesson, same_child_as=2),
+        ])
+
+        self.assertEqual(self._prices(shown), [
+            (350.0, 0.0, 350.0),
+            (300.0, 0.0, 300.0),      # the lesson's own second-class price
+            (350.0, 10.0, 340.0),
+            (300.0, 10.0, 290.0),     # the same price, and a brother
+        ])
+        self.assertEqual([self._types(item) for item in shown], [[], [], ['second_child'], ['second_child']])
+
+    def test_a_lesson_with_its_own_price_as_a_first_class_is_at_the_course_price(self):
+        self.hiphop_lesson.additional_course_prices = [{'course_index': 2, 'price': 300}]
+        self.hiphop_lesson.save(update_fields=['additional_course_prices'])
+
+        shown = self._shown_then_charged([self._item(MAYA, self.hiphop_lesson)])
+
+        self.assertEqual(self._prices(shown), [(350.0, 0.0, 350.0)])
 
     # ── what must not earn it ────────────────────────────────────────────────
 
