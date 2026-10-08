@@ -793,18 +793,20 @@ def _signup_declined(person, viewer, records, now) -> list[Problem]:
         ):
             continue    # they signed up to another course instead
         lesson = records.lesson(failed.lesson_id)
-        course_name = lesson.course_name or 'חוג'
+        # "לחוג <name>": a name may start with a number ("4.5-6 מחול"), and a
+        # letter glued to it does not read.
+        course_name = lesson.course_name or 'שלא נשמר שמו'
         when = _day_label(_local(failed.created_at))
         count = tries[(course, is_trial)]
         again = f'זה קרה {_b(f"{count} פעמים")}; האחרונה ב־{when}.' if count > 1 else ''
         if is_trial:
             title = 'ניסה להזמין שיעור ניסיון — החיוב נכשל'
-            tried = f'ב־{when} ניסו להזמין לו {_b("שיעור ניסיון")} ב{course_name}{_where(failed.child_id, viewer)}.'
+            tried = f'ב־{when} ניסו להזמין לו {_b("שיעור ניסיון")} בחוג {course_name}{_where(failed.child_id, viewer)}.'
             after = f'מאז {_b("לא הוזמן שיעור ניסיון")} בחוג הזה.'
             help_with = 'להזמין את שיעור הניסיון'
         else:
             title = 'ניסה להירשם — החיוב נכשל'
-            tried = f'ב־{when} ניסו {_b("לרשום אותו")} ל{course_name}{_where(failed.child_id, viewer)}.'
+            tried = f'ב־{when} ניסו {_b("לרשום אותו")} לחוג {course_name}{_where(failed.child_id, viewer)}.'
             after = f'מאז {_b("לא נרשם תשלום")} על החוג הזה.'
             help_with = 'להשלים את ההרשמה'
         problems.append(Problem(
