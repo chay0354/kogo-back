@@ -7,6 +7,9 @@ to payments. It supports multiple discount types that can be combined additively
 Discount Types:
 1. Early Sign-Up Discount: Applied when payment is made within specific date ranges
 2. Second Child Discount: Applied automatically to 2nd child onwards in a family
+3. Additional Lesson Discount: Applied to a child's second class onwards — an
+   amount off, which adds up with the two above, or a fixed price for the
+   extra class, which is final
 
 Usage:
     service = DiscountService()
@@ -89,21 +92,36 @@ class DiscountService:
         # Check Additional Lesson Discount (takes precedence as it's most specific)
         if lesson_id:
             additional_lesson = self.check_additional_lesson_discount(child_id, lesson_id)
-            if additional_lesson and self._fixed_price_lowers(additional_lesson, base_price):
-                # Fixed final price for additional lessons
-                discount_amount = max(Decimal('0.00'), base_price - additional_lesson.value)
-                return DiscountCalculation(
-                    applicable_discounts=[ApplicableDiscount(
+            if additional_lesson and additional_lesson.discount_type == 'fixed_final_price':
+                # "מחיר קבוע לחוג נוסף": that figure is the price, and nothing else comes off it.
+                if self._fixed_price_lowers(additional_lesson, base_price):
+                    discount_amount = max(Decimal('0.00'), base_price - additional_lesson.value)
+                    return DiscountCalculation(
+                        applicable_discounts=[ApplicableDiscount(
+                            discount_id=str(additional_lesson.id),
+                            name=additional_lesson.name,
+                            discount_type='additional_lesson',
+                            value=discount_amount,
+                            reason=f"שיעור נוסף: ₪{additional_lesson.value} (במקום ₪{base_price})"
+                        )],
+                        total_discount_amount=discount_amount,
+                        final_price=additional_lesson.value,
+                        base_price=base_price
+                    )
+            elif additional_lesson:
+                # An amount off (owner, 8.10.2026: "הנחה של 10 שקלים מכל סוגי
+                # החוגים"): the same shekels off every extra class, whatever
+                # the course costs. It is one discount among the family's —
+                # a child with a brother and a second class gets both.
+                amount_off = min(self._amount_off(additional_lesson, base_price), base_price)
+                if amount_off > 0:
+                    applicable_discounts.append(ApplicableDiscount(
                         discount_id=str(additional_lesson.id),
                         name=additional_lesson.name,
                         discount_type='additional_lesson',
-                        value=discount_amount,
-                        reason=f"שיעור נוסף: ₪{additional_lesson.value} (במקום ₪{base_price})"
-                    )],
-                    total_discount_amount=discount_amount,
-                    final_price=additional_lesson.value,
-                    base_price=base_price
-                )
+                        value=amount_off,
+                        reason=self._with_percent(additional_lesson, "חוג נוסף לאותו ילד"),
+                    ))
         
         # Check Early Sign-Up Discount
         early_signup = self.check_early_signup_discount(payment_date)
