@@ -497,16 +497,22 @@ class ChildViewSet(viewsets.ModelViewSet):
             # "רק עם תקלות": the children, out of the ones the other filters
             # left, that problem_flags finds something wrong with. Asked last,
             # of the rows already narrowed and already one per child.
+            # A problem's own code narrows to that kind alone — "ניסו להירשם
+            # והחיוב נכשל" is the list of people to phone (owner, 8.10.2026).
             has_problems = (self.request.query_params.get('has_problems') or '').strip().lower()
-            if has_problems in ('1', 'true', 'yes'):
-                from apps.customers.problem_flags import child_ids_with_problems
+            if has_problems:
+                from apps.customers.problem_flags import ORDER as PROBLEM_CODES, child_ids_with_problems
 
-                narrowed = Child.objects.filter(pk__in=queryset.values('pk')).only(
-                    'id', 'family_id', 'first_name', 'last_name', 'status', 'paid_until_date', 'created_at',
-                )
-                queryset = queryset.filter(
-                    pk__in=child_ids_with_problems(narrowed, branch_ids=self._problem_branch_ids()),
-                )
+                one_kind = has_problems if has_problems in PROBLEM_CODES else None
+                if one_kind or has_problems in ('1', 'true', 'yes'):
+                    narrowed = Child.objects.filter(pk__in=queryset.values('pk')).only(
+                        'id', 'family_id', 'first_name', 'last_name', 'status', 'paid_until_date', 'created_at',
+                    )
+                    queryset = queryset.filter(
+                        pk__in=child_ids_with_problems(
+                            narrowed, branch_ids=self._problem_branch_ids(), code=one_kind,
+                        ),
+                    )
 
         return queryset
 

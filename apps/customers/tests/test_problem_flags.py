@@ -553,6 +553,233 @@ class StuckChargeTest(FlagsTestCase):
         self.assertEqual(self.codes(child), [])
 
 
+CARD_REFUSED = 'חברת האשראי סירבה לעסקה (קוד 141). לא בוצע חיוב — אפשר לנסות כרטיס אחר.'
+
+
+class SignupDeclinedTest(FlagsTestCase):
+    """
+    Owner, 8.10.2026: whoever tried to sign up and whose card was refused must
+    be known — still a trial child, but with a sign that they tried and it
+    failed — so the office can phone them. Until now only the card company's
+    own system showed it.
+    """
+
+    def declined(self, child, when=None, *, amount='260.00', lesson='same', trial=False,
+                 code='141', reason=CARD_REFUSED):
+        payment = Payment.objects.create(
+            child=child, family=child.family, lesson=self.lesson if lesson == 'same' else lesson,
+            payment_type='one_time' if trial else 'recurring_subscription', status='failed',
+            base_amount=Decimal(amount), final_amount=Decimal(amount),
+            trial_lesson_date=TODAY + timedelta(days=3) if trial else None,
+            failure_code=code, failure_reason=reason, description='מנוי חודשי - קפואירה צעירים',
+        )
+        Payment.objects.filter(pk=payment.pk).update(created_at=when or timezone.now() - timedelta(days=2))
+        payment.refresh_from_db()
+        return payment
+
+    def light(self, child, **kwargs):
+        return [p for p in self.found(child, **kwargs) if p.code == problem_flags.SIGNUP_DECLINED]
+
+    def after_a_trial(self, **over):
+        child = self.child(status='trial_completed', **over)
+        self.place(child, trial_lesson_date=TODAY - timedelta(days=7), trial_held_on=TODAY - timedelta(days=7),
+                   trial_outcome='attended')
+        return child
+
+    # --- who is marked -----------------------------------------------------------
+
+    def test_a_trial_child_whose_sign_up_was_refused(self):
+        child = self.after_a_trial()
+        self.declined(child, at(TODAY - timedelta(days=2)), amount='182.50')
+
+        problem, = self.light(child)
+
+        self.assertEqual(problem.title, 'ניסה להירשם — החיוב נכשל')
+        self.assertIn('קפואירה צעירים', problem.what)
+        self.assertIn('**₪182.50**', problem.what)
+        self.assertIn('חברת האשראי סירבה לעסקה (קוד 141).', problem.what)
+        self.assertNotIn('אפשר לנסות כרטיס אחר', problem.what)
+        self.assertIn('**להתקשר להורה**', problem.action)
+        # Nothing is written: the child is still a trial child.
+        child.refresh_from_db()
+        self.assertEqual(child.status, 'trial_completed')
+
+    def test_a_new_child_whose_first_charge_was_refused(self):
+        child = self.child(status='pending')
+        self.declined(child)
+
+        self.assertEqual(self.codes(child), [problem_flags.SIGNUP_DECLINED])
+
+    def test_a_paying_child_who_tried_to_add_a_course(self):
+        child = self.child(paid_until_date=TODAY + timedelta(days=10))
+        self.place(child)
+        self.standing_order(child)
+        other = TestDataFactory.create_lesson(
+            course=TestDataFactory.create_course(name='ריקוד', branch=self.branch), branch=self.branch,
+        )
+        self.declined(child, at(TODAY - timedelta(days=9)), lesson=other)
+        # The month charged since is the first course's: it does not put the light out.
+        self.charge(child, at(TODAY - timedelta(days=3)))
+
+        problem, = self.light(child)
+
+        self.assertIn('ריקוד', problem.what)
+
+    def test_several_tries_are_one_light_that_says_how_many(self):
+        child = self.child(status='pending')
+        for days in (6, 5, 2):
+            self.declined(child, at(TODAY - timedelta(days=days)))
+
+        problem, = self.light(child)
+
+        self.assertIn('**3 פעמים**', problem.what)
+
+    def test_a_paid_trial_that_was_refused(self):
+        child = self.child(status='pending')
+        self.declined(child, trial=True, amount='30.00', code='004',
+                      reason='חברת האשראי סירבה לעסקה (קוד 004). לא בוצע חיוב — אפשר לנסות כרטיס אחר.')
+
+        problem, = self.light(child)
+
+        self.assertEqual(problem.title, 'ניסה להזמין שיעור ניסיון — החיוב נכשל')
+        self.assertIn('**₪30**', problem.what)
+        self.assertIn('להזמין את שיעור הניסיון', problem.action)
+
+    def test_a_failed_trial_and_a_failed_sign_up_are_two_lights(self):
+        child = self.child(status='pending')
+        self.declined(child, at(TODAY - timedelta(days=8)), trial=True, amount='30.00')
+        self.declined(child, at(TODAY - timedelta(days=2)))
+
+        self.assertEqual(
+            [p.title for p in self.light(child)],
+            ['ניסה להזמין שיעור ניסיון — החיוב נכשל', 'ניסה להירשם — החיוב נכשל'],
+        )
+
+    # --- when the light goes out -------------------------------------------------
+
+    def test_a_retry_that_went_through(self):
+        child = self.child(paid_until_date=TODAY + timedelta(days=20))
+        self.place(child)
+        self.declined(child, at(TODAY - timedelta(days=2), 10))
+        self.charge(child, at(TODAY - timedelta(days=2), 11))
+
+        self.assertEqual(self.light(child), [])
+
+    def test_another_day_of_the_same_course(self):
+        child = self.child(paid_until_date=TODAY + timedelta(days=20))
+        other_day = TestDataFactory.create_lesson(course=self.course, branch=self.branch)
+        self.place(child, lesson=other_day)
+        self.declined(child, at(TODAY - timedelta(days=4)))
+        self.charge(child, at(TODAY - timedelta(days=3)), lesson=other_day)
+
+        self.assertEqual(self.light(child), [])
+
+    def test_a_sign_up_to_another_course_instead(self):
+        child = self.child(paid_until_date=TODAY + timedelta(days=20))
+        other = TestDataFactory.create_lesson(
+            course=TestDataFactory.create_course(name='ריקוד', branch=self.branch), branch=self.branch,
+        )
+        self.place(child, lesson=other)
+        self.declined(child, at(TODAY - timedelta(days=4)))
+        self.charge(child, at(TODAY - timedelta(days=3)), lesson=other, registration_fee=Decimal('120.00'))
+
+        self.assertEqual(self.light(child), [])
+
+    def test_a_place_given_in_the_office(self):
+        """Paid in cash, say: the child is a student of the course, whatever the card did."""
+        child = self.child(status='active', paid_until_date=TODAY + timedelta(days=20))
+        self.declined(child, at(TODAY - timedelta(days=4)))
+        self.place(child)
+
+        self.assertEqual(self.light(child), [])
+
+    def test_a_customer_of_this_course_is_a_failed_month_not_a_failed_sign_up(self):
+        child = self.child(paid_until_date=TODAY - timedelta(days=3))
+        self.place(child)
+        self.standing_order(child, status='failed')
+        self.declined(child, at(TODAY - timedelta(days=2)))
+
+        self.assertEqual(self.light(child), [])
+        self.assertIn(problem_flags.STANDING_ORDER_FAILED, self.codes(child))
+
+    def test_a_trial_booked_in_the_end(self):
+        child = self.child(status='trial_signed')
+        self.declined(child, at(TODAY - timedelta(days=4)), trial=True, amount='30.00')
+        self.place(child, trial_lesson_date=TODAY + timedelta(days=3))
+
+        self.assertEqual(self.light(child), [])
+
+    def test_a_trial_refused_and_the_course_paid_for_instead(self):
+        child = self.child(paid_until_date=TODAY + timedelta(days=20))
+        self.place(child)
+        self.declined(child, at(TODAY - timedelta(days=4)), trial=True, amount='30.00')
+        self.charge(child, at(TODAY - timedelta(days=3)))
+
+        self.assertEqual(self.light(child), [])
+
+    def test_after_two_months_it_is_history(self):
+        fresh, stale = self.child(first='רוני', status='pending'), self.child(first='גיל', status='pending')
+        self.declined(fresh, timezone.now() - timedelta(days=problem_flags.SIGNUP_DECLINED_LOOKBACK_DAYS - 1))
+        self.declined(stale, timezone.now() - timedelta(days=problem_flags.SIGNUP_DECLINED_LOOKBACK_DAYS + 1))
+
+        self.assertEqual(len(self.light(fresh)), 1)
+        self.assertEqual(self.light(stale), [])
+
+    # --- the other card, the words, the partner --------------------------------
+
+    def test_the_card_shown_carries_the_other_cards_failed_sign_up(self):
+        kept = self.after_a_trial()
+        leftover = self.child(status='pending')
+        self.declined(leftover)
+
+        problem, = self.light(kept)
+
+        self.assertIn(problem_flags.OTHER_CARD, problem.what)
+
+    def test_the_other_card_paid_and_the_light_is_out(self):
+        kept = self.child(paid_until_date=TODAY + timedelta(days=20))
+        leftover = self.child(status='pending')
+        self.place(kept)
+        self.declined(leftover, at(TODAY - timedelta(days=4)))
+        self.charge(kept, at(TODAY - timedelta(days=3)))
+
+        self.assertEqual(self.light(kept), [])
+        self.assertEqual(self.light(leftover), [])
+
+    def test_the_reason_reads_in_the_offices_words(self):
+        child = self.child(status='pending')
+        cases = (
+            ('Success', 'הקוד לא נשמר'),
+            ('', 'הקוד לא נשמר'),
+            ('Json does not match validation schema', 'לא בעיה בכרטיס'),
+            ('Credit card fetching failed.', 'לא הצליחה לקרוא את פרטי הכרטיס'),
+            ('הכרטיס חסום (קוד 001). לא בוצע חיוב — אפשר לנסות כרטיס אחר.', 'הכרטיס חסום (קוד 001).'),
+        )
+        for reason, expected in cases:
+            Payment.objects.filter(child=child).delete()
+            self.declined(child, reason=reason)
+            problem, = self.light(child)
+            self.assertIn(expected, problem.what, reason)
+
+    def test_a_partner_sees_it_only_for_a_course_in_their_branches(self):
+        child = self.child(status='pending')
+        self.declined(child)
+        elsewhere = TestDataFactory.create_branch(name='סניף אחר')
+
+        self.assertEqual(len(self.light(child, branch_ids=[self.branch.id])), 1)
+        self.assertEqual(self.light(child, branch_ids=[elsewhere.id]), [])
+
+    def test_the_marks_are_closed_and_the_title_has_none(self):
+        child = self.child(status='pending')
+        self.declined(child)
+        self.declined(child, trial=True, amount='30.00')
+
+        for problem in self.light(child):
+            self.assertNotIn('*', problem.title)
+            for text in (problem.what, problem.action):
+                self.assertEqual(text.count('**') % 2, 0, text)
+
+
 class StatusMismatchTest(FlagsTestCase):
     def test_a_child_who_pays_and_is_not_active(self):
         child = self.child(status='pending', paid_until_date=TODAY + timedelta(days=12))
@@ -705,6 +932,27 @@ class ListAndCardApiTest(FlagsTestCase):
         self.child(first='רוני', status='pending', paid_until_date=TODAY + timedelta(days=12))
 
         self.assertEqual(self.rows(has_problems='1', status='active'), [])
+
+    def test_only_the_ones_to_phone(self):
+        """One kind of problem alone: the people whose sign-up charge failed (owner, 8.10.2026)."""
+        tried = self.child(first='רוני', status='pending')
+        Payment.objects.create(
+            child=tried, family=tried.family, lesson=self.lesson, payment_type='recurring_subscription',
+            status='failed', base_amount=Decimal('260.00'), final_amount=Decimal('260.00'),
+            failure_code='141', failure_reason=CARD_REFUSED,
+        )
+        other_trouble = self.child(first='דנה', status='pending', paid_until_date=TODAY + timedelta(days=12))
+        self.child(first='גיל', paid_until_date=TODAY + timedelta(days=12))
+
+        only = self.rows(has_problems='signup_declined')
+        every = self.rows(has_problems='1')
+        unknown = self.rows(has_problems='no-such-kind')
+
+        self.assertEqual([row['id'] for row in only], [str(tried.id)])
+        self.assertEqual(only[0]['problem_titles'], ['ניסה להירשם — החיוב נכשל'])
+        self.assertEqual({row['id'] for row in every}, {str(tried.id), str(other_trouble.id)})
+        # A word the server does not know narrows nothing.
+        self.assertEqual(len(unknown), 3)
 
     def test_the_child_shown_carries_the_other_cards_problem(self):
         kept = self.child(paid_until_date=TODAY + timedelta(days=12))
