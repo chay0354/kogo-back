@@ -63,14 +63,37 @@ def _active_lesson_enrollments(child):
     return rows
 
 
+def _trial_took_place(enrollment, today) -> bool:
+    """
+    A trial row whose lesson has been: it carries an outcome, or its date has
+    passed and it was not dropped before that date.
+
+    The cron that retires a trial writes the outcome a day or so after the
+    lesson. Until then the row has a past date and nothing else — and the
+    child, already ביצע ניסיון, showed no trial at all on the list. A trial the
+    office cancelled ahead of its date never took place: the cancel ends the
+    row before the date and writes no outcome (child_status.trial_dates).
+    """
+    if enrollment.trial_outcome:
+        return True
+    held_on = enrollment.trial_lesson_date or enrollment.trial_held_on
+    if held_on is None or held_on >= today:
+        return False
+    dropped_before_its_date = (
+        enrollment.status == 'inactive' and enrollment.end_date is not None and enrollment.end_date < held_on
+    )
+    return not dropped_before_its_date
+
+
 def _latest_finished_trial(child):
-    """The most recent trial row that carries an outcome, whatever its status."""
+    """The most recent trial that took place, whatever the row's status."""
     latest = None
+    today = date.today()
     for person in _identity_children(child):
         for enrollment in person.lesson_enrollments.all():
-            if not enrollment.trial_outcome or not enrollment.lesson_id:
+            if not enrollment.lesson_id or not _trial_took_place(enrollment, today):
                 continue
-            key = enrollment.trial_lesson_date or enrollment.end_date or enrollment.start_date
+            key = enrollment.trial_lesson_date or enrollment.trial_held_on or enrollment.end_date or enrollment.start_date
             if latest is None or (key and key > latest[0]):
                 latest = (key, enrollment)
     return latest[1] if latest else None
@@ -518,22 +541,22 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         if chosen is None and obj.status == 'trial_signed':
             chosen = fallback
         if chosen is None:
-            # The trial is over: the cron retired the row and wrote the outcome
-            # on it. The card still shows that trial — הגיע / לא הגיע — until the
+            # The trial is over: its date has passed, and the cron retires the
+            # row and writes the outcome on it. The card and the list still show
+            # that trial — when, and הגיע / לא הגיע once it is known — until the
             # child books another one.
             chosen = _latest_finished_trial(obj)
         if chosen is None:
             return None
         lesson = chosen.lesson
+        held_on = chosen.trial_lesson_date or chosen.trial_held_on
         return {
             'enrollment_id': str(chosen.id),
             'lesson_id': str(lesson.id),
             'course_name': lesson.course.name,
             'trial_outcome': chosen.trial_outcome or None,
             'trial_number': chosen.trial_number,
-            'trial_lesson_date': (
-                chosen.trial_lesson_date.isoformat() if chosen.trial_lesson_date else None
-            ),
+            'trial_lesson_date': held_on.isoformat() if held_on else None,
         }
     
     def get_attendance_rate(self, obj):
