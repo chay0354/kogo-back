@@ -27,7 +27,7 @@ from apps.wahub.models import (
     Tag,
 )
 from apps.wahub.phones import phone_display
-from apps.wahub.queries import is_due
+from apps.wahub.queries import days_since, is_due, is_hot
 from apps.wahub.sending import can_free_text, window_closes_at
 
 SOURCE_LABELS = dict(SOURCE_CHOICES)
@@ -39,6 +39,8 @@ FOLLOWUP_LABELS = dict(FOLLOWUP_CHOICES)
 SENDER_LABELS = dict(SENDER_CHOICES)
 EVENT_LABELS = dict(EVENT_KIND_CHOICES)
 UNCHECKED_LABEL = 'עוד לא נבדק'
+# "What they asked" on the list of those who did not register: a line, not a conversation.
+ASKED_CHARS = 160
 
 _COLOR = re.compile(r'#[0-9a-fA-F]{6}')
 
@@ -145,6 +147,79 @@ def message_payload(message: Message) -> dict:
         'status': message.status,
         'error': message.error,
         'sent_at': _iso(message.sent_at),
+    }
+
+
+def _short(text: str, limit: int) -> str:
+    return re.sub(r'\s+', ' ', text or '').strip()[:limit]
+
+
+def unregistered_lead_payload(contact: Contact, *, today) -> dict:
+    """One row of "שאלו ולא נרשמו" (docs/WAHUB-CONTRACT-STAGE3.md, א); `contact` comes from queries.unregistered_leads."""
+    return {
+        'id': contact.id,
+        'name': contact.name,
+        'phone': contact.phone,
+        'phone_display': phone_display(contact.phone),
+        'is_demo': contact.is_demo,
+        'first_inbound_at': _iso(contact.first_inbound_at),
+        'last_inbound_at': _iso(contact.last_inbound_at),
+        'days_since_first': days_since(contact.first_inbound_at, today),
+        'days_since_last': days_since(contact.last_inbound_at, today),
+        # The summary when there is one; until then, their last message.
+        'asked': _short(contact.known_summary or getattr(contact, 'last_inbound_text', '') or '', ASKED_CHARS),
+        'known_interest': contact.known_interest,
+        'known_interest_label': INTEREST_LABELS.get(contact.known_interest, ''),
+        'known_city': contact.known_city,
+        'known_branch_name': contact.known_branch_name,
+        'known_course_type': contact.known_course_type,
+        'kogo_outcome': contact.kogo_outcome,
+        'kogo_outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, UNCHECKED_LABEL),
+        'kogo_detail': contact.kogo_detail,
+        'followup_status': contact.followup_status,
+        'followup_status_label': FOLLOWUP_LABELS.get(contact.followup_status, ''),
+        'followup_due': contact.followup_due.isoformat() if contact.followup_due else None,
+        'hot': is_hot(contact),
+        'handled_by': contact.handled_by,
+        'needs_human': contact.needs_human,
+    }
+
+
+def for_customer_payload(family, phones: list, contacts: list) -> dict:
+    """The WhatsApp block of a customer's card (docs/WAHUB-CONTRACT-STAGE3.md, ב)."""
+    checked = [contact.kogo_checked_at for contact in contacts if contact.kogo_checked_at]
+    return {
+        'family': str(family.id),
+        'phones': phones,
+        'contacts': [_for_customer_contact(contact, family.id) for contact in contacts],
+        # When the registrations were last read for these contacts; "בדוק שוב" moves it to now.
+        'checked_at': _iso(max(checked) if checked else None),
+    }
+
+
+def _for_customer_contact(contact: Contact, family_id) -> dict:
+    return {
+        'id': contact.id,
+        'name': contact.name,
+        'phone': contact.phone,
+        'phone_display': phone_display(contact.phone),
+        'is_demo': contact.is_demo,
+        'last_message_at': _iso(contact.last_message_at),
+        'last_message_text': contact.last_message_text,
+        'last_message_direction': contact.last_message_direction,
+        'last_message_sender': contact.last_message_sender,
+        'handled_by': contact.handled_by,
+        'needs_human': contact.needs_human,
+        'known_summary': contact.known_summary,
+        'known_interest_label': INTEREST_LABELS.get(contact.known_interest, ''),
+        'followup_status': contact.followup_status,
+        'followup_status_label': FOLLOWUP_LABELS.get(contact.followup_status, ''),
+        'followup_due': contact.followup_due.isoformat() if contact.followup_due else None,
+        'kogo_outcome': contact.kogo_outcome,
+        'kogo_outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, UNCHECKED_LABEL),
+        # The matching put THIS family on the contact (two families may share a phone).
+        'linked': contact.kogo_family_id == family_id,
+        'link': f'/wahub?tab=chats&contact={contact.id}',
     }
 
 

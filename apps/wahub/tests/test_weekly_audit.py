@@ -68,6 +68,10 @@ class WeeklyAuditTests(WahubTestCase):
                 'api/v1/wahub/review/notes/': 200,
                 'api/v1/wahub/review/summary/': 200,
                 'api/v1/wahub/demo/scenarios/': 200,
+                # stage 3: who asked and did not register; the card's block needs ?family= and, without it,
+                # refuses in Hebrew (400) — the sweep fills path parameters only, and a refusal is not a fault.
+                'api/v1/wahub/leads/unregistered/': 200,
+                'api/v1/wahub/for-customer/': 400,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])

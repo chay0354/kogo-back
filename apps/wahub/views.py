@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import uuid
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
@@ -27,6 +28,7 @@ from rest_framework.views import APIView
 
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
+from apps.customers.models import Family
 from apps.wahub import analysis, cron, demo, handoff, inbound, matching, queries, reviewer, sending, shadow, state
 from apps.wahub.models import (
     EVENT_CREATED,
@@ -52,8 +54,10 @@ from apps.wahub.serializers import (
     TagSerializer,
     contact_payload,
     event_payload,
+    for_customer_payload,
     message_payload,
     sorted_tags,
+    unregistered_lead_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -644,3 +648,67 @@ class DemoContactsView(APIView):
 
     def delete(self, request):
         return Response(demo.delete_demo_contacts())
+
+
+# --- stage 3: who asked and did not register; the WhatsApp block of a customer's card -----------------
+# (docs/WAHUB-CONTRACT-STAGE3.md, א and ב). Nothing here sends a message.
+
+class UnregisteredLeadsView(APIView):
+    """GET leads/unregistered/?days=30&hot=0|1 — hot first, then whoever has waited longest. No paging: the list is short."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        now = timezone.now()
+        today = timezone.localtime(now).date()
+        days = queries.unregistered_days(request.query_params.get('days'))
+        rows = list(queries.unregistered_leads(days, now=now))
+        leads = [unregistered_lead_payload(row, today=today) for row in rows]
+        if queries.flag(request.query_params.get('hot')):
+            leads = [lead for lead in leads if lead['hot']]
+        # The counts describe the whole window whatever the filter: the card's numbers do not move under it.
+        return Response({'days': days, 'counts': queries.unregistered_counts(rows, today), 'leads': leads})
+
+
+def _family_for(raw):
+    """(family, None) for a card the system has; (None, the refusal) otherwise."""
+    text = str(raw or '').strip()
+    if not text:
+        return None, _error('נדרש family (מזהה המשפחה).')
+    try:
+        family_id = uuid.UUID(text)
+    except ValueError:
+        return None, _error('מזהה המשפחה אינו תקין.')
+    family = Family.objects.filter(pk=family_id).only('id', 'phone').first()
+    if family is None:
+        return None, _error('המשפחה לא נמצאה.', http=status.HTTP_404_NOT_FOUND)
+    return family, None
+
+
+class ForCustomerView(APIView):
+    """GET for-customer/?family=<uuid> — every WhatsApp contact behind the family's phones. Reads only."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        family, refused = _family_for(request.query_params.get('family'))
+        if refused is not None:
+            return refused
+        phones, contacts = matching.contacts_of_family(family)
+        return Response(for_customer_payload(family, phones, contacts))
+
+
+class ForCustomerRecheckView(APIView):
+    """
+    POST for-customer/recheck/ {family} — the match against the registrations
+    again, for each contact found; then the same answer as GET. The only
+    write here is the kogo_* fields (matching.recheck_contact).
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def post(self, request):
+        family, refused = _family_for(request.data.get('family'))
+        if refused is not None:
+            return refused
+        phones, contacts = matching.contacts_of_family(family)
+        for contact in contacts:
+            matching.recheck_contact(contact)
+        return Response(for_customer_payload(family, phones, contacts))

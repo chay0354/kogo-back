@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, time, timedelta
 
-from django.db.models import Count, F, Min, Q
+from django.db.models import BooleanField, Case, Count, F, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
@@ -28,6 +28,12 @@ from apps.wahub.models import (
     HANDLED_BOT,
     HANDLED_HUMAN,
     HIDDEN_OUTCOMES,
+    OUTCOME_IN_SYSTEM,
+    OUTCOME_NOT_FOUND,
+    OUTCOME_PENDING,
+    OUTCOME_SIGNUP_DECLINED,
+    OUTCOME_TRIAL_ONLY,
+    OUTCOME_TRIAL_UPCOMING,
     STATUS_FAILED,
     Contact,
     Message,
@@ -90,7 +96,7 @@ def listed() -> 'QuerySet[Contact]':
     return Contact.objects.select_related('followup_by').prefetch_related('tags')
 
 
-def _flag(value) -> bool:
+def flag(value) -> bool:
     return str(value or '').strip().lower() in ('1', 'true', 'yes')
 
 
@@ -152,7 +158,7 @@ def contact_list(params):
     queryset = common_filters(listed(), params)
     view = (params.get('view') or VIEW_CHATS).strip()
     if view == VIEW_LEADS:
-        if not _flag(params.get('show_hidden')):
+        if not flag(params.get('show_hidden')):
             queryset = queryset.exclude(HIDDEN)
         queue = (params.get('queue') or 'all').strip()
         queryset = queryset.filter(queues(state.now_israel_date()).get(queue, Q()))
@@ -170,7 +176,7 @@ def box_counts(queryset=None) -> dict:
 def all_counts(params) -> dict:
     """Boxes and queues in one query."""
     queryset = common_filters(Contact.objects.all(), params)
-    shown = Q() if _flag(params.get('show_hidden')) else ~HIDDEN
+    shown = Q() if flag(params.get('show_hidden')) else ~HIDDEN
     wanted = {f'box_{name}': Count('id', filter=cond) for name, cond in BOXES.items()}
     wanted.update({
         f'queue_{name}': Count('id', filter=cond & shown)
@@ -184,6 +190,85 @@ def all_counts(params) -> dict:
     }
 
 
+# --- "שאלו ולא נרשמו" (docs/WAHUB-CONTRACT-STAGE3.md, א) -----------------------------------------
+
+# Somebody who asked and did not register: nobody has the phone, somebody who
+# never paid, a family that is there with nothing running (in_system: an old
+# customer asking again is a lead), and a contact the matching has not reached
+# yet ('' — the cron sleeps at night, and a lead who wrote at 23:00 is still a
+# lead at 8:00). Only a paying child, from before or after the message, takes
+# a person off the list — "מי שנרשם הוא לא ליד".
+LEAD_OUTCOMES = (
+    OUTCOME_NOT_FOUND, OUTCOME_PENDING, OUTCOME_SIGNUP_DECLINED, OUTCOME_TRIAL_ONLY, OUTCOME_TRIAL_UPCOMING,
+    OUTCOME_IN_SYSTEM, '',
+)
+# "Hot": the conversation said "wants to register" (INTEREST_CHOICES 'hot' —
+# 'warm' is curiosity, not a step), or the registrations show a step taken:
+# a sign-up whose charge failed, a trial booked, a trial held.
+HOT_INTERESTS = ('hot',)
+HOT_OUTCOMES = (OUTCOME_SIGNUP_DECLINED, OUTCOME_TRIAL_UPCOMING, OUTCOME_TRIAL_ONLY)
+# A person's mark that closes the lead.
+CLOSED_FOLLOWUPS = (FOLLOWUP_REGISTERED, FOLLOWUP_NOT_RELEVANT)
+UNREGISTERED_DAYS = 30
+UNREGISTERED_MAX_DAYS = 365
+
+HOT = Q(known_interest__in=HOT_INTERESTS) | Q(kogo_outcome__in=HOT_OUTCOMES)
+
+
+def is_hot(contact: Contact) -> bool:
+    """The same rule, for a contact in hand."""
+    return contact.known_interest in HOT_INTERESTS or contact.kogo_outcome in HOT_OUTCOMES
+
+
+def unregistered_days(raw) -> int:
+    """The window a screen asked for: 30 days unless told, never more than a year, never less than a day."""
+    text = str(raw or '').strip()
+    if not text.isdigit():
+        return UNREGISTERED_DAYS
+    return max(1, min(int(text), UNREGISTERED_MAX_DAYS))
+
+
+def unregistered_q(since) -> Q:
+    """Wrote first within the window, the registrations say "did not register", and nobody closed it."""
+    return Q(first_inbound_at__gte=since) & Q(kogo_outcome__in=LEAD_OUTCOMES) & ~Q(followup_status__in=CLOSED_FOLLOWUPS)
+
+
+def days_since(moment, today) -> int | None:
+    """Calendar days by the Israeli calendar: a message last night is "yesterday" at eight in the morning."""
+    if moment is None:
+        return None
+    return max(0, (today - timezone.localtime(moment).date()).days)
+
+
+def unregistered_leads(days: int, *, now=None):
+    """
+    Who asked in the last `days` days and did not register: the hot ones first,
+    then whoever has waited longest since their last message. One query; the
+    last incoming message rides along for the rows that have no summary yet.
+    """
+    now = now or timezone.now()
+    return (
+        Contact.objects.filter(unregistered_q(now - timedelta(days=days)))
+        .annotate(
+            hot=Case(When(HOT, then=Value(True)), default=Value(False), output_field=BooleanField()),
+            last_inbound_text=Subquery(
+                Message.objects.filter(contact=OuterRef('pk'), direction=DIRECTION_IN).order_by('-id').values('text')[:1]
+            ),
+        )
+        .order_by('-hot', F('last_inbound_at').asc(nulls_last=True), 'id')
+    )
+
+
+def unregistered_counts(contacts, today) -> dict:
+    """{total, hot, oldest_days} over rows in hand — the three numbers summary() computes in SQL."""
+    waits = [days for days in (days_since(contact.last_inbound_at, today) for contact in contacts) if days is not None]
+    return {
+        'total': len(contacts),
+        'hot': sum(1 for contact in contacts if is_hot(contact)),
+        'oldest_days': max(waits) if waits else None,
+    }
+
+
 def summary() -> dict:
     """The "today" tab: three queries, whatever the number of contacts."""
     now = timezone.now()
@@ -191,6 +276,7 @@ def summary() -> dict:
     first_day = today - timedelta(days=6)
     zone = timezone.get_current_timezone()
     since = timezone.make_aware(datetime.combine(first_day, time.min), zone)
+    unregistered = unregistered_q(now - timedelta(days=UNREGISTERED_DAYS))
 
     totals = Contact.objects.aggregate(
         waiting=Count('id', filter=BOXES['waiting']),
@@ -198,7 +284,16 @@ def summary() -> dict:
         unread=Count('id', filter=BOXES['unread']),
         due_followups=Count('id', filter=due_q(today) & ~HIDDEN),
         oldest_waiting_since=Min('waiting_since'),
+        # "שאלו ולא נרשמו", the last 30 days — the same rule as leads/unregistered/.
+        unregistered_total=Count('id', filter=unregistered),
+        unregistered_hot=Count('id', filter=unregistered & HOT),
+        unregistered_oldest_last_inbound=Min('last_inbound_at', filter=unregistered),
     )
+    not_registered = {
+        'total': totals.pop('unregistered_total'),
+        'hot': totals.pop('unregistered_hot'),
+        'oldest_days': days_since(totals.pop('unregistered_oldest_last_inbound'), today),
+    }
 
     days = {
         first_day + timedelta(days=offset): {'inbound': 0, 'outbound': 0, 'new_contacts': 0}
@@ -224,4 +319,5 @@ def summary() -> dict:
         'inbound_today': days[today]['inbound'],
         'outbound_today': days[today]['outbound'],
         'by_day': [{'date': day.isoformat(), **counts} for day, counts in days.items()],
+        'unregistered_leads': not_registered,
     }

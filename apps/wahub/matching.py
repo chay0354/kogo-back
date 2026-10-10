@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.customers.child_status import (
@@ -57,6 +57,7 @@ from apps.wahub.models import (
     OUTCOME_TRIAL_UPCOMING,
     Contact,
 )
+from apps.wahub.phones import normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,32 @@ def family_ids_for_phone(phone: str) -> set:
         .values_list('family_id', flat=True)
     )
     return found
+
+
+def family_phones(family) -> list[str]:
+    """
+    Every WhatsApp number a family could write from — the reverse of
+    family_ids_for_phone: the card's phone, every parent's (the extra contacts
+    too), every child's own (walk-ins left out, as there). Each in the spelling
+    a contact is stored in (9725XXXXXXXX); a number that is not an Israeli
+    mobile is nobody's WhatsApp and is dropped. Reads only.
+    """
+    raw = [family.phone]
+    raw += Parent.objects.filter(family_id=family.id).order_by('-is_primary', 'created_at').values_list('phone', flat=True)
+    raw += (
+        Child.objects.filter(family_id=family.id).exclude(status=STATUS_GHOST)
+        .order_by('created_at').values_list('phone_number', flat=True)
+    )
+    return list(dict.fromkeys(phone for phone in map(normalize_phone, raw) if phone))
+
+
+def contacts_of_family(family) -> tuple[list[str], list[Contact]]:
+    """(the phones looked for, the contacts found) — newest conversation first. Reads only."""
+    phones = family_phones(family)
+    if not phones:
+        return phones, []
+    contacts = list(Contact.objects.filter(phone__in=phones).order_by(F('last_message_at').desc(nulls_last=True), '-id'))
+    return phones, contacts
 
 
 def _registered_at(children) -> dict:

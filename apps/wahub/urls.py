@@ -23,5 +23,9 @@ urlpatterns = [
     path('demo/scenarios/', views.DemoScenariosView.as_view(), name='wahub-demo-scenarios'),
     path('demo/scenario/', views.DemoScenarioView.as_view(), name='wahub-demo-scenario'),
     path('demo/contacts/', views.DemoContactsView.as_view(), name='wahub-demo-contacts'),
+    # Stage 3 — who asked and did not register; the WhatsApp block of a customer's card (docs/WAHUB-CONTRACT-STAGE3.md).
+    path('leads/unregistered/', views.UnregisteredLeadsView.as_view(), name='wahub-leads-unregistered'),
+    path('for-customer/', views.ForCustomerView.as_view(), name='wahub-for-customer'),
+    path('for-customer/recheck/', views.ForCustomerRecheckView.as_view(), name='wahub-for-customer-recheck'),
     path('', include(router.urls)),
 ]
