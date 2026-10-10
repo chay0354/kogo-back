@@ -93,6 +93,9 @@ AREAS = (
     ), 2),
     Area('messages', 'הודעות, חתימות ואוטומציות', (
         'core/whatsapp', 'signatures/', 'core/registration-terms',
+        # "וואטסאפ ולידים" (apps/wahub). Its read routes only read; the ones that
+        # send or run the cron carry a NEVER_CALL word and are skipped.
+        'wahub/',
     ), 3),
     Area('customers', 'לקוחות ונתונים', (
         'customers/', 'external-students/', 'legacy-import/',

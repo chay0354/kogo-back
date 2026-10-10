@@ -19,5 +19,6 @@ urlpatterns = [
     path('rentals/', include('apps.rentals.urls')),
     path('rental-billing/', include('apps.rental_billing.urls')),
     path('legacy-import/', include('apps.legacy_import.urls')),
+    path('wahub/', include('apps.wahub.urls')),
 ]
 
