@@ -65,6 +65,7 @@ class WindowClosed(Exception):
 
 
 SENDING_OFF = 'השליחה ללקוחות כבויה. מפעילים אותה בהגדרות המערכת (WAHUB_SENDING_ENABLED) כשמוכנים.'
+DEMO_CONTACT = 'איש קשר דמו — לא שולחים אליו הודעות, גם כשהשליחה דלוקה.'
 
 
 def sending_enabled() -> bool:
@@ -182,7 +183,10 @@ def flow_name(flow_ns: str) -> str:
 
 def _deliver(contact: Contact, user, *, text: str, message_type: str, call) -> Message:
     status, error = STATUS_SENT, ''
-    if simulate_send():
+    if contact.is_demo:
+        # An invented contact: the message is kept so the screen shows it, nothing leaves.
+        status, error = STATUS_FAILED, DEMO_CONTACT
+    elif simulate_send():
         status = STATUS_SIMULATED
     elif not sending_enabled():
         # Kept, so the office sees the attempt and the reason; nothing leaves.

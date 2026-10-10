@@ -231,6 +231,8 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
             changes['last_inbound_at'] = sent_at
             changes['unread_count'] = F('unread_count') + 1
             changes['needs_analysis'] = True
+            # The shadow bot answers it in the cron (apps/wahub/shadow.py); never sent.
+            changes['needs_shadow'] = True
             if contact.first_inbound_at is None:
                 changes['first_inbound_at'] = sent_at
             if contact.waiting_since is None:
@@ -238,7 +240,8 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
             if asks_for_human(text) and not contact.needs_human:
                 changes.update(needs_human=True, needs_human_reason=NEEDS_HUMAN_REASON, needs_human_at=now)
                 state.log_event(contact.id, EVENT_NEEDS_HUMAN, f'{NEEDS_HUMAN_REASON}: "{state.preview(text)[:200]}"')
-                _alert_office(contact, name or contact.name, text)
+                if not contact.is_demo:
+                    _alert_office(contact, name or contact.name, text)
         else:
             # The bot answered: nobody is waiting any more.
             changes['waiting_since'] = None

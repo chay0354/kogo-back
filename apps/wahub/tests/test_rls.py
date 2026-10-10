@@ -13,6 +13,9 @@ from apps.wahub.tests.base import WahubTestCase
 TABLES = {
     'wahub_tags', 'wahub_quick_replies', 'wahub_contacts', 'wahub_contact_tags',
     'wahub_messages', 'wahub_contact_events',
+    # stage 2 (0002): the bot's knowledge, the shadow replies, the review
+    'wahub_knowledge_items', 'wahub_knowledge_history', 'wahub_shadow_replies',
+    'wahub_trial_questions', 'wahub_knowledge_proposals', 'wahub_service_notes',
 }
 
 
