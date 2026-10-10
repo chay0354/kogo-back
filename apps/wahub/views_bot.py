@@ -20,7 +20,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsManager
-from apps.wahub import knowledge, reviewer, shadow
+from apps.wahub import knowledge, knowledge_import, reviewer, shadow
 from apps.wahub.models import (
     PROPOSAL_PENDING,
     PROPOSAL_STATUS_CHOICES,
@@ -115,6 +115,27 @@ class KnowledgeViewSet(_ManagerViewSet):
     @action(detail=False, methods=['get'], url_path='office-hours/now')
     def office_hours_now(self, request):
         return Response(knowledge.office_hours_now())
+
+    @action(detail=False, methods=['post'], url_path='import')
+    def import_old_bot(self, request):
+        """
+        Files the old bot's knowledge (knowledge_seed, 137 records) from the
+        screen — production has no shell. Once: a record that already exists is
+        left alone, so the owner's edits survive a second click. Sends nothing.
+        """
+        data = request.data if isinstance(request.data, dict) else {}
+        dry_run = bool(data.get('dry_run'))
+        result = knowledge_import.run(user=request.user, dry_run=dry_run)
+        return Response({
+            'dry_run': dry_run,
+            'created_total': result['created_total'],
+            'created': {kind: count for kind, count in sorted(result['created'].items())},
+            'skipped': result['skipped'],
+            'inactive': result['inactive'],
+            'tags': result['tags'],
+            'quick_replies': result['quick_replies'],
+            'total': KnowledgeItem.objects.count(),
+        })
 
 
 # --- the shadow bot --------------------------------------------------------------------------------------------------
