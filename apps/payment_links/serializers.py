@@ -141,17 +141,31 @@ class PaymentLinkPaymentSerializer(serializers.ModelSerializer):
 
 
 class PublicPaymentLinkSerializer(serializers.ModelSerializer):
-    """What the payer sees — no tags, no counts, active options only."""
+    """
+    What the payer sees — no tags, no counts, active options only.
+
+    A business charge is a page made for one customer: it also says whom it is
+    for (`customer_name`) and the open invoice it pays (`invoice_number`, ''
+    while there is none). Nothing else about the customer is shown, and a
+    general link carries neither key.
+    """
     options = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentLink
-        fields = ['slug', 'title', 'description', 'options', 'payer_details_locked']
+        fields = ['slug', 'title', 'description', 'kind', 'options', 'payer_details_locked']
 
     payer_details_locked = serializers.SerializerMethodField()
 
     def get_payer_details_locked(self, obj):
         return obj.kind == PaymentLink.KIND_BUSINESS_CHARGE
+
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        if obj.kind == PaymentLink.KIND_BUSINESS_CHARGE:
+            data['customer_name'] = obj.business_customer.full_name if obj.business_customer_id else ''
+            data['invoice_number'] = obj.target_invoice.document_number if obj.target_invoice_id else ''
+        return data
 
     def get_options(self, obj):
         return [
