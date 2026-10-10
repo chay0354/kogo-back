@@ -486,6 +486,7 @@ class StatusView(APIView):
             ).exists(),
             'ai_configured': analysis.ai_configured(),
             'send_configured': ManyChatService().is_configured,
+            'sending_enabled': sending.sending_enabled(),
             'simulate_send': sending.simulate_send(),
             'last_inbound_at': contacts['last_inbound'],
             'contacts_total': contacts['total'],

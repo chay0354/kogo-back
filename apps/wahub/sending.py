@@ -64,6 +64,14 @@ class WindowClosed(Exception):
     """Free text outside the 24-hour window. Nothing was sent and nothing was kept."""
 
 
+SENDING_OFF = 'השליחה ללקוחות כבויה. מפעילים אותה בהגדרות המערכת (WAHUB_SENDING_ENABLED) כשמוכנים.'
+
+
+def sending_enabled() -> bool:
+    """The owner's switch. Simulation on a developer's machine does not need it."""
+    return bool(getattr(settings, 'WAHUB_SENDING_ENABLED', False)) or simulate_send()
+
+
 def simulate_send() -> bool:
     """Whether sends are only recorded. Looked at on a developer's machine alone."""
     if not settings.DEBUG:
@@ -176,6 +184,9 @@ def _deliver(contact: Contact, user, *, text: str, message_type: str, call) -> M
     status, error = STATUS_SENT, ''
     if simulate_send():
         status = STATUS_SIMULATED
+    elif not sending_enabled():
+        # Kept, so the office sees the attempt and the reason; nothing leaves.
+        status, error = STATUS_FAILED, SENDING_OFF
     else:
         service = ManyChatService()
         try:
