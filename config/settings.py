@@ -88,6 +88,7 @@ INSTALLED_APPS = [
     'apps.rentals',
     'apps.rental_billing',
     'apps.legacy_import',
+    'apps.wahub',
 ]
 
 MIDDLEWARE = [
@@ -315,6 +316,12 @@ REST_FRAMEWORK = {
         # The website reporting the number Tranzila's page handed back
         # (widget/payment/returned/): once per payment, from the site's server.
         'store_payment_returned': '120/min',
+        # ManyChat's copy of every incoming WhatsApp message and bot reply
+        # (apps/wahub/views.py). All of it comes from ManyChat's own servers —
+        # a handful of addresses for every customer at once — so this is the
+        # whole business's rate, not one person's. The key in the header is the
+        # guard; this only stops a runaway loop.
+        'wahub_inbound': '600/min',
     },
 }
 
@@ -559,6 +566,29 @@ BLOCKED_TRIAL_LESSON_DATES = config(
 )
 # Shared secret — Vercel Cron / external scheduler must send this in the X-Cron-Token header.
 CRON_TOKEN = config('CRON_TOKEN', default='')
+
+# ==========================
+# WHATSAPP AND LEADS (apps/wahub)
+# ==========================
+# The key ManyChat sends with its copy of each message is not here on purpose:
+# a manager creates it from the screen (wahub/settings/inbound-key/) and it is
+# kept, hashed, in IntegrationCredential.
+#
+# The automatic summary of a conversation. With no key the keyword rules do
+# the work; the key may also be stored from inside the app (IntegrationCredential).
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+WAHUB_AI_MODEL = config('WAHUB_AI_MODEL', default='claude-sonnet-5-5')
+WAHUB_AI_TIMEOUT_SECONDS = config('WAHUB_AI_TIMEOUT_SECONDS', default=12, cast=int)
+# A developer's machine only: a send from the screen is recorded as "simulated"
+# and nothing leaves. Not read at all outside DEBUG, so no value of it can
+# switch real sending off in production.
+WAHUB_SIMULATE_SEND = config('WAHUB_SIMULATE_SEND', default=False, cast=bool) if DEBUG else False
+# How the existing bot is told that a person took a conversation over
+# (apps/wahub/handoff.py). The names are the bot vendor's, in ManyChat.
+WAHUB_HUMAN_START_TAG = config('WAHUB_HUMAN_START_TAG', default='התחיל טיפול: נציג אנושי')
+WAHUB_HUMAN_END_TAG = config('WAHUB_HUMAN_END_TAG', default='סיים טיפול: נציג אנושי')
+WAHUB_HUMAN_STATUS_FIELD = config('WAHUB_HUMAN_STATUS_FIELD', default='סטטוס ט.אנושי')
+WAHUB_HUMAN_STATUS_VALUE = config('WAHUB_HUMAN_STATUS_VALUE', default='בטיפול נציג (Kogo)')
 
 # ==========================
 # DOCUMENT SIGNING (apps/documents/signing)

@@ -516,6 +516,30 @@ class ManyChatService:
         payload = {'subscriber_id': int(subscriber_id), 'flow_ns': flow_ns}
         return self._request('POST', '/fb/sending/sendFlow', json_body=payload)
 
+    # Tags and one field by name — what the "וואטסאפ ולידים" screen uses to tell
+    # the existing bot that a person took a conversation over (apps/wahub/handoff.py).
+    # Paths and bodies as in ManyChat's own API description (api.manychat.com/swagger).
+
+    def add_tag_by_name(self, subscriber_id: int | str, tag_name: str) -> dict:
+        """Put a tag the page already has on one contact."""
+        payload = {'subscriber_id': int(subscriber_id), 'tag_name': tag_name}
+        return self._request('POST', '/fb/subscriber/addTagByName', json_body=payload)
+
+    def remove_tag_by_name(self, subscriber_id: int | str, tag_name: str) -> dict:
+        """Take a tag off one contact."""
+        payload = {'subscriber_id': int(subscriber_id), 'tag_name': tag_name}
+        return self._request('POST', '/fb/subscriber/removeTagByName', json_body=payload)
+
+    def set_custom_field_by_name(self, subscriber_id: int | str, field_name: str, field_value) -> dict:
+        """
+        Write one User Field by its name, strictly.
+
+        `set_custom_fields` quietly skips a field the page does not have; here a
+        field that could not be written is an error the caller hears about.
+        """
+        payload = {'subscriber_id': int(subscriber_id), 'field_name': field_name, 'field_value': field_value}
+        return self._request('POST', '/fb/subscriber/setCustomFieldByName', json_body=payload)
+
     def get_flows(self) -> list[dict]:
         """List automations from ManyChat (name + ns)."""
         result = self._request('GET', '/fb/page/getFlows')

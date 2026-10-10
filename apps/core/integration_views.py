@@ -31,6 +31,10 @@ class IntegrationCredentialView(APIView):
     # place to keep arbitrary secrets.
     ALLOWED_KEYS = {
         'SUPABASE_SERVICE_ROLE_KEY': 'אחסון תמונות המדריכים',
+        # apps/wahub: the key ManyChat sends with its copy of each message, and the
+        # key for the automatic summary of a conversation.
+        'WAHUB_INBOUND_KEY': 'וואטסאפ ולידים — מפתח הכניסה מ-ManyChat',
+        'ANTHROPIC_API_KEY': 'וואטסאפ ולידים — סיכום אוטומטי (Claude)',
     }
 
     def _source(self, key, stored):

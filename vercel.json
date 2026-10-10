@@ -39,6 +39,10 @@
     {
       "path": "/api/v1/documents/cron/daily-backup/",
       "schedule": "30 0 * * *"
+    },
+    {
+      "path": "/api/v1/wahub/cron/tick/",
+      "schedule": "*/5 4-20 * * *"
     }
   ]
 }
