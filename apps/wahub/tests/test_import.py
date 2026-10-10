@@ -104,3 +104,21 @@ class ImportTests(WahubTestCase):
     def test_every_dropped_row_is_reported(self):
         self.assertGreaterEqual(len(knowledge_seed.DROPPED), 20)
         self.assertTrue(all(len(row) == 3 for row in knowledge_seed.DROPPED))
+
+
+class ImportFromTheScreenTests(WahubTestCase):
+    def test_the_button_files_everything_once_and_a_second_click_adds_nothing(self):
+        response = self.post('knowledge/import/', {})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertGreaterEqual(response.data['created_total'], 90)
+        self.assertEqual(response.data['total'], KnowledgeItem.objects.count())
+        self.assertFalse(response.data['dry_run'])
+
+        again = self.post('knowledge/import/', {})
+        self.assertEqual((again.data['created_total'], again.data['skipped']), (0, response.data['created_total']))
+
+    def test_a_dry_run_from_the_screen_creates_nothing(self):
+        response = self.post('knowledge/import/', {'dry_run': True})
+        self.assertTrue(response.data['dry_run'])
+        self.assertGreaterEqual(response.data['created_total'], 90)
+        self.assertEqual(KnowledgeItem.objects.count(), 0)
