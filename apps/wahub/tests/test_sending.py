@@ -14,7 +14,7 @@ REQUEST = 'apps.core.manychat_service.ManyChatService._request'
 OK = {'status': 'success'}
 
 
-@override_settings(MANYCHAT_KEY='test-key')
+@override_settings(MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=True)
 class SendTextTests(WahubTestCase):
     def setUp(self):
         super().setUp()
@@ -153,7 +153,7 @@ class SendTextTests(WahubTestCase):
         self.assertEqual(response.data['message']['status'], 'failed')
 
 
-@override_settings(MANYCHAT_KEY='test-key')
+@override_settings(MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=True)
 class SimulationTests(WahubTestCase):
     def setUp(self):
         super().setUp()
@@ -209,7 +209,7 @@ class SimulationTests(WahubTestCase):
         )
 
 
-@override_settings(MANYCHAT_KEY='test-key')
+@override_settings(MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=True)
 class SendFlowTests(WahubTestCase):
     def setUp(self):
         super().setUp()
@@ -279,3 +279,29 @@ class SendFlowTests(WahubTestCase):
         request.assert_not_called()
         self.assertEqual(response.data['message']['status'], 'simulated')
         self.assertEqual(response.data['message']['message_type'], 'template')
+
+
+class SendingSwitchTests(WahubTestCase):
+    """Until the owner turns sending on, nothing leaves and nothing pretends to."""
+
+    def _contact(self):
+        self.incoming('היי', subscriber_id='1001')  # opens the 24-hour window
+        return self.contact()
+
+    @override_settings(WAHUB_SENDING_ENABLED=False, WAHUB_SIMULATE_SEND=False, DEBUG=False)
+    def test_with_the_switch_off_a_send_is_kept_as_failed_and_manychat_is_not_called(self):
+        from unittest import mock
+        contact = self._contact()
+        with mock.patch('apps.wahub.sending.ManyChatService') as service:
+            message = sending.send_text(contact, 'שלום', self.manager)
+        service.assert_not_called()
+        self.assertEqual(message.status, 'failed')
+        self.assertIn('כבויה', message.error)
+
+    @override_settings(WAHUB_SENDING_ENABLED=False, WAHUB_SIMULATE_SEND=False, DEBUG=False)
+    def test_with_the_switch_off_the_status_says_so(self):
+        self.assertFalse(self.get('status/').data['sending_enabled'])
+
+    @override_settings(WAHUB_SENDING_ENABLED=True, WAHUB_SIMULATE_SEND=False, DEBUG=False)
+    def test_with_the_switch_on_the_status_says_so(self):
+        self.assertTrue(self.get('status/').data['sending_enabled'])

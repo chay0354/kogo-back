@@ -583,6 +583,11 @@ WAHUB_AI_TIMEOUT_SECONDS = config('WAHUB_AI_TIMEOUT_SECONDS', default=12, cast=i
 # and nothing leaves. Not read at all outside DEBUG, so no value of it can
 # switch real sending off in production.
 WAHUB_SIMULATE_SEND = config('WAHUB_SIMULATE_SEND', default=False, cast=bool) if DEBUG else False
+# Nothing leaves for a customer, and the live bot is not touched, until the
+# owner turns this on (10.10.2026: "אני עדיין עוד מפחד מזה קצת"). Off, a send
+# from the screen is kept as a failed message that says why, and "קח שיחה" is
+# refused. The copy of messages coming IN from ManyChat is not affected.
+WAHUB_SENDING_ENABLED = config('WAHUB_SENDING_ENABLED', default=False, cast=bool)
 # How the existing bot is told that a person took a conversation over
 # (apps/wahub/handoff.py). The names are the bot vendor's, in ManyChat.
 WAHUB_HUMAN_START_TAG = config('WAHUB_HUMAN_START_TAG', default='התחיל טיפול: נציג אנושי')

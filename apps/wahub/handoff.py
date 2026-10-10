@@ -24,7 +24,7 @@ from django.conf import settings
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.wahub import state
 from apps.wahub.models import EVENT_HANDLED_BY, HANDLED_BOT, HANDLED_HUMAN, Contact
-from apps.wahub.sending import failure_reason, simulate_send, subscriber_id_for
+from apps.wahub.sending import SENDING_OFF, failure_reason, sending_enabled, simulate_send, subscriber_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,9 @@ def _remove_tag(service: ManyChatService, subscriber_id, tag: str, tags: set | N
 def _in_manychat(contact: Contact, change) -> None:
     if simulate_send():
         return
+    if not sending_enabled():
+        # The bot would keep answering while the screen said a person took over.
+        raise HandoffError(SENDING_OFF)
     service = ManyChatService()
     try:
         if not service.is_configured:

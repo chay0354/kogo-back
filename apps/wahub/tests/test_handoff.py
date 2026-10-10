@@ -3,6 +3,8 @@ from unittest.mock import patch
 
 from django.test import override_settings
 
+from apps.wahub import handoff
+
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.wahub.models import Contact, ContactEvent
 from apps.wahub.tests.base import WahubTestCase
@@ -32,7 +34,7 @@ def writes(request):
     return [(call.args[1], call.kwargs.get('json_body')) for call in request.call_args_list if call.args[0] == 'POST']
 
 
-@override_settings(MANYCHAT_KEY='test-key')
+@override_settings(MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=True)
 class HandoffTests(WahubTestCase):
     def setUp(self):
         super().setUp()
@@ -155,3 +157,17 @@ class HandoffTests(WahubTestCase):
             self.takeover()
             self.takeover()
         self.assertEqual(ContactEvent.objects.filter(kind='handled_by_changed').count(), 1)
+
+
+class HandoffSwitchTests(WahubTestCase):
+    @override_settings(WAHUB_SENDING_ENABLED=False, WAHUB_SIMULATE_SEND=False, DEBUG=False)
+    def test_with_the_switch_off_takeover_is_refused_and_the_bot_keeps_answering_here(self):
+        from unittest import mock
+        self.incoming('היי', subscriber_id='1002')
+        contact = self.contact()
+        with mock.patch('apps.wahub.handoff.ManyChatService') as service:
+            with self.assertRaises(handoff.HandoffError):
+                handoff.takeover(contact, self.manager)
+        service.assert_not_called()
+        contact.refresh_from_db()
+        self.assertEqual(contact.handled_by, 'bot')
