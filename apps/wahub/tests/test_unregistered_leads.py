@@ -45,12 +45,15 @@ class UnregisteredLeadsTestCase(WahubTestCase):
 
 
 class WhoIsOnTheListTests(UnregisteredLeadsTestCase):
-    def test_the_five_outcomes_that_mean_did_not_register_are_in(self):
-        wanted = [self.lead(outcome=outcome).id for outcome in ('not_found', 'pending', 'signup_declined', 'trial_only', 'trial_upcoming')]
+    def test_every_outcome_that_is_not_a_paying_child_is_in(self):
+        wanted = [
+            self.lead(outcome=outcome).id
+            for outcome in ('not_found', 'pending', 'signup_declined', 'trial_only', 'trial_upcoming', 'in_system', '')
+        ]
         self.assertEqual(set(self.ids()), set(wanted))
 
-    def test_a_customer_a_family_with_nothing_running_and_an_unchecked_contact_are_out(self):
-        for outcome in ('registered_after', 'customer_before', 'in_system', ''):
+    def test_only_a_paying_child_before_or_after_takes_a_person_off(self):
+        for outcome in ('registered_after', 'customer_before'):
             with self.subTest(outcome=outcome):
                 Contact.objects.all().delete()
                 self.lead(outcome=outcome)
