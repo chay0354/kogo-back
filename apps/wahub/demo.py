@@ -365,8 +365,8 @@ def clear_demo() -> None:
 def _contact(scenario: dict, now, office_user, tags: dict) -> Contact:
     contact = Contact.objects.create(
         phone=_full_phone(scenario['phone']), name=scenario['name'], source=scenario.get('source', 'whatsapp'),
-        manychat_subscriber_id='' if scenario.get('source') == 'manual' else f"9{scenario['phone']}",
-        handled_by=scenario.get('handled_by', 'bot'),
+        manychat_subscriber_id='' if scenario.get('source') in ('manual', 'demo') else f"9{scenario['phone']}",
+        handled_by=scenario.get('handled_by', 'bot'), is_demo=True,
     )
     unread, waiting, first_in, last_in, last = 0, None, None, None, None
     rows = []
@@ -490,3 +490,248 @@ def simulate_one(rng: random.Random) -> tuple[str, str, object]:
 
 def simulate_bot_reply(phone: str, rng: random.Random):
     return inbound.store_event(event=inbound.EVENT_BOT_REPLY, phone=phone, text=rng.choice(SIMULATED_BOT))
+
+
+# =====================================================================================
+# Stage 2 — the old bot's failures beside what the new bot would answer
+# =====================================================================================
+#
+# Twelve invented conversations in which the old bot failed the way the real
+# one did (docs/bot-knowledge/04, "מה שהבוט הישן לא ידע"; the WhatsApp map of
+# 10.10.2026): internal text leaking, "I registered you" with no way to register,
+# a question loop, two answers to two messages, "cannot hear a voice message",
+# "the number is unavailable", a referral to Nicole. Three of them have an office
+# person answering over the bot. All phones are 050-555XXXX; nothing is real.
+
+SHADOW_DEMO_PREFIX = '97250555'
+OLD_BOT_INTERNAL = (
+    '<invoke name="Course_Manager">{"city": "ראש העין", "age_group": "5"}</invoke>\n'
+    'בודקת עבורך את החוגים בראש העין'
+)
+
+# The office answered over the bot: what the reviewer turns into "האם לעדכן את הידע?".
+HUMAN_OVERRIDE_SCENARIOS = [
+    S('נועה חיים', '0221', [
+        ('c', 'יש הנחה אם נרשמים לשני חוגים?', 5 * HOUR), ('b', 'אבדוק עם הצוות ואחזור אלייך.', 5 * HOUR - 1),
+        ('o', 'היי נועה, כאן מיכל מהמשרד. על חוג שני יש ₪10 הנחה בחודש, וזה מתעדכן לבד בהרשמה באתר', 4 * HOUR),
+    ], read=True, handled_by='human'),
+    S('אלעד פרי', '0222', [
+        ('c', 'הבת שלי בת 3 וחצי, מתאים לקפוארה?', 7 * HOUR), ('b', 'החוגים מגיל 4.', 7 * HOUR - 1),
+        ('o', 'היי אלעד, יש לנו קבוצת גיל רך מגיל 3 בכפר סבא ובראש העין, אפשר להגיע לניסיון', 6 * HOUR),
+    ], read=True, handled_by='human'),
+    S('קרן דויד', '0223', [
+        ('c', 'הבן שלי חולה, לא נגיע לניסיון מחר. אפשר להעביר לשבוע הבא?', 3 * HOUR),
+        ('b', 'תודה שעדכנתם, רשמנו שלא תגיעו. נשמח לתאם מועד חלופי במידת הצורך', 3 * HOUR - 1),
+        ('o', 'רפואה שלמה! נרשמים למועד חדש דרך הקישור באתר, בוחרים את התאריך של שבוע הבא', 2 * HOUR),
+    ], read=True, handled_by='human'),
+]
+
+# key → (title, what the old bot got wrong, the conversation). The twelve failures, the
+# office answering over the bot, the external branch and the closed office — what the
+# owner can replay in production from the screen (POST demo/scenario/).
+DEMO_SCENARIOS = {
+    'internal_text': ('טקסט פנימי שדלף', 'הבוט הישן שלח ללקוח את הקריאה הפנימית לכלי במקום תשובה', S('הדס מלמד', '0201', [
+        ('c', 'היי, יש חוג קפוארה לבן 5 בראש העין?', 50), ('b', OLD_BOT_INTERNAL, 49),
+    ], read=True)),
+    'fake_registration': ('"רשמתי שתגיע" בלי יכולת', 'הבוט "רשם" לשיעור ניסיון, אבל אין לו שום יכולת לרשום', S('נדב ברקוביץ', '0202', [
+        ('c', 'רוצים לבוא לשיעור ניסיון במחול בכפר סבא, הבת שלי בת 7', 3 * HOUR),
+        ('b', 'מעולה! רשמתי שתגיעו ביום חמישי בשעה 17:00. נתראה!', 3 * HOUR - 1),
+        ('c', 'תודה', 3 * HOUR - 5),
+    ], read=True)),
+    'loop': ('לופ שאלות', 'הבוט שאל "באיזו עיר" פעמיים אחרי שהלקוח כבר ענה', S('ליאור צור', '0203', [
+        ('c', 'יש לכם היפ הופ?', 5 * HOUR), ('b', 'באיזו עיר אתם?', 5 * HOUR - 1),
+        ('c', 'כפר סבא', 5 * HOUR - 3), ('b', 'באיזו עיר אתם?', 5 * HOUR - 4),
+        ('c', 'כפר סבא!! כתבתי', 5 * HOUR - 6),
+    ], read=True)),
+    'burst': ('שתי הודעות ברצף, שתי תשובות', 'הלקוח שלח שתי הודעות בעשר שניות וקיבל שתי תשובות נפרדות', S('מירב אוחנה', '0204', [
+        ('c', 'היי', 40), ('c', 'יש חוג אקרובטיקה לבת 9 בפתח תקווה?', 40),
+        ('b', 'היי, במה אוכל לעזור?', 39), ('b', 'באיזה סניף בפתח תקווה?', 39),
+    ], read=True)),
+    'voice': ('הודעה קולית', 'להודעה קולית הבוט ענה "לא ניתן לשמוע"', S('יוסי כץ', '0205', [
+        ('v', '', 2 * HOUR), ('b', 'לא ניתן לשמוע הודעות קוליות, בבקשה להשאיר הודעה כתובה', 2 * HOUR - 1),
+    ], read=True)),
+    'number_unavailable': ('"המספר לא זמין"', 'במקום לתת את טלפון המשרד הבוט אמר שהמספר לא זמין ושיבדוק', S('שרון גלעד', '0206', [
+        ('c', 'אפשר את הטלפון של המשרד? אני רוצה לדבר עם מישהו על ההוראת קבע', 4 * HOUR),
+        ('b', 'המספר לא זמין כרגע. אבדוק ואחזור אליך.', 4 * HOUR - 1),
+    ], read=True)),
+    'nicole': ('הפניה לניקול', 'בקשת ביטול הופנתה לניקול, שאינה במשרד, במקום לטופס', S('ענת שפירא', '0207', [
+        ('c', 'אני רוצה לבטל את החוג של הבן שלי', 6 * HOUR),
+        ('b', 'אני מעבירה את הבקשה לניקול מהמשרד והיא תחזור אליך.', 6 * HOUR - 1),
+    ], read=True)),
+    'broadcast_reply': ('תשובה לתפוצה', '"כן" לתזכורת ניסיון נקרא כשיחה חדשה: "על מה אתה מאשר?"', S('רוני אביב', '0208', [
+        ('t', 'תזכורת - שיעור ניסיון', DAY), ('c', 'כן', 7 * HOUR),
+        ('b', 'על מה אתה מאשר? במה אוכל לעזור?', 7 * HOUR - 1),
+    ], read=True)),
+    'external_branch': ('סניף חיצוני', 'על רמת גן (עירייה) הבוט המציא מחיר וניסיון חינם', S('דקלה רם', '0209', [
+        ('c', 'כמה עולה החוג ברמת גן? ויש שיעור ניסיון?', 8 * HOUR),
+        ('b', 'המחיר הוא 260 ₪ לחודש ושיעור ניסיון חינם. לקבוע לכם?', 8 * HOUR - 1),
+    ], read=True)),
+    'not_answered': ('"לא עניתם"', 'לקוח מתוסכל אחרי תפוצה — והבוט סגר את השיחה', S('אבי לוין', '0210', [
+        ('t', 'חזרה ללידים - אוקטובר', 2 * DAY), ('c', 'וואלה כן, לא עניתם לי בפעם הקודמת', 9 * HOUR),
+        ('b', 'מבינה שהיה עיכוב, בוא נשאיר את זה ככה. יום טוב!', 9 * HOUR - 1),
+    ], read=True)),
+    'asks_for_human': ('מבקש נציג', 'הלקוח ביקש נציג על בעיה בחיוב, הבוט המשיך לענות לבד', S('מאור ברזילי', '0213', [
+        ('c', 'חייבתם אותי פעמיים החודש. אפשר לדבר עם נציג?', 2 * HOUR),
+        ('b', 'אני כאן לכל שאלה! באיזה סניף הילד לומד?', 2 * HOUR - 1),
+    ])),
+    'office_hours': ('שעות סגורות', 'על "עד איזה שעה המשרד פתוח" הבוט ענה שעות ישנות', S('תומר שגב', '0212', [
+        ('c', 'עד איזה שעה המשרד פתוח היום?', 11 * HOUR),
+        ('b', 'המשרד פתוח בין 10:00 ל-17:30.', 11 * HOUR - 1),
+    ], read=True)),
+    'birthday': ('הפעלת יום הולדת → השכרה', 'שאלה על הפעלה ליום הולדת הועברה כ"השכרת סטודיו" לנציג', S('גלית נוי', '0211', [
+        ('c', 'אפשר לעשות אצלכם הפעלה ליום הולדת לבת 6?', 10 * HOUR),
+        ('b', 'השכרות סטודיו מועברות לנציג. שלי תחזור אליך.', 10 * HOUR - 1),
+    ], read=True)),
+    'human_override': ('נציג ענה מעל הבוט', 'הבוט אמר "אבדוק ואחזור"; מיכל מהמשרד ענתה מעליו — המערכת מציעה לעדכן את הידע לפי התשובה שלה', HUMAN_OVERRIDE_SCENARIOS[0]),
+}
+# The local seed (wahub_seed_shadow_demo): every scenario once, the three overrides included.
+SHADOW_SCENARIOS = [row[2] for key, row in DEMO_SCENARIOS.items() if key != 'human_override'] + HUMAN_OVERRIDE_SCENARIOS
+
+
+def scenario_list() -> list[dict]:
+    """GET demo/scenarios/ — the keys with a Hebrew title and what went wrong."""
+    return [{'key': key, 'title': title, 'description': description} for key, (title, description, _) in DEMO_SCENARIOS.items()]
+
+
+
+def _shadow_contact(scenario: dict, now, office_user) -> Contact:
+    """Like _contact, plus 'v' — a voice message with no text."""
+    talk = []
+    for who, text, minutes_ago in scenario['talk']:
+        talk.append((who, text, minutes_ago))
+    contact = _contact({**scenario, 'talk': [(w if w != 'v' else 'c', t or '(הודעה קולית)', m) for w, t, m in talk]}, now, office_user, {})
+    for who, text, minutes_ago in talk:
+        if who == 'v':
+            Message.objects.filter(contact=contact, text='(הודעה קולית)').update(message_type='voice', text='')
+    return contact
+
+
+def clear_shadow_demo() -> None:
+    """The sixteen conversations and what grew on them — a proposal outlives its contact (SET_NULL), so it goes first."""
+    from apps.wahub.models import KnowledgeProposal, ServiceNote
+
+    suffixes = [scenario['phone'] for scenario in SHADOW_SCENARIOS]
+    contacts = Contact.objects.filter(phone__in=[SHADOW_DEMO_PREFIX + suffix for suffix in suffixes])
+    ids = list(contacts.values_list('id', flat=True))
+    KnowledgeProposal.objects.filter(contact_id__in=ids).delete()
+    ServiceNote.objects.filter(contact_id__in=ids).delete()
+    contacts.delete()
+
+
+@transaction.atomic
+def seed_shadow_demo(office_user, *, run_bot: bool = True) -> dict:
+    """
+    The fifteen conversations above, with the shadow bot's answer to each and the
+    reviewer's proposals. Imports the old bot's knowledge first when it is missing
+    (the stub answers from the phrasings). Returns what was made.
+    """
+    from apps.wahub import knowledge_import, reviewer, shadow
+    from apps.wahub.models import KIND_PHRASING, KnowledgeItem, KnowledgeProposal, ShadowReply
+
+    clear_shadow_demo()
+    imported = 0
+    if not KnowledgeItem.objects.filter(kind=KIND_PHRASING, is_active=True).exists():
+        imported = knowledge_import.run(user=office_user)['created_total']
+    now = timezone.now()
+    places = analysis.load_places()
+    made = {'contacts': 0, 'messages': 0, 'shadow_replies': 0, 'proposals': 0, 'knowledge_imported': imported}
+    contacts = []
+    for scenario in SHADOW_SCENARIOS:
+        contact = _shadow_contact(scenario, now, office_user)
+        analysis.analyze_contact(contact, places=places, use_ai=False)
+        matching.recheck_contact(contact)
+        Contact.objects.filter(pk=contact.pk).update(needs_shadow=True)
+        contacts.append(contact)
+        made['contacts'] += 1
+        made['messages'] += len(scenario['talk'])
+    if run_bot:
+        before = KnowledgeProposal.objects.count()
+        for contact in contacts:
+            contact.refresh_from_db()
+            reply = shadow.propose(contact, now=now)
+            made['shadow_replies'] += int(reply is not None)
+        # Two of the twelve are judged by "the owner" so the screens have a 👎 and a 👍 to show.
+        worst = ShadowReply.objects.filter(contact__phone=SHADOW_DEMO_PREFIX + '0209').first()
+        if worst is not None:
+            worst.verdict, worst.verdict_note, worst.verdict_by, worst.verdict_at = 'bad', 'רמת גן זה סניף חיצוני, אסור להגיד מחיר בכלל', office_user, now
+            worst.save(update_fields=['verdict', 'verdict_note', 'verdict_by', 'verdict_at'])
+            reviewer.propose_from_verdict(worst, worst.verdict_note, office_user)
+        good = ShadowReply.objects.filter(contact__phone=SHADOW_DEMO_PREFIX + '0208').first()
+        if good is not None:
+            good.verdict, good.verdict_by, good.verdict_at = 'good', office_user, now
+            good.save(update_fields=['verdict', 'verdict_by', 'verdict_at'])
+        reviewer.scan(now=now)
+        made['proposals'] = KnowledgeProposal.objects.count() - before
+    Contact.objects.filter(phone__in=[c.phone for c in contacts]).update(touched_at=now - timedelta(minutes=1))
+    ContactEvent.objects.filter(contact__in=contacts, kind='analyzed').delete()
+    return made
+
+
+# --- demo mode in production (docs/WAHUB-CONTRACT-STAGE2.md, ה) ---------------------------------------
+
+SCENARIO_PHONE_FROM = 9000
+SCENARIO_SHADOW_SECONDS = 45
+
+
+def _free_demo_phone() -> str:
+    """The next 050-5559XXX nobody holds. Demo contacts made from the screen live in that range."""
+    taken = set(Contact.objects.filter(phone__startswith=SHADOW_DEMO_PREFIX + '9').values_list('phone', flat=True))
+    for suffix in range(SCENARIO_PHONE_FROM, 10000):
+        phone = f'{SHADOW_DEMO_PREFIX}{suffix:04d}'
+        if phone not in taken:
+            return phone
+    raise ValueError('אין מספר דמו פנוי')
+
+
+def create_scenario(key: str, user, *, run_bot: bool = True) -> Contact:
+    """
+    One invented conversation from DEMO_SCENARIOS as a demo contact, summarised,
+    matched and answered by the shadow bot at once. Works on any database: the
+    contact is marked is_demo and gets a fresh 050-5559XXX number, so nothing
+    collides with a real person and nothing is ever sent to it.
+    """
+    import time as time_module
+
+    from apps.wahub import reviewer, shadow
+
+    if key not in DEMO_SCENARIOS:
+        raise KeyError(key)
+    _title, _description, scenario = DEMO_SCENARIOS[key]
+    phone = _free_demo_phone()
+    scenario = {**scenario, 'phone': phone[len(SHADOW_DEMO_PREFIX):], 'source': 'demo'}
+    with transaction.atomic():
+        contact = _shadow_contact(scenario, timezone.now(), user)
+        Contact.objects.filter(pk=contact.pk).update(needs_shadow=True, needs_analysis=True)
+        contact.refresh_from_db()
+    try:
+        analysis.analyze_contact(contact, places=analysis.load_places())
+        matching.recheck_contact(contact)
+    except Exception:  # the conversation is there; the cron will finish what failed
+        import logging
+        logging.getLogger(__name__).exception('wahub demo: summary or matching of scenario %s failed', key)
+    if run_bot:
+        # Inside one request: the draft gets less time than the cron would give it, and the stub answers when it runs out.
+        shadow.propose(contact, now=timezone.now(), deadline=time_module.monotonic() + SCENARIO_SHADOW_SECONDS)
+        try:
+            reviewer.review_contact(contact)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('wahub demo: review of scenario %s failed', key)
+    contact.refresh_from_db()
+    return contact
+
+
+def delete_demo_contacts() -> dict:
+    """Every demo contact, with its messages, shadow replies, proposals and notes."""
+    from apps.wahub.models import KnowledgeProposal, ServiceNote
+
+    contacts = Contact.objects.filter(is_demo=True)
+    ids = list(contacts.values_list('id', flat=True))
+    counts = {'contacts': len(ids)}
+    counts['proposals'] = KnowledgeProposal.objects.filter(contact_id__in=ids).delete()[0]
+    counts['notes'] = ServiceNote.objects.filter(contact_id__in=ids).delete()[0]
+    counts['messages'] = Message.objects.filter(contact_id__in=ids).count()
+    contacts.delete()
+    from apps.customers.models import Family
+    counts['families'] = Family.objects.filter(notes=DEMO_MARK).delete()[0]
+    return counts

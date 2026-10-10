@@ -217,7 +217,8 @@ class ListTests(WahubTestCase):
         self.assertEqual(
             set(data),
             {'inbound_configured', 'inbound_key_set_at', 'bot_replies_seen', 'ai_configured', 'send_configured',
-             'sending_enabled', 'simulate_send', 'last_inbound_at', 'contacts_total', 'messages_last_24h', 'inbound_url'},
+             'sending_enabled', 'simulate_send', 'last_inbound_at', 'contacts_total', 'messages_last_24h', 'inbound_url',
+             'shadow_configured', 'shadow_model'},
         )
         self.assertEqual(data['contacts_total'], 9)
         self.assertEqual(data['messages_last_24h'], 1)

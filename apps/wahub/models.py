@@ -30,6 +30,7 @@ from django.utils import timezone
 
 SOURCE_WHATSAPP = 'whatsapp'
 SOURCE_MANUAL = 'manual'
+SOURCE_DEMO = 'demo'
 SOURCE_CHOICES = [
     (SOURCE_WHATSAPP, 'וואטסאפ'),
     ('ad', 'מודעה'),
@@ -38,6 +39,7 @@ SOURCE_CHOICES = [
     ('kogo_signup', 'נרשם במערכת'),
     ('import', 'ייבוא'),
     (SOURCE_MANUAL, 'הוסף ידנית'),
+    (SOURCE_DEMO, 'דמו'),
 ]
 
 HANDLED_BOT = 'bot'
@@ -264,6 +266,14 @@ class Contact(models.Model):
     kogo_detail = models.CharField(max_length=300, blank=True)
     kogo_checked_at = models.DateTimeField(null=True, blank=True)
 
+    # --- the shadow bot (stage 2): set by inbound.py, cleared by shadow.py ---
+    needs_shadow = models.BooleanField(default=False)
+    last_shadow_at = models.DateTimeField(null=True, blank=True)
+    # An invented contact the owner plays with in production (docs/WAHUB-CONTRACT-STAGE2.md, ה).
+    # Nothing is ever sent to it, no office alert is raised for it, and the
+    # manager may type its messages in (contacts/{id}/simulate-inbound/).
+    is_demo = models.BooleanField(default=False)
+
     # --- what a person marked. Never written by automatic code. ---
     followup_status = models.CharField(max_length=20, choices=FOLLOWUP_CHOICES, blank=True)
     followup_due = models.DateField(null=True, blank=True)
@@ -295,6 +305,11 @@ class Contact(models.Model):
                 condition=Q(needs_analysis=True),
             ),
             models.Index(fields=['kogo_checked_at'], name='wahub_contact_checked'),
+            # What the shadow bot picks up: the few rows with a customer message it has not answered.
+            models.Index(
+                fields=['last_inbound_at'], name='wahub_contact_to_shadow',
+                condition=Q(needs_shadow=True),
+            ),
         ]
 
     def __str__(self):
@@ -365,3 +380,306 @@ class ContactEvent(models.Model):
 
     def __str__(self):
         return f'{self.get_kind_display()} · {self.text[:40]}'
+
+
+# =====================================================================================
+# Stage 2 — the bot's knowledge, the shadow bot, and the review (docs/WAHUB-CONTRACT-STAGE2.md)
+# =====================================================================================
+
+KIND_PROFILE = 'profile'
+KIND_STYLE_RULE = 'style_rule'
+KIND_BEHAVIOR_RULE = 'behavior_rule'
+KIND_PHRASING = 'phrasing'
+KIND_TOPIC = 'topic'
+KIND_FACT = 'fact'
+KIND_CONTACT = 'contact'
+KIND_LINK = 'link'
+KIND_ALIAS = 'alias'
+KIND_SPECIAL_DAY = 'special_day'
+KIND_OFFICE_HOURS = 'office_hours'
+KNOWLEDGE_KIND_CHOICES = [
+    (KIND_PROFILE, 'פרופיל הבוט'),
+    (KIND_STYLE_RULE, 'כלל עיצוב'),
+    (KIND_BEHAVIOR_RULE, 'כלל התנהגות'),
+    (KIND_PHRASING, 'נוסח'),
+    (KIND_TOPIC, 'נושא'),
+    (KIND_FACT, 'עובדה'),
+    (KIND_CONTACT, 'איש קשר'),
+    (KIND_LINK, 'קישור'),
+    (KIND_ALIAS, 'כינוי'),
+    (KIND_SPECIAL_DAY, 'יום מיוחד'),
+    (KIND_OFFICE_HOURS, 'שעות משרד'),
+]
+# One live row each.
+SINGLETON_KINDS = (KIND_PROFILE, KIND_OFFICE_HOURS)
+
+SCOPE_BUSINESS = 'business'
+SCOPE_CITY = 'city'
+SCOPE_BRANCH = 'branch'
+SCOPE_COURSE_TYPE = 'course_type'
+SCOPE_COURSE = 'course'
+SCOPE_LEVEL_CHOICES = [
+    (SCOPE_BUSINESS, 'כל העסק'),
+    (SCOPE_CITY, 'עיר'),
+    (SCOPE_BRANCH, 'סניף'),
+    (SCOPE_COURSE_TYPE, 'תחום'),
+    (SCOPE_COURSE, 'חוג'),
+]
+
+WHEN_PROACTIVE = 'proactive'
+WHEN_IF_ASKED = 'if_asked'
+WHEN_INTERNAL = 'internal'
+WHEN_TO_SAY_CHOICES = [
+    (WHEN_PROACTIVE, 'מיוזמתו כשרלוונטי'),
+    (WHEN_IF_ASKED, 'רק אם שואלים'),
+    (WHEN_INTERNAL, 'הנחיה פנימית, לא נאמר ללקוח'),
+]
+
+SPECIAL_CLOSED = 'closed'
+SPECIAL_OPEN = 'open'
+SPECIAL_HOURS = 'hours'
+SPECIAL_QUIET = 'quiet'
+SPECIAL_STATE_CHOICES = [
+    (SPECIAL_CLOSED, 'סגור'),
+    (SPECIAL_OPEN, 'פתוח כרגיל'),
+    (SPECIAL_HOURS, 'שעות שונות'),
+    (SPECIAL_QUIET, 'פעילות שקטה'),
+]
+
+SEND_ON_AGENT_REQUEST = 'on_agent_request'
+SEND_ALWAYS = 'always'
+SEND_ON_TAKEOVER = 'on_takeover'
+SEND_MODE_CHOICES = [
+    (SEND_ON_AGENT_REQUEST, 'רק כשמבקשים נציג'),
+    (SEND_ALWAYS, 'בכל פנייה מחוץ לשעות'),
+    (SEND_ON_TAKEOVER, 'כשנציג לוקח שיחה'),
+]
+
+
+class KnowledgeItem(models.Model):
+    """
+    One thing the bot knows that has no home in Kogo: a rule, a phrasing, a fact,
+    a contact, a link, a nickname, a special day, the office hours, the profile.
+    Prices, addresses, schedules and capacities are NOT here — the bot reads
+    them from Kogo (shadow_tools.py), by the owner's rule of 10.10.2026.
+
+    The fields every kind shares are columns; what one kind alone needs lives in
+    `data` and is flattened into the JSON the screen gets (knowledge.py).
+    """
+    kind = models.CharField(max_length=20, choices=KNOWLEDGE_KIND_CHOICES)
+    # phrasing / link: how the code and the other items refer to it ({נוסח:greeting}).
+    key = models.CharField(max_length=80, blank=True)
+    title = models.CharField(max_length=200, blank=True)
+    body = models.TextField(blank=True)
+    scope_level = models.CharField(max_length=20, choices=SCOPE_LEVEL_CHOICES, default=SCOPE_BUSINESS)
+    # The Kogo id (UUID as text) of the city / branch / course type / course; empty for the business.
+    scope_id = models.CharField(max_length=64, blank=True)
+    scope_label = models.CharField(max_length=200, blank=True)
+    valid_from = models.DateField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    when_to_say = models.CharField(max_length=20, choices=WHEN_TO_SAY_CHOICES, default=WHEN_PROACTIVE)
+    example_good = models.TextField(blank=True)
+    example_bad = models.TextField(blank=True)
+    # Where it came from. The import of the old bot's texts keys on it, so running
+    # the import twice makes nothing twice.
+    source_note = models.CharField(max_length=300, blank=True, db_index=True)
+    data = models.JSONField(default=dict, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'wahub_knowledge_items'
+        ordering = ['kind', 'id']
+        verbose_name = 'רשומת ידע'
+        verbose_name_plural = 'ידע הבוט'
+        indexes = [models.Index(fields=['kind', 'is_active'], name='wahub_knowledge_kind')]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} · {self.title or self.key}'
+
+
+class KnowledgeHistory(models.Model):
+    """Every version of every item: who, when, before, after, why. Restore reads `after`."""
+    item = models.ForeignKey(KnowledgeItem, on_delete=models.CASCADE, related_name='history')
+    version = models.PositiveIntegerField()
+    changed_at = models.DateTimeField(auto_now_add=True)
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    before = models.JSONField(null=True, blank=True)
+    after = models.JSONField(default=dict)
+    note = models.CharField(max_length=300, blank=True)
+
+    class Meta:
+        db_table = 'wahub_knowledge_history'
+        ordering = ['-version', '-id']
+        verbose_name = 'גרסה של רשומת ידע'
+        verbose_name_plural = 'היסטוריית ידע'
+        indexes = [models.Index(fields=['item', '-version'], name='wahub_knowledge_hist_item')]
+
+    def __str__(self):
+        return f'#{self.item_id} v{self.version}'
+
+
+VERDICT_GOOD = 'good'
+VERDICT_BAD = 'bad'
+VERDICT_CHOICES = [(VERDICT_GOOD, 'טוב'), (VERDICT_BAD, 'לא טוב')]
+
+SHADOW_MODEL_STUB = 'stub'
+
+
+class ShadowReply(models.Model):
+    """
+    What the new bot WOULD have answered a customer's message. Never sent.
+
+    One row per customer message (or per burst of messages within twenty
+    seconds — `covers_message_ids`). The owner marks it good or bad; "bad" with
+    a note becomes a proposal to fix the knowledge (reviewer.py).
+    """
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name='shadow_replies')
+    after_message = models.ForeignKey(Message, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    covers_message_ids = models.JSONField(default=list, blank=True)
+    text = models.TextField(blank=True)
+    # Short, in Hebrew: why this answer. Shown on click.
+    reasoning = models.TextField(blank=True)
+    # [{name, input, summary}]
+    tools_used = models.JSONField(default=list, blank=True)
+    # [knowledge item ids]
+    knowledge_used = models.JSONField(default=list, blank=True)
+    took_ms = models.PositiveIntegerField(default=0)
+    # "stub" when no Anthropic key was set and the answer was built from the tools alone.
+    model = models.CharField(max_length=60, blank=True)
+    request_human = models.BooleanField(default=False)
+    request_human_reason = models.CharField(max_length=200, blank=True)
+    verdict = models.CharField(max_length=10, choices=VERDICT_CHOICES, blank=True)
+    verdict_note = models.TextField(blank=True)
+    verdict_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    verdict_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'wahub_shadow_replies'
+        ordering = ['-id']
+        verbose_name = 'תשובת צל'
+        verbose_name_plural = 'תשובות צל'
+        indexes = [
+            models.Index(fields=['contact', '-id'], name='wahub_shadow_contact'),
+            models.Index(fields=['created_at'], name='wahub_shadow_created'),
+        ]
+
+    def __str__(self):
+        return f'{self.contact_id} · {self.text[:40]}'
+
+
+class TrialQuestion(models.Model):
+    """"נסה שאלה" on the knowledge screen, kept when the manager asked to keep it."""
+    question = models.TextField()
+    contact = models.ForeignKey(Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    pretend_now = models.DateTimeField(null=True, blank=True)
+    last_outbound = models.TextField(blank=True)
+    answer = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'wahub_trial_questions'
+        ordering = ['-id']
+        verbose_name = 'שאלת ניסיון'
+        verbose_name_plural = 'שאלות ניסיון'
+
+    def __str__(self):
+        return self.question[:60]
+
+
+PROPOSAL_PENDING = 'pending'
+PROPOSAL_APPROVED = 'approved'
+PROPOSAL_REJECTED = 'rejected'
+PROPOSAL_APPLIED = 'applied'
+PROPOSAL_STATUS_CHOICES = [
+    (PROPOSAL_PENDING, 'ממתין לאישור'),
+    (PROPOSAL_APPROVED, 'אושר'),
+    (PROPOSAL_REJECTED, 'נדחה'),
+    (PROPOSAL_APPLIED, 'הוחל על הידע'),
+]
+
+SOURCE_HUMAN_OVERRIDE = 'human_override'
+SOURCE_BAD_VERDICT = 'bad_verdict'
+SOURCE_SERVICE_NOTE = 'service_note'
+SOURCE_REVIEWER = 'reviewer'
+PROPOSAL_SOURCE_CHOICES = [
+    (SOURCE_HUMAN_OVERRIDE, 'נציג ענה מעל הבוט'),
+    (SOURCE_BAD_VERDICT, 'סימון 👎 על תשובת צל'),
+    (SOURCE_SERVICE_NOTE, 'הערת שירות'),
+    (SOURCE_REVIEWER, 'סריקה יזומה של השיחות'),
+]
+
+
+class KnowledgeProposal(models.Model):
+    """
+    "האם אתה רוצה שאני אשנה את ההגדרות?" — a change to the knowledge that waits
+    for a click. Nothing here touches a KnowledgeItem until approve() runs.
+    """
+    status = models.CharField(max_length=10, choices=PROPOSAL_STATUS_CHOICES, default=PROPOSAL_PENDING)
+    source = models.CharField(max_length=20, choices=PROPOSAL_SOURCE_CHOICES)
+    # For the reviewer: which pattern fired.
+    pattern = models.CharField(max_length=40, blank=True)
+    contact = models.ForeignKey(Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='proposals')
+    message = models.ForeignKey(Message, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    shadow = models.ForeignKey(ShadowReply, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    title = models.CharField(max_length=200)
+    explanation = models.TextField(blank=True)
+    # {action: create|update, item_id, kind, before, after}
+    change = models.JSONField(default=dict, blank=True)
+    # [{message_id, who, text}]
+    evidence = models.JSONField(default=list, blank=True)
+    # source + contact + day: the same cause never makes two proposals in one day.
+    dedup_key = models.CharField(max_length=200, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    decision_note = models.TextField(blank=True)
+    applied_item = models.ForeignKey(
+        KnowledgeItem, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'wahub_knowledge_proposals'
+        ordering = ['-id']
+        verbose_name = 'הצעת עדכון לבוט'
+        verbose_name_plural = 'הצעות עדכון לבוט'
+        indexes = [models.Index(fields=['status', '-id'], name='wahub_proposal_status')]
+
+    def __str__(self):
+        return f'{self.get_status_display()} · {self.title}'
+
+
+class ServiceNote(models.Model):
+    """"היי, שימי לב, הבוט עשה ככה וככה" — a line from the office, turned into a proposal."""
+    text = models.TextField()
+    contact = models.ForeignKey(Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    message = models.ForeignKey(Message, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    proposal = models.ForeignKey(KnowledgeProposal, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'wahub_service_notes'
+        ordering = ['-id']
+        verbose_name = 'הערת שירות'
+        verbose_name_plural = 'הערות שירות'
+
+    def __str__(self):
+        return self.text[:60]

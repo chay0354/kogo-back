@@ -75,6 +75,7 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
         'name': contact.name,
         'source': contact.source,
         'source_label': SOURCE_LABELS.get(contact.source, contact.source),
+        'is_demo': contact.is_demo,
         'first_inbound_at': _iso(contact.first_inbound_at),
         'last_inbound_at': _iso(contact.last_inbound_at),
         'last_message_at': _iso(contact.last_message_at),

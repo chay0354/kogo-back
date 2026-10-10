@@ -51,16 +51,30 @@ class WeeklyAuditTests(WahubTestCase):
                 'api/v1/wahub/contacts/updates/': 200,
                 f'api/v1/wahub/contacts/{contact.id}/': 200,
                 f'api/v1/wahub/contacts/{contact.id}/messages/': 200,
+                f'api/v1/wahub/contacts/{contact.id}/shadow/': 200,
                 'api/v1/wahub/quick-replies/': 200,
                 'api/v1/wahub/status/': 200,
                 'api/v1/wahub/summary/': 200,
                 'api/v1/wahub/tags/': 200,
                 f'api/v1/wahub/tags/{Tag.objects.get().id}/': 200,
+                # stage 2: the bot's knowledge, the shadow, the review and the demo list (all read only)
+                'api/v1/wahub/knowledge/': 200,
+                'api/v1/wahub/knowledge/from-kogo/': 200,
+                'api/v1/wahub/knowledge/office-hours/now/': 200,
+                'api/v1/wahub/shadow/summary/': 200,
+                'api/v1/wahub/shadow/bad/': 200,
+                'api/v1/wahub/shadow/recent/': 200,
+                'api/v1/wahub/review/proposals/': 200,
+                'api/v1/wahub/review/notes/': 200,
+                'api/v1/wahub/review/summary/': 200,
+                'api/v1/wahub/demo/scenarios/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])
         skipped = {outcome.path for outcome in ours if outcome.skipped}
         self.assertIn('api/v1/wahub/cron/tick/', skipped)
+        # The routes that write (a demo scenario, a verdict, a note, an approval) answer POST or DELETE only.
+        self.assertFalse({'api/v1/wahub/demo/scenario/', 'api/v1/wahub/demo/contacts/', 'api/v1/wahub/shadow/try/'} & set(called))
 
         self.assertEqual(
             (Contact.objects.values().get(), Message.objects.count(), ContactEvent.objects.count()), before,

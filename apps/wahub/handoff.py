@@ -85,7 +85,8 @@ def _remove_tag(service: ManyChatService, subscriber_id, tag: str, tags: set | N
 
 
 def _in_manychat(contact: Contact, change) -> None:
-    if simulate_send():
+    if contact.is_demo or simulate_send():
+        # An invented contact has nothing in ManyChat to mute; only the local state moves.
         return
     if not sending_enabled():
         # The bot would keep answering while the screen said a person took over.

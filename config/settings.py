@@ -579,6 +579,12 @@ CRON_TOKEN = config('CRON_TOKEN', default='')
 ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
 WAHUB_AI_MODEL = config('WAHUB_AI_MODEL', default='claude-sonnet-5-5')
 WAHUB_AI_TIMEOUT_SECONDS = config('WAHUB_AI_TIMEOUT_SECONDS', default=12, cast=int)
+# The shadow bot (apps/wahub/shadow.py): the model that drafts what the new bot
+# would answer, how hard it thinks, and how long one request may take. Without
+# ANTHROPIC_API_KEY a rule-built stub answers instead (model "stub").
+WAHUB_SHADOW_MODEL = config('WAHUB_SHADOW_MODEL', default='claude-opus-5-5')
+WAHUB_SHADOW_EFFORT = config('WAHUB_SHADOW_EFFORT', default='medium')
+WAHUB_SHADOW_TIMEOUT_SECONDS = config('WAHUB_SHADOW_TIMEOUT_SECONDS', default=40, cast=int)
 # A developer's machine only: a send from the screen is recorded as "simulated"
 # and nothing leaves. Not read at all outside DEBUG, so no value of it can
 # switch real sending off in production.

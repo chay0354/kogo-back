@@ -27,7 +27,7 @@ from rest_framework.views import APIView
 
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
-from apps.wahub import analysis, cron, handoff, inbound, matching, queries, sending, state
+from apps.wahub import analysis, cron, demo, handoff, inbound, matching, queries, reviewer, sending, shadow, state
 from apps.wahub.models import (
     EVENT_CREATED,
     EVENT_FOLLOWUP,
@@ -37,6 +37,7 @@ from apps.wahub.models import (
     FOLLOWUP_LATER,
     MESSAGE_SOURCE_MANYCHAT,
     SENDER_BOT,
+    SOURCE_DEMO,
     SOURCE_MANUAL,
     Contact,
     ContactEvent,
@@ -137,13 +138,17 @@ class ContactViewSet(viewsets.GenericViewSet):
             return _error('מספר הטלפון אינו נייד ישראלי תקין.', code='invalid_phone')
         name = ' '.join(str(request.data.get('name') or '').split())[:200]
         note = str(request.data.get('note') or '').strip()
+        # An invented contact the owner types messages for; nothing is ever sent to it.
+        is_demo = request.data.get('is_demo') is True
         existing = Contact.objects.filter(phone=phone).values_list('id', flat=True).first()
         if existing:
             return Response({'code': 'exists', 'contact_id': existing}, status=status.HTTP_409_CONFLICT)
         try:
             with transaction.atomic():
-                contact = Contact.objects.create(phone=phone, name=name, source=SOURCE_MANUAL)
-                state.log_event(contact.id, EVENT_CREATED, 'נוסף ידנית', actor=request.user)
+                contact = Contact.objects.create(
+                    phone=phone, name=name, source=SOURCE_DEMO if is_demo else SOURCE_MANUAL, is_demo=is_demo,
+                )
+                state.log_event(contact.id, EVENT_CREATED, 'נוסף כאיש קשר דמו' if is_demo else 'נוסף ידנית', actor=request.user)
                 if note:
                     state.log_event(contact.id, EVENT_NOTE, note, actor=request.user)
         except IntegrityError:
@@ -268,6 +273,10 @@ class ContactViewSet(viewsets.GenericViewSet):
             return _error('נדרש automation_id.')
         name = ' '.join(str(request.data.get('automation_name') or '').split())[:200]
         name = name or ManyChatService.AUTOMATION_LABELS.get(automation_id, '')
+        if contact.is_demo:
+            # An invented contact: ManyChat is not asked for the flow or its name; sending.py refuses the send.
+            message = sending.send_flow(contact, automation_id, name or automation_id, request.user)
+            return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
         try:
             flow_ns = sending.flow_for(automation_id)
         except ManyChatError:
@@ -390,6 +399,39 @@ class ContactViewSet(viewsets.GenericViewSet):
         analysis.analyze_contact(contact)
         return Response(self._payload(contact.id))
 
+    @action(detail=True, methods=['post'], url_path='simulate-inbound')
+    def simulate_inbound(self, request, pk=None):
+        """
+        Demo mode: a message typed by the manager goes through the very door
+        ManyChat's copy uses (inbound.store_event) — needs_human, needs_analysis,
+        needs_shadow and all. Only for a contact marked is_demo.
+        """
+        contact = self.get_object()
+        if not contact.is_demo:
+            return _error('אפשר להקליד הודעות רק לאיש קשר דמו.', code='not_demo')
+        text = str(request.data.get('text') or '').strip()
+        if not text:
+            return _error('נדרש טקסט להודעה.')
+        sender = str(request.data.get('sender') or 'customer').strip()
+        if sender not in ('customer', 'bot'):
+            return _error('sender: customer או bot.')
+        event = inbound.EVENT_CUSTOMER_MESSAGE if sender == 'customer' else inbound.EVENT_BOT_REPLY
+        result = inbound.store_event(event=event, phone=contact.phone, text=text, name=contact.name)
+        payload = self._payload(contact.id)
+        payload['stored'] = result.stored
+        payload['stored_message_id'] = result.message_id
+        return Response(payload)
+
+    @action(detail=True, methods=['get'])
+    def shadow(self, request, pk=None):
+        """What the new bot would have answered, message by message, beside the old bot's answers. Newest first."""
+        contact = self.get_object()
+        rows = list(contact.shadow_replies.select_related('verdict_by').order_by('-id')[:100])
+        ids = {item_id for reply in rows for item_id in (reply.knowledge_used or []) if isinstance(item_id, int)}
+        from apps.wahub.models import KnowledgeItem
+        items = {item.id: item for item in KnowledgeItem.objects.filter(id__in=ids)} if ids else {}
+        return Response([shadow.reply_payload(reply, items=items) for reply in rows])
+
 
 class _SettingsListViewSet(viewsets.ModelViewSet):
     """A short settings list: a plain array, and one Hebrew line for a refused save."""
@@ -485,6 +527,9 @@ class StatusView(APIView):
                 sender=SENDER_BOT, source=MESSAGE_SOURCE_MANYCHAT, created_at__gte=now - timedelta(days=7),
             ).exists(),
             'ai_configured': analysis.ai_configured(),
+            # The shadow bot drafts with Claude when there is a key; otherwise the stub answers.
+            'shadow_configured': shadow.shadow_configured(),
+            'shadow_model': shadow.model_name() if shadow.shadow_configured() else 'stub',
             'send_configured': ManyChatService().is_configured,
             'sending_enabled': sending.sending_enabled(),
             'simulate_send': sending.simulate_send(),
@@ -565,3 +610,37 @@ def cron_tick(request):
     if not _cron_request_authorized(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
     return Response({'ok': True, **cron.tick()})
+
+
+
+# --- demo mode (docs/WAHUB-CONTRACT-STAGE2.md, ה) -----------------------------------------------------
+
+class DemoScenariosView(APIView):
+    """GET demo/scenarios/ — the ready-made failure conversations the owner can replay."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        return Response(demo.scenario_list())
+
+
+class DemoScenarioView(APIView):
+    """POST demo/scenario/ {scenario} — a demo contact with that conversation, summarised, matched, shadowed and reviewed at once."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def post(self, request):
+        key = str(request.data.get('scenario') or '').strip()
+        if key not in demo.DEMO_SCENARIOS:
+            return _error('תרחיש לא מוכר. GET demo/scenarios/ מחזיר את הרשימה.', code='unknown_scenario')
+        contact = demo.create_scenario(key, request.user)
+        payload = contact_payload(queries.listed().get(pk=contact.id))
+        payload['shadow'] = [shadow.reply_payload(reply) for reply in contact.shadow_replies.order_by('-id')[:5]]
+        payload['proposals'] = [reviewer.proposal_payload(row) for row in contact.proposals.order_by('-id')[:5]]
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class DemoContactsView(APIView):
+    """DELETE demo/contacts/ — every demo contact with its messages, shadow replies, proposals and notes."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def delete(self, request):
+        return Response(demo.delete_demo_contacts())
