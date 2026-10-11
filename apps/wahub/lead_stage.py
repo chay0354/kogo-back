@@ -271,30 +271,47 @@ def _trial_day(contact: Contact):
 # message with no answer on record says nothing: the bot answered, and we never
 # saw it. Calling every such lead "asked and got no answer" would be a false
 # alarm on every conversation.
+#
+# Two things follow. The old bot's lines in a demo conversation are typed or
+# seeded in Kogo and kept with ManyChat's source — they are no copy of anything,
+# and must not say "ManyChat copies". And on the day the copying does begin, the
+# messages written before it are still unknown: only what is written from then
+# on can be called unanswered, or every lead of the weeks before would be.
 BOT_REPLIES_SEEN_FOR = timedelta(days=7)
 _SEEN_TTL = timedelta(seconds=60)
-_seen = {'at': None, 'value': False}
+_seen = {'at': None, 'since': None}
+
+
+def replies_copied_since(now=None):
+    """
+    Since when Kogo sees the old bot's answers to real customers: the moment it
+    kept the first reply ManyChat copied — as long as one was copied in the last
+    week; None while ManyChat copies none. One query a minute, whoever asks.
+    """
+    now = now or timezone.now()
+    if _seen['at'] is None or abs(now - _seen['at']) >= _SEEN_TTL:
+        copied = Message.objects.filter(
+            sender=SENDER_BOT, source=MESSAGE_SOURCE_MANYCHAT, contact__is_demo=False,
+        ).aggregate(first=Min('created_at'), last=Max('created_at'))
+        still = copied['last'] is not None and copied['last'] >= now - BOT_REPLIES_SEEN_FOR
+        _seen['since'] = copied['first'] if still else None
+        _seen['at'] = now
+    return _seen['since']
 
 
 def old_bot_replies_seen(now=None) -> bool:
-    """ManyChat copied a reply of the old bot in the last week. One query a minute, whoever asks."""
-    now = now or timezone.now()
-    if _seen['at'] is None or abs(now - _seen['at']) >= _SEEN_TTL:
-        _seen['value'] = Message.objects.filter(
-            sender=SENDER_BOT, source=MESSAGE_SOURCE_MANYCHAT, created_at__gte=now - BOT_REPLIES_SEEN_FOR,
-        ).exists()
-        _seen['at'] = now
-    return _seen['value']
+    """ManyChat copied a reply of the old bot to a real customer in the last week."""
+    return replies_copied_since(now) is not None
+
+
+def answers_itself(contact: Contact) -> bool:
+    """The answers this contact gets are Kogo's own: a demo, a live test, a conversation a person took."""
+    return bool(contact.is_demo or contact.live_test or contact.handled_by == HANDLED_HUMAN)
 
 
 def replies_visible(contact: Contact, now=None) -> bool:
-    """
-    Kogo sees the answers this contact gets: they are its own (a demo, a live
-    test, a conversation a person took), or ManyChat copies the old bot's.
-    """
-    if contact.is_demo or contact.live_test or contact.handled_by == HANDLED_HUMAN:
-        return True
-    return old_bot_replies_seen(now)
+    """Kogo sees the answers this contact gets: they are its own, or ManyChat copies the old bot's."""
+    return answers_itself(contact) or old_bot_replies_seen(now)
 
 
 class _Facts:
@@ -309,7 +326,7 @@ class _Facts:
         self.marked_at = contact.followup_at if self.mark else None
 
         # The customer's messages nobody has answered in WhatsApp, bot or office: since the oldest of them.
-        waiting = None
+        waiting = newest = None
         if contact.waiting_since is not None or contact.last_message_direction == DIRECTION_IN:
             newest = contact.last_inbound_at or contact.last_message_at or contact.waiting_since
             waiting = contact.waiting_since or newest
@@ -321,10 +338,14 @@ class _Facts:
                     waiting = None
                 elif spoke_at >= waiting:
                     waiting = newest
-        # Without the answers on record, "nobody answered" cannot be said of this contact.
-        self.replies_visible = replies_visible(contact, now)
+        # Without the answers on record, "nobody answered" cannot be said of this contact — nor of a
+        # message written before ManyChat began copying them: the wait is counted from what came after.
+        copied_since = None if answers_itself(contact) else replies_copied_since(now)
+        self.replies_visible = answers_itself(contact) or copied_since is not None
         if not self.replies_visible:
             waiting = None
+        elif waiting is not None and copied_since is not None and waiting < copied_since:
+            waiting = newest if newest is not None and newest >= copied_since else None
         self.waiting_from = waiting
         self.reply_overdue = waiting is not None and now - waiting >= REPLY_AFTER
 
@@ -376,8 +397,10 @@ class _Facts:
 
 def compute(contact: Contact, now=None) -> dict:
     """
-    The stage of one contact at `now`, from the row in hand: no query, nothing
-    written. Returns {stage, group, label, reason, next_step, since, recheck_at}.
+    The stage of one contact at `now`, from the row in hand: nothing written,
+    and no query but the one, once a minute, that asks whether ManyChat copies
+    the old bot's replies (`replies_copied_since`). Returns
+    {stage, group, label, reason, next_step, since, recheck_at}.
 
     `since` is the moment of the fact behind the stage when one dates it, else
     None (and the caller keeps the moment the stage was first seen).
