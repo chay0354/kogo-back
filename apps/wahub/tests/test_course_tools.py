@@ -13,6 +13,7 @@ What is held here:
     token — by key and by value — and no tool writes.
 """
 import json
+import re
 from datetime import date, time, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -54,6 +55,14 @@ FORBIDDEN_VALUES = (
     '7777.77', '5555.55', '8888.88', '6666.66', INSTRUCTOR_PHONE, '0509999999', INSTRUCTOR_EMAIL, WIFI_CODE,
     CARD_TOKEN, '431.37',
 )
+
+
+_UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+
+
+def _without_ids(payload) -> str:
+    """The payload as text, without its ids: a random UUID may hold any digits ("…b71199b0…"), and a price check must not trip on one."""
+    return _UUID.sub('', json.dumps(payload, ensure_ascii=False))
 
 
 def _keys(value):
@@ -324,7 +333,7 @@ class FindCoursesTest(CourseToolsTestCase):
         result = self.tool('find_courses', city='רמת גן')
         self.assertEqual(result['courses'], [])
         self.assertTrue(result['branches'][0]['is_external'])
-        self.assertNotIn('199', json.dumps(result, ensure_ascii=False))
+        self.assertNotIn('199', _without_ids(result))
 
 
 class CourseCardTest(CourseToolsTestCase):
@@ -425,13 +434,13 @@ class CourseCardTest(CourseToolsTestCase):
         result = self.card(self.external_course)
         self.assertTrue(result['is_external'])
         self.assertEqual(result['course']['external_link'], 'https://ramat-gan.example/signup')
-        self.assertNotIn('199', json.dumps(result, ensure_ascii=False))
+        self.assertNotIn('199', _without_ids(result))
         self.assertIn('לבדוק מול העירייה', summarize_result('course_card', result))
         # …and when a name fits it among others, it is named with no price beside it.
         several = self.card(name='קפוארה')
         named = next(row for row in several['matches'] if row['name'] == 'קפוארה גאולים')
         self.assertEqual(set(named), {'id', 'name', 'branch', 'course_type', 'is_external'})
-        self.assertNotIn('199', json.dumps(several, ensure_ascii=False))
+        self.assertNotIn('199', _without_ids(several))
 
 
 class QuoteRegistrationTest(CourseToolsTestCase):

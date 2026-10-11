@@ -33,6 +33,7 @@ urlpatterns = [
     # The live test from the owner's phone (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב): the inbound door calls this
     # on itself, fire-and-forget, for a live-test contact's message; the same token as the cron.
     path('live-test/reply/', views.LiveTestReplyView.as_view(), name='wahub-live-test-reply'),
+    path('media/prepare/', views.MediaPrepareView.as_view(), name='wahub-media-prepare'),
     # Stage 3 — who asked and did not register; the WhatsApp block of a customer's card (docs/WAHUB-CONTRACT-STAGE3.md).
     path('leads/unregistered/', views.UnregisteredLeadsView.as_view(), name='wahub-leads-unregistered'),
     # The lead stages (docs/WAHUB-CONTRACT-LEAD-STAGES.md): how many contacts are in each; the lists are contacts/?lead_stage=.
