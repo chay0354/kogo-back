@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.core.tests.test_fixtures import TestDataFactory
-from apps.wahub import cron, knowledge_import, shadow
+from apps.wahub import cron, knowledge_import, shadow, shadow_tools
 from apps.wahub.knowledge_seed import WEEKEND_MESSAGE
 from apps.wahub.models import KnowledgeItem, KnowledgeProposal, Message, ShadowReply, TrialQuestion
 from apps.wahub.tests.base import BASE, PHONE, WahubTestCase
@@ -74,6 +74,18 @@ class StubTests(ShadowTestCase):
         self.assertIn('1 חוגים', reply.tools_used[0]['summary'])
         self.assertIn('find_courses', reply.reasoning)
         self.assertFalse(reply.text.endswith('.'))
+
+    def test_the_course_tool_carries_what_to_bring_from_the_course_card(self):
+        """The owner (11.10): "מה להביא" is written on the course in Kogo — the bot quotes it, never invents it."""
+        kind = self.course.course_type
+        kind.trial_bring_note = ' בגדים נוחים, בקבוק מים וחיוך '
+        kind.save(update_fields=['trial_bring_note'])
+        result = shadow_tools.find_courses(shadow_tools.ToolContext(), city='ראש העין', course_type='קפוארה')
+        self.assertEqual(result['courses'][0]['trial']['bring'], 'בגדים נוחים, בקבוק מים וחיוך')
+        kind.trial_bring_note = None
+        kind.save(update_fields=['trial_bring_note'])
+        result = shadow_tools.find_courses(shadow_tools.ToolContext(), city='ראש העין', course_type='קפוארה')
+        self.assertEqual(result['courses'][0]['trial']['bring'], '')
 
     def test_a_price_question_names_the_price_from_the_course_card(self):
         self.incoming('כמה עולה חוג קפוארה בראש העין לבן 6?')
