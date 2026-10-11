@@ -30,7 +30,9 @@ from rest_framework.views import APIView
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
 from apps.customers.models import Family
-from apps.wahub import analysis, cron, demo, handoff, inbound, live_test, matching, media, queries, reviewer, sending, shadow, state
+from apps.wahub import (
+    analysis, cron, demo, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending, shadow, state,
+)
 from apps.wahub.models import (
     EVENT_CREATED,
     EVENT_FOLLOWUP,
@@ -165,6 +167,9 @@ class ContactViewSet(viewsets.GenericViewSet):
             matching.recheck_contact(contact)
         except Exception:
             logger.exception('wahub: matching a new contact %s failed', contact.id)
+        # The lead stage follows whatever a person does to its facts (a new contact, a mark, an answer,
+        # a recheck), so the screen that asked gets it back at once. It never fails the request.
+        lead_stage.refresh_quietly(contact.id)
         return Response(self._payload(contact.id), status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['get'])
@@ -268,6 +273,7 @@ class ContactViewSet(viewsets.GenericViewSet):
             message = sending.send_text(contact, text, request.user)
         except sending.WindowClosed:
             return _error(sending.WINDOW_CLOSED_DETAIL, code='window_closed', http=status.HTTP_409_CONFLICT)
+        lead_stage.refresh_quietly(contact.id)
         return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
 
     @action(detail=True, methods=['post'], url_path='send-flow')
@@ -281,6 +287,7 @@ class ContactViewSet(viewsets.GenericViewSet):
         if contact.is_demo:
             # An invented contact: ManyChat is not asked for the flow or its name; sending.py refuses the send.
             message = sending.send_flow(contact, automation_id, name or automation_id, request.user)
+            lead_stage.refresh_quietly(contact.id)
             return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
         try:
             flow_ns = sending.flow_for(automation_id)
@@ -290,6 +297,7 @@ class ContactViewSet(viewsets.GenericViewSet):
             return _error('לא נמצאה ב-ManyChat אוטומציה לתבנית הזו.')
         name = name or sending.flow_name(flow_ns)
         message = sending.send_flow(contact, flow_ns, name or automation_id, request.user)
+        lead_stage.refresh_quietly(contact.id)
         return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
 
     @action(detail=True, methods=['post'])
@@ -344,6 +352,7 @@ class ContactViewSet(viewsets.GenericViewSet):
         elif contact.needs_human:
             state.touch(contact.id, needs_human=False, needs_human_reason='', needs_human_at=None)
             state.log_event(contact.id, EVENT_NEEDS_HUMAN, 'סומן שטופל', actor=request.user)
+        lead_stage.refresh_quietly(contact.id)
         return Response(self._payload(contact.id))
 
     @action(detail=True, methods=['patch'])
@@ -391,6 +400,8 @@ class ContactViewSet(viewsets.GenericViewSet):
                 followup_by=request.user, followup_at=timezone.now(),
             )
             state.log_event(contact.id, EVENT_FOLLOWUP, ' · '.join(described), actor=request.user)
+            # The marks feed the lead stage: "נרשם" closes it, "בזמן אחר" with a day makes it wait.
+            lead_stage.refresh_quietly(contact.id)
         return Response(self._payload(contact.id))
 
     @action(detail=True, methods=['put'])
@@ -417,12 +428,14 @@ class ContactViewSet(viewsets.GenericViewSet):
     def recheck(self, request, pk=None):
         contact = self.get_object()
         matching.recheck_contact(contact)
+        lead_stage.refresh_quietly(contact.id)
         return Response(self._payload(contact.id))
 
     @action(detail=True, methods=['post'])
     def analyze(self, request, pk=None):
         contact = self.get_object()
         analysis.analyze_contact(contact)
+        lead_stage.refresh_quietly(contact.id)
         return Response(self._payload(contact.id))
 
     @action(detail=True, methods=['post'], url_path='simulate-inbound')
@@ -728,6 +741,7 @@ class DemoScenarioView(APIView):
         if key not in demo.DEMO_SCENARIOS:
             return _error('תרחיש לא מוכר. GET demo/scenarios/ מחזיר את הרשימה.', code='unknown_scenario')
         contact = demo.create_scenario(key, request.user)
+        lead_stage.refresh_quietly(contact.id)
         payload = contact_payload(queries.listed().get(pk=contact.id))
         payload['shadow'] = [shadow.reply_payload(reply) for reply in contact.shadow_replies.order_by('-id')[:5]]
         payload['proposals'] = [reviewer.proposal_payload(row) for row in contact.proposals.order_by('-id')[:5]]
@@ -799,6 +813,8 @@ class DemoReplyView(APIView):
         if reply is None:
             return Response({'shadow': None, **payload_of(None)})
         message = sending.keep_new_bot_reply(contact, reply.text) if post and reply.text else None
+        if message is not None:
+            lead_stage.refresh_quietly(contact.id)
         return Response({'shadow': shadow.reply_payload(reply), **payload_of(message)})
 
 
@@ -840,6 +856,20 @@ class UnregisteredLeadsView(APIView):
             leads = [lead for lead in leads if lead['hot']]
         # The counts describe the whole window whatever the filter: the card's numbers do not move under it.
         return Response({'days': days, 'counts': queries.unregistered_counts(rows, today), 'leads': leads})
+
+
+class LeadBoardView(APIView):
+    """
+    GET leads/board/ — the lead stages in their three groups (דורש טיפול ·
+    בתהליך · סגור), each stage with how many contacts are in it and how long the
+    longest has been there (docs/WAHUB-CONTRACT-LEAD-STAGES.md). A stage with
+    nobody stays on the list. The people behind a line: contacts/?lead_stage=<key>.
+    Reads only; `pending_scan` is how many contacts the cron has still to look at.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        return Response(lead_stage.board())
 
 
 def _family_for(raw):
@@ -884,4 +914,5 @@ class ForCustomerRecheckView(APIView):
         phones, contacts = matching.contacts_of_family(family)
         for contact in contacts:
             matching.recheck_contact(contact)
+            lead_stage.refresh_quietly(contact.id)
         return Response(for_customer_payload(family, phones, contacts))

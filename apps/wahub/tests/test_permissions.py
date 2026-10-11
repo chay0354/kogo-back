@@ -46,6 +46,7 @@ class PermissionTests(WahubTestCase):
             ('get', 'quick-replies/', None),
             ('post', 'quick-replies/', {'title': 'x', 'text': 'y'}),
             ('get', 'leads/unregistered/', None),
+            ('get', 'leads/board/', None),
             ('get', 'for-customer/?family=00000000-0000-0000-0000-000000000000', None),
             ('post', 'for-customer/recheck/', {'family': '00000000-0000-0000-0000-000000000000'}),
         ]

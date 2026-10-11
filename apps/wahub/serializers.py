@@ -15,6 +15,8 @@ from apps.wahub.models import (
     HANDLED_BY_CHOICES,
     HIDDEN_OUTCOMES,
     INTEREST_CHOICES,
+    LEAD_STAGE_CHOICES,
+    LEAD_STAGE_GROUPS,
     OUTCOME_CHOICES,
     SENDER_CHOICES,
     SENDER_OFFICE,
@@ -27,7 +29,7 @@ from apps.wahub.models import (
     Tag,
 )
 from apps.wahub.phones import phone_display
-from apps.wahub.queries import days_since, is_due, is_hot
+from apps.wahub.queries import days_since, is_due, is_hot, temperature
 from apps.wahub.sending import can_free_text, window_closes_at
 
 SOURCE_LABELS = dict(SOURCE_CHOICES)
@@ -38,6 +40,7 @@ OUTCOME_LABELS = dict(OUTCOME_CHOICES)
 FOLLOWUP_LABELS = dict(FOLLOWUP_CHOICES)
 SENDER_LABELS = dict(SENDER_CHOICES)
 EVENT_LABELS = dict(EVENT_KIND_CHOICES)
+LEAD_STAGE_LABELS = dict(LEAD_STAGE_CHOICES)
 UNCHECKED_LABEL = 'עוד לא נבדק'
 # "What they asked" on the list of those who did not register: a line, not a conversation.
 ASKED_CHARS = 160
@@ -56,6 +59,26 @@ def tag_payload(tag: Tag) -> dict:
 def sorted_tags(tags) -> list:
     """By name, sorted here: the database's order for Hebrew depends on its collation."""
     return sorted(tags, key=lambda tag: (tag.name, tag.id))
+
+
+def lead_payload(contact: Contact, *, today) -> dict:
+    """
+    The lead stage as it is kept on the contact (apps/wahub/lead_stage.py) — the
+    very values the board counts and the lists filter by. Until the first look
+    the stage is '' and the sentences are empty. `days` counts from `since`.
+    """
+    stage = contact.lead_stage
+    return {
+        'stage': stage,
+        'stage_label': LEAD_STAGE_LABELS.get(stage, ''),
+        'group': LEAD_STAGE_GROUPS.get(stage, ''),
+        'since': _iso(contact.lead_stage_since),
+        'days': days_since(contact.lead_stage_since, today),
+        'reason': contact.lead_reason,
+        'next_step': contact.lead_next_step,
+        'human_touched': contact.lead_human_touched,
+        'temperature': temperature(contact),
+    }
 
 
 def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
@@ -132,6 +155,7 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
             'at': _iso(contact.followup_at),
             'is_due': is_due(contact, today),
         },
+        'lead': lead_payload(contact, today=today),
         'tags': [tag_payload(tag) for tag in sorted_tags(contact.tags.all())],
     }
 

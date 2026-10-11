@@ -28,6 +28,9 @@ from apps.wahub.models import (
     HANDLED_BOT,
     HANDLED_HUMAN,
     HIDDEN_OUTCOMES,
+    LEAD_GROUP_ACT,
+    LEAD_STAGE_CHOICES,
+    LEAD_STAGE_GROUPS,
     OUTCOME_IN_SYSTEM,
     OUTCOME_NOT_FOUND,
     OUTCOME_PENDING,
@@ -152,7 +155,34 @@ def common_filters(queryset, params):
     # live_test=1 — only the contacts the NEW bot answers for real (docs/WAHUB-CONTRACT-LIVE-TEST.md).
     if _truthy(params.get('live_test')):
         queryset = queryset.filter(live_test=True)
+
+    # lead_stage=<key>[,<key>] and lead_group=act|wait|closed — the board's lists (docs/WAHUB-CONTRACT-LEAD-STAGES.md).
+    stages, groups = _lead_filter(params)
+    if stages:
+        queryset = queryset.filter(lead_stage__in=stages)
+    if groups:
+        queryset = queryset.filter(lead_stage__in=[stage for stage, group in LEAD_STAGE_GROUPS.items() if group in groups])
     return queryset
+
+
+def _lead_filter(params) -> tuple[list, list]:
+    """(the stages asked for, the groups asked for) — either may be empty."""
+    def keys(name):
+        return [key.strip() for key in (params.get(name) or '').split(',') if key.strip()]
+
+    return keys('lead_stage'), keys('lead_group')
+
+
+def _lead_order(stages: list, groups: list) -> list:
+    """
+    A stage's list is a queue of work: whoever has been in a stage that asks
+    for something the longest comes first. The stages that ask for nothing
+    (in motion, closed) read newest first.
+    """
+    asked = groups or [LEAD_STAGE_GROUPS.get(stage) for stage in stages]
+    if asked and all(group == LEAD_GROUP_ACT for group in asked):
+        return [F('lead_stage_since').asc(nulls_last=True), 'id']
+    return [F('lead_stage_since').desc(nulls_last=True), '-id']
 
 
 def contact_list(params):
@@ -162,18 +192,27 @@ def contact_list(params):
     chats — everything, newest message first, like any messaging app.
     leads — newest incoming message first, a fixed order that no mark changes;
             registered customers and trials still ahead are left out unless asked for.
+
+    With lead_stage / lead_group it is the list behind a line of the board:
+    whoever is in that stage, in either view — a stage of registered customers
+    or of trials ahead is asked for by name, so nothing is left out — in the
+    stage's own order (`_lead_order`).
     """
     queryset = common_filters(listed(), params)
+    stages, groups = _lead_filter(params)
+    by_stage = bool(stages or groups)
     view = (params.get('view') or VIEW_CHATS).strip()
     if view == VIEW_LEADS:
-        if not flag(params.get('show_hidden')):
+        if not by_stage and not flag(params.get('show_hidden')):
             queryset = queryset.exclude(HIDDEN)
         queue = (params.get('queue') or 'all').strip()
         queryset = queryset.filter(queues(state.now_israel_date()).get(queue, Q()))
-        return queryset.order_by(F('last_inbound_at').desc(nulls_last=True), '-id')
-    box = (params.get('box') or 'all').strip()
-    queryset = queryset.filter(BOXES.get(box, Q()))
-    return queryset.order_by(F('last_message_at').desc(nulls_last=True), '-id')
+        order = [F('last_inbound_at').desc(nulls_last=True), '-id']
+    else:
+        box = (params.get('box') or 'all').strip()
+        queryset = queryset.filter(BOXES.get(box, Q()))
+        order = [F('last_message_at').desc(nulls_last=True), '-id']
+    return queryset.order_by(*(_lead_order(stages, groups) if by_stage else order))
 
 
 def box_counts(queryset=None) -> dict:
@@ -184,7 +223,8 @@ def box_counts(queryset=None) -> dict:
 def all_counts(params) -> dict:
     """Boxes and queues in one query."""
     queryset = common_filters(Contact.objects.all(), params)
-    shown = Q() if flag(params.get('show_hidden')) else ~HIDDEN
+    # A stage asked for by name is never hidden — in the list (contact_list) and so in its counts.
+    shown = Q() if flag(params.get('show_hidden')) or any(_lead_filter(params)) else ~HIDDEN
     wanted = {f'box_{name}': Count('id', filter=cond) for name, cond in BOXES.items()}
     wanted.update({
         f'queue_{name}': Count('id', filter=cond & shown)
@@ -226,6 +266,17 @@ HOT = Q(known_interest__in=HOT_INTERESTS) | Q(kogo_outcome__in=HOT_OUTCOMES)
 def is_hot(contact: Contact) -> bool:
     """The same rule, for a contact in hand."""
     return contact.known_interest in HOT_INTERESTS or contact.kogo_outcome in HOT_OUTCOMES
+
+
+def temperature(contact: Contact) -> str:
+    """
+    hot / warm / cold — the small dot beside a lead. Hot by the rule above;
+    warm when the conversation shows interest and no step yet; cold for
+    everything else: said "not now", or nothing is known.
+    """
+    if is_hot(contact):
+        return 'hot'
+    return 'warm' if contact.known_interest == 'warm' else 'cold'
 
 
 def unregistered_days(raw) -> int:
@@ -277,6 +328,10 @@ def unregistered_counts(contacts, today) -> dict:
     }
 
 
+# The stages that ask the office for something, in the board's order.
+ACT_STAGES = [(stage, label) for stage, label in LEAD_STAGE_CHOICES if LEAD_STAGE_GROUPS[stage] == LEAD_GROUP_ACT]
+
+
 def summary() -> dict:
     """The "today" tab: three queries, whatever the number of contacts."""
     now = timezone.now()
@@ -296,11 +351,19 @@ def summary() -> dict:
         unregistered_total=Count('id', filter=unregistered),
         unregistered_hot=Count('id', filter=unregistered & HOT),
         unregistered_oldest_last_inbound=Min('last_inbound_at', filter=unregistered),
+        # "דורש טיפול": how many contacts are in each stage that asks for something (lead_stage.py).
+        **{f'lead_{stage}': Count('id', filter=Q(lead_stage=stage)) for stage, _label in ACT_STAGES},
     )
     not_registered = {
         'total': totals.pop('unregistered_total'),
         'hot': totals.pop('unregistered_hot'),
         'oldest_days': days_since(totals.pop('unregistered_oldest_last_inbound'), today),
+    }
+    act = [(stage, label, totals.pop(f'lead_{stage}')) for stage, label in ACT_STAGES]
+    lead_act = {
+        'total': sum(count for _stage, _label, count in act),
+        # Only the stages somebody is in: the card lists what there is to do.
+        'stages': [{'key': stage, 'label': label, 'count': count} for stage, label, count in act if count],
     }
 
     days = {
@@ -328,4 +391,5 @@ def summary() -> dict:
         'outbound_today': days[today]['outbound'],
         'by_day': [{'date': day.isoformat(), **counts} for day, counts in days.items()],
         'unregistered_leads': not_registered,
+        'lead_act': lead_act,
     }
