@@ -6,7 +6,10 @@ Nothing here sends a message. What changes the knowledge is a manager's own
 save, restore or approval of a proposal — and, since the owner's standing
 approval of 11.10.2026 (docs/WAHUB-CONTRACT-REFINE.md), a fix she writes in
 free text ("דיוק", refine.py) or a proposal the review applies by itself
-(reviewer.py), each with its line in the item's history and its "בטל".
+(reviewer.py), each with its line in the item's history and its "בטל". In
+"ללמד את הבוט" (docs/WAHUB-CONTRACT-TEACH-AND-TESTS.md, א) nothing is applied
+by itself: the owner's own "מאשר" (refine/{id}/approve/) is what changes the
+knowledge there.
 """
 from __future__ import annotations
 
@@ -18,6 +21,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -291,6 +296,13 @@ class ReviewProposalViewSet(_ManagerViewSet):
 
 # --- "דיוק": the fix in free text (docs/WAHUB-CONTRACT-REFINE.md) ---------------------------------------------------
 
+class TeachPagination(PageNumberPagination):
+    """ "מה לימדת עד היום": {count, next, previous, results}, as the contacts list pages."""
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
 class RefineViewSet(_ManagerViewSet):
     """
     refine/ — the operator picked messages and wrote what was wrong, or pressed
@@ -300,11 +312,30 @@ class RefineViewSet(_ManagerViewSet):
     she picked and a question, and nothing is changed or proposed until she
     answers through say/ (docs/WAHUB-CONTRACT-POLISH-1.md, ב). One answer shape
     for every door: {thread, status, reply, needs_answer, summary, changes, turns}.
+
+    "ללמד את הבוט" (docs/WAHUB-CONTRACT-TEACH-AND-TESTS.md, א) is the third door:
+    `text` and nothing else. Its threads answer in their own shape
+    ({mode: "teach", understood, question, changes, preview, conflicts,
+    needs_approval, …}), nothing in them is applied until approve/, and the
+    example and the check that take the bot seconds to make are asked for apart
+    (preview/, check/).
     """
     queryset = RefineThread.objects.select_related('contact', 'created_by', 'proposal')
 
     def list(self, request):
-        rows = self.get_queryset()
+        mode = (request.query_params.get('mode') or '').strip()
+        if mode == refine.MODE_TEACH:
+            # "מה לימדת עד היום": a line a thread, newest first, a page at a time.
+            paginator = TeachPagination()
+            try:
+                page = paginator.paginate_queryset(refine.teach_threads(), request, view=self)
+            except NotFound:
+                return _error('אין עמוד כזה.', http=status.HTTP_404_NOT_FOUND)
+            return paginator.get_paginated_response(refine.teach_list_payload(page))
+        if mode:
+            return _error('mode לא תקין.')
+        # The threads of "דיוק"; the ones of "ללמד את הבוט" have their own list and their own shape.
+        rows = refine.other_threads(self.get_queryset())
         for name in ('contact', 'proposal'):
             raw = (request.query_params.get(name) or '').strip()
             if raw:
@@ -319,15 +350,18 @@ class RefineViewSet(_ManagerViewSet):
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
         raw_proposal = data.get('proposal', data.get('proposal_id'))
+        raw_contact = data.get('contact', data.get('contact_id'))
         try:
-            if raw_proposal not in (None, ''):
+            if raw_proposal in (None, '') and raw_contact in (None, '') and not data.get('message_ids') and not data.get('shadow_ids'):
+                # "ללמד את הבוט": the owner's words and nothing else — no conversation, no messages, no proposal.
+                thread = refine.teach(data.get('text'), request.user)
+            elif raw_proposal not in (None, ''):
                 # "דיוק" on a proposal that exists: no conversation and no messages are named.
                 proposal = KnowledgeProposal.objects.filter(pk=raw_proposal).first() if str(raw_proposal).isdigit() else None
                 if proposal is None:
                     return _error('ההצעה לא נמצאה.')
                 thread = refine.start_on_proposal(proposal, data.get('text'), request.user)
             else:
-                raw_contact = data.get('contact', data.get('contact_id'))
                 contact = Contact.objects.filter(pk=raw_contact).first() if str(raw_contact or '').isdigit() else None
                 if contact is None:
                     return _error('איש הקשר לא נמצא.')
@@ -351,8 +385,45 @@ class RefineViewSet(_ManagerViewSet):
         try:
             refine.undo(thread, request.user)
         except refine.RefineError as exc:
-            return _error(str(exc), http=status.HTTP_409_CONFLICT if 'אין בשיחה' in str(exc) else status.HTTP_400_BAD_REQUEST)
+            extra = {'technical': exc.technical} if getattr(exc, 'technical', None) else {}
+            return _error(str(exc), http=status.HTTP_409_CONFLICT if 'אין בשיחה' in str(exc) else status.HTTP_400_BAD_REQUEST, **extra)
         return Response(refine.thread_payload(thread))
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """
+        "מאשר" in "ללמד את הבוט": the thread's waiting changes go on the
+        knowledge, and the bot is asked again. The thread as it now is, with
+        `applied` (what this press applied) and `check`. A second press changes
+        nothing and answers the same.
+        """
+        thread = self.get_object()
+        try:
+            applied = refine.approve(thread, request.user)
+        except refine.RefineError as exc:
+            # Nothing waits, or what waits no longer fits what the knowledge says now: the press came too late.
+            too_late = str(exc) in (refine.TEACH_NOTHING_WAITS, refine.TEACH_MOVED)
+            extra = {'technical': exc.technical} if getattr(exc, 'technical', None) else {}
+            return _error(str(exc), http=status.HTTP_409_CONFLICT if too_late else status.HTTP_400_BAD_REQUEST, **extra)
+        payload = refine.thread_payload(thread)
+        payload['applied'] = [card for card in payload['changes'] if card['proposal_id'] in applied]
+        return Response(payload)
+
+    @action(detail=True, methods=['get'])
+    def check(self, request, pk=None):
+        """The check after the last approval; while it is `pending`, each call carries it on. Changes nothing in the knowledge."""
+        thread = self.get_object()
+        return Response({'thread': thread.id, 'check': refine.check(thread)})
+
+    @action(detail=True, methods=['get'])
+    def preview(self, request, pk=None):
+        """
+        The example of a "ללמד" thread — what the bot answers today, and what it
+        would answer with the change; while it is `pending`, each call makes one
+        part of it. The change is put on the knowledge in memory only.
+        """
+        thread = self.get_object()
+        return Response({'thread': thread.id, 'preview': refine.preview(thread)})
 
 
 class ReviewSettingsView(APIView):

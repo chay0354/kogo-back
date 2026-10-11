@@ -900,9 +900,15 @@ def _where(proposal: KnowledgeProposal) -> str:
 
 
 @transaction.atomic
-def approve(proposal: KnowledgeProposal, user, note: str = '') -> KnowledgeItem:
+def approve(proposal: KnowledgeProposal, user, note: str = '', *, history_note: str = '') -> KnowledgeItem:
+    """
+    A person's click. `history_note` — the line written in the item's history
+    when the caller has a better one than the proposal's number (refine.py: the
+    owner's own words in "ללמד את הבוט").
+    """
     proposal = KnowledgeProposal.objects.select_for_update().get(pk=proposal.pk)
-    return _apply(proposal, user, decision_note=note, history_note=f'לפי הצעה #{proposal.id}{_where(proposal)}', auto=False)
+    history_note = history_note or f'לפי הצעה #{proposal.id}{_where(proposal)}'
+    return _apply(proposal, user, decision_note=note, history_note=history_note, auto=False)
 
 
 # --- the standing approval ---------------------------------------------------------------------------
