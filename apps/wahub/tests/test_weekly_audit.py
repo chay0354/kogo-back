@@ -78,6 +78,8 @@ class WeeklyAuditTests(WahubTestCase):
                 # writes there (a fix, say, undo, the switch itself) answers POST or PATCH only.
                 'api/v1/wahub/refine/': 200,
                 'api/v1/wahub/settings/review/': 200,
+                # the lead stages: the board is one aggregate, read only
+                'api/v1/wahub/leads/board/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])

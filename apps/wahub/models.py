@@ -13,6 +13,10 @@ confused (docs/WAHUB-CONTRACT.md):
     kogo_*      what the registrations say about this phone (matching.py)
     followup_*  what a person marked. Automatic code never writes these.
 
+A fourth group is read from those three and never the other way round:
+
+    lead_*      the one stage of the lead, by rules (lead_stage.py)
+
 The tables hold phones and the text of conversations, so the migration turns
 ROW LEVEL SECURITY on for all of them (docs/11-SECURITY-FINDING-ANON-EXPOSURE.md).
 
@@ -117,6 +121,67 @@ FOLLOWUP_CHOICES = [
 # The marks under which "the customer said when to come back" still counts.
 CALLBACK_COUNTS_UNDER = ('', FOLLOWUP_LATER, FOLLOWUP_ANSWERED, FOLLOWUP_NO_ANSWER)
 
+# --- the lead stage (docs/WAHUB-CONTRACT-LEAD-STAGES.md) -------------------------
+# One stage per contact, in three groups. The rules that pick it, and the
+# sentence each stage shows, are in apps/wahub/lead_stage.py.
+
+LEAD_GROUP_ACT = 'act'
+LEAD_GROUP_WAIT = 'wait'
+LEAD_GROUP_CLOSED = 'closed'
+LEAD_GROUP_CHOICES = [
+    (LEAD_GROUP_ACT, 'דורש טיפול'),
+    (LEAD_GROUP_WAIT, 'בתהליך'),
+    (LEAD_GROUP_CLOSED, 'סגור'),
+]
+
+LEAD_NEEDS_REPLY = 'needs_reply'
+LEAD_SIGNUP_FAILED = 'signup_failed'
+LEAD_SIGNUP_STARTED = 'signup_started'
+LEAD_TRIAL_NO_SHOW = 'trial_no_show'
+LEAD_TRIAL_DONE = 'trial_done'
+LEAD_CALLBACK_DUE = 'callback_due'
+LEAD_ANSWERED_SILENT = 'answered_silent'
+LEAD_TRIAL_BOOKED = 'trial_booked'
+LEAD_WAITING_DATE = 'waiting_date'
+LEAD_IN_CONVERSATION = 'in_conversation'
+LEAD_REGISTERED = 'registered'
+LEAD_CUSTOMER = 'customer'
+LEAD_NOT_RELEVANT = 'not_relevant'
+LEAD_COLD = 'cold'
+# In the order the board shows them, group by group.
+LEAD_STAGE_CHOICES = [
+    (LEAD_NEEDS_REPLY, 'שאל ולא קיבל תשובה'),
+    (LEAD_SIGNUP_FAILED, 'ניסה להירשם והחיוב נכשל'),
+    (LEAD_SIGNUP_STARTED, 'התחיל הרשמה ולא סיים'),
+    (LEAD_TRIAL_NO_SHOW, 'נרשם לניסיון ולא הגיע'),
+    (LEAD_TRIAL_DONE, 'עשה ניסיון ולא נרשם'),
+    (LEAD_CALLBACK_DUE, 'הגיע הזמן לחזור אליו'),
+    (LEAD_ANSWERED_SILENT, 'קיבל תשובה ולא נרשם'),
+    (LEAD_TRIAL_BOOKED, 'רשום לשיעור ניסיון'),
+    (LEAD_WAITING_DATE, 'ממתין לתאריך'),
+    (LEAD_IN_CONVERSATION, 'בשיחה'),
+    (LEAD_REGISTERED, 'נרשם'),
+    (LEAD_CUSTOMER, 'לקוח קיים'),
+    (LEAD_NOT_RELEVANT, 'לא רלוונטי'),
+    (LEAD_COLD, 'ליד ישן'),
+]
+LEAD_STAGE_GROUPS = {
+    LEAD_NEEDS_REPLY: LEAD_GROUP_ACT,
+    LEAD_SIGNUP_FAILED: LEAD_GROUP_ACT,
+    LEAD_SIGNUP_STARTED: LEAD_GROUP_ACT,
+    LEAD_TRIAL_NO_SHOW: LEAD_GROUP_ACT,
+    LEAD_TRIAL_DONE: LEAD_GROUP_ACT,
+    LEAD_CALLBACK_DUE: LEAD_GROUP_ACT,
+    LEAD_ANSWERED_SILENT: LEAD_GROUP_ACT,
+    LEAD_TRIAL_BOOKED: LEAD_GROUP_WAIT,
+    LEAD_WAITING_DATE: LEAD_GROUP_WAIT,
+    LEAD_IN_CONVERSATION: LEAD_GROUP_WAIT,
+    LEAD_REGISTERED: LEAD_GROUP_CLOSED,
+    LEAD_CUSTOMER: LEAD_GROUP_CLOSED,
+    LEAD_NOT_RELEVANT: LEAD_GROUP_CLOSED,
+    LEAD_COLD: LEAD_GROUP_CLOSED,
+}
+
 DIRECTION_IN = 'in'
 DIRECTION_OUT = 'out'
 DIRECTION_CHOICES = [(DIRECTION_IN, 'נכנסת'), (DIRECTION_OUT, 'יוצאת')]
@@ -178,6 +243,7 @@ EVENT_HANDLED_BY = 'handled_by_changed'
 EVENT_NEEDS_HUMAN = 'needs_human_changed'
 EVENT_NOTE = 'note'
 EVENT_LIVE_TEST = 'live_test'
+EVENT_LEAD_STAGE = 'lead_stage_changed'
 EVENT_KIND_CHOICES = [
     (EVENT_CREATED, 'נוצר'),
     (EVENT_FOLLOWUP, 'סימון מעקב'),
@@ -188,6 +254,7 @@ EVENT_KIND_CHOICES = [
     (EVENT_NEEDS_HUMAN, 'מבקש נציג'),
     (EVENT_NOTE, 'הערה'),
     (EVENT_LIVE_TEST, 'בדיקה חיה'),
+    (EVENT_LEAD_STAGE, 'מצב הליד'),
 ]
 
 LAST_MESSAGE_PREVIEW_CHARS = 300
@@ -271,6 +338,10 @@ class Contact(models.Model):
     kogo_family_id = models.UUIDField(null=True, blank=True)
     kogo_child_ids = models.JSONField(default=list, blank=True)
     kogo_detail = models.CharField(max_length=300, blank=True)
+    # The trial behind a trial_upcoming / trial_only answer, as facts and not as the
+    # sentence above: {on: 'YYYY-MM-DD', outcome: 'attended'|'no_show'|'', course: its name}.
+    # Empty for every other answer, and for a trial known only from the child's status.
+    kogo_trial = models.JSONField(default=dict, blank=True)
     kogo_checked_at = models.DateTimeField(null=True, blank=True)
 
     # --- the shadow bot (stage 2): set by inbound.py, cleared by shadow.py ---
@@ -299,6 +370,21 @@ class Contact(models.Model):
     )
     followup_at = models.DateTimeField(null=True, blank=True)
 
+    # --- the lead stage, written by lead_stage.py only (docs/WAHUB-CONTRACT-LEAD-STAGES.md) ---
+    # One stage, picked by rules from the three groups above; '' until the first look.
+    lead_stage = models.CharField(max_length=20, choices=LEAD_STAGE_CHOICES, blank=True)
+    # Since when: the moment of the fact behind the stage where there is one
+    # (the unanswered message, the last message, the trial), else when the stage was first seen.
+    lead_stage_since = models.DateTimeField(null=True, blank=True)
+    lead_reason = models.CharField(max_length=300, blank=True)
+    lead_next_step = models.CharField(max_length=200, blank=True)
+    # Somebody from the office has ever written to this contact from the CRM.
+    lead_human_touched = models.BooleanField(default=False)
+    lead_checked_at = models.DateTimeField(null=True, blank=True)
+    # When the clock alone may change the answer (30 minutes with no reply, 48 hours of
+    # quiet, the day to come back, midnight for "yesterday"): the cron looks again then.
+    lead_recheck_at = models.DateTimeField(null=True, blank=True)
+
     tags = models.ManyToManyField(Tag, blank=True, related_name='contacts', db_table='wahub_contact_tags')
 
     # Moved forward by every change the screen has to see; the live update
@@ -325,6 +411,13 @@ class Contact(models.Model):
             models.Index(
                 fields=['last_inbound_at'], name='wahub_contact_to_shadow',
                 condition=Q(needs_shadow=True),
+            ),
+            # The board's counts and the list of one stage, longest in the stage first.
+            models.Index(fields=['lead_stage', 'lead_stage_since'], name='wahub_contact_lead_stage'),
+            # What the cron looks at again because time passed.
+            models.Index(
+                fields=['lead_recheck_at'], name='wahub_contact_lead_recheck',
+                condition=Q(lead_recheck_at__isnull=False),
             ),
         ]
 

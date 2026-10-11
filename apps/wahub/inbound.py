@@ -8,7 +8,8 @@ the conversation. The endpoint and the local simulator both go through here.
 
 Nothing in this module calls another company, and nothing is matched against
 the registrations: the answer has to come back to ManyChat fast. The summary
-and the matching happen later, in the cron (apps/wahub/cron.py).
+and the matching happen later, in the cron (apps/wahub/cron.py). The lead stage
+is worked out again at once, from the row alone (apps/wahub/lead_stage.py).
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.wahub import media, state
+from apps.wahub import lead_stage, media, state
 from apps.wahub.models import (
     DIRECTION_IN,
     DIRECTION_OUT,
@@ -322,6 +323,9 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
         if created:
             state.log_event(contact.id, EVENT_CREATED, 'נוצר מהודעת וואטסאפ')
 
+    # The stage follows the message at once: a customer who wrote is "in conversation" again, an
+    # answer takes them off "needs a reply". Rules over the row, no other company asked; it never raises.
+    lead_stage.refresh_quietly(contact.id)
     return StoreResult(True, contact_id=contact.id, message_id=message.id, live_test=live_test)
 
 

@@ -6,14 +6,17 @@ The slice of background work one cron call does (every five minutes):
      summarised once, not five times;
   2. the match against the registrations, for contacts never checked or last
      checked more than twelve hours ago;
+  2b. the lead stage of every contact something happened to, or whose time has
+     come — rules over the row, no model (apps/wahub/lead_stage.py);
   3. the shadow bot's answer to every customer message it has not answered yet,
      twenty seconds after the last one of a burst (apps/wahub/shadow.py);
   4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py);
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py).
 
-Nothing in 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the shadow keeps
-proposals, the reviewer keeps proposals-to-approve, the look only marks.
+Nothing in 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
+a few fields on the contact, the shadow keeps proposals, the reviewer keeps
+proposals-to-approve, the look only marks.
 
 A call stops when its time is spent and the next one carries on: every contact
 is finished and saved on its own, so a call that is cut loses nothing.
@@ -27,7 +30,7 @@ from datetime import timedelta
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.wahub import analysis, live_test, matching, reviewer, shadow
+from apps.wahub import analysis, lead_stage, live_test, matching, reviewer, shadow
 from apps.wahub.models import ANALYSIS_AI, SHADOW_MODEL_STUB, Contact
 
 logger = logging.getLogger(__name__)
@@ -40,6 +43,12 @@ ANALYSIS_SHARE = 0.6
 # stops early to leave the shadow its share.
 MATCHING_FLOOR = 0.35
 SHADOW_FLOOR = 0.12
+# The lead stage comes right after the matching, whose answers it reads. It is
+# rules over rows already in hand, so a short slice is plenty — and the matching
+# always leaves it one, also on a call with no shadow reply waiting. When one is
+# waiting, the stages take only what is left above the time a shadow answer needs.
+LEAD_STAGE_FLOOR = 0.1
+SHADOW_ANSWER_SECONDS = 3.0
 SHADOW_BATCH = 10
 QUIET_BEFORE_ANALYSIS = timedelta(minutes=5)
 RECHECK_AFTER = timedelta(hours=12)
@@ -66,6 +75,7 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
     counts = {
         'analyzed': 0, 'analyzed_ai': 0, 'analyzed_rules': 0, 'matched': 0, 'outcomes_changed': 0,
         'shadow_proposed': 0, 'shadow_ai': 0, 'shadow_stub': 0, 'review_proposals': 0,
+        'lead_checked': 0, 'lead_changed': 0,
     }
 
     places = None
@@ -86,7 +96,8 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         counts['analyzed'] += 1
         counts['analyzed_ai' if known.source == ANALYSIS_AI else 'analyzed_rules'] += 1
 
-    matching_until = budget_seconds * MATCHING_FLOOR if shadow.pending(now).exists() else 0
+    shadow_waiting = shadow.pending(now).exists()
+    matching_until = budget_seconds * (MATCHING_FLOOR if shadow_waiting else LEAD_STAGE_FLOOR)
     for contact in _to_match(now).order_by(F('kogo_checked_at').asc(nulls_first=True), 'id')[:BATCH * 4]:
         if left() <= matching_until:
             break
@@ -99,8 +110,18 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         counts['matched'] += 1
         counts['outcomes_changed'] += int(changed)
 
-    # 3. the shadow bot — one answer per quiet burst, never sent
+    # 2b. the lead stage — after the summary and the matching, so it reads today's facts
     shadow_until = budget_seconds * SHADOW_FLOOR
+    lead_seconds = min(
+        lead_stage.SCAN_SECONDS, left() - (shadow_until + SHADOW_ANSWER_SECONDS if shadow_waiting else 0),
+    )
+    if lead_seconds > 0:
+        try:
+            counts.update(lead_stage.scan(budget_seconds=lead_seconds))
+        except Exception:
+            logger.exception('wahub cron: the lead stages were not refreshed')
+
+    # 3. the shadow bot — one answer per quiet burst, never sent
     for contact in shadow.pending(now).order_by(F('last_inbound_at').asc(nulls_first=True), 'id')[:SHADOW_BATCH]:
         if left() <= shadow_until:
             break
@@ -132,5 +153,6 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
     counts['pending_analysis'] = _to_analyze(now).count()
     counts['pending_matching'] = _to_match(now).count()
     counts['pending_shadow'] = shadow.pending(now).count()
+    counts['pending_lead_stage'] = lead_stage.pending_count(now)
     counts['seconds'] = round(time.monotonic() - started, 2)
     return counts

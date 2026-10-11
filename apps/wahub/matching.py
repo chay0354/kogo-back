@@ -5,6 +5,10 @@ Reads the customers' tables and writes one of eight answers on the contact
 (`kogo_*`). It never writes to a family, a parent, a child or a payment, and
 never to the follow-up marks a person fills in.
 
+For the two answers about a trial the facts are kept beside the sentence
+(`kogo_trial`: the day, whether the child came, the class), because the lead
+stage reads them (apps/wahub/lead_stage.py) and a sentence is not a fact.
+
 The answer, first rule that fits:
 
     not_found         no family has this phone
@@ -81,6 +85,17 @@ class Match:
     detail: str = ''
     family_id: object = None
     child_ids: list = field(default_factory=list)
+    # {on, outcome, course} for trial_upcoming / trial_only; empty otherwise.
+    trial: dict = field(default_factory=dict)
+
+
+def _trial_facts(when, outcome: str, course: str) -> dict:
+    """The trial as the contact keeps it. "Not marked" is no outcome, whichever way it was stored."""
+    return {
+        'on': when.isoformat() if when else '',
+        'outcome': outcome if outcome in ('attended', 'no_show') else '',
+        'course': (course or '').strip()[:200],
+    }
 
 
 def _day(value) -> str:
@@ -215,9 +230,9 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
     )
     child_ids = [str(child.id) for child in children]
 
-    def answer(outcome: str, detail: str, about=None) -> Match:
+    def answer(outcome: str, detail: str, about=None, trial=None) -> Match:
         family_id = about.family_id if about is not None else next(iter(families))
-        return Match(outcome, detail[:300], family_id, child_ids)
+        return Match(outcome, detail[:300], family_id, child_ids, trial or {})
 
     # 2. somebody pays
     paying = [child for child in children if status_of(child) in PAYING_STATUSES]
@@ -243,20 +258,23 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
         LessonEnrollment.objects
         .filter(child_id__in=list(by_id))
         .filter(Q(trial_lesson_date__isnull=False) | Q(trial_held_on__isnull=False) | ~Q(trial_outcome=''))
-        .values_list('child_id', 'status', 'trial_lesson_date', 'trial_held_on', 'trial_outcome')
+        .values_list('child_id', 'status', 'trial_lesson_date', 'trial_held_on', 'trial_outcome', 'lesson__course__name')
     )
 
     # 3. a trial still ahead
     ahead = sorted(
-        (trial_date, child_id) for child_id, status, trial_date, _held, _outcome in trials
+        (trial_date, child_id, course or '') for child_id, status, trial_date, _held, _outcome, course in trials
         if trial_date is not None and trial_date >= today and status in LIVE_ENROLLMENT_STATUSES
     )
     signed = [child for child in children if status_of(child) == STATUS_TRIAL_SIGNED]
     if ahead or signed:
         if ahead:
-            trial_date, child_id = ahead[0]
+            trial_date, child_id, course = ahead[0]
             child = by_id[child_id]
-            return answer(OUTCOME_TRIAL_UPCOMING, f'ניסיון ב-{_day(trial_date)} · {_names([child])}', child)
+            return answer(
+                OUTCOME_TRIAL_UPCOMING, f'ניסיון ב-{_day(trial_date)} · {_names([child])}', child,
+                trial=_trial_facts(trial_date, '', course),
+            )
         return answer(OUTCOME_TRIAL_UPCOMING, f'רשום לשיעור ניסיון · {_names(signed)}', signed[0])
 
     # 4. a trial that took place, and nobody registered. A child who was once
@@ -264,8 +282,8 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
     former = _ever_registered(list(by_id))
     past = sorted(
         (
-            (held or trial_date, outcome, child_id)
-            for child_id, _status, trial_date, held, outcome in trials
+            (held or trial_date, outcome, child_id, course)
+            for child_id, _status, trial_date, held, outcome, course in trials
             if child_id not in former and (held or trial_date) is not None
             and ((held or trial_date) < today or outcome)
         ),
@@ -273,12 +291,13 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
     )
     completed = [child for child in children if status_of(child) == STATUS_TRIAL_COMPLETED]
     if past:
-        when, outcome, child_id = past[0]
+        when, outcome, child_id, course = past[0]
         child = by_id[child_id]
         return answer(
             OUTCOME_TRIAL_ONLY,
             f'ניסיון ב-{_day(when)}, {TRIAL_OUTCOME_LABELS.get(outcome, "לא סומן")} · {_names([child])}',
             child,
+            trial=_trial_facts(when, outcome, course),
         )
     if completed:
         return answer(OUTCOME_TRIAL_ONLY, f'עשה שיעור ניסיון, לא סומן · {_names(completed)}', completed[0])
@@ -332,8 +351,11 @@ def recheck_contact(contact: Contact) -> bool:
     """
     match = match_phone(contact.phone, first_message_at=contact.first_inbound_at or contact.created_at)
     now = timezone.now()
-    before = (contact.kogo_outcome, contact.kogo_detail, contact.kogo_family_id, list(contact.kogo_child_ids or []))
-    after = (match.outcome, match.detail, match.family_id, match.child_ids)
+    before = (
+        contact.kogo_outcome, contact.kogo_detail, contact.kogo_family_id, list(contact.kogo_child_ids or []),
+        dict(contact.kogo_trial or {}),
+    )
+    after = (match.outcome, match.detail, match.family_id, match.child_ids, match.trial)
     if before == after:
         Contact.objects.filter(pk=contact.pk).update(kogo_checked_at=now)
         contact.kogo_checked_at = now
@@ -345,6 +367,7 @@ def recheck_contact(contact: Contact) -> bool:
         kogo_detail=match.detail,
         kogo_family_id=match.family_id,
         kogo_child_ids=match.child_ids,
+        kogo_trial=match.trial,
         kogo_checked_at=now,
     )
     if contact.kogo_outcome and contact.kogo_outcome != match.outcome:
@@ -356,6 +379,7 @@ def recheck_contact(contact: Contact) -> bool:
         )
     contact.kogo_outcome, contact.kogo_detail = match.outcome, match.detail
     contact.kogo_family_id, contact.kogo_child_ids = match.family_id, match.child_ids
+    contact.kogo_trial = match.trial
     contact.kogo_checked_at = now
     return True
 
