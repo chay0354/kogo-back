@@ -13,6 +13,14 @@ demo conversation uses (shadow.answer_now) and sends it through ManyChat
 sender "bot", `new_bot=True` and the status the send got; the timings are
 written in the contact's journal so the delay can be measured.
 
+One answer for a burst: people write three short messages seven seconds apart.
+The computation starts early (SETTLE seconds of quiet) so a single message is
+not kept waiting, but nothing leaves before he has been quiet for QUIET
+seconds — and a message that arrives before the answer left drops that answer
+(shadow.Superseded: nothing kept, nothing sent) and the computation starts
+over on everything he wrote. MAX_RESTARTS times at most; then what is ready is
+sent, so somebody who never stops writing still gets an answer.
+
 Guards: one answer at a time per contact (the claim), one answer per five
 seconds, thirty a day (a loop would otherwise talk to itself), nothing while a
 person holds the conversation. A failure of Claude — or no Claude key at all —
@@ -51,6 +59,13 @@ REPLY_PATH = 'live-test/reply/'
 # Connect quickly, read for a second: the answer takes seconds and this call does not wait for it.
 KICK_TIMEOUT = (2, 1)
 DEFAULT_SETTLE_SECONDS = 4.0
+# No answer leaves before the customer has been quiet for this long (he may be in the middle of writing).
+DEFAULT_QUIET_SECONDS = 10.0
+# How often the wait for that quiet looks whether he wrote again, and what it leaves of the deadline for the send.
+HOLD_STEP = 1.0
+HOLD_RESERVE = 5.0
+# An answer dropped because he wrote again is computed again, this many times at most; then what is ready leaves.
+MAX_RESTARTS = 3
 # A message that arrives during the wait restarts it, this many waits at most (4 + 4 + 4 = 12 seconds).
 MAX_SETTLE_ROUNDS = 3
 # One answer, from the claim to the send: the wait, the files, Claude.
@@ -59,7 +74,7 @@ REPLY_SECONDS = 50
 # computed — as long as this many seconds have not passed since the call began, and this many answers at most.
 FOLLOW_UP_SECONDS = 120
 MAX_ANSWERS = 6
-# A claim nobody released (a cut call) expires by itself.
+# A claim nobody released (a cut call) expires by itself. Every computation that starts over takes it anew.
 CLAIM_SECONDS = 90
 # The contact's row held by somebody else for a moment: asked for again this many times, this far apart.
 CLAIM_TRIES = 5
@@ -98,6 +113,14 @@ def settle_seconds() -> float:
         value = float(getattr(settings, 'WAHUB_LIVE_TEST_SETTLE_SECONDS', DEFAULT_SETTLE_SECONDS))
     except (TypeError, ValueError):
         value = DEFAULT_SETTLE_SECONDS
+    return max(0.0, value)
+
+
+def quiet_seconds() -> float:
+    try:
+        value = float(getattr(settings, 'WAHUB_LIVE_TEST_QUIET_SECONDS', DEFAULT_QUIET_SECONDS))
+    except (TypeError, ValueError):
+        value = DEFAULT_QUIET_SECONDS
     return max(0.0, value)
 
 
@@ -198,6 +221,20 @@ def _release(contact_id: int, until) -> None:
     Contact.objects.filter(pk=contact_id, live_test_busy_until=until).update(live_test_busy_until=None)
 
 
+def _renew(contact_id: int, held: dict) -> bool:
+    """
+    The claim, taken anew for a computation that starts over. False when it is
+    no longer this call's (it expired and another call took the contact): then
+    this call stops, and that one answers.
+    """
+    until = timezone.now() + timedelta(seconds=CLAIM_SECONDS)
+    if not Contact.objects.filter(pk=contact_id, live_test_busy_until=held['until']).update(live_test_busy_until=until):
+        held['until'] = None
+        return False
+    held['until'] = until
+    return True
+
+
 def _now():
     """The clock the wait is measured by."""
     return timezone.now()
@@ -238,6 +275,33 @@ def _settle(contact: Contact, *, deadline: float) -> Contact:
     return Contact.objects.get(pk=contact.pk)
 
 
+def _written_since(contact_id: int, message_id: int) -> bool:
+    """Did the customer write after that message?"""
+    return Message.objects.filter(contact_id=contact_id, direction=DIRECTION_IN, id__gt=message_id).exists()
+
+
+def _hold(contact_id: int, last_id: int, deadline: float) -> None:
+    """
+    The answer is ready: it does not leave before the customer has been quiet
+    for `quiet_seconds` since the last message it covers. Usually there is
+    nothing left to wait — Claude took longer than that. Looks every HOLD_STEP
+    whether he wrote again and returns at once when he did (the caller's look
+    then drops the answer); never eats the time the send needs.
+    """
+    newest = _newest_inbound(contact_id)
+    if newest is None or newest[0] != last_id:
+        return
+    remaining = quiet_seconds() - (_now() - newest[1]).total_seconds()
+    while remaining > 0:
+        step = min(remaining, HOLD_STEP)
+        if time.monotonic() + step > deadline - HOLD_RESERVE:
+            return
+        time.sleep(step)
+        remaining -= step
+        if _written_since(contact_id, last_id):
+            return
+
+
 # --- what is written when it fails ----------------------------------------------------------------------
 
 def _needs_human(contact_id: int, reason: str) -> None:
@@ -276,7 +340,7 @@ def _over_daily_limit(contact: Contact, now) -> bool:
 
 
 def _no_answer(contact: Contact, reason: str, received, started) -> dict:
-    """Claude (or the transcription) gave no answer: nothing is sent, the contact asks for a person, the journal says why."""
+    """Claude gave no answer: nothing is sent, the contact asks for a person, the journal says why."""
     _needs_human(contact.pk, f'{MODEL_FAILED_REASON}: {reason}')
     text = f'תשובה חיה נכשלה, לא נשלח דבר: {reason} (התקבלה {_clock(received)}, חישוב מ-{_clock(started)})'
     state.log_event(contact.pk, EVENT_LIVE_TEST, text)
@@ -331,8 +395,10 @@ def reply(contact_id: int) -> dict:
     that started it is not listening anyway.
 
     A message that arrives while an answer is being computed finds the contact
-    claimed, and its own call leaves with "busy" — so the call that holds the
-    claim looks again once it has sent, and answers that too, for as long as
+    claimed, and its own call leaves with "busy" — the call that holds the claim
+    notices it, drops the answer it was computing and answers everything
+    together (`_answer`). One that arrives in the instant the answer leaves is
+    seen once it has left, and answered by the same call too, for as long as
     FOLLOW_UP_SECONDS and MAX_ANSWERS allow (the first answer's result is
     returned, with what followed it). What is still unanswered after that is
     answered by the next message's call, or said by the cron (`flag_unanswered`).
@@ -340,22 +406,22 @@ def reply(contact_id: int) -> dict:
     began = time.monotonic()
     results: list[dict] = []
     for _ in range(MAX_ANSWERS):
-        until = None
+        held = {'until': None}
         try:
             contact, refused = claim(contact_id)
             if contact is None:
                 if not results:
                     return {'outcome': refused}
                 break
-            until = contact.live_test_busy_until
-            result = _answer(contact, deadline=time.monotonic() + REPLY_SECONDS)
+            held['until'] = contact.live_test_busy_until
+            result = _answer(contact, held)
         except Exception:
             logger.exception('wahub live test: the answer for contact %s failed unexpectedly', contact_id)
             result = {'outcome': OUTCOME_MODEL_ERROR, 'error': UNEXPECTED}
             _unexpected(contact_id)
         finally:
-            if until is not None:
-                _free(contact_id, until)
+            if held['until'] is not None:
+                _free(contact_id, held['until'])
         results.append(result)
         # Released first, looked at second: a message stored before the release is seen here,
         # one stored after it claims the contact by its own call.
@@ -389,7 +455,8 @@ def _left_unanswered(contact_id: int) -> bool:
     return contact is not None and bool(shadow.unanswered_messages(contact))
 
 
-def _answer(contact: Contact, *, deadline: float) -> dict:
+def _answer(contact: Contact, held: dict) -> dict:
+    """One answer for everything unanswered; `held` is this call's claim, taken anew each time the computation starts over."""
     if contact.handled_by == HANDLED_HUMAN:
         # A person holds the conversation: the bot keeps quiet, as the old one does.
         return {'outcome': OUTCOME_HUMAN}
@@ -403,24 +470,39 @@ def _answer(contact: Contact, *, deadline: float) -> dict:
         # (where nothing leaves), never for a real phone.
         return _no_answer(contact, NO_KEY, waiting[-1].created_at, timezone.now())
 
-    contact = _settle(contact, deadline=deadline)
-    started = timezone.now()
-    # The wait is seconds long: the test may have been turned off in it, or a person may have taken over.
-    if not contact.live_test or contact.is_demo:
-        return {'outcome': OUTCOME_NOT_LIVE_TEST}
-    if contact.handled_by == HANDLED_HUMAN:
-        return {'outcome': OUTCOME_HUMAN}
-    messages = shadow.unanswered_messages(contact)
-    if not messages:
-        return {'outcome': OUTCOME_NOTHING}
-    received = messages[-1].created_at
-
-    try:
-        proposal = shadow.answer_now(contact, deadline=deadline, max_tokens=max_tokens(), effort=effort())
-    except shadow.ShadowModelError as exc:
-        return _no_answer(contact, str(exc), received, started)
+    contact_id = contact.pk
+    restarts = 0
+    while True:
+        deadline = time.monotonic() + REPLY_SECONDS
+        contact = _settle(contact, deadline=deadline)
+        started = timezone.now()
+        # The wait is seconds long: the test may have been turned off in it, or a person may have taken over.
+        if not contact.live_test or contact.is_demo:
+            return {'outcome': OUTCOME_NOT_LIVE_TEST}
+        if contact.handled_by == HANDLED_HUMAN:
+            return {'outcome': OUTCOME_HUMAN}
+        if not shadow.unanswered_messages(contact):
+            return {'outcome': OUTCOME_NOTHING}
+        # The last time round nobody is asked whether he wrote again: what is ready leaves.
+        watch = restarts < MAX_RESTARTS
+        try:
+            proposal = shadow.answer_now(
+                contact, deadline=deadline, max_tokens=max_tokens(), effort=effort(),
+                superseded=(lambda last_id: _written_since(contact_id, last_id)) if watch else None,
+                before_keep=(lambda last_id: _hold(contact_id, last_id, deadline)) if watch else None,
+            )
+        except shadow.Superseded:
+            restarts += 1
+            logger.info('wahub live test: contact %s wrote again before the answer left; computing again (%s)', contact_id, restarts)
+            if not _renew(contact_id, held):
+                return {'outcome': OUTCOME_BUSY}
+            continue
+        except shadow.ShadowModelError as exc:
+            return _no_answer(contact, str(exc), _last_received(contact) or started, started)
+        break
     if proposal is None:
         return {'outcome': OUTCOME_NOTHING}
+    received = _covered_until(proposal) or started
     if not proposal.text:
         return {**_no_answer(contact, EMPTY_ANSWER, received, started), 'shadow_id': proposal.id}
 
@@ -444,6 +526,8 @@ def _answer(contact: Contact, *, deadline: float) -> dict:
         f'{"נשלחה" if delivered else "ניסיון שליחה"} {_clock(sent)} (+{_secs(started, sent)}, מהם Claude {proposal.took_ms / 1000:.1f} שנ\') · '
         f'סה"כ {_secs(received, sent)}'
     )
+    if restarts:
+        text += f' · חושב מחדש {restarts} פעמים (הגיעו עוד הודעות לפני השליחה)'
     if message.error:
         text += f' — {message.error}'
     state.log_event(contact.pk, EVENT_LIVE_TEST, text)
@@ -453,4 +537,16 @@ def _answer(contact: Contact, *, deadline: float) -> dict:
         'message_id': message.id,
         'shadow_id': proposal.id,
         'seconds': round((sent - received).total_seconds(), 1),
+        'restarts': restarts,
     }
+
+
+def _last_received(contact: Contact):
+    """When the customer's last unanswered message reached Kogo; None when there is none."""
+    messages = shadow.unanswered_messages(contact)
+    return messages[-1].created_at if messages else None
+
+
+def _covered_until(proposal):
+    """When the last message this answer covers reached Kogo — what the delay is measured from."""
+    return Message.objects.filter(pk=proposal.after_message_id).values_list('created_at', flat=True).first()

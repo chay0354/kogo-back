@@ -79,6 +79,11 @@ TRANSCRIBE_TIMEOUT = 25
 MAX_PASSED_OVER_FILES = 3
 # How the new bot's own earlier answers are named in the conversation Claude reads.
 OWN_ANSWER_LABEL = 'את (הבוט החדש)'
+# The cron's second look at recordings that were not transcribed: how many a tick, how far back.
+HEAR_AGAIN_BATCH = 3
+HEAR_AGAIN_WITHIN = timedelta(days=3)
+# Written on a recording the transcription returned no words for.
+EMPTY_TRANSCRIPT = 'ההקלטה ריקה או לא ברורה'
 
 REPLY_SCHEMA = {
     'type': 'object',
@@ -134,6 +139,14 @@ _PRICE = re.compile(r'מחיר|עולה|עלות|כמה זה|תעריף')
 _DONE = re.compile(r'עזבי|לא משנה|נשאיר את זה ככה|הסתדרתי|הסתדרנו|תודה רבה|תודה,|^תודה')
 _SHEKEL_AFTER = re.compile(r'(\d[\d,.]*)\s*₪')
 _TRAILING_DOT = re.compile(r'(?<!\.)\.(?=\s*$)', re.M)
+
+
+class Superseded(Exception):
+    """
+    A newer message of the customer's arrived while this answer was being
+    computed: nothing is kept, and the caller starts over on everything he
+    wrote (live_test.py). Never raised unless the caller asked to be told.
+    """
 
 
 class ShadowModelError(Exception):
@@ -634,7 +647,8 @@ def _user_content(ctx: Context):
     return [{'type': 'text', 'text': text}, *blocks]
 
 
-def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = None, effort: str | None = None) -> Draft:
+def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = None, effort: str | None = None,
+            superseded=None) -> Draft:
     from apps.core.scoping import integration_credential
 
     api_key = integration_credential('ANTHROPIC_API_KEY')
@@ -664,6 +678,9 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
     }
     served_model = model_name()
     for _round in range(MAX_TOOL_ROUNDS + 1):
+        # A tool round took seconds: an answer the customer has already written past is not finished.
+        if _round and superseded is not None and superseded():
+            raise Superseded()
         remaining = _timeout_seconds()
         if deadline is not None:
             remaining = min(remaining, deadline - time_module.monotonic())
@@ -744,7 +761,7 @@ def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) ->
 # --- drafting, proposing, trying ----------------------------------------------------------------------------
 
 def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True, max_tokens: int | None = None,
-          effort: str | None = None) -> Draft:
+          effort: str | None = None, superseded=None) -> Draft:
     """
     Claude when there is a key, the stub otherwise — and the stub when Claude
     fails, saying why. With `fallback=False` (the demo conversation's "answer
@@ -756,7 +773,9 @@ def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True,
     result = None
     if shadow_configured():
         try:
-            result = _claude(ctx, deadline, max_tokens=max_tokens, effort=effort)
+            result = _claude(ctx, deadline, max_tokens=max_tokens, effort=effort, superseded=superseded)
+        except Superseded:
+            raise
         except ShadowModelError as exc:
             if not fallback:
                 raise
@@ -833,9 +852,17 @@ def _hear(row: Message, *, deadline: float | None) -> str:
     # From the bucket, or straight from ManyChat when the copy failed: the words do not wait for the storage.
     audio, media_type, filename = media.read(row.media_url, timeout=timeout)
     transcript = transcribe.transcribe(audio, filename=filename, media_type=media_type, timeout=timeout)
-    Message.objects.filter(pk=row.pk).update(transcript=transcript)
-    row.transcript = transcript
+    Message.objects.filter(pk=row.pk).update(transcript=transcript, error='')
+    row.transcript, row.error = transcript, ''
     return transcript
+
+
+def _unheard(row: Message, reason: str) -> None:
+    """Why a recording was not transcribed, written on the message itself: the conversation shows it under the recording."""
+    reason = str(reason)[:300]
+    if row.error != reason:
+        Message.objects.filter(pk=row.pk).update(error=reason)
+        row.error = reason
 
 
 def prepare_media(contact: Contact, *, deadline: float | None = None, skip=()) -> list[int]:
@@ -859,33 +886,72 @@ def prepare_media(contact: Contact, *, deadline: float | None = None, skip=()) -
                 _hear(row, deadline=deadline)
         except (media.MediaError, transcribe.TranscriptionError) as exc:
             logger.warning('wahub shadow: the recording of message %s was not transcribed ahead of the answer: %s', row.pk, exc)
+            if row.message_type == TYPE_VOICE:
+                _unheard(row, str(exc))
         except Exception:
             logger.exception('wahub shadow: preparing the file of message %s failed unexpectedly', row.pk)
     return seen
 
 
-def _target_of(row: Message, notes: list, *, strict: bool, deadline: float | None) -> Target:
+def hear_again(*, now=None, limit: int = HEAR_AGAIN_BATCH, deadline: float | None = None) -> int:
+    """
+    The cron's second look at recordings that were not transcribed (the account
+    ran out of credit, the service did not answer): the newest few of the last
+    days are tried again, so the conversation shows what was said once the
+    transcription works. Nothing is answered from here — the bot already
+    answered those by its voice rule. Stops at the first failure: what failed
+    one recording fails the next. Returns how many were transcribed.
+    """
+    if not transcribe.configured():
+        return 0
+    now = now or timezone.now()
+    rows = Message.objects.filter(
+        direction=DIRECTION_IN, message_type=TYPE_VOICE, transcript='', created_at__gte=now - HEAR_AGAIN_WITHIN,
+    ).exclude(media_url='').exclude(error='').order_by('-id')[:limit]
+    heard = 0
+    for row in rows:
+        if deadline is not None and deadline - time_module.monotonic() < 8:
+            break
+        try:
+            if _hear(row, deadline=deadline):
+                heard += 1
+            else:
+                _unheard(row, EMPTY_TRANSCRIPT)
+        except (media.MediaError, transcribe.TranscriptionError) as exc:
+            _unheard(row, str(exc))
+            break
+        except Exception:
+            logger.exception('wahub shadow: the second try at the recording of message %s failed unexpectedly', row.pk)
+            break
+        state.touch(row.contact_id)
+    return heard
+
+
+def _target_of(row: Message, notes: list, *, deadline: float | None) -> Target:
     """
     The Target for one customer message. A recording with a file and no
-    transcript yet is transcribed here and the transcript kept on the message;
-    without a key the note says so and the bot answers by its voice rule. A
-    failed transcription is a note (the cron) or a ShadowModelError (strict).
+    transcript yet is transcribed here and the transcript kept on the message.
+    Without a key, or when the transcription fails (no credit left in the
+    account, a timeout), the note says so, the reason is written on the message
+    and the bot answers by its voice rule — a customer who sent a recording is
+    never left without an answer because of it.
     """
     _archive(row, notes, deadline=deadline)
     transcript = row.transcript or ''
     if row.message_type == TYPE_VOICE and row.media_url and not transcript:
         if not transcribe.configured():
+            _unheard(row, transcribe.NO_KEY_REASON)
             notes.append(transcribe.NO_KEY_REASON)
         else:
             try:
                 transcript = _hear(row, deadline=deadline)
             except (media.MediaError, transcribe.TranscriptionError) as exc:
-                if strict:
-                    raise ShadowModelError(f'התמלול נכשל: {exc}') from exc
                 logger.warning('wahub shadow: transcription of message %s failed: %s', row.pk, exc)
+                _unheard(row, str(exc))
                 notes.append(f'התמלול נכשל ({exc}); הבוט ענה לפי כלל "הודעה קולית"')
             else:
                 if not transcript:
+                    _unheard(row, EMPTY_TRANSCRIPT)
                     notes.append('התמלול חזר ריק; הבוט ענה לפי כלל "הודעה קולית"')
     # A file nobody can read carries no words of the customer's: the line kept in its place is ours.
     words = '' if row.message_type == TYPE_OTHER else (transcript or row.text or '')
@@ -896,12 +962,20 @@ def _target_of(row: Message, notes: list, *, strict: bool, deadline: float | Non
 
 
 def propose(contact: Contact, *, now=None, deadline: float | None = None, fallback: bool = True,
-            max_tokens: int | None = None, effort: str | None = None) -> ShadowReply | None:
+            max_tokens: int | None = None, effort: str | None = None, superseded=None, before_keep=None) -> ShadowReply | None:
     """
     The new bot's answer to what the customer wrote since the last one, kept as
     a ShadowReply. None when there is nothing to answer. Never sends anything.
-    `fallback=False` (see `draft`) raises ShadowModelError when Claude or the
-    transcription fails, and then nothing is kept — the messages stay unanswered.
+    `fallback=False` (see `draft`) raises ShadowModelError when Claude fails, and
+    then nothing is kept — the messages stay unanswered. A recording that could
+    not be transcribed is never such a failure: the reason is written on the
+    message and the bot answers by its voice rule.
+
+    The live test's two hooks, both given the id of the last message the answer
+    covers: `superseded(id)` — True when the customer has written since; asked
+    between Claude's tool rounds and once more before the answer is kept, and a
+    True raises Superseded with nothing kept. `before_keep(id)` — called when the
+    draft is ready, just before that last look; it may wait.
     """
     now = now or timezone.now()
     messages = unanswered_messages(contact)
@@ -913,10 +987,18 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
     last_at = messages[-1].sent_at
     burst = [row for row in messages if last_at - row.sent_at <= MERGE_WINDOW * 3] or messages[-1:]
     notes: list[str] = []
-    targets = [_target_of(row, notes, strict=not fallback, deadline=deadline) for row in burst]
+    targets = [_target_of(row, notes, deadline=deadline) for row in burst]
     ctx = build_context(contact, targets=targets, now=now)
     ctx.notes.extend(notes)
-    result = draft(ctx, deadline=deadline, fallback=fallback, max_tokens=max_tokens, effort=effort)
+    last_id = burst[-1].id
+    result = draft(
+        ctx, deadline=deadline, fallback=fallback, max_tokens=max_tokens, effort=effort,
+        superseded=(lambda: superseded(last_id)) if superseded is not None else None,
+    )
+    if before_keep is not None:
+        before_keep(last_id)
+    if superseded is not None and superseded(last_id):
+        raise Superseded()
     with transaction.atomic():
         reply = ShadowReply.objects.create(
             contact=contact, after_message=burst[-1], covers_message_ids=[row.id for row in burst],
@@ -938,15 +1020,18 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
 
 
 def answer_now(contact: Contact, *, deadline: float, max_tokens: int | None = None,
-               effort: str | None = None) -> ShadowReply | None:
+               effort: str | None = None, superseded=None, before_keep=None) -> ShadowReply | None:
     """
     The one computation behind "the new bot answers NOW": the demo conversation's
     reply (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב) and the live test from the owner's
     phone (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב) — `propose` on the unanswered
-    burst, with no fall to the stub: a failure of Claude or of the transcription
-    is a ShadowModelError and nothing is kept.
+    burst, with no fall to the stub: a failure of Claude is a ShadowModelError
+    and nothing is kept. `superseded` and `before_keep`: see `propose`.
     """
-    return propose(contact, now=timezone.now(), deadline=deadline, fallback=False, max_tokens=max_tokens, effort=effort)
+    return propose(
+        contact, now=timezone.now(), deadline=deadline, fallback=False, max_tokens=max_tokens, effort=effort,
+        superseded=superseded, before_keep=before_keep,
+    )
 
 
 def answer(question: str, *, contact: Contact | None = None, pretend_now=None, last_outbound: str | None = None,

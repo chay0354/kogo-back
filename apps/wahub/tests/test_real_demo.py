@@ -13,7 +13,7 @@ import requests
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 
-from apps.wahub import knowledge_import, reviewer, transcribe
+from apps.wahub import knowledge_import, reviewer, shadow, transcribe
 from apps.wahub.media import BUCKET, IMAGE_MAX_BYTES, SIGNED_URL_SECONDS
 from apps.wahub.models import Contact, KnowledgeProposal, Message, ShadowReply
 from apps.wahub.tests.base import BASE, WahubTestCase, client_for, make_user
@@ -360,22 +360,74 @@ class DemoReplyTests(RealDemoTestCase):
         post.assert_not_called()
 
     @override_settings(OPENAI_API_KEY='openai-test-key')
-    def test_a_failed_transcription_is_an_error_and_nothing_is_kept_so_the_next_call_tries_again(self):
+    def test_a_failed_transcription_is_written_on_the_recording_and_the_bot_answers_by_its_voice_rule(self):
         self.upload('voice')
         with patch(OPENAI_POST, return_value=_json_response({'error': {'message': 'boom'}}, 500)):
             response = self.reply()
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data['shadow'], {'error': 'התמלול נכשל: התמלול נכשל (500)'})
-        self.assertIsNone(response.data['message'])
-        self.assertEqual(ShadowReply.objects.count(), 0)
-        self.assertEqual(Message.objects.count(), 1)
-        self.assertTrue(Contact.objects.get(pk=self.contact_id).needs_shadow)
+        # The customer is not left without an answer because of a recording nobody could hear.
+        self.assertIn(VOICE_RULE, response.data['shadow']['text'])
+        self.assertIn('התמלול נכשל (התמלול נכשל (500))', response.data['shadow']['reasoning'])
+        recording = Message.objects.get(direction='in')
+        self.assertEqual((recording.transcript, recording.error), ('', 'התמלול נכשל (500)'))
+        self.assertEqual(ShadowReply.objects.count(), 1)
+        self.assertEqual(self.get('status/').data['transcribe'], {
+            'configured': True, 'ok': False, 'reason': 'התמלול נכשל (500)', 'at': self.get('status/').data['transcribe']['at'],
+        })
+
+    @override_settings(OPENAI_API_KEY='openai-test-key')
+    def test_an_account_with_no_credit_is_said_in_words_and_the_recording_is_heard_once_there_is_credit(self):
+        self.upload('voice')
+        no_credit = _json_response({'error': {
+            'message': 'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+            'type': 'insufficient_quota', 'code': 'insufficient_quota',
+        }}, 429)
+        with patch(OPENAI_POST, return_value=no_credit):
+            self.assertEqual(self.reply().status_code, 200)
+        recording = Message.objects.get(direction='in')
+        self.assertEqual(recording.error, transcribe.NO_CREDIT_REASON)
+        health = self.get('status/').data['transcribe']
+        self.assertEqual((health['configured'], health['ok'], health['reason']), (True, False, transcribe.NO_CREDIT_REASON))
+        # A plain rate limit is not "no credit".
+        with patch(OPENAI_POST, return_value=_json_response({'error': {'message': 'Rate limit reached', 'type': 'requests', 'code': 'rate_limit_exceeded'}}, 429)):
+            with self.assertRaises(transcribe.TranscriptionError) as raised:
+                transcribe.transcribe(WEBM, filename='voice.webm', media_type='audio/webm')
+        self.assertEqual(str(raised.exception), 'התמלול נכשל (429)')
+        Message.objects.filter(pk=recording.pk).update(error=transcribe.NO_CREDIT_REASON)
+
+        # The cron tries it again while there is still no credit: one call, the reason stays.
+        with patch(OPENAI_POST, return_value=no_credit) as post:
+            self.assertEqual(shadow.hear_again(), 0)
+        post.assert_called_once()
+        # He added credit: the next look hears it, and the conversation shows what was said.
+        with patch(OPENAI_POST, return_value=_json_response({'text': 'יש חוג קפוארה לבן 6?'})):
+            self.assertEqual(shadow.hear_again(), 1)
+        recording.refresh_from_db()
+        self.assertEqual((recording.transcript, recording.error), ('יש חוג קפוארה לבן 6?', ''))
+        health = self.get('status/').data['transcribe']
+        self.assertEqual((health['ok'], health['reason']), (True, ''))
+        # Nothing was answered from there: the bot's one answer is the one it gave by its voice rule.
+        self.assertEqual(ShadowReply.objects.count(), 1)
+        with patch(OPENAI_POST) as post:
+            self.assertEqual(shadow.hear_again(), 0)                     # nothing left to hear
+        post.assert_not_called()
+
+    def test_without_a_key_the_recording_says_why_and_the_settings_screen_too(self):
+        self.upload('voice')
+        self.assertEqual(self.reply().status_code, 200)
+        self.assertEqual(Message.objects.get(direction='in').error, transcribe.NO_KEY_REASON)
+        self.assertEqual(self.get('status/').data['transcribe'], {'configured': False, 'ok': False, 'reason': transcribe.NO_KEY_REASON, 'at': None})
+
+    @override_settings(OPENAI_API_KEY='openai-test-key')
+    def test_a_transcription_that_does_not_answer_is_a_reason_on_the_recording_too(self):
+        self.upload('voice')
         with patch(OPENAI_POST, side_effect=requests.ReadTimeout('slow')):
             response = self.reply()
-        self.assertIn('התמלול לא ענה', response.data['shadow']['error'])
+        self.assertIn(VOICE_RULE, response.data['shadow']['text'])
+        self.assertEqual(Message.objects.get(message_type='voice').error, 'התמלול לא ענה (ReadTimeout)')
+        # The cron's second look hears it once the service answers.
         with patch(OPENAI_POST, return_value=_json_response({'text': 'היי'})):
-            response = self.reply()
-        self.assertEqual(response.data['shadow']['text'], 'היי *דמו*, במה אוכל לעזור?')
+            self.assertEqual(shadow.hear_again(), 1)
         self.assertEqual(Message.objects.get(message_type='voice').transcript, 'היי')
 
 

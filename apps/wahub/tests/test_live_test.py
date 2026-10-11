@@ -20,6 +20,7 @@ from rest_framework.test import APIClient
 
 from apps.core.manychat_service import ManyChatError
 from apps.wahub import cron, inbound, knowledge_import, live_test, media, sending, shadow
+from apps.wahub import transcribe as transcribe_module
 from apps.wahub.models import Contact, ContactEvent, Message, ShadowReply
 from apps.wahub.tests.base import BASE, WahubTestCase, client_for, make_user
 from apps.wahub.tests.test_handoff import END, FIELD, START, manychat, writes
@@ -87,7 +88,7 @@ def the_stub_in_claudes_place(ctx, deadline, **options):
 
 @override_settings(
     MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=False, WAHUB_SIMULATE_SEND=False, DEBUG=False,
-    CRON_TOKEN='cron-secret', ANTHROPIC_API_KEY='test-key', OPENAI_API_KEY='',
+    CRON_TOKEN='cron-secret', ANTHROPIC_API_KEY='test-key', OPENAI_API_KEY='', WAHUB_LIVE_TEST_QUIET_SECONDS=0,
 )
 class LiveTestCase(WahubTestCase):
     """
@@ -1019,6 +1020,178 @@ class LiveReplyClaudeTests(LiveTestCase):
                 request.assert_not_called()
                 self.assertEqual(Message.objects.filter(direction='out').count(), 0)
                 self.manychat_message(f'הלו {outcome}')
+
+
+# --- a burst gets one answer ------------------------------------------------------------------------------------
+
+class LiveBurstTests(LiveTestCase):
+    """
+    He writes three short messages a few seconds apart. The computation starts
+    early, but an answer he has written past never leaves: it is dropped, and
+    everything he wrote is answered together.
+    """
+
+    def setUp(self):
+        super().setUp()
+        knowledge_import.run()
+        catalogue()
+        self.turn_on()
+
+    def writes_while_claude_thinks(self, texts):
+        """Claude, with a message of his landing during each of the first computations (its own call finds the contact busy)."""
+        waiting = list(texts)
+        calls = []
+
+        def claude(ctx, deadline, **options):
+            calls.append([target.text for target in ctx.targets])
+            if waiting:
+                self.assertTrue(self.manychat_message(waiting.pop(0)).data['stored'])
+                self.assertEqual(self.reply().data['outcome'], 'busy')
+            return shadow._stub(ctx)
+
+        return patch(CLAUDE, side_effect=claude), calls
+
+    def test_a_message_that_lands_while_claude_thinks_drops_that_answer_and_all_is_answered_together(self):
+        claude, calls = self.writes_while_claude_thinks(['יש לכם קפוארה?', 'בראש העין'])
+        with claude, patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual((response.data['outcome'], response.data['restarts']), ('sent', 2))
+        self.assertNotIn('followed_by', response.data)
+        # Three computations, each over everything he had written by then — and one answer.
+        self.assertEqual(calls, [['היי'], ['היי', 'יש לכם קפוארה?'], ['היי', 'יש לכם קפוארה?', 'בראש העין']])
+        self.assertEqual(len(sends(request)), 1)
+        reply = ShadowReply.objects.get()                                # the dropped answers were never kept
+        self.assertEqual(len(reply.covers_message_ids), 3)
+        self.assertEqual(Message.objects.filter(contact_id=self.contact_id, new_bot=True).count(), 1)
+        [line] = self.answers()
+        self.assertIn('חושב מחדש 2 פעמים', line.text)
+        contact = self.owner()
+        self.assertIsNone(contact.live_test_busy_until)
+        self.assertFalse(contact.needs_shadow)
+        self.assertFalse(contact.needs_human)
+
+    def test_somebody_who_never_stops_writing_still_gets_an_answer(self):
+        # A message during each of the first four computations: the fourth is not asked whether he wrote again.
+        claude, calls = self.writes_while_claude_thinks(['א', 'ב', 'ג', 'ד'])
+        with claude, patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual((response.data['outcome'], response.data['restarts']), ('sent', live_test.MAX_RESTARTS))
+        # The fourth computation's answer left; the message that landed in it got the next one, from the same call.
+        self.assertEqual(response.data['followed_by'], ['sent'])
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(sends(request)), 2)
+        self.assertEqual(ShadowReply.objects.count(), 2)
+
+    @override_settings(WAHUB_LIVE_TEST_QUIET_SECONDS=10)
+    def test_nothing_leaves_before_he_has_been_quiet_for_ten_seconds(self):
+        # The clock stands at his last message: four seconds until the computation, then the rest of the ten.
+        with patch(REQUEST, return_value=OK) as request:
+            self.assertEqual(self.reply().data['outcome'], 'sent')
+        self.assertEqual(self.waits(), [4.0] + [1.0] * 10)
+        self.assertEqual(len(sends(request)), 1)
+        # Claude took longer than that: nothing left to wait.
+        self.sleep.reset_mock()
+        self.manychat_message('ועוד שאלה')
+        self.last_answer_was(60)
+        self.since_his_last_message = 14
+        with patch(REQUEST, return_value=OK):
+            self.assertEqual(self.reply().data['outcome'], 'sent')
+        self.sleep.assert_not_called()
+
+    @override_settings(WAHUB_LIVE_TEST_QUIET_SECONDS=10)
+    def test_a_message_that_lands_while_the_ready_answer_waits_for_quiet_drops_it_too(self):
+        wrote = []
+
+        def waiting(seconds):
+            # The third second of the wait for quiet (the first sleep is the wait before the computation).
+            if len(self.sleep.call_args_list) == 4 and not wrote:
+                wrote.append(self.manychat_message('ומה המחיר?').data['stored'])
+
+        self.sleep.side_effect = waiting
+        with patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual(wrote, [True])
+        self.assertEqual((response.data['outcome'], response.data['restarts']), ('sent', 1))
+        self.assertEqual(len(sends(request)), 1)
+        self.assertEqual(len(ShadowReply.objects.get().covers_message_ids), 2)
+
+    def test_a_claim_another_call_took_meanwhile_stops_this_one_and_nothing_is_sent_twice(self):
+        def claude(ctx, deadline, **options):
+            self.manychat_message('עוד משהו')
+            # This call's claim ran out and another call took the contact.
+            Contact.objects.filter(pk=self.contact_id).update(live_test_busy_until=timezone.now() + timedelta(seconds=60))
+            return shadow._stub(ctx)
+
+        with patch(CLAUDE, side_effect=claude), patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual(response.data['outcome'], 'busy')
+        self.assertEqual(sends(request), [])
+        self.assertEqual(ShadowReply.objects.count(), 0)
+        self.assertIsNotNone(self.owner().live_test_busy_until)          # the other call's claim is left alone
+
+
+class LiveBurstClaudeTests(LiveTestCase):
+    REAL_CLAUDE = True
+
+    def setUp(self):
+        super().setUp()
+        knowledge_import.run()
+        catalogue()
+        self.turn_on()
+
+    def test_claude_is_not_asked_for_another_tool_round_once_he_wrote_again(self):
+        import json
+
+        posts = []
+
+        def claude(url, **kwargs):
+            posts.append(len(kwargs['json']['messages']))
+            if len(posts) == 1:
+                # The first computation asks for a tool; his next message lands while the tool runs.
+                self.manychat_message('בראש העין')
+                return _json_response({'model': 'claude-opus-5-5', 'stop_reason': 'tool_use', 'content': [
+                    {'type': 'tool_use', 'id': 'toolu_1', 'name': 'find_courses', 'input': {'course_type': 'קפוארה'}},
+                ]})
+            return _json_response({'model': 'claude-opus-5-5', 'stop_reason': 'end_turn', 'content': [
+                {'type': 'text', 'text': json.dumps({'text': 'יש קפוארה בראש העין', 'reasoning': 'כי', 'knowledge_ids': []}, ensure_ascii=False)},
+            ]})
+
+        with patch(CLAUDE_POST, side_effect=claude), patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual((response.data['outcome'], response.data['restarts']), ('sent', 1))
+        # The dropped computation stopped after its first round; the second began anew, with one message to Claude.
+        self.assertEqual(posts, [1, 1])
+        self.assertEqual(sends(request), [(OWNER_SUBSCRIBER, 'יש קפוארה בראש העין')])
+        self.assertEqual(len(ShadowReply.objects.get().covers_message_ids), 2)
+
+    @override_settings(OPENAI_API_KEY='openai-test-key', SUPABASE_URL=STORAGE_URL, SUPABASE_SERVICE_ROLE_KEY=SERVICE_KEY)
+    def test_a_recording_openai_refused_is_answered_all_the_same_and_says_why(self):
+        import json
+
+        self.manychat_message(OGG_URL)
+        no_credit = _json_response({'error': {'message': 'You have no credits remaining.', 'type': 'insufficient_quota'}}, 429)
+        answer = _json_response({'model': 'claude-opus-5-5', 'stop_reason': 'end_turn', 'content': [
+            {'type': 'text', 'text': json.dumps({'text': 'אפשר לכתוב לי את השאלה?', 'reasoning': 'כי', 'knowledge_ids': []}, ensure_ascii=False)},
+        ]})
+        to_claude = []
+
+        def post(url, **kwargs):
+            # One `requests.post` serves both: OpenAI refuses the recording, Claude answers.
+            if url == transcribe_module.TRANSCRIPTIONS_URL:
+                return no_credit
+            to_claude.append(kwargs['json'])
+            return answer
+
+        with patch(FETCH, return_value=fetched(OGG, 'audio/ogg')), patch(STORAGE_REQUEST, side_effect=FakeStorage()), \
+                patch(CLAUDE_POST, side_effect=post), patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual(response.data['outcome'], 'sent')
+        self.assertEqual(sends(request), [(OWNER_SUBSCRIBER, 'אפשר לכתוב לי את השאלה?')])
+        recording = Message.objects.filter(contact_id=self.contact_id, direction='in').order_by('-id').first()
+        self.assertEqual((recording.transcript, recording.error), ('', 'אין יתרה בחשבון OpenAI — התמלול לא עובד עד שמטעינים'))
+        # Claude was told a recording arrived that nobody could hear, and the owner is not asked for a person over it.
+        self.assertIn('הודעה קולית', to_claude[-1]['messages'][0]['content'])
+        self.assertFalse(self.owner().needs_human)
 
 
 # --- ManyChat's files: fetched into the bucket when answered ----------------------------------------------------
