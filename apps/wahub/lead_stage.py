@@ -234,6 +234,9 @@ STAGE_OWNERS = {
     LEAD_DELETED: '',
     LEAD_COLD: '',
 }
+# Stages in which a person who holds the conversation has nothing to do right now: the customer's turn,
+# a lesson or a date ahead, nothing to offer yet.
+NOBODYS_MOVE = (LEAD_IN_CONVERSATION, LEAD_TRIAL_BOOKED, LEAD_WAITING_DATE, LEAD_NOTHING_TO_OFFER)
 OWNER_LABELS = dict(LEAD_OWNER_CHOICES)
 
 # One cron call: how long the look may take, and how many contacts of each kind it reads.
@@ -534,7 +537,9 @@ class _Facts:
         self.reopened_at = _moment(manual.get('reopened_at'))
         taken = manual.get('owner') if isinstance(manual.get('owner'), dict) else {}
         # A person answers this conversation, or pressed "קח אליי": the next move is theirs, whatever the stage.
-        self.person_holds = contact.handled_by == HANDLED_HUMAN or taken.get('value') == LEAD_OWNER_OFFICE
+        # Somebody pressed "קח אליי" on the lead itself: it stays on her list whatever its stage.
+        self.lead_taken = taken.get('value') == LEAD_OWNER_OFFICE
+        self.person_holds = contact.handled_by == HANDLED_HUMAN or self.lead_taken
         self.person_holds_why = (
             'נציג לקח את השיחה' if contact.handled_by == HANDLED_HUMAN
             else f'{taken.get("by_name") or "מנהל"} לקח את הליד' if taken.get('value') == LEAD_OWNER_OFFICE else ''
@@ -724,7 +729,12 @@ def compute(contact: Contact, now=None) -> dict:
             moments.append(_midnight(today + timedelta(days=1)))
             owner = STAGE_OWNERS[stage] if owner is None else owner
             if facts.person_holds:
-                owner = LEAD_OWNER_OFFICE
+                # A person holds the conversation: the bot never comes back by itself. The lead waits
+                # for the office only while there is something for the office to do — one a person has
+                # answered, or that waits for a lesson or a date, is nobody's move ("מחכים לך" is a list of
+                # work). A lead somebody took by name stays hers.
+                waits_for_nobody = stage in NOBODYS_MOVE and owner != LEAD_OWNER_OFFICE and not facts.lead_taken
+                owner = '' if waits_for_nobody else LEAD_OWNER_OFFICE
             if owner != LEAD_OWNER_BOT:
                 follow = None
         moments = [moment for moment in moments if moment is not None]

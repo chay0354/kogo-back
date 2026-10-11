@@ -941,7 +941,9 @@ class StageTests(LeadsCase):
             with self.subTest(held=held):
                 result = self.stage(self.lead(**link, **held))
                 self.assertEqual((result['stage'], result['owner'], result['follow']), ('link_sent', 'office', None))
-                self.assertEqual(self.got(self.lead(**held)), ('in_conversation', 'office'))
+                # In conversation there is nothing for the office to do: a conversation a person holds and
+                # has answered is nobody's move, and leaves "מחכים לך" — unless she took the lead by name.
+                self.assertEqual(self.got(self.lead(**held)), ('in_conversation', 'office' if 'lead_manual' in held else ''))
                 self.assertEqual(self.got(self.lead(40 * DAY, **held)), ('cold', ''))              # closed is nobody's
 
     def test_closed_by_a_person_on_the_leads_screen(self):
