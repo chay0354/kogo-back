@@ -24,6 +24,10 @@ class Command(BaseCommand):
             f'סה"כ {result["created_total"]} רשומות ({result["inactive"]} מהן לא פעילות — החלטות פתוחות או תאריכים שעברו); '
             f'{result["skipped"]} כבר היו; תגיות חדשות: {result["tags"]}; תשובות מוכנות חדשות: {result["quick_replies"]}.'
         ))
+        if result['revised'] or result['revision_left']:
+            self.stdout.write(f'עודכנו לפי ביקורת הכללים: {result["revised"]} רשומות.')
+            for title in result['revision_left']:
+                self.stdout.write(self.style.WARNING(f'  "{title}" נערכה מאז הייבוא ונשארה כפי שהיא — לבדוק מול ביקורת הכללים.'))
         if result['docs_found']:
             self.stdout.write(f'נבדקו {result["verbatim_checked"]} נוסחים מילה במילה מול המסמכים.')
             for key in result['verbatim_mismatch']:

@@ -1,0 +1,86 @@
+"""
+An invented catalogue for running the bot's self-checks on a machine with no
+data: the unit tests, and `manage.py wahub_eval --fixtures` (which builds it
+inside a transaction and rolls it back, so the local database is left as it
+was). Never built on a server: there the scripts run against the real
+catalogue.
+
+Every name of a person here is made up. The cities are real names because the
+conversation rules recognise a city by its name (analysis.BRANCH_ALIASES); the
+branches, the classes, the prices and the people are not anybody's.
+
+What it holds is what the scripts need the system to hold (world.py):
+
+    ראש העין     one branch of ours, two fields. Capoeira for ages 4.5–6 whose
+                 trial costs ₪30 and for grades ג–ד whose trial is free (with
+                 a registration fee of its own); hip hop for ages 4.5–6 and
+                 for grades א–ב, both free — so that at six the two hip hop
+                 groups meet, and at five there are two fields to choose from.
+    פתח תקווה    two branches of ours — a city where the branch is asked first.
+    רמת גן       an external branch, run by the municipality.
+"""
+from __future__ import annotations
+
+from datetime import time
+from decimal import Decimal
+
+
+def build() -> dict:
+    """Creates the catalogue and, when the bot has no knowledge yet, files the knowledge. Returns the main rows."""
+    from apps.core.tests.test_fixtures import TestDataFactory
+    from apps.enrollments.models import TrialRegistrationPolicy
+    from apps.wahub import knowledge_import
+    from apps.wahub.models import KnowledgeItem
+
+    TrialRegistrationPolicy.current()           # made on first use; here, so that the tools find it
+    if not KnowledgeItem.objects.exists():
+        knowledge_import.run()
+
+    stage = TestDataFactory.create_branch(
+        name='סטודיו הדגמה ראש העין', city=TestDataFactory.create_city('ראש העין'), address='רחוב הדוגמה 8, ראש העין',
+        phone='03-5550000', arrival_directions='חניה מאחורי הבניין, קומה 2',
+    )
+    capoeira = TestDataFactory.create_course_type('קפוארה')
+    capoeira.description = 'אומנות לחימה ברזילאית עם מוזיקה'
+    capoeira.trial_bring_note = 'בגדים נוחים ובקבוק מים'
+    capoeira.save()
+    hip_hop = TestDataFactory.create_course_type('היפ הופ')
+    uri = TestDataFactory.create_instructor(first_name='אורי', last_name='דוגמאי', branch=stage, phone='050-0000001')
+    noa = TestDataFactory.create_instructor(first_name='נועה', last_name='לדוגמה', branch=stage, phone='050-0000002')
+    room = TestDataFactory.create_room(name='אולם 1', branch=stage, capacity=14)
+
+    def course(name, kind, low, high, price, *, lessons, instructor, **extra):
+        row = TestDataFactory.create_course(
+            name=name, branch=stage, course_type=kind, price=Decimal(price), min_age=low, max_age=high, capacity=14, **extra,
+        )
+        for day, start, end in lessons:
+            TestDataFactory.create_lesson(course=row, room=room, instructor=instructor, day_of_week=day, start_time=start, end_time=end)
+        return row
+
+    young_capoeira = course(
+        'קפוארה גיל 4.5-6', capoeira, 2, 2, '260.00', lessons=[(2, time(17, 0), time(17, 45))], instructor=uri,
+        trial_lesson_is_paid=True, trial_lesson_price=Decimal('30.00'),
+    )
+    older_capoeira = course(
+        'קפוארה כיתות ג-ד', capoeira, 5, 6, '270.00', instructor=uri, registration_fee_override=Decimal('60.00'),
+        lessons=[(0, time(16, 0), time(17, 0)), (3, time(16, 0), time(17, 0))],
+    )
+    young_hip_hop = course('היפ הופ גיל 4.5-6', hip_hop, 2, 2, '250.00', lessons=[(4, time(16, 30), time(17, 15))], instructor=noa)
+    older_hip_hop = course('היפ הופ כיתות א-ב', hip_hop, 3, 4, '280.00', lessons=[(1, time(17, 0), time(18, 0))], instructor=noa)
+
+    petah_tikva = TestDataFactory.create_city('פתח תקווה')
+    for name, start in (('מינץ - הדגמה', time(16, 0)), ('אם המושבות - הדגמה', time(17, 30))):
+        branch = TestDataFactory.create_branch(name=name, city=petah_tikva, address=f'{name}, פתח תקווה', phone='03-5550001')
+        row = TestDataFactory.create_course(
+            name=f'קפוארה כיתות א-ב {name}', branch=branch, course_type=capoeira, price=Decimal('265.00'), min_age=3, max_age=4,
+        )
+        TestDataFactory.create_lesson(course=row, day_of_week=1, start_time=start, end_time=time(start.hour + 1, start.minute))
+
+    external = TestDataFactory.create_branch(
+        name='רמת גן - הדגמה', city=TestDataFactory.create_city('רמת גן'), is_external=True,
+        external_link='https://ramat-gan.example/signup',
+    )
+    return {
+        'stage': stage, 'external': external, 'young_capoeira': young_capoeira, 'older_capoeira': older_capoeira,
+        'young_hip_hop': young_hip_hop, 'older_hip_hop': older_hip_hop,
+    }

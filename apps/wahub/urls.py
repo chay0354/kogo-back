@@ -23,6 +23,11 @@ urlpatterns = [
     path('cron/tick/', views.cron_tick, name='wahub-cron-tick'),
     path('review/notes/', views_bot.ReviewNotesView.as_view(), name='wahub-review-notes'),
     path('review/summary/', views_bot.ReviewSummaryView.as_view(), name='wahub-review-summary'),
+    # "בדיקות הבוט" — the bot's self-checks (docs/WAHUB-CONTRACT-BOT-EVALS.md): the list with the last results,
+    # one conversation played per request, and one kept run in full.
+    path('bot/evals/', views_bot.BotEvalsView.as_view(), name='wahub-bot-evals'),
+    path('bot/evals/run/', views_bot.BotEvalRunView.as_view(), name='wahub-bot-evals-run'),
+    path('bot/evals/runs/<int:pk>/', views_bot.BotEvalRunDetailView.as_view(), name='wahub-bot-evals-run-detail'),
     path('demo/scenarios/', views.DemoScenariosView.as_view(), name='wahub-demo-scenarios'),
     path('demo/scenario/', views.DemoScenarioView.as_view(), name='wahub-demo-scenario'),
     path('demo/contacts/', views.DemoContactsView.as_view(), name='wahub-demo-contacts'),

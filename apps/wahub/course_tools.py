@@ -44,6 +44,9 @@ TRIAL_PER_COURSE = (
     'שיעור ניסיון נקבע לכל חוג בנפרד. עונים רק על החוג שמתאים לגיל ולתחום של הילד; '
     'לא אומרים "הניסיון בסניף הזה ללא עלות" או "בתשלום" על הסניף כולו'
 )
+TRIAL_WHEN_ASKED = (
+    'עלות שיעור הניסיון נאמרת על חוג מסוים שהלקוח בחר, ורק כששאל עליה. לא מכלילים על כל החוגים ("בכל האפשרויות הניסיון ללא עלות")'
+)
 REGISTRATION_FEE_NOTE = 'דמי רישום נגבים פעם אחת לכל ילד, בהרשמה הראשונה שלו; ילד שכבר משלם על חוג לא משלם אותם שוב'
 HIDDEN_NOTE = 'החוג לא מוצג בהרשמה באתר, ואי אפשר להירשם אליו משם. לא מציעים אותו; מפנים למשרד'
 NOT_OPEN = 'חוג זה אינו פתוח להרשמה'
@@ -134,6 +137,8 @@ def lesson_payload(lesson, course, seats: Seats, *, dates: int, detail: bool = F
     )
     payload = {
         'id': str(lesson.id),
+        # Whose lesson this is, on the lesson itself: a day or an hour lifted out of here still says its class.
+        'course': course.name,
         'day': DAY_NAMES[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '',
         'start': str(lesson.start_time)[:5],
         'end': str(lesson.end_time)[:5],
@@ -196,6 +201,8 @@ def trial_payload(course, lessons: list) -> dict:
         text = TRIAL_NO_PRICE
     is_open = any(lesson['trial_open'] for lesson in lessons)
     return {
+        # Whose trial this is: one class's trial is never the next class's, nor the branch's.
+        'course': course.name,
         'is_paid': is_paid,
         'price': _money(price) if priced else None,
         'text': text,
@@ -298,13 +305,14 @@ def trial_summary(courses) -> dict:
             f'שיעור הניסיון שונה מחוג לחוג: בתשלום ב-{len(paid)} חוגים{f" ({priced})" if priced else ""}, '
             f'ללא עלות ב-{len(free)}. {TRIAL_PER_COURSE}'
         )
-    elif paid:
-        text = f'בכל {len(paid)} החוגים שנמצאו שיעור הניסיון בתשלום{f" ({priced})" if priced else ""}'
-    elif free:
-        text = f'בכל {len(free)} החוגים שנמצאו שיעור הניסיון ללא עלות'
     else:
+        # One answer for every class found is not a sentence to hand over: the bot said it of "all the options"
+        # (the owner's live test, 11.10.2026). The counts stay; each class says its own trial.
         text = ''
-    return {'paid_courses': len(paid), 'free_courses': len(free), 'mixed': bool(paid and free), 'text': text}
+    return {
+        'paid_courses': len(paid), 'free_courses': len(free), 'mixed': bool(paid and free), 'text': text,
+        'note': TRIAL_WHEN_ASKED,
+    }
 
 
 def trial_line(courses: list) -> str:

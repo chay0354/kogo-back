@@ -80,13 +80,18 @@ class WeeklyAuditTests(WahubTestCase):
                 'api/v1/wahub/settings/review/': 200,
                 # the lead stages: the board is one aggregate, read only
                 'api/v1/wahub/leads/board/': 200,
+                # "בדיקות הבוט": the list of scripts with their last results, read only. Playing one — which asks
+                # Claude and costs money — answers POST only, so the sweep never plays a script.
+                'api/v1/wahub/bot/evals/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])
         skipped = {outcome.path for outcome in ours if outcome.skipped}
         self.assertIn('api/v1/wahub/cron/tick/', skipped)
         # The routes that write (a demo scenario, a verdict, a note, an approval) answer POST or DELETE only.
-        self.assertFalse({'api/v1/wahub/demo/scenario/', 'api/v1/wahub/demo/contacts/', 'api/v1/wahub/shadow/try/'} & set(called))
+        self.assertFalse({
+            'api/v1/wahub/demo/scenario/', 'api/v1/wahub/demo/contacts/', 'api/v1/wahub/shadow/try/', 'api/v1/wahub/bot/evals/run/',
+        } & set(called))
 
         self.assertEqual(
             (Contact.objects.values().get(), Message.objects.count(), ContactEvent.objects.count()), before,

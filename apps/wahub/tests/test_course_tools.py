@@ -31,7 +31,7 @@ from apps.enrollments.trial_reminders import iter_upcoming_lesson_occurrences
 from apps.scheduling.models import LessonCancellation
 from apps.wahub import knowledge, knowledge_import, shadow, shadow_tools
 from apps.wahub.knowledge_seed import OFFICE_PHONE
-from apps.wahub.models import Contact, ShadowReply
+from apps.wahub.models import Contact, ShadowReply, Tag
 from apps.wahub.shadow_tools import ToolContext, run_tool, summarize_result
 from apps.wahub.tests.base import PHONE, WahubTestCase
 
@@ -208,22 +208,49 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
         self.assertEqual((result['courses'][0]['min_age'], result['courses'][0]['max_age']), (8.0, 10.0))
 
     def test_a_grade_is_understood_as_a_grade(self):
-        self.assertEqual([course['name'] for course in self.find(grade='כיתה ג')['courses']], ['ג-ד קפוארה ואקרובטיקה'])
-        self.assertEqual([course['name'] for course in self.find(grade='גן חובה')['courses']], ['קפוארה 4.5-6 יום שלישי'])
-        self.assertEqual([course['name'] for course in self.find(grade='ב')['courses']], ['א-ב ריקוד'])
+        capoeira = {'course_type': 'קפוארה'}
+        self.assertEqual([course['name'] for course in self.find(grade='כיתה ג', **capoeira)['courses']], ['ג-ד קפוארה ואקרובטיקה'])
+        self.assertEqual([course['name'] for course in self.find(grade='גן חובה', **capoeira)['courses']], ['קפוארה 4.5-6 יום שלישי'])
+        self.assertEqual([course['name'] for course in self.find(grade='ב', course_type='מחול')['courses']], ['א-ב ריקוד'])
+        # The field is never assumed (the owner, 12.10.2026): one field for the grade is offered by name, as a question.
+        alone = self.find(grade='ב')
+        self.assertEqual((alone['need'], alone['course_types'], alone['courses']), ('course_type', ['היפהופ - מחול'], []))
+        self.assertEqual(alone['ask'], 'יש כאן היפהופ - מחול — זה התחום שמחפשים?')
 
-    def test_an_age_on_the_line_between_two_groups_returns_both_and_says_to_ask(self):
+    def test_an_age_on_the_line_between_two_groups_asks_the_grade_before_any_class(self):
+        """
+        Until 12.10.2026 both groups came back with a hint to ask. The owner's
+        order ("first find out, then offer") made the hint the answer: the two
+        groups to choose between, the question, and no class of either.
+        """
         result = self.find(age=6)
+        self.assertEqual((result['need'], result['course_types']), ('course_type', ['היפהופ - מחול', 'קפוארה']))
+        self.assertEqual(result['courses'], [])
+        # The field is known and one group fits it: nothing is left to ask.
+        result = self.find(age=6, course_type='קפוארה')
+        self.assertEqual((result['need'], [course['ages'] for course in result['courses']]), ('', ['גיל 4.5-6']))
+        # Two groups of one field meet at six — גן חובה or כיתה א: the grade is asked, and no class of either is given.
+        first_grade = TestDataFactory.create_course(
+            name='א-ב קפוארה', branch=self.branch, course_type=self.capoeira, price=Decimal('270.00'), min_age=3, max_age=4,
+        )
+        TestDataFactory.create_lesson(course=first_grade, room=self.room, instructor=self.moshe, day_of_week=4)
+        result = self.find(age=6, course_type='קפוארה')
+        self.assertEqual((result['need'], result['ask'], result['between']), ('grade', 'באיזו כיתה או גן הילד?', ['גיל 4.5-6', 'כיתות א–ב']))
+        self.assertEqual(result['courses'], [])
+        self.assertNotIn('270', json.dumps(result, ensure_ascii=False))
+        self.assertEqual([course['name'] for course in self.find(grade='כיתה א', course_type='קפוארה')['courses']], ['א-ב קפוארה'])
+        # A customer who pressed to see everything still gets both, with the line that says to ask.
+        result = self.find(age=6, course_type='קפוארה', show_all=True)
         self.assertEqual({course['ages'] for course in result['courses']}, {'גיל 4.5-6', 'כיתות א–ב'})
         self.assertIn('לשאול באיזו כיתה או גן', result['hint'])
 
     def test_a_child_under_three_has_no_group(self):
-        result = self.find(age=2)
+        result = self.find(age=2, course_type='קפוארה')
         self.assertEqual(result['courses'], [])
         self.assertIn('החוגים מגיל 3', result['hint'])
 
     def test_one_class_is_never_read_as_the_branch(self):
-        result = self.find()
+        result = self.find(show_all=True)       # the whole branch: only for a customer who asked to see everything
         summary = result['trial_summary']
         self.assertEqual((summary['paid_courses'], summary['free_courses'], summary['mixed']), (1, 2, True))
         self.assertIn('שונה מחוג לחוג', summary['text'])
@@ -245,7 +272,7 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
                     trial_lesson_is_paid=paid, trial_lesson_price=Decimal('30.00') if paid else None,
                 )
                 TestDataFactory.create_lesson(course=course, room=self.room, instructor=self.moshe, day_of_week=5)
-        result = self.find()
+        result = self.find(show_all=True)
         self.assertEqual((len(result['courses']), len(result['more_courses']), result['courses_total']), (12, 17, 29))
         cut_and_paid = [row for row in result['more_courses'] if row['trial_is_paid']]
         self.assertGreaterEqual(len(cut_and_paid), 2)                  # fourteen are paid and twelve are spelled out
@@ -261,7 +288,7 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
     def test_a_trial_marked_paid_with_no_price_is_never_called_free(self):
         self.young.trial_lesson_price = None
         self.young.save(update_fields=['trial_lesson_price'])
-        trial = self.find(age=5)['courses'][0]['trial']
+        trial = self.find(age=5, course_type='קפוארה')['courses'][0]['trial']
         self.assertEqual((trial['is_paid'], trial['price']), (True, None))
         self.assertNotIn('ללא עלות', trial['text'].replace('לא לומר שהוא ללא עלות', ''))
         self.assertIn('לבדוק במשרד', trial['text'])
@@ -273,7 +300,7 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
 
         rows = APIClient().get('/api/v1/customers/widget/courses/', {'branch_id': str(self.branch.id)}).json()
         form = {row['id']: row for row in rows}
-        for course in self.find()['courses']:
+        for course in self.find(show_all=True)['courses']:
             shown = form[course['id']]
             self.assertEqual(course['trial']['is_paid'], shown['trial_lesson_is_paid'], course['name'])
             self.assertEqual(course['trial']['price'], shown['trial_lesson_price'], course['name'])
@@ -290,7 +317,7 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
         self.assertIn('שיעור ניסיון ללא עלות', reply.text)
 
     def test_the_stub_names_each_class_when_their_trials_differ(self):
-        line = shadow_tools.trial_line(self.find(course_type='קפוארה')['courses'])
+        line = shadow_tools.trial_line(self.find(course_type='קפוארה', show_all=True)['courses'])
         self.assertTrue(line.startswith('שיעור ניסיון: '))
         self.assertEqual(
             set(line[len('שיעור ניסיון: '):].split(', ')),
@@ -310,7 +337,7 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
 
 class FindCoursesTest(CourseToolsTestCase):
     def test_a_class_carries_what_a_parent_asks_about(self):
-        course = self.find(age=5)['courses'][0]
+        course = self.find(age=5, course_type='קפוארה')['courses'][0]
         self.assertEqual(course['description'], 'שיעור קפוארה לגיל הרך')
         self.assertEqual((course['price_monthly'], course['registration_fee']), ('260.00', '120.00'))
         self.assertEqual((course['ages'], course['min_age'], course['max_age']), ('גיל 4.5-6', 4.5, 6.0))
@@ -322,7 +349,7 @@ class FindCoursesTest(CourseToolsTestCase):
         self.assertEqual([row['date'] for row in lesson['next_dates']], [day.strftime('%d.%m.%Y') for day in coming])
 
     def test_the_description_falls_back_to_the_fields_and_the_fee_is_the_classs_own(self):
-        course = self.find(age=9)['courses'][0]
+        course = self.find(age=9, course_type='קפוארה')['courses'][0]
         self.assertEqual(course['description'], 'אומנות לחימה ברזילאית עם מוזיקה')
         self.assertEqual(course['registration_fee'], '60.00')
         self.assertEqual(course['tracks'][0]['name'], 'פעמיים בשבוע')
@@ -425,7 +452,7 @@ class CourseCardTest(CourseToolsTestCase):
         result = self.card(self.young)
         self.assertEqual(result['course']['show_in_widget'], False)
         self.assertIn('לא מוצג בהרשמה באתר', result['course']['note'])
-        self.assertEqual(self.find(age=5)['courses'], [])
+        self.assertEqual(self.find(age=5, course_type='קפוארה')['courses'], [])
         self.young.is_active = False
         self.young.save(update_fields=['is_active'])
         self.assertFalse(self.card(self.young)['found'])
@@ -658,6 +685,7 @@ class NothingOfMoneyThatIsNotAParentsBusinessTest(CourseToolsTestCase):
     def setUp(self):
         super().setUp()
         _discount('הנחת ילד שני', '10.00')
+        Tag.objects.create(name='ברכת יום הולדת')      # the tag a topic ends with; the tool only marks it
         self.family, self.child = self.family_with_child()
         LessonEnrollment.objects.create(child=self.child, lesson=self.dance_lesson, status='active')
         paid = Payment.objects.create(
@@ -694,6 +722,9 @@ class NothingOfMoneyThatIsNotAParentsBusinessTest(CourseToolsTestCase):
             ('office_hours_now', {}),
             ('customer_card', {}),
             ('request_human', {'reason': 'בדיקה'}),
+            ('find_courses', {'city': 'ראש העין', 'show_all': True}),
+            ('find_courses', {}),
+            ('tag_conversation', {'tag': 'ברכת יום הולדת', 'details': 'נועה, בת, השרון'}),
         ]
         answers = {}
         for name, arguments in calls:
