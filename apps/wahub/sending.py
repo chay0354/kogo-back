@@ -35,6 +35,7 @@ from apps.wahub.models import (
     DELIVERED_STATUSES,
     DIRECTION_OUT,
     MESSAGE_SOURCE_KOGO,
+    SENDER_BOT,
     SENDER_OFFICE,
     STATUS_FAILED,
     STATUS_SENT,
@@ -206,17 +207,34 @@ def _deliver(contact: Contact, user, *, text: str, message_type: str, call) -> M
     return _keep_outbound(contact, user, text, message_type, status, error)
 
 
-def _keep_outbound(contact: Contact, user, text: str, message_type: str, status: str, error: str) -> Message:
+def keep_new_bot_reply(contact: Contact, text: str) -> Message:
+    """
+    The NEW bot's answer inside a DEMO conversation (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב).
+
+    The same simulation the screen already has — a message kept as `simulated`,
+    nothing leaves — with sender "bot" and `new_bot=True` so the screen and the
+    comparisons (shadow.old_bot_reply_for) tell it from the old bot's real
+    replies. Refuses any contact that is not a demo: a real customer's
+    conversation never gets an unsent line that looks like an answer.
+    """
+    if not contact.is_demo:
+        raise ValueError('new bot replies are written into demo conversations only')
+    return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_SIMULATED, '', sender=SENDER_BOT, new_bot=True)
+
+
+def _keep_outbound(contact: Contact, user, text: str, message_type: str, status: str, error: str,
+                   *, sender: str = SENDER_OFFICE, new_bot: bool = False) -> Message:
     now = timezone.now()
     with transaction.atomic():
         message = Message.objects.create(
             contact=contact,
             direction=DIRECTION_OUT,
-            sender=SENDER_OFFICE,
+            sender=sender,
             sender_name=state.user_display_name(user)[:150],
             sent_by=user if getattr(user, 'is_authenticated', False) else None,
             text=text,
             message_type=message_type,
+            new_bot=new_bot,
             status=status,
             error=error[:300],
             sent_at=now,
@@ -224,14 +242,16 @@ def _keep_outbound(contact: Contact, user, text: str, message_type: str, status:
         )
         changes = {'messages_count': F('messages_count') + 1}
         if status in DELIVERED_STATUSES:
-            # The office answered: nobody is waiting, and nothing is unread.
+            # Somebody answered: nobody is waiting.
             changes.update(
                 last_message_at=now,
                 last_message_text=state.preview(text),
                 last_message_direction=DIRECTION_OUT,
-                last_message_sender=SENDER_OFFICE,
+                last_message_sender=sender,
                 waiting_since=None,
-                unread_count=0,
             )
+            if sender == SENDER_OFFICE:
+                # The office answered, so it has read the conversation; a bot's answer reads nothing.
+                changes['unread_count'] = 0
         state.touch(contact.pk, **changes)
     return message

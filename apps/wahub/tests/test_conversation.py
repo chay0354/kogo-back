@@ -119,7 +119,7 @@ class ConversationDetailTests(WahubTestCase):
         self.assertEqual(
             set(data['messages'][0]),
             {'id', 'direction', 'sender', 'sender_label', 'sender_name', 'text', 'message_type', 'media_url',
-             'status', 'error', 'sent_at'},
+             'has_media', 'transcript', 'new_bot', 'status', 'error', 'sent_at'},
         )
 
         older = self.get(f'contacts/{contact.id}/messages/', before=ids[0], limit=50).data

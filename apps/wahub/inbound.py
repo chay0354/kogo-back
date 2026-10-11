@@ -35,7 +35,9 @@ from apps.wahub.models import (
     SOURCE_WHATSAPP,
     STATUS_RECEIVED,
     STATUS_SENT,
+    TYPE_IMAGE,
     TYPE_TEXT,
+    TYPE_VOICE,
     Contact,
     Message,
 )
@@ -52,6 +54,11 @@ DUPLICATE_WINDOW = timedelta(seconds=30)
 
 # WhatsApp's own limit is 4,096 characters; the rest is not a message.
 MAX_TEXT_CHARS = 8000
+
+# A demo contact's recording or picture (docs/WAHUB-CONTRACT-REAL-DEMO.md, א), and
+# the line the list shows for one that came with no text.
+MEDIA_TYPES = (TYPE_VOICE, TYPE_IMAGE)
+MEDIA_PREVIEW = {TYPE_VOICE: '🎤 הודעה קולית', TYPE_IMAGE: '📷 תמונה'}
 
 NEEDS_HUMAN_REASON = 'ביקש נציג'
 
@@ -172,14 +179,26 @@ def handle_payload(data, query_event: str = '') -> StoreResult:
     return store_event(**parse_payload(data, query_event))
 
 
-def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts=None) -> StoreResult:
+def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts=None,
+                message_type: str = TYPE_TEXT, media_url: str = '') -> StoreResult:
+    """
+    `message_type` and `media_url` come only from the demo door (a recording or
+    a picture the manager uploaded, apps/wahub/media.py): ManyChat's copy of a
+    real message is text. A media message may have no text, and two of them a
+    moment apart are two messages — the duplicate window is for ManyChat's
+    repeats of one text, and a second picture is not a repeat.
+    """
     if event not in EVENTS:
         return StoreResult(False, 'unknown_event')
     phone = normalize_phone(phone)
     if not phone:
         return StoreResult(False, 'invalid_phone')
     text = _text(text)[:MAX_TEXT_CHARS]
-    if not text:
+    is_media = message_type in MEDIA_TYPES and bool(media_url)
+    if not is_media:
+        message_type = TYPE_TEXT
+        media_url = ''
+    if not text and not is_media:
         return StoreResult(False, 'empty_text')
 
     now = timezone.now()
@@ -199,7 +218,7 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
         # are read before they are written.
         contact = Contact.objects.select_for_update().get(pk=contact.pk)
 
-        if Message.objects.filter(
+        if not is_media and Message.objects.filter(
             contact=contact, direction=direction, text=text, created_at__gte=now - DUPLICATE_WINDOW,
         ).exists():
             return StoreResult(False, 'duplicate', contact_id=contact.id)
@@ -209,7 +228,8 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
             direction=direction,
             sender=SENDER_CUSTOMER if incoming else SENDER_BOT,
             text=text,
-            message_type=TYPE_TEXT,
+            message_type=message_type,
+            media_url=media_url,
             status=STATUS_RECEIVED if incoming else STATUS_SENT,
             sent_at=sent_at,
             source=MESSAGE_SOURCE_MANYCHAT,
@@ -218,7 +238,7 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
         changes = {
             'messages_count': F('messages_count') + 1,
             'last_message_at': sent_at,
-            'last_message_text': state.preview(text),
+            'last_message_text': state.preview(text) or MEDIA_PREVIEW.get(message_type, ''),
             'last_message_direction': direction,
             'last_message_sender': message.sender,
         }

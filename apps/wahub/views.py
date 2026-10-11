@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 
@@ -29,7 +30,7 @@ from rest_framework.views import APIView
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
 from apps.customers.models import Family
-from apps.wahub import analysis, cron, demo, handoff, inbound, matching, queries, reviewer, sending, shadow, state
+from apps.wahub import analysis, cron, demo, handoff, inbound, matching, media, queries, reviewer, sending, shadow, state
 from apps.wahub.models import (
     EVENT_CREATED,
     EVENT_FOLLOWUP,
@@ -409,21 +410,50 @@ class ContactViewSet(viewsets.GenericViewSet):
         Demo mode: a message typed by the manager goes through the very door
         ManyChat's copy uses (inbound.store_event) — needs_human, needs_analysis,
         needs_shadow and all. Only for a contact marked is_demo.
+
+        As multipart it also takes a recording or a picture (docs/WAHUB-CONTRACT-REAL-DEMO.md, א):
+        `message_type` voice|image, `file`, and `text` as an optional caption.
+        The file goes to the private bucket (apps/wahub/media.py) and the
+        message carries its path.
         """
         contact = self.get_object()
         if not contact.is_demo:
             return _error('אפשר להקליד הודעות רק לאיש קשר דמו.', code='not_demo')
+        message_type = str(request.data.get('message_type') or 'text').strip()
+        if message_type not in ('text', 'voice', 'image'):
+            return _error('message_type: text, voice או image.')
         text = str(request.data.get('text') or '').strip()
-        if not text:
-            return _error('נדרש טקסט להודעה.')
         sender = str(request.data.get('sender') or 'customer').strip()
         if sender not in ('customer', 'bot'):
             return _error('sender: customer או bot.')
+        media_path = ''
+        if message_type == 'text':
+            if not text:
+                return _error('נדרש טקסט להודעה.')
+        else:
+            if sender != 'customer':
+                return _error('הקלטה או תמונה נשלחות רק בשם הלקוח.')
+            upload = request.FILES.get('file')
+            try:
+                # Refused for its type or size before the storage is asked anything.
+                media.check_upload(upload, message_type)
+            except media.MediaError as exc:
+                return _error(str(exc), code='bad_file')
+            if not media.configured():
+                return _error(media.NOT_CONFIGURED, code='storage_not_configured', http=status.HTTP_503_SERVICE_UNAVAILABLE)
+            try:
+                media_path = media.upload(contact.id, upload, message_type)
+            except media.MediaError as exc:
+                return _error(str(exc), code='storage_failed', http=status.HTTP_502_BAD_GATEWAY)
         event = inbound.EVENT_CUSTOMER_MESSAGE if sender == 'customer' else inbound.EVENT_BOT_REPLY
-        result = inbound.store_event(event=event, phone=contact.phone, text=text, name=contact.name)
+        result = inbound.store_event(
+            event=event, phone=contact.phone, text=text, name=contact.name, message_type=message_type, media_url=media_path,
+        )
         payload = self._payload(contact.id)
         payload['stored'] = result.stored
         payload['stored_message_id'] = result.message_id
+        if result.message_id:
+            payload['message'] = message_payload(Message.objects.get(pk=result.message_id))
         return Response(payload)
 
     @action(detail=True, methods=['get'])
@@ -648,6 +678,85 @@ class DemoContactsView(APIView):
 
     def delete(self, request):
         return Response(demo.delete_demo_contacts())
+
+
+# --- a real conversation with a demo contact (docs/WAHUB-CONTRACT-REAL-DEMO.md) ---------------------------
+
+# The shadow bot's answer inside one request, with the transcription and the tool rounds it needs.
+REPLY_SECONDS = 50
+
+
+def _flag(value, default: bool) -> bool | None:
+    """A JSON boolean, or its text from a form; None when it is neither."""
+    if value is None or value == '':
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ('true', '1', 'yes'):
+        return True
+    if text in ('false', '0', 'no'):
+        return False
+    return None
+
+
+class DemoReplyView(APIView):
+    """
+    POST demo/contacts/{id}/reply/ {post: true|false} — the new bot answers the
+    demo contact's unanswered messages NOW: the very code the cron runs
+    (shadow.propose, one answer per burst), kept as a ShadowReply. With `post`
+    the answer is also written into the conversation as the new bot's message
+    (sending.keep_new_bot_reply: sender "bot", new_bot, status "simulated").
+    Nothing is sent to anybody. A failure of Claude or of the transcription is
+    200 with `shadow.error`, and nothing is kept, so the next call tries again.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def post(self, request, pk):
+        contact = Contact.objects.filter(pk=pk).first()
+        if contact is None:
+            return _error('איש הקשר לא נמצא.', http=status.HTTP_404_NOT_FOUND)
+        if not contact.is_demo:
+            return _error('הבוט החדש עונה בשיחה רק לאיש קשר דמו.', code='not_demo')
+        post = _flag(request.data.get('post'), True)
+        if post is None:
+            return _error('post: true או false.')
+
+        def payload_of(message):
+            return {
+                'message': message_payload(message) if message is not None else None,
+                'contact': contact_payload(queries.listed().get(pk=contact.id)),
+            }
+
+        try:
+            reply = shadow.propose(contact, now=timezone.now(), deadline=time.monotonic() + REPLY_SECONDS, fallback=False)
+        except shadow.ShadowModelError as exc:
+            logger.warning('wahub demo reply for contact %s: %s', contact.pk, exc)
+            return Response({'shadow': {'error': str(exc)}, **payload_of(None)})
+        if reply is None:
+            return Response({'shadow': None, **payload_of(None)})
+        message = sending.keep_new_bot_reply(contact, reply.text) if post and reply.text else None
+        return Response({'shadow': shadow.reply_payload(reply), **payload_of(message)})
+
+
+class MessageMediaView(APIView):
+    """GET messages/{id}/media/ → {url, expires_in}: a short-lived signed address of a message's recording or picture."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request, pk):
+        message = Message.objects.filter(pk=pk).only('id', 'media_url').first()
+        if message is None or not message.media_url:
+            return _error('להודעה הזאת אין קובץ.', code='no_media', http=status.HTTP_404_NOT_FOUND)
+        if message.media_url.startswith('http://') or message.media_url.startswith('https://'):
+            # An address kept as it came (nothing writes one today); it is not ours to sign.
+            return Response({'url': message.media_url, 'expires_in': None})
+        try:
+            url = media.signed_url(message.media_url)
+        except media.MediaNotConfigured as exc:
+            return _error(str(exc), code='storage_not_configured', http=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except media.MediaError as exc:
+            return _error(str(exc), code='storage_failed', http=status.HTTP_502_BAD_GATEWAY)
+        return Response({'url': url, 'expires_in': media.SIGNED_URL_SECONDS})
 
 
 # --- stage 3: who asked and did not register; the WhatsApp block of a customer's card -----------------
