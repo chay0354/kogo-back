@@ -21,12 +21,20 @@ This module puts the price next to the move:
   monthly cron applies due changes before it charges.
 * **same**: exactly as before.
 
+Which discounts the price carries (owner, 11.10.2026): the ones the child was
+given when they signed up — a sibling, an early signup — travel with the
+child. They are not asked again on the day of the move, when the early-signup
+window has long closed and the sibling may have left. A move between two units
+that cost the same therefore changes nothing on the standing order, and a move
+to a unit with another price takes the new price less those same discounts.
+
 Nothing here talks to Tranzila except the one prorated charge, and that
 one runs only when the office confirmed the quoted figures.
 """
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -41,6 +49,7 @@ from apps.core.payment_service import (
 )
 from apps.core.tranzila_service import TOKEN_UNKNOWN, TranzilaService, token_charge_outcome
 from apps.courses.models import Lesson, LessonBundle
+from apps.customers.discount_service import DiscountService
 from apps.customers.models import Payment, RecurringPayment, TranzilaTransaction
 from apps.customers.recurring_amount import (
     effective_date_for_amount_change,
@@ -49,6 +58,7 @@ from apps.customers.recurring_amount import (
 from apps.enrollments.change_course import (
     _lesson_has_room,
     _same_unit,
+    matching_bundle,
     recurring_payments_for_unit,
     replace_unit,
     sibling_unit_enrollments,
@@ -146,6 +156,112 @@ def _unit_prorate(target_lessons: list[Lesson], today: date) -> tuple[Decimal, i
     return (Decimal(remaining) / Decimal(total)), remaining, total
 
 
+def unit_price(
+    child, old_rows: list[LessonEnrollment], lessons: list[Lesson], bundle: LessonBundle | None,
+    *, by_signup_order: bool = False,
+) -> tuple[Decimal, list[dict], bool]:
+    """
+    What a unit costs this child a month before any family discount: the list
+    price as their Nth class, less the "another class" discount when it is one.
+
+    That discount belongs to the lesson's place among the child's classes, not
+    to the family, so it is worked out for the unit in question. For a move,
+    the unit the child sits on and the one they move to are priced the same
+    way — as a class beside the child's others — so that two classes with one
+    price always compare as equal. `by_signup_order` asks instead what signup
+    asks about a class the child already sits on: the first one they joined is
+    the full-price one (the report of amounts that do not match their class).
+
+    Returns (price, the discount lines taken, final). `final` is the "מחיר
+    קבוע לחוג נוסף" case: that figure is the price and nothing else comes off it.
+    """
+    base, discount_lesson_id = target_pricing(child, old_rows, lessons, bundle)
+    if discount_lesson_id is None:
+        return base, [], False
+    service = DiscountService()
+    if by_signup_order:
+        discount = service.check_additional_lesson_discount(str(child.id), discount_lesson_id)
+    else:
+        discount = service.built_in_discount(service.ADDITIONAL_LESSON_IDENTIFIER)
+    if discount is None:
+        return base, [], False
+    if discount.discount_type == 'fixed_final_price':
+        if not service._fixed_price_lowers(discount, base):
+            return base, [], False
+        fixed = money(discount.value)
+        line = {'name': discount.name, 'reason': f'שיעור נוסף: ₪{fixed} (במקום ₪{base})', 'value': str(base - fixed)}
+        return fixed, [line], True
+    off = min(money(service._amount_off(discount, base)), base)
+    if off <= 0:
+        return base, [], False
+    line = {'name': discount.name, 'reason': service._with_percent(discount, 'חוג נוסף לאותו ילד'), 'value': str(off)}
+    return base - off, [line], False
+
+
+def current_unit(old_rows: list[LessonEnrollment]) -> tuple[list[Lesson], LessonBundle | None] | None:
+    """
+    The unit the child sits on, in the shape `unit_price` takes — or None when
+    it cannot be priced as one unit (two separate classes of a course that are
+    neither a track nor a course attended in full).
+    """
+    lessons = [row.lesson for row in old_rows if row.lesson_id]
+    if not lessons:
+        return None
+    lessons.sort(key=lambda lesson: (lesson.day_of_week, str(lesson.start_time), str(lesson.id)))
+    bundle = next((row.bundle for row in old_rows if row.bundle_id), None)
+    if bundle is None and len(lessons) > 1:
+        course = lessons[0].course
+        if any(lesson.course_id != course.id for lesson in lessons):
+            return None
+        bundle = matching_bundle(course, lessons)
+        if bundle is None and not course.must_attend_all_lessons:
+            return None
+    return lessons, bundle
+
+
+# The discounts of a family, as against the one that belongs to a lesson's
+# place among the child's classes (`unit_price`).
+SIGNUP_DISCOUNT_TYPES = ('second_child', 'early_signup', 'fixed_final_price')
+_PERCENT_IN_REASON = re.compile(r'\((\d+(?:\.\d+)?)%\)\s*$')      # written by DiscountService._with_percent
+
+
+def signup_discounts(recurring: RecurringPayment) -> list[dict]:
+    """The family discounts written on the standing order when the child signed up."""
+    raw = recurring.discount_details
+    rows = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) and raw else [])
+    return [row for row in rows if isinstance(row, dict) and row.get('type') in SIGNUP_DISCOUNT_TYPES]
+
+
+def price_with_signup_discounts(recurring: RecurringPayment, price: Decimal) -> tuple[Decimal, list[dict]]:
+    """
+    `price` less what this child was given at signup, the way it was given: the
+    same shekels for an amount off, the same percent for a percentage, the same
+    figure for a fixed price (which, as at signup, is the whole of it).
+    """
+    kept = []
+    for row in signup_discounts(recurring):
+        try:
+            deducted = money(row.get('amount_deducted') or row.get('value') or 0)
+        except (ArithmeticError, ValueError):
+            continue
+        name = str(row.get('name') or 'הנחה מההרשמה')
+        if row.get('type') == 'fixed_final_price':
+            signup_base = recurring.initial_payment.base_amount if recurring.initial_payment_id else None
+            if signup_base is None:
+                continue
+            fixed = money(signup_base) - deducted
+            if Decimal('0.00') < fixed < price:
+                return fixed, [{'name': name, 'reason': f'{name} — נשמרה מההרשמה', 'value': str(price - fixed)}]
+            continue
+        percent = _PERCENT_IN_REASON.search(str(row.get('reason') or ''))
+        off = money(price * Decimal(percent.group(1)) / Decimal('100')) if percent else deducted
+        if off <= 0:
+            continue
+        kept.append({'name': name, 'reason': f'{name} — נשמרה מההרשמה', 'value': str(off)})
+    total = sum((Decimal(line['value']) for line in kept), Decimal('0.00'))
+    return max(Decimal('0.00'), price - total), kept
+
+
 def pending_change_for(enrollment: LessonEnrollment) -> ScheduledUnitChange | None:
     rows = sibling_unit_enrollments(enrollment)
     return (
@@ -210,42 +326,47 @@ def quote_unit_change(
         return quote
 
     current = money(recurring.amount)
-    new_base, discount_lesson_id = target_pricing(child, old_rows, target_lessons, target_bundle)
-    # Every discount is recomputed for the new price the way signup computes
-    # it: family-level ones (second child, early signup) always, and the
-    # "additional lesson" one when the target really is an additional lesson
-    # for this child and no per-lesson tier already lowered the figure. A child
-    # with two lessons who moves the second one keeps the second-lesson price.
-    calc = PaymentService().discount_service.evaluate_discounts_for_payment(
-        family_id=str(child.family_id),
-        child_id=str(child.id),
-        payment_date=today,
-        base_price=new_base,
-        lesson_id=discount_lesson_id,
-    )
-    new_amount = money(calc.final_price)
+    new_base = target_base_price(child, old_rows, target_lessons, target_bundle)
+    new_price, lines, final = unit_price(child, old_rows, target_lessons, target_bundle)
+    sits_on = current_unit(old_rows)
+    old_price = unit_price(child, old_rows, *sits_on)[0] if sits_on else None
     factor, remaining, total = _unit_prorate(target_lessons, today)
-    difference = new_amount - current
-    prorated = money(difference * factor) if difference > 0 else Decimal('0.00')
-    if difference > 0 and prorated < Decimal('1.00'):
-        prorated = Decimal('0.00')
-    direction = 'same' if difference == 0 else ('up' if difference > 0 else 'down')
     effective = effective_date_for_amount_change(recurring, today=today)
     pending = money(recurring.pending_amount) if recurring.pending_amount is not None else None
-    # A different figure already waiting for the next cycle (a same-day revert,
-    # an old schedule) is replaced by this change — the office sees it first.
-    clears_pending = pending is not None and pending != new_amount
+
+    if old_price is not None and new_price == old_price:
+        # The two units cost the same: the move is only a move. Whatever this
+        # child pays — with the discounts from signup, a price the office set
+        # by hand, an amount already waiting for next month — stays as it is.
+        new_amount = current
+        lines = []
+        difference = prorated = Decimal('0.00')
+        direction = 'same'
+        clears_pending = False
+    else:
+        # Another price: the new unit's price, less the discounts the child
+        # was given at signup. They are not asked again today.
+        if final:
+            new_amount = new_price
+        else:
+            new_amount, kept = price_with_signup_discounts(recurring, new_price)
+            lines = lines + kept
+        difference = new_amount - current
+        prorated = money(difference * factor) if difference > 0 else Decimal('0.00')
+        if difference > 0 and prorated < Decimal('1.00'):
+            prorated = Decimal('0.00')
+        direction = 'same' if difference == 0 else ('up' if difference > 0 else 'down')
+        # A different figure already waiting for the next cycle (a same-day revert,
+        # an old schedule) is replaced by this change — the office sees it first.
+        clears_pending = pending is not None and pending != new_amount
 
     quote.update({
         'recurring_payment_id': str(recurring.id),
         'current_amount': str(current),
         'new_base_price': str(new_base),
         'new_amount': str(new_amount),
-        'discount_amount': str(money(calc.total_discount_amount)),
-        'discounts': [
-            {'name': d.name, 'reason': d.reason, 'value': str(d.value)}
-            for d in calc.applicable_discounts if Decimal(str(d.value or 0)) > 0
-        ],
+        'discount_amount': str(sum((Decimal(line['value']) for line in lines), Decimal('0.00'))),
+        'discounts': lines,
         'direction': direction,
         'difference': str(difference),
         'prorated_difference': str(prorated),
@@ -656,14 +777,15 @@ def resolve_difference_payment(payment: Payment, *, decision: str, transaction_i
 # Read-only report: standing orders whose amount no longer matches their unit
 # ---------------------------------------------------------------------------
 
-def price_drift_report(*, today: date | None = None, limit: int = 500) -> list[dict]:
+def price_drift_report(*, limit: int = 500) -> list[dict]:
     """
     Active standing orders billed by our cron whose amount differs from what
-    their current lessons cost today (a child moved to a dearer or cheaper
-    unit before changes were priced, or a course price that moved).
+    their current lessons cost: today's price of the unit, less the discounts
+    the child was given at signup (a child moved to a dearer or cheaper unit
+    before changes were priced, a course price that moved, a discount a move
+    took away before 11.10.2026).
     Nothing is written.
     """
-    today = today or timezone.now().astimezone(JERUSALEM_TZ).date()
     rows = []
     qs = (
         RecurringPayment.objects
@@ -685,28 +807,40 @@ def price_drift_report(*, today: date | None = None, limit: int = 500) -> list[d
         )
         if enrollment is None:
             continue
-        unit = sibling_unit_enrollments(enrollment)
-        target_lessons = [row.lesson for row in unit]
-        target_lessons.sort(key=lambda lesson: (lesson.day_of_week, str(lesson.start_time), str(lesson.id)))
-        target_bundle = next((row.bundle for row in unit if row.bundle_id), None)
-        try:
-            quote = quote_unit_change(enrollment=enrollment, target_lessons=target_lessons, target_bundle=target_bundle, today=today)
-        except Exception as exc:  # a broken unit must not hide the rest of the report
-            logger.warning('price drift: %s could not be quoted: %s', recurring.id, exc)
-            continue
-        if quote['blocked'] or quote['direction'] in ('same', 'no_sto'):
-            continue
         child = enrollment.child
+        unit = sibling_unit_enrollments(enrollment)
+        if len(recurring_payments_for_unit(child, unit)) != 1:
+            continue        # several orders for one unit: no single figure to compare
+        sits_on = current_unit(unit)
+        if sits_on is None:
+            continue
+        try:
+            price, _lines, final = unit_price(child, unit, *sits_on, by_signup_order=True)
+            expected = price if final else price_with_signup_discounts(recurring, price)[0]
+        except Exception as exc:  # a broken unit must not hide the rest of the report
+            logger.warning('price drift: %s could not be priced: %s', recurring.id, exc)
+            continue
+        current = money(recurring.amount)
+        # An amount already waiting for the next cycle is what the parent will
+        # pay from then on — a discount a move took away shows there first.
+        # Not when a move is scheduled with it: that amount is the price of
+        # the unit the child is about to move to, not of this one.
+        forward = current
+        if recurring.pending_amount is not None and pending_change_for(enrollment) is None:
+            forward = money(recurring.pending_amount)
+        difference = expected - forward
+        if difference == 0:
+            continue
         rows.append({
             'recurring_payment_id': str(recurring.id),
             'child_id': str(child.id),
             'child_name': child.full_name,
             'family_name': child.family.name if child.family_id else '',
-            'unit_label': quote['target_label'],
-            'current_amount': quote['current_amount'],
-            'expected_amount': quote['new_amount'],
-            'difference': quote['difference'],
-            'direction': quote['direction'],
+            'unit_label': unit_label(*sits_on),
+            'current_amount': str(current),
+            'expected_amount': str(expected),
+            'difference': str(difference),
+            'direction': 'up' if difference > 0 else 'down',
             'pending_amount': str(recurring.pending_amount) if recurring.pending_amount is not None else None,
             'next_billing_date': recurring.next_billing_date.isoformat() if recurring.next_billing_date else None,
         })

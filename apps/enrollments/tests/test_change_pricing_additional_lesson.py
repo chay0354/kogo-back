@@ -1,82 +1,103 @@
-"""A lesson change asks for the same discounts a signup asks for.
+"""A lesson that moves is priced by its place among the child's classes.
 
-The quote used to hand the discount service `lesson_id=None`, so the
-"additional lesson" price a child already had on their second lesson vanished
-the moment that lesson moved to another day. The target lesson is now passed
-exactly as `resolve_billing_price` does at signup: never when a per-lesson
-tier or bundle price already lowered the figure, and never for a child whose
-only lesson is the one being moved.
+The "another class" discount belongs to the lesson's place, not to the family:
+a child's second class keeps the second-class price when it moves, an only
+class never becomes a second one by moving (the row being moved still sits on
+the roster while we quote), and a price a group set for itself as a second
+class is not lowered a second time.
 """
 from datetime import date, time
 from decimal import Decimal
-from unittest.mock import patch
 
-from apps.courses.models import Lesson
-from apps.customers.discount_service import DiscountCalculation
+from apps.courses.models import Course, Lesson
+from apps.customers.financial_models import Discount
 from apps.enrollments.change_pricing import quote_unit_change
 from apps.enrollments.models import LessonEnrollment
 from apps.enrollments.tests.test_change_lesson_pricing import TODAY, _Base
 
 
-def _passthrough(**kwargs):
-    return DiscountCalculation(
-        applicable_discounts=[],
-        total_discount_amount=Decimal('0.00'),
-        final_price=kwargs['base_price'],
-        base_price=kwargs['base_price'],
-    )
-
-
 class AdditionalLessonOnChangeTest(_Base):
     def setUp(self):
         super().setUp()
-        # A second Wednesday-course lesson on Sunday to move the child's lesson to.
+        Discount.objects.create(
+            name='הנחת שיעור נוסף לילד פעיל', discount_type='fixed', value=Decimal('10.00'),
+            applies_to='child', promotion_type='permanent', is_built_in=True, is_active=True,
+        )
+        # A dearer class to move the Wednesday lesson to.
+        dearer = Course.objects.create(
+            course_type=self.course_once.course_type, name='אקרובטיקה', price=300, capacity=10, branch=self.branch,
+        )
         self.sun = Lesson.objects.create(
-            course=self.course_once, room=self.room, day_of_week=0,
-            start_time=time(16, 45), end_time=time(17, 30),
+            course=dearer, room=self.room, day_of_week=0, start_time=time(16, 45), end_time=time(17, 30),
         )
 
-    def _quote(self, target):
-        with patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment',
-                   side_effect=_passthrough) as evaluate:
-            quote_unit_change(enrollment=self.enrollment, target_lessons=[target], target_bundle=None, today=TODAY)
-        evaluate.assert_called_once()
-        return evaluate.call_args.kwargs
+    def _quote(self, *targets, bundle=None):
+        return quote_unit_change(
+            enrollment=self.enrollment, target_lessons=list(targets), target_bundle=bundle, today=TODAY,
+        )
 
     def test_the_only_lesson_moving_is_not_an_additional_lesson(self):
         # The Wednesday row still sits on the roster while we quote; it must
         # not make its own replacement look like a second lesson.
-        self.assertIsNone(self._quote(self.sun)['lesson_id'])
+        quote = self._quote(self.sun)
+        self.assertEqual(quote['new_amount'], '300.00')
+        self.assertEqual(quote['discounts'], [])
 
     def test_a_second_lesson_keeps_its_additional_lesson_price_when_it_moves(self):
         LessonEnrollment.objects.create(lesson=self.mon, child=self.child, status='active', start_date=date(2026, 8, 1))
-        args = self._quote(self.sun)
-        self.assertEqual(args['lesson_id'], str(self.sun.id))
-        self.assertEqual(args['base_price'], Decimal('260.00'))
+        quote = self._quote(self.sun)
+        self.assertEqual(quote['new_base_price'], '300.00')
+        self.assertEqual(quote['new_amount'], '290.00')
+        self.assertEqual([line['value'] for line in quote['discounts']], ['10.00'])
 
     def test_a_lesson_on_a_payment_problem_still_counts_as_the_other_lesson(self):
         LessonEnrollment.objects.create(lesson=self.mon, child=self.child, status='payments_problem', start_date=date(2026, 8, 1))
-        self.assertEqual(self._quote(self.sun)['lesson_id'], str(self.sun.id))
+        self.assertEqual(self._quote(self.sun)['new_amount'], '290.00')
 
     def test_a_trial_booking_is_not_the_other_lesson(self):
         LessonEnrollment.objects.create(
             lesson=self.mon, child=self.child, status='active', start_date=date(2026, 8, 1),
             trial_lesson_date=date(2026, 9, 14),
         )
-        self.assertIsNone(self._quote(self.sun)['lesson_id'])
+        self.assertEqual(self._quote(self.sun)['new_amount'], '300.00')
 
     def test_a_tier_price_is_never_discounted_a_second_time(self):
         LessonEnrollment.objects.create(lesson=self.mon, child=self.child, status='active', start_date=date(2026, 8, 1))
         self.sun.additional_course_prices = [{'course_index': 2, 'price': 200}]
         self.sun.save()
-        args = self._quote(self.sun)
-        self.assertEqual(args['base_price'], Decimal('200.00'))
-        self.assertIsNone(args['lesson_id'])
+        quote = self._quote(self.sun)
+        self.assertEqual(quote['new_base_price'], '200.00')
+        self.assertEqual(quote['new_amount'], '200.00')
+        self.assertEqual(quote['discounts'], [])
 
     def test_a_bundle_target_is_priced_by_the_bundle_alone(self):
         LessonEnrollment.objects.create(lesson=self.sun, child=self.child, status='active', start_date=date(2026, 8, 1))
-        with patch('apps.customers.discount_service.DiscountService.evaluate_discounts_for_payment',
-                   side_effect=_passthrough) as evaluate:
-            quote_unit_change(enrollment=self.enrollment, target_lessons=[self.mon, self.thu], target_bundle=self.bundle, today=TODAY)
-        self.assertIsNone(evaluate.call_args.kwargs['lesson_id'])
-        self.assertEqual(evaluate.call_args.kwargs['base_price'], Decimal('335.00'))
+        quote = self._quote(self.mon, self.thu, bundle=self.bundle)
+        self.assertEqual(quote['new_amount'], '335.00')
+        self.assertEqual(quote['discounts'], [])
+
+    def test_a_fixed_price_for_another_class_is_the_whole_price(self):
+        Discount.objects.filter(is_built_in=True).update(discount_type='fixed_final_price', value=Decimal('180.00'))
+        LessonEnrollment.objects.create(lesson=self.mon, child=self.child, status='active', start_date=date(2026, 8, 1))
+        # The class the child sits on costs less than the fixed price, so the
+        # fixed price does not touch it; the dearer one costs the fixed price.
+        self.course_once.price = 150
+        self.course_once.save()
+        # A sibling discount from signup does not come off a fixed price — as at signup.
+        self.recurring.discount_details = [{
+            'name': 'הנחת ילד שני', 'type': 'second_child', 'value': '10.00', 'amount_deducted': '10.00', 'reason': '',
+        }]
+        self.recurring.amount = Decimal('140.00')
+        self.recurring.save()
+        quote = self._quote(self.sun)
+        self.assertEqual(quote['new_amount'], '180.00')
+        self.assertEqual(quote['direction'], 'up')
+
+    def test_under_a_fixed_price_every_other_class_costs_the_same(self):
+        Discount.objects.filter(is_built_in=True).update(discount_type='fixed_final_price', value=Decimal('180.00'))
+        LessonEnrollment.objects.create(lesson=self.mon, child=self.child, status='active', start_date=date(2026, 8, 1))
+        self.recurring.amount = Decimal('180.00')
+        self.recurring.save()
+        quote = self._quote(self.sun)
+        self.assertEqual(quote['direction'], 'same')
+        self.assertEqual(quote['new_amount'], '180.00')
