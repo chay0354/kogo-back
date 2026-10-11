@@ -895,10 +895,11 @@ def prepare_media(contact: Contact, *, deadline: float | None = None, skip=()) -
 
 def hear_again(*, now=None, limit: int = HEAR_AGAIN_BATCH, deadline: float | None = None) -> int:
     """
-    The cron's second look at recordings that were not transcribed (the account
-    ran out of credit, the service did not answer): the newest few of the last
-    days are tried again, so the conversation shows what was said once the
-    transcription works. Nothing is answered from here — the bot already
+    The cron's second look at recordings that have no transcript (the account
+    ran out of credit, the service did not answer, or they arrived before the
+    reason was written down): the newest few of the last days are tried again,
+    so the conversation shows what was said once the transcription works — and
+    says why while it does not. Nothing is answered from here — the bot already
     answered those by its voice rule. Stops at the first failure: what failed
     one recording fails the next. Returns how many were transcribed.
     """
@@ -907,7 +908,7 @@ def hear_again(*, now=None, limit: int = HEAR_AGAIN_BATCH, deadline: float | Non
     now = now or timezone.now()
     rows = Message.objects.filter(
         direction=DIRECTION_IN, message_type=TYPE_VOICE, transcript='', created_at__gte=now - HEAR_AGAIN_WITHIN,
-    ).exclude(media_url='').exclude(error='').order_by('-id')[:limit]
+    ).exclude(media_url='').exclude(error=EMPTY_TRANSCRIPT).order_by('-id')[:limit]
     heard = 0
     for row in rows:
         if deadline is not None and deadline - time_module.monotonic() < 8:

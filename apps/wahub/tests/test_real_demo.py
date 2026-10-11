@@ -430,6 +430,26 @@ class DemoReplyTests(RealDemoTestCase):
             self.assertEqual(shadow.hear_again(), 1)
         self.assertEqual(Message.objects.get(message_type='voice').transcript, 'היי')
 
+    @override_settings(OPENAI_API_KEY='openai-test-key')
+    def test_a_recording_from_before_the_reason_was_kept_is_tried_too_and_an_empty_one_is_left_alone(self):
+        self.upload('voice')
+        recording = Message.objects.get(message_type='voice')
+        self.assertEqual((recording.transcript, recording.error), ('', ''))   # never tried, nothing written on it
+        no_credit = _json_response({'error': {'message': 'You have no credits remaining.', 'type': 'insufficient_quota'}}, 429)
+        with patch(OPENAI_POST, return_value=no_credit):
+            self.assertEqual(shadow.hear_again(), 0)
+        recording.refresh_from_db()
+        self.assertEqual(recording.error, transcribe.NO_CREDIT_REASON)       # now the conversation says why
+        self.assertFalse(self.get('status/').data['transcribe']['ok'])
+        # A recording the service heard nothing in is not asked about every five minutes.
+        with patch(OPENAI_POST, return_value=_json_response({'text': ''})):
+            self.assertEqual(shadow.hear_again(), 0)
+        recording.refresh_from_db()
+        self.assertEqual(recording.error, shadow.EMPTY_TRANSCRIPT)
+        with patch(OPENAI_POST) as post:
+            self.assertEqual(shadow.hear_again(), 0)
+        post.assert_not_called()
+
 
 @override_settings(ANTHROPIC_API_KEY='test-key', WAHUB_SHADOW_MODEL='claude-opus-5-5')
 class DemoReplyClaudeTests(RealDemoTestCase):
