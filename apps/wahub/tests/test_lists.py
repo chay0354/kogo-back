@@ -247,3 +247,13 @@ class InboundUrlTests(WahubTestCase):
             self.assertEqual(
                 self.get('status/').data['inbound_url'], 'https://api.example.test/api/v1/wahub/inbound/manychat/',
             )
+
+    def test_a_base_written_without_api_v1_gets_it(self):
+        """Production writes CRM_API_BASE_URL as the bare host: the live test's self-call got 404 on /wahub/… (11.10.2026)."""
+        from django.test import override_settings
+
+        for base in ('https://kogo-back.example.test', 'https://kogo-back.example.test/'):
+            with self.subTest(base=base), override_settings(CRM_API_BASE_URL=base):
+                self.assertEqual(
+                    self.get('status/').data['inbound_url'], 'https://kogo-back.example.test/api/v1/wahub/inbound/manychat/',
+                )
