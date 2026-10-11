@@ -29,6 +29,9 @@ class WeeklyAuditTests(WahubTestCase):
             'api/v1/wahub/contacts/{pk}/recheck/', 'api/v1/wahub/contacts/{pk}/analyze/',
             # The live test: the switch writes in ManyChat, the reply sends a real message.
             'api/v1/wahub/contacts/{pk}/live-test/', 'api/v1/wahub/live-test/reply/',
+            # Leads, version 2: what a person does to a lead.
+            'api/v1/wahub/leads/{pk}/close/', 'api/v1/wahub/leads/{pk}/reopen/',
+            'api/v1/wahub/leads/{pk}/snooze/', 'api/v1/wahub/leads/{pk}/owner/',
         ):
             self.assertFalse(by_template[template].callable_get, template)
 
@@ -83,6 +86,11 @@ class WeeklyAuditTests(WahubTestCase):
                 # "בדיקות הבוט": the list of scripts with their last results, read only. Playing one — which asks
                 # Claude and costs money — answers POST only, so the sweep never plays a script.
                 'api/v1/wahub/bot/evals/': 200,
+                # leads, version 2: the lists, one lead in full, the texts of the follow-ups — read only. What a
+                # person does to a lead (close, reopen, snooze, owner) answers POST only.
+                'api/v1/wahub/leads/': 200,
+                'api/v1/wahub/leads/templates/': 200,
+                f'api/v1/wahub/leads/{contact.id}/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])

@@ -12,8 +12,11 @@ Two ways, one result:
            manager stored). A failure, a timeout or a refusal falls back to the
            rules and never raises.
 
-The result is written to the `known_*` fields only. The follow-up marks belong
-to a person and are not touched here.
+The result is written to the `known_*` fields, and — out of the same pass, the
+same call — to `lead_ai`: what the conversation says about the lead (interest,
+what holds them back, the child, when to come back; apps/wahub/lead_ai.py,
+docs/WAHUB-CONTRACT-LEADS-V2.md). The follow-up marks belong to a person and
+are not touched here.
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ import requests
 from django.conf import settings
 from django.utils import timezone
 
-from apps.wahub import state
+from apps.wahub import lead_ai, state
 from apps.wahub.models import (
     ANALYSIS_AI,
     ANALYSIS_RULES,
@@ -75,6 +78,8 @@ class Known:
     flags: list = field(default_factory=list)
     summary: str = ''
     source: str = ANALYSIS_RULES
+    # What the conversation says about the lead (apps/wahub/lead_ai.py); {} until it is worked out.
+    lead: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -375,9 +380,11 @@ AI_SCHEMA = {
         'callback_on': {'type': 'string'},
         'flags': {'type': 'array', 'items': {'type': 'string', 'enum': FLAGS}},
         'summary': {'type': 'string'},
+        'lead': lead_ai.LEAD_SCHEMA,
     },
     'required': [
         'topic', 'course_type', 'city', 'branch_name', 'child_age', 'interest', 'callback_on', 'flags', 'summary',
+        'lead',
     ],
     'additionalProperties': False,
 }
@@ -396,8 +403,9 @@ AI_SYSTEM = """\
 - callback_on: אם ההורה אמר מתי לחזור אליו או מתי יחזור ("אחזור בעוד שבועיים", "דברו איתי אחרי החגים"), התאריך בצורה YYYY-MM-DD. חשב אותו מהתאריך של ההודעה שבה זה נאמר, לא מהיום. אחרת ריק.
 - flags: רק מה שעולה בבירור מהשיחה. price = המחיר עצר אותו; class_full = אין מקום בחוג; lives_far = גר רחוק מהסניף; no_branch_nearby = אין סניף בעיר שלו; complaint = תלונה; says_registered = אומר שכבר נרשם; child_too_young = הילד צעיר מהגיל של החוג; difficult = שיחה טעונה או לא ברורה שכדאי שאדם יקרא.
 - summary: עד שני משפטים קצרים בעברית פשוטה: מה ההורה רוצה ואיפה זה עומד. בלי פתיח, בלי שמות שדות ובלי ציטוטים ארוכים.
+{lead}
 
-בשיחה, "לקוח" הוא ההורה, "בוט" הוא המענה האוטומטי ו"משרד" הוא נציג. תבנית שהמערכת שלחה אינה דברי ההורה."""
+בשיחה, "לקוח" הוא ההורה, "בוט" הוא המענה האוטומטי ו"משרד" הוא נציג. תבנית שהמערכת שלחה אינה דברי ההורה.""".replace('{lead}', lead_ai.LEAD_PROMPT)
 
 
 def ai_configured() -> bool:
@@ -406,13 +414,20 @@ def ai_configured() -> bool:
     return bool(integration_credential('ANTHROPIC_API_KEY'))
 
 
-def _ai_input(lines: list[Line], places: list[Place], today: date) -> str:
+def _ai_input(lines: list[Line], places: list[Place], today: date, course_types=(), external_places=()) -> str:
     cities = sorted({place.city for place in places if place.city})
+    kinds = [name for _type_id, name in course_types if name]
     parts = [
         f'היום: {today.isoformat()} (שעון ישראל).',
         'הסניפים של העסק (שם הסניף — עיר):',
         *(f'- {place.name} — {place.city or "לא צוינה עיר"}' for place in places),
         'הערים שיש בהן סניף: ' + (', '.join(cities) if cities else 'אין רשימה'),
+        *(
+            ['סניפים חיצוניים (ההרשמה אליהם היא מול העירייה ולא דרכנו; גם שמם נכתב ב-branch_name כפי שהוא כאן):']
+            + [f'- {place.name} — {place.city or "לא צוינה עיר"}' for place in external_places]
+            if external_places else []
+        ),
+        *(['התחומים של העסק (course_type — בדיוק אחד מהשמות האלה, אם נאמר): ' + ', '.join(kinds)] if kinds else []),
         '',
         'השיחה, מהישנה לחדשה:',
     ]
@@ -424,7 +439,10 @@ def _ai_input(lines: list[Line], places: list[Place], today: date) -> str:
     return '\n'.join(parts)
 
 
-def analyze_ai(lines: list[Line], places: list[Place], *, timeout: float | None = None) -> Known | None:
+def analyze_ai(
+    lines: list[Line], places: list[Place], *, timeout: float | None = None, course_types=(), external_places=(),
+    link_sent: bool = False,
+) -> Known | None:
     """
     Ask Claude. None for anything that is not a usable answer — no key, a
     network fault, a timeout, an error status, a refusal, an answer cut short.
@@ -450,7 +468,10 @@ def analyze_ai(lines: list[Line], places: list[Place], *, timeout: float | None 
         # above the few hundred tokens the card itself takes.
         'max_tokens': 8000,
         'system': AI_SYSTEM,
-        'messages': [{'role': 'user', 'content': _ai_input(lines, places, state.now_israel_date())}],
+        'messages': [{
+            'role': 'user',
+            'content': _ai_input(lines, places, state.now_israel_date(), course_types, external_places),
+        }],
         'output_config': {
             'effort': 'low',
             'format': {'type': 'json_schema', 'schema': AI_SCHEMA},
@@ -493,7 +514,24 @@ def analyze_ai(lines: list[Line], places: list[Place], *, timeout: float | None 
         return None
     if not isinstance(data, dict):
         return None
-    return _known_from_ai(data, places)
+    known = _known_from_ai(data, places)
+    known.lead = lead_ai.from_model(
+        data.get('lead'), lines=lines, known=known, course_types=course_types, external_places=external_places,
+        today=state.now_israel_date(), link_sent=link_sent,
+    )
+    _one_day_to_come_back(known)
+    return known
+
+
+def _one_day_to_come_back(known: Known) -> None:
+    """
+    The day worked out in code from what was said (lead_ai.come_back_day) is the
+    day everywhere: the card's own "they said when" follows it, so the two
+    screens never show two dates. A day only the model named stays as it is.
+    """
+    day = (known.lead or {}).get('come_back_on')
+    if day:
+        known.callback_on = date.fromisoformat(day)
 
 
 def _known_from_ai(data: dict, places: list[Place]) -> Known:
@@ -540,6 +578,24 @@ def load_places() -> list[Place]:
     ]
 
 
+def load_external_places() -> list[Place]:
+    """The external branches: classes the business runs where the municipality takes the registrations."""
+    from apps.core.models import Branch
+
+    return [
+        Place(id=branch_id, name=name or '', city=city or '')
+        for branch_id, name, city in Branch.objects.filter(is_active=True, is_external=True)
+        .values_list('id', 'name', 'city__name')
+    ]
+
+
+def load_course_types() -> list[tuple]:
+    """(id, name) of every kind of class the business runs — what a conversation's "קפוארה" is matched to."""
+    from apps.courses.models import CourseType
+
+    return list(CourseType.objects.filter(is_active=True).order_by('name').values_list('id', 'name'))
+
+
 def conversation_lines(contact: Contact) -> list[Line]:
     """The last MAX_MESSAGES messages that reached the customer or came from them, oldest first."""
     rows = list(
@@ -560,20 +616,42 @@ def conversation_lines(contact: Contact) -> list[Line]:
 
 def analyze_contact(
     contact: Contact, *, places: list[Place] | None = None, timeout: float | None = None, use_ai: bool = True,
+    course_types: list | None = None, external_places: list | None = None,
 ) -> Known:
-    """Summarise one contact and keep it. Only the known_* fields are written."""
+    """
+    Summarise one contact and keep it. Only the known_* fields are written, and
+    — from the same pass — `lead_ai` and the moment a registration link last
+    went out (`lead_link_sent_at`, found in the messages; never moved back).
+    """
     places = load_places() if places is None else places
+    course_types = load_course_types() if course_types is None else course_types
+    external_places = load_external_places() if external_places is None else external_places
     lines = conversation_lines(contact)
-    known = (analyze_ai(lines, places, timeout=timeout) if use_ai else None) or analyze_rules(lines, places)
+    link_at = lead_ai.link_sent_at(contact)
+    if contact.lead_link_sent_at is not None and (link_at is None or contact.lead_link_sent_at > link_at):
+        link_at = contact.lead_link_sent_at
+    known = analyze_ai(
+        lines, places, timeout=timeout, course_types=course_types, external_places=external_places,
+        link_sent=link_at is not None,
+    ) if use_ai else None
+    if known is None:
+        known = analyze_rules(lines, places)
+        known.lead = lead_ai.from_rules(
+            lines, known, course_types=course_types, external_places=external_places, today=state.now_israel_date(),
+            link_sent=link_at is not None,
+        )
+        _one_day_to_come_back(known)
 
     before = (
         contact.known_topic, contact.known_course_type, contact.known_city, contact.known_branch_id,
         contact.known_branch_name, contact.known_child_age, contact.known_interest, contact.known_callback_on,
         list(contact.known_flags or []), contact.known_summary, contact.analysis_source,
+        dict(contact.lead_ai or {}), contact.lead_link_sent_at,
     )
     after = (
         known.topic, known.course_type, known.city, known.branch_id, known.branch_name, known.child_age,
         known.interest, known.callback_on, list(known.flags), known.summary, known.source,
+        dict(known.lead), link_at,
     )
     now = timezone.now()
     fields = dict(
@@ -587,6 +665,8 @@ def analyze_contact(
         known_callback_on=known.callback_on,
         known_flags=list(known.flags),
         known_summary=known.summary,
+        lead_ai=dict(known.lead),
+        lead_link_sent_at=link_at,
         needs_analysis=False,
         analyzed_at=now,
         analysis_source=known.source,
@@ -596,8 +676,9 @@ def analyze_contact(
         Contact.objects.filter(pk=contact.pk).update(needs_analysis=False, analyzed_at=now)
     else:
         state.touch(contact.pk, **fields)
-        label = 'AI' if known.source == ANALYSIS_AI else 'כללים'
-        state.log_event(contact.pk, EVENT_ANALYZED, f'סיכום אוטומטי ({label}): {known.summary}'.strip(': '))
+        if before[:11] != after[:11]:
+            label = 'AI' if known.source == ANALYSIS_AI else 'כללים'
+            state.log_event(contact.pk, EVENT_ANALYZED, f'סיכום אוטומטי ({label}): {known.summary}'.strip(': '))
     for name, value in fields.items():
         setattr(contact, name, value)
     return known

@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from apps.wahub import knowledge_import
+from apps.wahub import knowledge_import, lead_followup_seed
 from apps.wahub.knowledge import KIND_LABELS
 
 
@@ -34,6 +34,12 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING(f'  הנוסח "{key}" לא נמצא מילה במילה במסמכים — לבדוק.'))
         else:
             self.stdout.write(self.style.WARNING('תיקיית המסמכים לא נמצאה; הנוסחים לא נבדקו מולה.'))
+        # The words the bot comes back to a lead with (leads, version 2): filed once, by the same
+        # deploy step, and never over what the owner has since made of them.
+        nudges = lead_followup_seed.run(dry_run=options['dry_run'])
+        self.stdout.write(
+            f'נוסחי החזרה ללידים: {prefix} {nudges["created"]}; {nudges["skipped"]} כבר היו.'
+        )
         self.stdout.write('לא יובאו (לפי טבלת המיפוי וההחלטות):')
         for source, what, why in result['dropped']:
             self.stdout.write(f'  {source}: {what} — {why}')

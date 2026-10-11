@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import SimpleRouter
 
-from apps.wahub import views, views_bot
+from apps.wahub import views, views_bot, views_leads
 
 router = SimpleRouter()
 router.register(r'contacts', views.ContactViewSet, basename='wahub-contact')
@@ -43,6 +43,15 @@ urlpatterns = [
     path('leads/unregistered/', views.UnregisteredLeadsView.as_view(), name='wahub-leads-unregistered'),
     # The lead stages (docs/WAHUB-CONTRACT-LEAD-STAGES.md): how many contacts are in each; the lists are contacts/?lead_stage=.
     path('leads/board/', views.LeadBoardView.as_view(), name='wahub-leads-board'),
+    # Leads, version 2 (docs/WAHUB-CONTRACT-LEADS-V2.md, ד): the lists by who makes the next move, one lead in
+    # full, and what a person does to a lead. The board above stays for the screen that still reads it.
+    path('leads/', views_leads.LeadListView.as_view(), name='wahub-leads'),
+    path('leads/templates/', views_leads.LeadTemplatesView.as_view(), name='wahub-leads-templates'),
+    path('leads/<int:pk>/', views_leads.LeadDetailView.as_view(), name='wahub-lead'),
+    path('leads/<int:pk>/close/', views_leads.LeadCloseView.as_view(), name='wahub-lead-close'),
+    path('leads/<int:pk>/reopen/', views_leads.LeadReopenView.as_view(), name='wahub-lead-reopen'),
+    path('leads/<int:pk>/snooze/', views_leads.LeadSnoozeView.as_view(), name='wahub-lead-snooze'),
+    path('leads/<int:pk>/owner/', views_leads.LeadOwnerView.as_view(), name='wahub-lead-owner'),
     path('for-customer/', views.ForCustomerView.as_view(), name='wahub-for-customer'),
     path('for-customer/recheck/', views.ForCustomerRecheckView.as_view(), name='wahub-for-customer-recheck'),
     path('', include(router.urls)),

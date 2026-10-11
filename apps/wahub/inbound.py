@@ -24,7 +24,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.wahub import lead_stage, media, state
+from apps.wahub import lead_ai, lead_stage, media, state
 from apps.wahub.models import (
     DIRECTION_IN,
     DIRECTION_OUT,
@@ -320,6 +320,9 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
         else:
             # The bot answered: nobody is waiting any more.
             changes['waiting_since'] = None
+            if lead_ai.has_registration_link(text):
+                # "קיבל קישור ועוד לא נרשם" starts here (lead_stage.py).
+                changes['lead_link_sent_at'] = sent_at
 
         state.touch(contact.id, **changes)
         if created:

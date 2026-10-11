@@ -17,6 +17,7 @@ from apps.wahub.models import (
     INTEREST_CHOICES,
     LEAD_STAGE_CHOICES,
     LEAD_STAGE_GROUPS,
+    LEGACY_LEAD_STAGES,
     OUTCOME_CHOICES,
     SENDER_CHOICES,
     SENDER_OFFICE,
@@ -65,9 +66,12 @@ def lead_payload(contact: Contact, *, today) -> dict:
     """
     The lead stage as it is kept on the contact (apps/wahub/lead_stage.py) — the
     very values the board counts and the lists filter by. Until the first look
-    the stage is '' and the sentences are empty. `days` counts from `since`.
+    the stage is '' and the sentences are empty; '' with a sentence is a
+    conversation that is not about a class at all (no lead). `days` counts from
+    `since`. `owner` is who makes the next move (docs/WAHUB-CONTRACT-LEADS-V2.md).
     """
-    stage = contact.lead_stage
+    # A row the cron has not looked at since the stage got its present name reads like its heir.
+    stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     return {
         'stage': stage,
         'stage_label': LEAD_STAGE_LABELS.get(stage, ''),
@@ -78,6 +82,7 @@ def lead_payload(contact: Contact, *, today) -> dict:
         'next_step': contact.lead_next_step,
         'human_touched': contact.lead_human_touched,
         'temperature': temperature(contact),
+        'owner': contact.lead_owner,
     }
 
 

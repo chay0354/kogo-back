@@ -99,6 +99,11 @@ _URL = re.compile(r'^https://\S+$')
 
 STEP_KINDS = ('ask', 'say', 'handoff', 'tool', 'tag')
 
+# The phrasings the system itself sends when it comes back to a lead (lead_followup_seed.py).
+# They are edited on the same screen as every other phrasing, and never read out to the bot
+# that answers customers: an answer is not to be built from them.
+LEAD_PHRASING_PREFIX = 'lead_'
+
 
 class KnowledgeError(ValueError):
     """A save refused, with the reason in Hebrew."""
@@ -705,6 +710,8 @@ def relevant_items(*, today: date, branch_id=None, city_id=None, course_type_id=
     rows = []
     for item in KnowledgeItem.objects.filter(kind__in=CONTEXT_KINDS, is_active=True).order_by('kind', 'id'):
         if not _valid_on(item, today):
+            continue
+        if item.kind == KIND_PHRASING and item.key.startswith(LEAD_PHRASING_PREFIX):
             continue
         if item.scope_level != SCOPE_BUSINESS and wanted.get(item.scope_level) != item.scope_id:
             # A scoped item whose scope is not yet known in the conversation is

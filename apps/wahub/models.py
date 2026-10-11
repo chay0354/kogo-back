@@ -15,7 +15,12 @@ confused (docs/WAHUB-CONTRACT.md):
 
 A fourth group is read from those three and never the other way round:
 
-    lead_*      the one stage of the lead, by rules (lead_stage.py)
+    lead_*      the one stage of the lead and who makes the next move, by rules
+                (lead_stage.py). Three of them are kept by somebody else:
+                `lead_ai` — what the conversation says about the lead — by the
+                summary (analysis.py); `lead_manual` — what a person decided on
+                the leads screen — by its endpoints (leads.py); `lead_bot`
+                — where the bot's own follow-ups stand — by lead_followups.py.
 
 The tables hold phones and the text of conversations, so the migration turns
 ROW LEVEL SECURITY on for all of them (docs/11-SECURITY-FINDING-ANON-EXPOSURE.md).
@@ -121,9 +126,11 @@ FOLLOWUP_CHOICES = [
 # The marks under which "the customer said when to come back" still counts.
 CALLBACK_COUNTS_UNDER = ('', FOLLOWUP_LATER, FOLLOWUP_ANSWERED, FOLLOWUP_NO_ANSWER)
 
-# --- the lead stage (docs/WAHUB-CONTRACT-LEAD-STAGES.md) -------------------------
-# One stage per contact, in three groups. The rules that pick it, and the
-# sentence each stage shows, are in apps/wahub/lead_stage.py.
+# --- the lead stage (docs/WAHUB-CONTRACT-LEAD-STAGES.md, docs/WAHUB-CONTRACT-LEADS-V2.md) -----
+# One stage per contact. The rules that pick it, and the sentence each stage
+# shows, are in apps/wahub/lead_stage.py. The three groups are what the first
+# board shows (leads/board/); the leads screen that follows it reads who makes
+# the next move instead (`lead_owner`).
 
 LEAD_GROUP_ACT = 'act'
 LEAD_GROUP_WAIT = 'wait'
@@ -135,52 +142,80 @@ LEAD_GROUP_CHOICES = [
 ]
 
 LEAD_NEEDS_REPLY = 'needs_reply'
+LEAD_SIGNUP_STUCK = 'signup_stuck'
 LEAD_SIGNUP_FAILED = 'signup_failed'
 LEAD_SIGNUP_STARTED = 'signup_started'
+LEAD_LINK_SENT = 'link_sent'
 LEAD_TRIAL_NO_SHOW = 'trial_no_show'
 LEAD_TRIAL_DONE = 'trial_done'
 LEAD_CALLBACK_DUE = 'callback_due'
 LEAD_ANSWERED_SILENT = 'answered_silent'
+LEAD_WILL_CHECK = 'will_check'
 LEAD_TRIAL_BOOKED = 'trial_booked'
 LEAD_WAITING_DATE = 'waiting_date'
+LEAD_NOTHING_TO_OFFER = 'nothing_to_offer'
 LEAD_IN_CONVERSATION = 'in_conversation'
 LEAD_REGISTERED = 'registered'
 LEAD_CUSTOMER = 'customer'
-LEAD_NOT_RELEVANT = 'not_relevant'
+LEAD_NOT_INTERESTED = 'not_interested'
+LEAD_DELETED = 'deleted'
 LEAD_COLD = 'cold'
 # In the order the board shows them, group by group.
 LEAD_STAGE_CHOICES = [
-    (LEAD_NEEDS_REPLY, 'שאל ולא קיבל תשובה'),
+    (LEAD_SIGNUP_STUCK, 'נתקע בהרשמה'),
+    (LEAD_NEEDS_REPLY, 'שאל ולא קיבל מענה'),
     (LEAD_SIGNUP_FAILED, 'ניסה להירשם והחיוב נכשל'),
     (LEAD_SIGNUP_STARTED, 'התחיל הרשמה ולא סיים'),
+    (LEAD_LINK_SENT, 'קיבל קישור ועוד לא נרשם'),
     (LEAD_TRIAL_NO_SHOW, 'נרשם לניסיון ולא הגיע'),
     (LEAD_TRIAL_DONE, 'עשה ניסיון ולא נרשם'),
     (LEAD_CALLBACK_DUE, 'הגיע הזמן לחזור אליו'),
     (LEAD_ANSWERED_SILENT, 'קיבל תשובה ולא נרשם'),
+    (LEAD_WILL_CHECK, 'אמר שיבדוק ויחזור'),
     (LEAD_TRIAL_BOOKED, 'רשום לשיעור ניסיון'),
-    (LEAD_WAITING_DATE, 'ממתין לתאריך'),
+    (LEAD_WAITING_DATE, 'מחכה למועד'),
+    (LEAD_NOTHING_TO_OFFER, 'אין כרגע מה להציע'),
     (LEAD_IN_CONVERSATION, 'בשיחה'),
     (LEAD_REGISTERED, 'נרשם'),
     (LEAD_CUSTOMER, 'לקוח קיים'),
-    (LEAD_NOT_RELEVANT, 'לא רלוונטי'),
-    (LEAD_COLD, 'ליד ישן'),
+    (LEAD_NOT_INTERESTED, 'לא מעוניין'),
+    (LEAD_DELETED, 'נמחק'),
+    (LEAD_COLD, 'רדום'),
 ]
 LEAD_STAGE_GROUPS = {
+    LEAD_SIGNUP_STUCK: LEAD_GROUP_ACT,
     LEAD_NEEDS_REPLY: LEAD_GROUP_ACT,
     LEAD_SIGNUP_FAILED: LEAD_GROUP_ACT,
     LEAD_SIGNUP_STARTED: LEAD_GROUP_ACT,
+    LEAD_LINK_SENT: LEAD_GROUP_ACT,
     LEAD_TRIAL_NO_SHOW: LEAD_GROUP_ACT,
     LEAD_TRIAL_DONE: LEAD_GROUP_ACT,
     LEAD_CALLBACK_DUE: LEAD_GROUP_ACT,
     LEAD_ANSWERED_SILENT: LEAD_GROUP_ACT,
+    LEAD_WILL_CHECK: LEAD_GROUP_WAIT,
     LEAD_TRIAL_BOOKED: LEAD_GROUP_WAIT,
     LEAD_WAITING_DATE: LEAD_GROUP_WAIT,
+    LEAD_NOTHING_TO_OFFER: LEAD_GROUP_WAIT,
     LEAD_IN_CONVERSATION: LEAD_GROUP_WAIT,
     LEAD_REGISTERED: LEAD_GROUP_CLOSED,
     LEAD_CUSTOMER: LEAD_GROUP_CLOSED,
-    LEAD_NOT_RELEVANT: LEAD_GROUP_CLOSED,
+    LEAD_NOT_INTERESTED: LEAD_GROUP_CLOSED,
+    LEAD_DELETED: LEAD_GROUP_CLOSED,
     LEAD_COLD: LEAD_GROUP_CLOSED,
 }
+# What a stage was called before 12.10.2026, on a row the cron has not looked at since.
+LEGACY_LEAD_STAGES = {'not_relevant': LEAD_NOT_INTERESTED}
+
+# Who makes the next move on a lead (docs/WAHUB-CONTRACT-LEADS-V2.md, ב). '' — nobody
+# has a step now, or the lead is closed.
+LEAD_OWNER_BOT = 'bot'
+LEAD_OWNER_OFFICE = 'office'
+LEAD_OWNER_CHOICES = [(LEAD_OWNER_BOT, 'הבוט מטפל'), (LEAD_OWNER_OFFICE, 'מחכה למשרד')]
+
+# The two ways a person closes a lead on the leads screen (`lead_manual`).
+LEAD_CLOSE_DELETED = 'deleted'
+LEAD_CLOSE_NOT_INTERESTED = 'not_interested'
+LEAD_CLOSE_CHOICES = [(LEAD_CLOSE_DELETED, 'נמחק'), (LEAD_CLOSE_NOT_INTERESTED, 'לא מעוניין')]
 
 DIRECTION_IN = 'in'
 DIRECTION_OUT = 'out'
@@ -244,6 +279,8 @@ EVENT_NEEDS_HUMAN = 'needs_human_changed'
 EVENT_NOTE = 'note'
 EVENT_LIVE_TEST = 'live_test'
 EVENT_LEAD_STAGE = 'lead_stage_changed'
+EVENT_LEAD_FOLLOWUP = 'lead_followup'
+EVENT_LEAD_ACTION = 'lead_action'
 EVENT_KIND_CHOICES = [
     (EVENT_CREATED, 'נוצר'),
     (EVENT_FOLLOWUP, 'סימון מעקב'),
@@ -255,6 +292,8 @@ EVENT_KIND_CHOICES = [
     (EVENT_NOTE, 'הערה'),
     (EVENT_LIVE_TEST, 'בדיקה חיה'),
     (EVENT_LEAD_STAGE, 'מצב הליד'),
+    (EVENT_LEAD_FOLLOWUP, 'חזרה של הבוט לליד'),
+    (EVENT_LEAD_ACTION, 'פעולה על הליד'),
 ]
 
 LAST_MESSAGE_PREVIEW_CHARS = 300
@@ -384,6 +423,32 @@ class Contact(models.Model):
     # When the clock alone may change the answer (30 minutes with no reply, 48 hours of
     # quiet, the day to come back, midnight for "yesterday"): the cron looks again then.
     lead_recheck_at = models.DateTimeField(null=True, blank=True)
+
+    # --- leads, version 2 (docs/WAHUB-CONTRACT-LEADS-V2.md) ---
+    # Who makes the next move: the bot, the office, or '' (no step now, or closed). lead_stage.py.
+    lead_owner = models.CharField(max_length=10, choices=LEAD_OWNER_CHOICES, blank=True)
+    # What the conversation says about the lead, worked out in the summary pass (analysis.py —
+    # the only writer; apps/wahub/lead_ai.py describes the keys): interest, what holds them
+    # back, the child, when to come back, one sentence of "why is this a lead". {} until the
+    # pass has reached the contact.
+    lead_ai = models.JSONField(default=dict, blank=True)
+    # The branch, the kind of class and the day to come back, out of lead_ai, as columns the
+    # lists filter by. lead_stage.py.
+    lead_branch_id = models.UUIDField(null=True, blank=True)
+    lead_course_type = models.CharField(max_length=100, blank=True)
+    lead_come_back_on = models.DateField(null=True, blank=True)
+    # A registration link went out to this contact, in any outgoing message Kogo saw: the
+    # newest of them (inbound.py, sending.py; the summary fills it for older conversations).
+    lead_link_sent_at = models.DateTimeField(null=True, blank=True)
+    # What a person decided on the leads screen — {closed: {reason, note, at, by, by_name},
+    # owner: {value: 'office', at, by, by_name}, reopened_at}. Written by its endpoints only
+    # (leads.py); the marks of the older screen stay in followup_*.
+    lead_manual = models.JSONField(default=dict, blank=True)
+    # Where the bot's own follow-ups stand in the lead's present round — {episode, started_at,
+    # step, attempts, last_at, done, note}. Written by lead_followups.py only.
+    lead_bot = models.JSONField(default=dict, blank=True)
+    # Which version of the rules last worked the stage out; an older one is looked at again.
+    lead_version = models.PositiveSmallIntegerField(default=0)
 
     tags = models.ManyToManyField(Tag, blank=True, related_name='contacts', db_table='wahub_contact_tags')
 
@@ -987,3 +1052,100 @@ class BotEvalRun(models.Model):
 
     def __str__(self):
         return f'{self.scenario_id} · {self.get_status_display()}'
+
+
+# =====================================================================================
+# Leads, version 2 — the bot's own follow-ups (docs/WAHUB-CONTRACT-LEADS-V2.md, ג)
+# =====================================================================================
+
+NUDGE_LINK_REMINDER = 'link_reminder'
+NUDGE_WILL_CHECK = 'will_check'
+NUDGE_TRIAL_FEEDBACK = 'trial_feedback'
+NUDGE_TRIAL_NO_SHOW = 'trial_no_show'
+NUDGE_DATE_ARRIVED = 'date_arrived'
+NUDGE_OPENING = 'opening'
+NUDGE_DORMANT = 'dormant'
+NUDGE_KIND_CHOICES = [
+    (NUDGE_LINK_REMINDER, 'קיבל קישור ועוד לא נרשם'),
+    (NUDGE_WILL_CHECK, 'אמר שיבדוק ויחזור'),
+    (NUDGE_TRIAL_FEEDBACK, 'אחרי שיעור ניסיון'),
+    (NUDGE_TRIAL_NO_SHOW, 'לא הגיע לשיעור ניסיון'),
+    (NUDGE_DATE_ARRIVED, 'הגיע המועד שדובר עליו'),
+    (NUDGE_OPENING, 'פנה ולא כתב מה הוא מחפש'),
+    (NUDGE_DORMANT, 'ליד רדום — נפתחה הרשמה'),
+]
+
+NUDGE_PLANNED = 'planned'
+NUDGE_DUE = 'due'
+NUDGE_SENT = 'sent'
+NUDGE_SKIPPED = 'skipped'
+NUDGE_FAILED = 'failed'
+NUDGE_STATUS_CHOICES = [
+    (NUDGE_PLANNED, 'מתוכנן'),
+    (NUDGE_DUE, 'הגיע הזמן — לא נשלח'),
+    (NUDGE_SENT, 'נשלח'),
+    (NUDGE_SKIPPED, 'בוטל'),
+    (NUDGE_FAILED, 'נכשל'),
+]
+# Still ahead of the bot: at most one of these per contact (the constraint below).
+NUDGE_OPEN_STATUSES = (NUDGE_PLANNED, NUDGE_DUE)
+
+
+class LeadFollowUp(models.Model):
+    """
+    One time the bot comes back to a lead by itself: planned for a moment inside
+    the office hours, with the text already written. When the moment comes it
+    goes out only if a message may leave for this contact (sending.sending_enabled)
+    and WhatsApp allows it (free text within 24 hours of the customer's last
+    message, otherwise the approved template mapped to the kind); if not, it
+    stays `due` — "the bot would have sent this now" — and nothing leaves.
+    apps/wahub/lead_followups.py is the only writer.
+    """
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name='lead_followups')
+    kind = models.CharField(max_length=20, choices=NUDGE_KIND_CHOICES)
+    # 1–3: which of the round's attempts this is.
+    step = models.PositiveSmallIntegerField(default=1)
+    # The round of the lead this belongs to (lead_stage.compute names it). A new message from
+    # the customer, a registration, a closure start another round or none — and this one is skipped.
+    episode = models.CharField(max_length=160, blank=True)
+    due_at = models.DateTimeField()
+    # When the cron looks at the row next: `due_at` while planned; a `due` row is tried again later.
+    next_look_at = models.DateTimeField()
+    status = models.CharField(max_length=10, choices=NUDGE_STATUS_CHOICES, default=NUDGE_PLANNED)
+    # What would be said, written when it was planned — no model is asked at sending time.
+    text = models.TextField(blank=True)
+    # The name of the kind's WhatsApp template in the mapping (settings_store.lead_templates).
+    template_key = models.CharField(max_length=40, blank=True)
+    # One sentence: why the bot comes back.
+    why = models.CharField(max_length=300, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    acted_at = models.DateTimeField(null=True, blank=True)
+    # What happened: why it was not sent, why it was skipped, the send's own error.
+    outcome_note = models.CharField(max_length=300, blank=True)
+    # A cron call that took the row to act on it. Two calls never act on one row; a claim
+    # nobody released is a send whose outcome is unknown, and it is never tried again.
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    # The message that went out (or was written into a demo conversation).
+    message = models.ForeignKey(Message, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    class Meta:
+        db_table = 'wahub_lead_followups'
+        ordering = ['-id']
+        verbose_name = 'חזרה לליד'
+        verbose_name_plural = 'חזרות ללידים'
+        indexes = [
+            models.Index(fields=['contact', '-id'], name='wahub_nudge_contact'),
+            # What the cron picks up: the few rows whose moment has come.
+            models.Index(
+                fields=['next_look_at'], name='wahub_nudge_open',
+                condition=Q(status__in=NUDGE_OPEN_STATUSES),
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['contact'], condition=Q(status__in=NUDGE_OPEN_STATUSES), name='wahub_nudge_one_open',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} · {self.get_status_display()}'

@@ -4,17 +4,27 @@ The slice of background work one cron call does (every five minutes):
   1. a summary for the contacts marked for one, once their conversation has
      been quiet for five minutes — so a customer typing five short messages is
      summarised once, not five times;
+  1b. the same summary, a few contacts a call, for the conversations of the last
+     months that it has never read as a lead (`lead_ai` still empty): the
+     one-time pass of leads version 2, spread over the cron instead of run at
+     the deploy (docs/WAHUB-CONTRACT-LEADS-V2.md, ו). By the keyword rules
+     unless WAHUB_LEAD_BACKFILL_AI says the model may be asked — a call to
+     Claude for every old conversation is money, and that is the owner's to decide;
   2. the match against the registrations, for contacts never checked or last
      checked more than twelve hours ago;
   2b. the lead stage of every contact something happened to, or whose time has
      come — rules over the row, no model (apps/wahub/lead_stage.py);
+  2c. the bot's own follow-ups to leads whose moment has come
+     (apps/wahub/lead_followups.py) — the one step here that may send a message,
+     and only where sending.sending_enabled says one may leave for that contact;
+     everywhere else the follow-up stays "due" and nothing leaves;
   3. the shadow bot's answer to every customer message it has not answered yet,
      twenty seconds after the last one of a burst (apps/wahub/shadow.py);
   4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py);
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py).
 
-Nothing in 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
+Nothing in 1b, 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
 a few fields on the contact, the shadow keeps proposals, the reviewer keeps
 proposals-to-approve, the look only marks.
 
@@ -27,11 +37,12 @@ import logging
 import time
 from datetime import timedelta
 
+from django.conf import settings
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.wahub import analysis, lead_stage, live_test, matching, reviewer, shadow
-from apps.wahub.models import ANALYSIS_AI, SHADOW_MODEL_STUB, Contact
+from apps.wahub import analysis, lead_followups, lead_stage, live_test, matching, reviewer, shadow
+from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +61,13 @@ SHADOW_FLOOR = 0.12
 LEAD_STAGE_FLOOR = 0.1
 SHADOW_ANSWER_SECONDS = 3.0
 SHADOW_BATCH = 10
+# The one-time pass of leads version 2 over the older conversations: this many a call, and only
+# conversations whose customer wrote within this long. A registered customer is no lead, and is
+# left out. WAHUB_LEAD_BACKFILL_PER_TICK=0 stops it; WAHUB_LEAD_BACKFILL_AI=1 lets it ask Claude
+# (off unless set: the rules cost nothing, and a conversation is read by Claude anyway the next
+# time its customer writes).
+LEAD_BACKFILL_PER_TICK = 3
+LEAD_BACKFILL_WITHIN = timedelta(days=90)
 QUIET_BEFORE_ANALYSIS = timedelta(minutes=5)
 RECHECK_AFTER = timedelta(hours=12)
 BATCH = 50
@@ -59,6 +77,21 @@ def _to_analyze(now):
     return Contact.objects.filter(needs_analysis=True).filter(
         Q(last_message_at__lte=now - QUIET_BEFORE_ANALYSIS) | Q(last_message_at__isnull=True)
     )
+
+
+def _to_understand(now):
+    """Conversations the summary has never read as a lead: not waiting for a summary anyway, recent, not a customer's."""
+    return (
+        Contact.objects.filter(lead_ai={}, needs_analysis=False, last_inbound_at__gte=now - LEAD_BACKFILL_WITHIN)
+        .exclude(kogo_outcome__in=CUSTOMER_OUTCOMES)
+    )
+
+
+def _backfill_per_tick() -> int:
+    try:
+        return max(0, int(getattr(settings, 'WAHUB_LEAD_BACKFILL_PER_TICK', LEAD_BACKFILL_PER_TICK)))
+    except (TypeError, ValueError):
+        return LEAD_BACKFILL_PER_TICK
 
 
 def _to_match(now):
@@ -75,19 +108,25 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
     counts = {
         'analyzed': 0, 'analyzed_ai': 0, 'analyzed_rules': 0, 'matched': 0, 'outcomes_changed': 0,
         'shadow_proposed': 0, 'shadow_ai': 0, 'shadow_stub': 0, 'review_proposals': 0,
-        'lead_checked': 0, 'lead_changed': 0,
+        'lead_checked': 0, 'lead_changed': 0, 'lead_understood': 0,
+        'followups_sent': 0, 'followups_due': 0, 'followups_skipped': 0, 'followups_failed': 0,
     }
 
-    places = None
+    places = course_types = external_places = None
     analysis_until = budget_seconds * (1 - ANALYSIS_SHARE)
     for contact in _to_analyze(now).order_by(F('last_message_at').asc(nulls_first=True), 'id')[:BATCH]:
         if left() <= analysis_until:
             break
         if places is None:
-            places = analysis.load_places()
+            # Read once for the whole call: the branches, the external ones, the kinds of class.
+            places, course_types = analysis.load_places(), analysis.load_course_types()
+            external_places = analysis.load_external_places()
         try:
             # Never wait for Claude longer than the time this call still has.
-            known = analysis.analyze_contact(contact, places=places, timeout=max(2.0, left() - analysis_until))
+            known = analysis.analyze_contact(
+                contact, places=places, course_types=course_types, external_places=external_places,
+                timeout=max(2.0, left() - analysis_until),
+            )
         except Exception:
             logger.exception('wahub cron: summary of contact %s failed', contact.pk)
             # Left marked, it would be the first one picked again every five minutes.
@@ -95,6 +134,26 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
             continue
         counts['analyzed'] += 1
         counts['analyzed_ai' if known.source == ANALYSIS_AI else 'analyzed_rules'] += 1
+
+    # 1b. the older conversations, read as leads a few at a time — newest first
+    for contact in _to_understand(now).order_by('-last_inbound_at', 'id')[:_backfill_per_tick()]:
+        if left() <= analysis_until:
+            break
+        if places is None:
+            places, course_types = analysis.load_places(), analysis.load_course_types()
+            external_places = analysis.load_external_places()
+        try:
+            analysis.analyze_contact(
+                contact, places=places, course_types=course_types, external_places=external_places,
+                timeout=max(2.0, left() - analysis_until),
+                use_ai=bool(getattr(settings, 'WAHUB_LEAD_BACKFILL_AI', False)),
+            )
+        except Exception:
+            logger.exception('wahub cron: contact %s was not read as a lead', contact.pk)
+            # Left empty, it would be picked again on every call: marked as read, with nothing found.
+            Contact.objects.filter(pk=contact.pk, lead_ai={}).update(lead_ai={'v': 0})
+            continue
+        counts['lead_understood'] += 1
 
     shadow_waiting = shadow.pending(now).exists()
     matching_until = budget_seconds * (MATCHING_FLOOR if shadow_waiting else LEAD_STAGE_FLOOR)
@@ -120,6 +179,16 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
             counts.update(lead_stage.scan(budget_seconds=lead_seconds))
         except Exception:
             logger.exception('wahub cron: the lead stages were not refreshed')
+
+    # 2c. the bot's own follow-ups to leads — after the stages, which say whether each is still wanted
+    follow_seconds = min(
+        lead_followups.RUN_SECONDS, left() - (shadow_until + SHADOW_ANSWER_SECONDS if shadow_waiting else 0),
+    )
+    if follow_seconds > 0:
+        try:
+            counts.update(lead_followups.run(budget_seconds=follow_seconds))
+        except Exception:
+            logger.exception('wahub cron: the follow-ups to leads were not run')
 
     # 3. the shadow bot — one answer per quiet burst, never sent
     for contact in shadow.pending(now).order_by(F('last_inbound_at').asc(nulls_first=True), 'id')[:SHADOW_BATCH]:
@@ -161,5 +230,6 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
     counts['pending_matching'] = _to_match(now).count()
     counts['pending_shadow'] = shadow.pending(now).count()
     counts['pending_lead_stage'] = lead_stage.pending_count(now)
+    counts['pending_lead_understanding'] = _to_understand(now).count() if _backfill_per_tick() else 0
     counts['seconds'] = round(time.monotonic() - started, 2)
     return counts

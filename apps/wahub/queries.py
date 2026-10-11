@@ -31,6 +31,7 @@ from apps.wahub.models import (
     LEAD_GROUP_ACT,
     LEAD_STAGE_CHOICES,
     LEAD_STAGE_GROUPS,
+    LEGACY_LEAD_STAGES,
     OUTCOME_IN_SYSTEM,
     OUTCOME_NOT_FOUND,
     OUTCOME_PENDING,
@@ -159,7 +160,8 @@ def common_filters(queryset, params):
     # lead_stage=<key>[,<key>] and lead_group=act|wait|closed — the board's lists (docs/WAHUB-CONTRACT-LEAD-STAGES.md).
     stages, groups = _lead_filter(params)
     if stages:
-        queryset = queryset.filter(lead_stage__in=stages)
+        # A row the cron has not looked at since a stage got its present name is listed under that name.
+        queryset = queryset.filter(lead_stage__in=stages + [old for old, new in LEGACY_LEAD_STAGES.items() if new in stages])
     if groups:
         queryset = queryset.filter(lead_stage__in=[stage for stage, group in LEAD_STAGE_GROUPS.items() if group in groups])
     return queryset
