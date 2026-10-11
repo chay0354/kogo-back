@@ -20,6 +20,13 @@ MODEL = 'gpt-4o-mini-transcribe'
 LANGUAGE = 'he'
 DEFAULT_TIMEOUT = 30
 NO_KEY_REASON = 'אין תמלול: חסר מפתח OPENAI_API_KEY'
+# OpenAI's 429 for an account with nothing left to spend — not a rate limit: waiting does not help, paying does.
+NO_CREDIT_REASON = 'אין יתרה בחשבון OpenAI — התמלול לא עובד עד שמטעינים'
+BAD_KEY_REASON = 'מפתח OpenAI לא תקין או בוטל'
+_NO_CREDIT_CODES = ('insufficient_quota', 'billing_not_active', 'billing_hard_limit_reached')
+_NO_CREDIT_WORDS = ('credit', 'quota', 'billing')
+# Where the last result is kept for the settings screen (settings_store): {'ok', 'reason', 'at'}.
+HEALTH_KEY = 'transcribe_health'
 
 
 class TranscriptionError(Exception):
@@ -52,15 +59,54 @@ def transcribe(audio: bytes, *, filename: str, media_type: str, timeout: float =
     except requests.RequestException as exc:
         raise TranscriptionError(f'התמלול לא ענה ({type(exc).__name__})') from exc
     if response.status_code != 200:
-        detail = ''
+        detail, code = '', ''
         try:
-            detail = str((response.json().get('error') or {}).get('message', ''))[:200]
-        except ValueError:
+            error = response.json().get('error') or {}
+            detail, code = str(error.get('message', ''))[:200], f"{error.get('code', '')} {error.get('type', '')}"
+        except (ValueError, AttributeError):
             pass
         logger.warning('wahub transcribe: OpenAI answered %s %s', response.status_code, detail)
-        raise TranscriptionError(f'התמלול נכשל ({response.status_code})')
+        reason = f'התמלול נכשל ({response.status_code})'
+        if response.status_code == 429 and (
+            any(word in code for word in _NO_CREDIT_CODES) or any(word in detail.lower() for word in _NO_CREDIT_WORDS)
+        ):
+            reason = NO_CREDIT_REASON
+        elif response.status_code == 401:
+            reason = BAD_KEY_REASON
+        _remember(False, reason)
+        raise TranscriptionError(reason)
     try:
         text = str(response.json().get('text') or '').strip()
     except ValueError as exc:
         raise TranscriptionError('תשובה לא קריאה מהתמלול') from exc
+    _remember(True)
     return text
+
+
+def _remember(ok: bool, reason: str = '') -> None:
+    """
+    Whether OpenAI took the last recording, for the settings screen. Written
+    only when it changes (it worked and now does not, or the other way, or the
+    reason is another one) — and never allowed to fail a transcription.
+    """
+    try:
+        from django.utils import timezone
+
+        from apps.wahub import settings_store
+
+        last = settings_store.get(HEALTH_KEY) or {}
+        if last.get('ok') is ok and last.get('reason', '') == reason:
+            return
+        settings_store.put(HEALTH_KEY, {'ok': ok, 'reason': reason, 'at': timezone.now().isoformat()})
+    except Exception:
+        logger.exception('wahub transcribe: the result could not be written down')
+
+
+def health() -> dict:
+    """{'configured', 'ok', 'reason', 'at'} — `ok` is None until a recording was tried."""
+    from apps.wahub import settings_store
+
+    last = settings_store.get(HEALTH_KEY) or {}
+    if not configured():
+        return {'configured': False, 'ok': False, 'reason': NO_KEY_REASON, 'at': None}
+    return {'configured': True, 'ok': last.get('ok'), 'reason': last.get('reason', ''), 'at': last.get('at')}

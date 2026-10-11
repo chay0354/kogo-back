@@ -34,6 +34,7 @@ from apps.core.permissions import IsManager
 from apps.customers.models import Family
 from apps.wahub import (
     analysis, cron, demo, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending, shadow, state,
+    transcribe,
 )
 from apps.wahub.models import (
     EVENT_CREATED,
@@ -612,6 +613,8 @@ class StatusView(APIView):
             # The shadow bot drafts with Claude when there is a key; otherwise the stub answers.
             'shadow_configured': shadow.shadow_configured(),
             'shadow_model': shadow.model_name() if shadow.shadow_configured() else 'stub',
+            # Recordings: is there a key, and did OpenAI take the last one (no credit left is the usual "no").
+            'transcribe': transcribe.health(),
             'send_configured': ManyChatService().is_configured,
             'sending_enabled': sending.sending_enabled(),
             'simulate_send': sending.simulate_send(),

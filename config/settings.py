@@ -612,6 +612,9 @@ WAHUB_HUMAN_STATUS_VALUE = config('WAHUB_HUMAN_STATUS_VALUE', default='בטיפ�
 # Claude's token ceiling for a live answer (a customer is waiting).
 WAHUB_LIVE_TEST_STATUS_VALUE = config('WAHUB_LIVE_TEST_STATUS_VALUE', default='בדיקה חיה (Kogo)')
 WAHUB_LIVE_TEST_SETTLE_SECONDS = config('WAHUB_LIVE_TEST_SETTLE_SECONDS', default=4, cast=float)
+# No live answer leaves before the customer has been quiet for this long; a message that arrives
+# before it left drops it and everything is answered together (apps/wahub/live_test.py).
+WAHUB_LIVE_TEST_QUIET_SECONDS = config('WAHUB_LIVE_TEST_QUIET_SECONDS', default=10, cast=float)
 WAHUB_LIVE_TEST_MAX_TOKENS = config('WAHUB_LIVE_TEST_MAX_TOKENS', default=4000, cast=int)
 # Claude's effort for a live answer: empty = the shadow's own (WAHUB_SHADOW_EFFORT),
 # so the live test answers exactly as the shadow and the demo do. "low" is the

@@ -143,6 +143,13 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         except Exception:
             logger.exception('wahub cron: the reviewer sweep failed')
 
+    # 4b. recordings that were not transcribed are tried again (nothing is answered from here)
+    if left() > 10:
+        try:
+            counts['recordings_heard_again'] = shadow.hear_again(now=timezone.now(), deadline=time.monotonic() + left())
+        except Exception:
+            logger.exception('wahub cron: the second try at the recordings failed')
+
     # 5. the live test: a message nobody answered is said on the contact (nothing is sent from here)
     try:
         counts['live_test_unanswered'] = live_test.flag_unanswered()
