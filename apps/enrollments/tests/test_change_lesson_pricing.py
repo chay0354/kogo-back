@@ -270,28 +270,34 @@ class UpgradeTest(_Base):
         self.assertTrue(res.data.get('unchanged'))
         self.assertFalse(Payment.objects.filter(payment_type='one_time').exists())
 
-    def test_a_same_price_move_replaces_a_stale_pending_amount_only_after_confirmation(self):
-        # An upgrade reverted the same day: 260 → 335 (pending) → back to a 260 lesson.
+    def test_a_revert_replaces_the_amount_that_was_waiting_only_after_confirmation(self):
+        # An upgrade reverted the same day: 260 → the 335 track (the new amount
+        # waits for 1.10) → back to a 260 lesson. This month was charged 260, so
+        # nothing is owed either way; the 335 that was waiting must go.
+        self.enrollment.lesson = self.mon; self.enrollment.bundle = self.bundle; self.enrollment.save()
+        LessonEnrollment.objects.create(lesson=self.thu, child=self.child, status='active', bundle=self.bundle)
+        self.payment.lesson = self.mon; self.payment.bundle = self.bundle; self.payment.save()
         self.recurring.pending_amount = Decimal('335.00'); self.recurring.pending_amount_effective_date = date(2026, 10, 1); self.recurring.save()
-        same = Lesson.objects.create(course=self.course_once, room=self.room, day_of_week=0, start_time=time(17, 0), end_time=time(18, 0))
         with self._today():
-            quote = self.client.post(f'{self.url}quote/', {'lesson_id': str(same.id)}, format='json').data
+            quote = self.client.post(f'{self.url}quote/', {'lesson_id': str(self.wed.id)}, format='json').data
         self.assertEqual(quote['direction'], 'same')
         self.assertTrue(quote['clears_pending'])
         self.assertEqual(quote['pending_amount'], '335.00')
         with self._today():
-            res = self.client.post(self.url, {'lesson_id': str(same.id)}, format='json')
+            res = self.client.post(self.url, {'lesson_id': str(self.wed.id)}, format='json')
         self.assertEqual(res.status_code, 400)
         self.recurring.refresh_from_db()
         self.assertEqual(self.recurring.pending_amount, Decimal('335.00'))
         with self._today():
-            res = self.client.post(self.url, {'lesson_id': str(same.id), 'expected_new_amount': '260.00'}, format='json')
+            res = self.client.post(self.url, {'lesson_id': str(self.wed.id), 'expected_new_amount': '260.00'}, format='json')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertTrue(res.data['cleared_pending'])
         self.recurring.refresh_from_db()
         self.assertIsNone(self.recurring.pending_amount)
-        self.enrollment.refresh_from_db()
-        self.assertEqual(self.enrollment.lesson_id, same.id)
+        self.assertEqual(
+            list(LessonEnrollment.objects.filter(child=self.child, status='active').values_list('lesson_id', flat=True)),
+            [self.wed.id],
+        )
 
     def test_no_standing_order_moves_without_pricing(self):
         self.recurring.delete()
