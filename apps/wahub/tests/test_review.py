@@ -209,7 +209,9 @@ class ServiceNoteAndDecisionTests(ReviewTestCase):
         rejected = self.post(f'review/proposals/{proposal_id}/reject/', {'note': 'כבר יש כלל כזה'})
         self.assertEqual((rejected.status_code, rejected.data['status'], rejected.data['decision_note']), (200, 'rejected', 'כבר יש כלל כזה'))
         summary = self.get('review/summary/').data
-        self.assertEqual((summary['pending'], summary['applied_7d'], summary['rejected_7d'], summary['auto_mode']), (0, 0, 1, False))
+        self.assertEqual((summary['pending'], summary['applied_7d'], summary['rejected_7d']), (0, 0, 1))
+        # The owner's standing approval (11.10.2026) is on until he turns it off; `auto_mode` is the same switch.
+        self.assertEqual((summary['auto_apply'], summary['auto_mode'], summary['auto_applied_7d']), (True, True, 0))
         self.assertEqual(KnowledgeItem.objects.count(), self.knowledge_before)
 
     def test_a_broken_change_is_refused_and_the_proposal_stays_pending(self):
