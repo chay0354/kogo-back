@@ -10,9 +10,12 @@ nobody typed into a card, the contacts, the links, the nicknames, the special
 days and the office hours.
 
 Every change to an item is a version with a before/after snapshot
-(KnowledgeHistory); restore copies an old `after` back. Nothing here is
-written by automatic code except through a proposal the owner approved
-(reviewer.approve), and the import of the old bot's texts.
+(KnowledgeHistory); restore copies an old `after` back, and revert_version
+takes back what one version changed. Nothing here is written by automatic code
+except through a proposal — one the owner approved with a click
+(reviewer.approve) or one his standing approval of 11.10.2026 covers
+(reviewer.apply_automatically; docs/WAHUB-CONTRACT-REFINE.md) — and the import
+of the old bot's texts.
 """
 from __future__ import annotations
 
@@ -380,6 +383,33 @@ def restore(item: KnowledgeItem, version: int, user=None) -> KnowledgeItem:
     return update_item(item, {**fields, 'data': data}, user, note=f'שחזור לגרסה {version}')
 
 
+def revert_version(item: KnowledgeItem, version: int, user=None, note: str = '') -> KnowledgeItem:
+    """
+    Take back what one version changed, and only that. Every field that version
+    changed, and that still holds the value it gave, gets its earlier value; a
+    field somebody changed since is left as it is now. A new version, like any
+    other change — nothing is erased.
+    """
+    row = KnowledgeHistory.objects.filter(item=item, version=version).first()
+    if row is None or not isinstance(row.before, dict):
+        raise KnowledgeError(f'אין גרסה {version} לחזור ממנה.')
+    before, after, now = row.before, row.after or {}, snapshot(item)
+    fields = {
+        name: before.get(name) for name in COLUMNS
+        if name != 'kind' and before.get(name) != after.get(name) and now.get(name) == after.get(name)
+    }
+    data_before, data_after = before.get('data') or {}, after.get('data') or {}
+    data = {
+        name: data_before.get(name) for name in {*data_before, *data_after}
+        if data_before.get(name) != data_after.get(name) and now['data'].get(name) == data_after.get(name)
+    }
+    if data:
+        fields['data'] = data
+    if not fields:
+        return item
+    return update_item(item, fields, user, note or f'ביטול השינוי של גרסה {version}')
+
+
 def apply_change(change: dict, user=None, note: str = '') -> KnowledgeItem:
     """A proposal's `change` ({action, item_id, kind, after}) put on the knowledge. For reviewer.approve."""
     if not isinstance(change, dict):
@@ -392,6 +422,13 @@ def apply_change(change: dict, user=None, note: str = '') -> KnowledgeItem:
             raise KnowledgeError('הרשומה שההצעה מעדכנת כבר לא קיימת.')
         fields = {name: value for name, value in after.items() if name != 'kind'}
         return update_item(item, fields, user, note)
+    if action == 'deactivate':
+        item = KnowledgeItem.objects.filter(pk=change.get('item_id')).first()
+        if item is None:
+            raise KnowledgeError('הרשומה שההצעה מכבה כבר לא קיימת.')
+        if item.kind in SINGLETON_KINDS:
+            raise KnowledgeError(f'אי אפשר לכבות את הרשומה מסוג {KIND_LABELS[item.kind]}; עורכים אותה.')
+        return soft_delete(item, user, note or 'הוסר')
     if action == 'create':
         kind = change.get('kind') or after.get('kind')
         if kind not in KIND_LABELS:
@@ -400,7 +437,7 @@ def apply_change(change: dict, user=None, note: str = '') -> KnowledgeItem:
         if kind == KIND_PHRASING and not fields.get('key'):
             fields['key'] = f'proposal_{int(timezone.now().timestamp())}'
         return create_item(fields, user, note)
-    raise KnowledgeError('פעולה לא מוכרת בהצעה (create או update).')
+    raise KnowledgeError('פעולה לא מוכרת בהצעה (create, update או deactivate).')
 
 
 # --- scope labels from Kogo ----------------------------------------------------------------

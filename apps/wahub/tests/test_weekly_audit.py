@@ -74,6 +74,10 @@ class WeeklyAuditTests(WahubTestCase):
                 # refuses in Hebrew (400) — the sweep fills path parameters only, and a refusal is not a fault.
                 'api/v1/wahub/leads/unregistered/': 200,
                 'api/v1/wahub/for-customer/': 400,
+                # "דיוק" and the automatic approval: the list of threads and the switch, read only. What
+                # writes there (a fix, say, undo, the switch itself) answers POST or PATCH only.
+                'api/v1/wahub/refine/': 200,
+                'api/v1/wahub/settings/review/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])

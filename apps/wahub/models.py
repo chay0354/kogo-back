@@ -634,29 +634,36 @@ PROPOSAL_PENDING = 'pending'
 PROPOSAL_APPROVED = 'approved'
 PROPOSAL_REJECTED = 'rejected'
 PROPOSAL_APPLIED = 'applied'
+# Taken back: an applied change undone, or a waiting one withdrawn (docs/WAHUB-CONTRACT-REFINE.md).
+PROPOSAL_UNDONE = 'undone'
 PROPOSAL_STATUS_CHOICES = [
     (PROPOSAL_PENDING, 'ממתין לאישור'),
     (PROPOSAL_APPROVED, 'אושר'),
     (PROPOSAL_REJECTED, 'נדחה'),
     (PROPOSAL_APPLIED, 'הוחל על הידע'),
+    (PROPOSAL_UNDONE, 'בוטל'),
 ]
 
 SOURCE_HUMAN_OVERRIDE = 'human_override'
 SOURCE_BAD_VERDICT = 'bad_verdict'
 SOURCE_SERVICE_NOTE = 'service_note'
 SOURCE_REVIEWER = 'reviewer'
+SOURCE_REFINE = 'refine'
 PROPOSAL_SOURCE_CHOICES = [
     (SOURCE_HUMAN_OVERRIDE, 'נציג ענה מעל הבוט'),
     (SOURCE_BAD_VERDICT, 'סימון 👎 על תשובת צל'),
     (SOURCE_SERVICE_NOTE, 'הערת שירות'),
     (SOURCE_REVIEWER, 'סריקה יזומה של השיחות'),
+    (SOURCE_REFINE, 'דיוק'),
 ]
 
 
 class KnowledgeProposal(models.Model):
     """
-    "האם אתה רוצה שאני אשנה את ההגדרות?" — a change to the knowledge that waits
-    for a click. Nothing here touches a KnowledgeItem until approve() runs.
+    "האם אתה רוצה שאני אשנה את ההגדרות?" — a change to the knowledge. It waits
+    for a click, unless the owner's standing approval of 11.10.2026 covers it
+    (reviewer.py, "automatic approval"): then it is applied as it is made, marked
+    `auto_applied`, and can be taken back (`undone`).
     """
     status = models.CharField(max_length=10, choices=PROPOSAL_STATUS_CHOICES, default=PROPOSAL_PENDING)
     source = models.CharField(max_length=20, choices=PROPOSAL_SOURCE_CHOICES)
@@ -667,7 +674,7 @@ class KnowledgeProposal(models.Model):
     shadow = models.ForeignKey(ShadowReply, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     title = models.CharField(max_length=200)
     explanation = models.TextField(blank=True)
-    # {action: create|update, item_id, kind, before, after}
+    # {action: create|update|deactivate, item_id, kind, before, after}
     change = models.JSONField(default=dict, blank=True)
     # [{message_id, who, text}]
     evidence = models.JSONField(default=list, blank=True)
@@ -681,6 +688,15 @@ class KnowledgeProposal(models.Model):
     decision_note = models.TextField(blank=True)
     applied_item = models.ForeignKey(
         KnowledgeItem, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    # Applied with no click, under the owner's standing approval.
+    auto_applied = models.BooleanField(default=False)
+    # The version this proposal gave the item — what undo reads. 0: applying it
+    # changed nothing; null: applied before versions were kept here.
+    applied_version = models.PositiveIntegerField(null=True, blank=True)
+    undone_at = models.DateTimeField(null=True, blank=True)
+    undone_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
 
     class Meta:
@@ -713,3 +729,103 @@ class ServiceNote(models.Model):
 
     def __str__(self):
         return self.text[:60]
+
+
+# =====================================================================================
+# "דיוק" — fixing the bot in free text, and the automatic approval (docs/WAHUB-CONTRACT-REFINE.md)
+# =====================================================================================
+
+class WahubSetting(models.Model):
+    """
+    A switch or a marker of this app that is neither knowledge (KnowledgeItem:
+    it would be read to the bot) nor a secret (IntegrationCredential: write-only,
+    and the environment overrides it): `review_auto_apply`, and the place the
+    one-time sweep over the old conversations has reached. Read and written
+    through settings_store.py only.
+    """
+    key = models.CharField(max_length=64, unique=True)
+    value = models.JSONField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'wahub_settings'
+        verbose_name = 'הגדרה של וואטסאפ ולידים'
+        verbose_name_plural = 'הגדרות של וואטסאפ ולידים'
+
+    def __str__(self):
+        return self.key
+
+
+REFINE_OPEN = 'open'
+REFINE_DONE = 'done'
+REFINE_STATUS_CHOICES = [(REFINE_OPEN, 'פתוח'), (REFINE_DONE, 'הסתיים')]
+
+TURN_OPERATOR = 'operator'
+TURN_SYSTEM = 'system'
+TURN_ROLE_CHOICES = [(TURN_OPERATOR, 'מפעילה'), (TURN_SYSTEM, 'המערכת')]
+
+
+class RefineThread(models.Model):
+    """
+    One "דיוק": the operator picked messages of a conversation and wrote, in her
+    own words, what was wrong — or pressed "דיוק" on a proposal that already
+    exists (`proposal`) and wrote what to change in it. The small chat that
+    follows is the turns; what it changed in the knowledge are KnowledgeProposal
+    rows whose ids the system turns carry.
+    """
+    contact = models.ForeignKey(Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='refine_threads')
+    # A "דיוק" on a proposal: the one she pressed it on. Waiting — it is rewritten
+    # in place; already applied — its item in the knowledge is what gets edited.
+    proposal = models.ForeignKey(
+        KnowledgeProposal, on_delete=models.SET_NULL, null=True, blank=True, related_name='refine_threads',
+    )
+    # The messages she picked, and (when the screen pointed at one) the shadow replies.
+    message_ids = models.JSONField(default=list, blank=True)
+    shadow_ids = models.JSONField(default=list, blank=True)
+    # open: the system asked, or nothing of the thread stands; done: there is an outcome.
+    status = models.CharField(max_length=10, choices=REFINE_STATUS_CHOICES, default=REFINE_OPEN)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'wahub_refine_threads'
+        ordering = ['-id']
+        verbose_name = 'דיוק'
+        verbose_name_plural = 'דיוקים'
+        indexes = [models.Index(fields=['contact', '-id'], name='wahub_refine_contact')]
+
+    def __str__(self):
+        return f'דיוק #{self.pk} · {self.get_status_display()}'
+
+
+class RefineTurn(models.Model):
+    thread = models.ForeignKey(RefineThread, on_delete=models.CASCADE, related_name='turns')
+    role = models.CharField(max_length=10, choices=TURN_ROLE_CHOICES)
+    text = models.TextField(blank=True)
+    # A system turn: what it proposed — [{proposal_id, action, kind, kind_label, title, before, after}].
+    # Whether each still stands is read from the proposal, never from here.
+    changes = models.JSONField(default=list, blank=True)
+    # A system turn that ends with a question to the operator.
+    needs_answer = models.BooleanField(default=False)
+    # A system turn: {outcome, understood, question, confidence, earlier_changes, model, took_ms}.
+    meta = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'wahub_refine_turns'
+        ordering = ['id']
+        verbose_name = 'הודעה בדיוק'
+        verbose_name_plural = 'הודעות בדיוק'
+        indexes = [models.Index(fields=['thread', 'id'], name='wahub_refine_turn_thread')]
+
+    def __str__(self):
+        return f'{self.get_role_display()} · {self.text[:40]}'

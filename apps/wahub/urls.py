@@ -11,11 +11,14 @@ router.register(r'quick-replies', views.QuickReplyViewSet, basename='wahub-quick
 router.register(r'knowledge', views_bot.KnowledgeViewSet, basename='wahub-knowledge')
 router.register(r'shadow', views_bot.ShadowViewSet, basename='wahub-shadow')
 router.register(r'review/proposals', views_bot.ReviewProposalViewSet, basename='wahub-review-proposal')
+# "דיוק" — fixing the bot in free text (docs/WAHUB-CONTRACT-REFINE.md).
+router.register(r'refine', views_bot.RefineViewSet, basename='wahub-refine')
 
 urlpatterns = [
     path('summary/', views.SummaryView.as_view(), name='wahub-summary'),
     path('status/', views.StatusView.as_view(), name='wahub-status'),
     path('settings/inbound-key/', views.InboundKeyView.as_view(), name='wahub-inbound-key'),
+    path('settings/review/', views_bot.ReviewSettingsView.as_view(), name='wahub-settings-review'),
     path('inbound/manychat/', views.ManyChatInboundView.as_view(), name='wahub-inbound-manychat'),
     path('cron/tick/', views.cron_tick, name='wahub-cron-tick'),
     path('review/notes/', views_bot.ReviewNotesView.as_view(), name='wahub-review-notes'),

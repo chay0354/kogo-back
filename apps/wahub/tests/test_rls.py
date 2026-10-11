@@ -16,6 +16,8 @@ TABLES = {
     # stage 2 (0002): the bot's knowledge, the shadow replies, the review
     'wahub_knowledge_items', 'wahub_knowledge_history', 'wahub_shadow_replies',
     'wahub_trial_questions', 'wahub_knowledge_proposals', 'wahub_service_notes',
+    # "דיוק" and the automatic approval (0005): the app's settings, the threads, their turns
+    'wahub_settings', 'wahub_refine_threads', 'wahub_refine_turns',
 }
 
 

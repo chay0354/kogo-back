@@ -2,8 +2,11 @@
 The API of "הבוט" — the knowledge, the shadow bot and the review
 (docs/WAHUB-CONTRACT-STAGE2.md, endpoint for endpoint). Managers only.
 
-Nothing here sends a message. The only thing that changes the knowledge is a
-manager's own save, restore, or approval of a proposal.
+Nothing here sends a message. What changes the knowledge is a manager's own
+save, restore or approval of a proposal — and, since the owner's standing
+approval of 11.10.2026 (docs/WAHUB-CONTRACT-REFINE.md), a fix she writes in
+free text ("דיוק", refine.py) or a proposal the review applies by itself
+(reviewer.py), each with its line in the item's history and its "בטל".
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsManager
-from apps.wahub import knowledge, knowledge_import, reviewer, shadow
+from apps.wahub import knowledge, knowledge_import, refine, reviewer, settings_store, shadow
 from apps.wahub.models import (
     PROPOSAL_PENDING,
     PROPOSAL_STATUS_CHOICES,
@@ -30,6 +33,7 @@ from apps.wahub.models import (
     KnowledgeHistory,
     KnowledgeItem,
     KnowledgeProposal,
+    RefineThread,
     ServiceNote,
     ShadowReply,
     TrialQuestion,
@@ -225,7 +229,7 @@ class ShadowViewSet(_ManagerViewSet):
 # --- the review ------------------------------------------------------------------------------------------------------
 
 class ReviewProposalViewSet(_ManagerViewSet):
-    queryset = KnowledgeProposal.objects.select_related('contact', 'decided_by')
+    queryset = KnowledgeProposal.objects.select_related('contact', 'decided_by', 'undone_by')
 
     def list(self, request):
         rows = self.get_queryset()
@@ -236,7 +240,13 @@ class ReviewProposalViewSet(_ManagerViewSet):
         source = (request.query_params.get('source') or '').strip()
         if source:
             rows = rows.filter(source=source)
-        return Response([reviewer.proposal_payload(row) for row in rows.order_by('-id')[:300]])
+        # "עודכן לבד": ?status=applied&auto=1 — what the standing approval applied with no click.
+        auto = (request.query_params.get('auto') or '').strip()
+        if auto in ('1', 'true'):
+            rows = rows.filter(auto_applied=True)
+        elif auto in ('0', 'false'):
+            rows = rows.filter(auto_applied=False)
+        return Response(reviewer.proposals_payload(rows.order_by('-id')[:300]))
 
     def retrieve(self, request, pk=None):
         return Response(reviewer.proposal_payload(self.get_object()))
@@ -261,6 +271,96 @@ class ReviewProposalViewSet(_ManagerViewSet):
             return _error(str(exc), http=status.HTTP_409_CONFLICT)
         proposal.refresh_from_db()
         return Response(reviewer.proposal_payload(proposal))
+
+    @action(detail=True, methods=['post'])
+    def undo(self, request, pk=None):
+        """"בטל" on a change that was applied (by itself, or by a click): the knowledge as it was, the proposal marked "בוטל"."""
+        proposal = self.get_object()
+        try:
+            reviewer.undo(proposal, request.user)
+        except reviewer.ReviewError as exc:
+            return _error(str(exc), http=status.HTTP_409_CONFLICT if 'כבר' in str(exc) else status.HTTP_400_BAD_REQUEST)
+        proposal = self.get_queryset().get(pk=proposal.pk)
+        item = proposal.applied_item
+        return Response({'proposal': reviewer.proposal_payload(proposal), 'item': knowledge.item_payload(item) if item else None})
+
+
+# --- "דיוק": the fix in free text (docs/WAHUB-CONTRACT-REFINE.md) ---------------------------------------------------
+
+class RefineViewSet(_ManagerViewSet):
+    """
+    refine/ — the operator picked messages and wrote what was wrong, or pressed
+    "דיוק" on a proposal and wrote what to change in it; the system answers what
+    it understood and what it changed (refine.py). One answer shape for every
+    door: {thread, status, reply, needs_answer, changes, turns}.
+    """
+    queryset = RefineThread.objects.select_related('contact', 'created_by', 'proposal')
+
+    def list(self, request):
+        rows = self.get_queryset()
+        for name in ('contact', 'proposal'):
+            raw = (request.query_params.get(name) or '').strip()
+            if raw:
+                if not raw.isdigit():
+                    return _error(f'{name} לא תקין.')
+                rows = rows.filter(**{f'{name}_id': int(raw)})
+        return Response([refine.thread_payload(thread) for thread in rows.order_by('-id')[:50]])
+
+    def retrieve(self, request, pk=None):
+        return Response(refine.thread_payload(self.get_object()))
+
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        raw_proposal = data.get('proposal', data.get('proposal_id'))
+        try:
+            if raw_proposal not in (None, ''):
+                # "דיוק" on a proposal that exists: no conversation and no messages are named.
+                proposal = KnowledgeProposal.objects.filter(pk=raw_proposal).first() if str(raw_proposal).isdigit() else None
+                if proposal is None:
+                    return _error('ההצעה לא נמצאה.')
+                thread = refine.start_on_proposal(proposal, data.get('text'), request.user)
+            else:
+                raw_contact = data.get('contact', data.get('contact_id'))
+                contact = Contact.objects.filter(pk=raw_contact).first() if str(raw_contact or '').isdigit() else None
+                if contact is None:
+                    return _error('איש הקשר לא נמצא.')
+                thread = refine.start(contact, data.get('message_ids'), data.get('text'), request.user, shadow_ids=data.get('shadow_ids'))
+        except refine.RefineError as exc:
+            return _error(str(exc))
+        return Response(refine.thread_payload(thread), status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def say(self, request, pk=None):
+        thread = self.get_object()
+        try:
+            refine.say(thread, request.data.get('text') if isinstance(request.data, dict) else None, request.user)
+        except refine.RefineError as exc:
+            return _error(str(exc))
+        return Response(refine.thread_payload(thread))
+
+    @action(detail=True, methods=['post'])
+    def undo(self, request, pk=None):
+        thread = self.get_object()
+        try:
+            refine.undo(thread, request.user)
+        except refine.RefineError as exc:
+            return _error(str(exc), http=status.HTTP_409_CONFLICT if 'אין בשיחה' in str(exc) else status.HTTP_400_BAD_REQUEST)
+        return Response(refine.thread_payload(thread))
+
+
+class ReviewSettingsView(APIView):
+    """GET / PATCH settings/review/ — the one switch: "אישור אוטומטי של תיקונים"."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        return Response(reviewer.settings_payload())
+
+    def patch(self, request):
+        value = request.data.get('auto_apply') if isinstance(request.data, dict) else None
+        if not isinstance(value, bool):
+            return _error('נדרש auto_apply: true או false.')
+        settings_store.set_review_auto_apply(value, request.user)
+        return Response(reviewer.settings_payload())
 
 
 class ReviewNotesView(APIView):

@@ -12,7 +12,7 @@ The slice of background work one cron call does (every five minutes):
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py).
 
-Nothing in 3, 4 or 5 sends a message or changes the knowledge: the shadow keeps
+Nothing in 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the shadow keeps
 proposals, the reviewer keeps proposals-to-approve, the look only marks.
 
 A call stops when its time is spent and the next one carries on: every contact
