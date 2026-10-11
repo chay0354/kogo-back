@@ -19,6 +19,7 @@ of the old bot's texts.
 """
 from __future__ import annotations
 
+import copy
 import re
 from datetime import date, datetime, time, timedelta
 
@@ -371,6 +372,19 @@ def update_item(item: KnowledgeItem, fields: dict, user=None, note: str = '') ->
 
 def soft_delete(item: KnowledgeItem, user=None, note: str = 'הוסר') -> KnowledgeItem:
     return update_item(item, {'is_active': False}, user, note)
+
+
+def in_memory(fields: dict, item: KnowledgeItem | None = None) -> KnowledgeItem:
+    """
+    The item as it WOULD be with `fields` put on it — refused or accepted by the
+    same rules as create_item / update_item — and NOT saved: a copy of `item`,
+    or a new one that is no row. For showing what the bot would answer with a
+    change that still waits (refine.py, the example of "ללמד את הבוט"). The
+    item given, and the database, are left as they are.
+    """
+    draft = copy.copy(item) if item is not None else KnowledgeItem(kind=fields.get('kind', ''))
+    _apply(draft, fields)
+    return draft
 
 
 def restore(item: KnowledgeItem, version: int, user=None) -> KnowledgeItem:
