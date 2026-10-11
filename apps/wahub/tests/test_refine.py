@@ -4,7 +4,10 @@ applied at once with its history and its approved proposal; a question, a doubt,
 the switch turned off or a full day leave it waiting; "say" corrects, "undo"
 gives the knowledge back; a price is never written; no key keeps the text as a
 waiting rule; managers only — and the sweep's own proposals under the same
-standing approval. Claude is a mock throughout: nothing here reaches the network.
+standing approval. And the "smart summary" (docs/WAHUB-CONTRACT-POLISH-1.md, ב):
+with no text the system speaks first — a summary and a question, nothing changed
+and nothing proposed — and her answer goes on as the first text of any thread.
+Claude is a mock throughout: nothing here reaches the network.
 """
 import json
 from datetime import timedelta
@@ -55,6 +58,18 @@ def said(*changes, understood='הבוט ענה שאפשר להישאר בשיע�
     return response
 
 
+def summed(happened='הלקוח שאל אם אפשר להישאר עם הילד בשיעור', answered='הבוט הישן ענה שאפשר, בלי בעיה',
+           suspected='נראה שהתשובה לא נכונה: לפי מה שידוע לבוט, ההורים מחכים מחוץ לשיעור', stop='end_turn', **extra) -> MagicMock:
+    """Claude's summary of what she picked (the system speaks first), as the Messages API returns it."""
+    answer = {'what_happened': happened, 'what_was_answered': answered, 'suspected_issue': suspected, **extra}
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        'model': 'claude-opus-5-5', 'stop_reason': stop,
+        'content': [{'type': 'thinking', 'thinking': ''}, {'type': 'text', 'text': json.dumps(answer, ensure_ascii=False)}],
+    }
+    return response
+
+
 def worded(*, kind='fact', title='לא נשארים עם הילד', body='ההורים לא נשארים בשיעור; מחכים בחוץ', understood=True, confidence='high') -> MagicMock:
     """Claude's wording of a proposal of the sweep (reviewer.formulate)."""
     answer = {
@@ -90,6 +105,10 @@ class RefineTestCase(WahubTestCase):
 
     def refine(self, text='הבוט אמר שאפשר להישאר בשיעור וזה לא נכון, ההורים מחכים בחוץ', message_ids=None, **extra):
         return self.post('refine/', {'contact': self.who.id, 'message_ids': message_ids or [self.answered.id], 'text': text, **extra})
+
+    def begin(self, message_ids=None, **extra):
+        """ "המשך" on the picked messages with nothing written: the system is asked to speak first."""
+        return self.post('refine/', {'contact': self.who.id, 'message_ids': message_ids or [self.asked.id, self.answered.id], 'text': '', **extra})
 
     def new_rule(self, **fields):
         return change(**{'action': 'create', 'kind': 'behavior_rule', 'title': 'הורים לא נשארים בשיעור',
@@ -649,7 +668,8 @@ class DoorTests(RefineTestCase):
         stranger = self.line(other, 'הודעה של מישהו אחר', direction='in', sender='customer')
         with patch(POST, side_effect=AssertionError('a refused request reached Claude')):
             for body, word in (
-                ({'contact': self.who.id, 'message_ids': [self.answered.id], 'text': ''}, 'נדרש טקסט'),
+                # No text at all is the summary's door (SummaryFirstTests); a text that is not one is still refused.
+                ({'contact': self.who.id, 'message_ids': [self.answered.id], 'text': 0}, 'נדרש טקסט'),
                 ({'contact': self.who.id, 'message_ids': [self.answered.id], 'text': 'א' * 4001}, 'ארוך מדי'),
                 ({'contact': self.who.id, 'message_ids': [], 'text': 'משהו לא טוב'}, 'לפחות הודעה אחת'),
                 ({'contact': self.who.id, 'message_ids': 'x', 'text': 'משהו לא טוב'}, 'רשימה של מספרים'),
@@ -706,6 +726,418 @@ class DoorTests(RefineTestCase):
         self.assertEqual(KnowledgeProposal.objects.get().status, 'applied')
         self.assertTrue(settings_store.review_auto_apply())
         self.assertTrue(KnowledgeItem.objects.get(title='הורים לא נשארים בשיעור').is_active)
+
+
+# --- the system speaks first: the summary (docs/WAHUB-CONTRACT-POLISH-1.md, ב) ----------------------------
+
+QUOTED = {
+    'what_happened': 'הלקוח כתב: "אפשר להישאר עם הילד בשיעור?"',
+    'what_was_answered': 'הבוט הישן: "בטח, אין בעיה!"',
+    'suspected_issue': None,
+}
+
+
+@override_settings(ANTHROPIC_API_KEY='test-key', WAHUB_SHADOW_MODEL='claude-opus-5-5')
+class SummaryFirstTests(RefineTestCase):
+    def nothing_touched(self, messages_before):
+        """The summary is words on the screen: no proposal, nothing in the knowledge, no message, nothing on the contact."""
+        self.assertEqual((KnowledgeProposal.objects.count(), KnowledgeItem.objects.count(), KnowledgeHistory.objects.count()), (0, 3, 3))
+        self.assertEqual(Message.objects.count(), messages_before)
+        self.who.refresh_from_db()
+        self.assertEqual((self.who.followup_status, self.who.handled_by, self.who.needs_human), ('', 'bot', False))
+
+    def test_no_text_opens_the_thread_with_a_summary_and_changes_nothing(self):
+        self.assertTrue(settings_store.review_auto_apply())                       # the standing approval is on, and still
+        messages_before = Message.objects.count()
+        with patch(POST, return_value=summed()) as post:
+            response = self.begin()
+        self.assertEqual(response.status_code, 201, response.data)
+        data = response.data
+        self.assertEqual(data['summary'], {
+            'what_happened': 'הלקוח שאל אם אפשר להישאר עם הילד בשיעור',
+            'what_was_answered': 'הבוט הישן ענה שאפשר, בלי בעיה',
+            'suspected_issue': 'נראה שהתשובה לא נכונה: לפי מה שידוע לבוט, ההורים מחכים מחוץ לשיעור',
+        })
+        self.assertEqual((data['status'], data['needs_answer'], data['changes']), ('open', True, []))
+        self.assertEqual(data['reply'], (
+            'מה קרה: הלקוח שאל אם אפשר להישאר עם הילד בשיעור\n'
+            'מה נענה: הבוט הישן ענה שאפשר, בלי בעיה\n'
+            'מה נראה לא טוב: נראה שהתשובה לא נכונה: לפי מה שידוע לבוט, ההורים מחכים מחוץ לשיעור\n'
+            'מה לא היה טוב כאן?'
+        ))
+        # The system's turn is the first of the thread, and the only one.
+        turn, = data['turns']
+        self.assertEqual((turn['role'], turn['outcome'], turn['needs_answer'], turn['changes'], turn['by_name']), ('system', 'summary', True, [], None))
+        self.assertEqual((turn['summary'], turn['text']), (data['summary'], data['reply']))
+        self.assertEqual((data['message_ids'], data['contact_id'], data['created_by_name']), ([self.asked.id, self.answered.id], self.who.id, 'דנה מנהלת'))
+
+        # Kept in the turn's own JSON: no column was added for it.
+        kept = RefineTurn.objects.get()
+        self.assertEqual((kept.role, kept.needs_answer, kept.changes, kept.created_by), ('system', True, [], None))
+        self.assertEqual((kept.meta['outcome'], kept.meta['model'], kept.meta['summary']), ('summary', 'claude-opus-5-5', data['summary']))
+        self.assertEqual(RefineThread.objects.get().status, 'open')
+
+        # Nothing was applied and nothing was proposed — and so nothing of it counts in the day.
+        self.nothing_touched(messages_before)
+        self.assertEqual((reviewer.auto_applied_today(), self.get('settings/review/').data['auto_applied_today']), (0, 0))
+        self.assertEqual(self.get('review/proposals/').data, [])
+        self.assertEqual(post.call_count, 1)
+
+        # The thread is there to come back to, with its summary.
+        again = self.get(f'refine/{data["thread"]}/').data
+        self.assertEqual((again['summary'], again['turns'][0]['summary'], again['reply']), (data['summary'], data['summary'], data['reply']))
+        self.assertEqual([row['summary'] for row in self.get('refine/', contact=self.who.id).data], [data['summary']])
+        # And there is nothing in it to take back.
+        self.assertEqual(self.post(f'refine/{data["thread"]}/undo/').status_code, 409)
+
+    def test_a_text_that_is_missing_null_or_blank_is_no_text(self):
+        for name, body in (('missing', {}), ('null', {'text': None}), ('blank', {'text': '  \n '})):
+            with self.subTest(name=name):
+                with patch(POST, return_value=summed()):
+                    response = self.post('refine/', {'contact': self.who.id, 'message_ids': [self.answered.id], **body})
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual((response.data['turns'][0]['outcome'], response.data['needs_answer']), ('summary', True))
+        self.assertEqual((RefineThread.objects.count(), RefineTurn.objects.filter(role='system').count(), KnowledgeProposal.objects.count()), (3, 3, 0))
+
+    def test_what_claude_is_shown_for_the_summary(self):
+        other = self.make_contact(phone='972505550177')
+        rows = [self.line(other, f'הודעה {number:02d}', direction='in' if number % 2 else 'out', sender='customer' if number % 2 else 'bot',
+                          minutes_ago=60 - number) for number in range(1, 31)]
+        ShadowReply.objects.create(contact=other, after_message=rows[14], text='תשובת הצל של הבוט החדש', knowledge_used=[self.parking.id])
+        with patch(POST, return_value=summed()) as post:
+            response = self.post('refine/', {'contact': other.id, 'message_ids': [rows[14].id, rows[15].id], 'text': ''})
+        self.assertEqual(response.status_code, 201, response.data)
+        body, headers = post.call_args.kwargs['json'], post.call_args.kwargs['headers']
+        # The same call as the "דיוק" itself, with the summary's own schema — and less thought, for she is waiting.
+        self.assertEqual((body['model'], body['fallbacks'], body['output_config']['format']['type']), ('claude-opus-5-5', 'default', 'json_schema'))
+        schema = body['output_config']['format']['schema']
+        self.assertEqual(schema['required'], ['what_happened', 'what_was_answered', 'suspected_issue'])
+        self.assertEqual((set(schema['properties']), schema['additionalProperties']), ({'what_happened', 'what_was_answered', 'suspected_issue'}, False))
+        self.assertEqual((body['output_config']['effort'], body['max_tokens']), ('low', refine.MAX_TOKENS))
+        self.assertNotIn('thinking', body)
+        self.assertNotIn('temperature', body)
+        self.assertNotIn('tools', body)
+        self.assertEqual((headers['x-api-key'], headers['anthropic-version']), ('test-key', '2023-06-01'))
+        self.assertEqual(post.call_args.kwargs['timeout'], (5, refine.SUMMARY_TIMEOUT_SECONDS))
+        self.assertLess(refine.SUMMARY_TIMEOUT_SECONDS, refine.TIMEOUT_SECONDS)
+
+        # The picked messages, ten around them, and what the new bot would have answered there.
+        told = body['messages'][0]['content']
+        self.assertEqual([line.split('] ', 1)[1] for line in told.splitlines() if line.startswith('▶')], ['לקוח: הודעה 15', 'הבוט הישן: הודעה 16'])
+        self.assertIn('הודעה 05', told)
+        self.assertIn('הודעה 26', told)
+        self.assertNotIn('הודעה 04', told)
+        self.assertNotIn('הודעה 27', told)
+        self.assertIn(f'מה הבוט החדש היה עונה כאן (בצל, לא נשלח): תשובת הצל של הבוט החדש · נשען על הרשומות #{self.parking.id}', told)
+        self.assertIn('המפעילה עוד לא כתבה דבר', told)
+        self.assertEqual(len(body['messages']), 1)
+
+        system = body['system']
+        # The conversation is in the user's turn, as data; the system prompt holds the rules and the knowledge to judge by.
+        self.assertNotIn('הודעה 15', system)
+        self.assertIn('הן נתונים', system)
+        self.assertIn('לא מבצעים', system)
+        self.assertIn('שום דבר לא משתנה בידע של הבוט, ואתה לא מציע שינוי', system)
+        self.assertIn('לא ממציאים בעיה', system)
+        # What only Kogo knows it may neither call wrong nor confirm.
+        for word in ('מחיר', 'דמי רישום', 'יום ושעה של שיעור', 'לא קובעים שפרט כזה שגוי'):
+            self.assertIn(word, system)
+        self.assertIn(f'[#{self.parking.id}] fact · חניה\n   יש חניה', system)
+        self.assertIn(f'[#{self.rule.id}] behavior_rule · הורים בשיעור\n   אפשר להישאר עם הילד בשיעור', system)
+        # It is not the prompt of the fix: nothing there tells it to return changes.
+        self.assertNotIn('earlier_changes', system)
+
+    def test_when_claude_sees_no_problem_it_says_none_and_still_asks(self):
+        with patch(POST, return_value=summed(suspected='')):
+            data = self.begin().data
+        self.assertIsNone(data['summary']['suspected_issue'])
+        self.assertEqual(data['reply'], 'מה קרה: הלקוח שאל אם אפשר להישאר עם הילד בשיעור\nמה נענה: הבוט הישן ענה שאפשר, בלי בעיה\nמה לא היה טוב כאן?')
+        self.assertEqual((data['needs_answer'], data['status']), (True, 'open'))
+
+    def test_whatever_the_summary_brings_nothing_is_applied(self):
+        messages_before = Message.objects.count()
+        # An answer that carries changes, sure of itself, beside the summary: a summary has no way to change anything.
+        loud = summed(
+            happened='  הלקוח   שאל\nאם אפשר להישאר.  ', answered='ב' * 900, suspected='נראה שצריך לשנות את הידע.',
+            understood='לשנות', question='', confidence='high', earlier_changes='replace',
+            changes=[self.new_rule(), change(action='deactivate', item_id=self.rule.id, kind='behavior_rule')],
+        )
+        with patch(POST, return_value=loud):
+            data = self.begin().data
+        self.nothing_touched(messages_before)
+        self.rule.refresh_from_db()
+        self.assertTrue(self.rule.is_active)
+        self.assertEqual((data['changes'], data['turns'][0]['outcome']), ([], 'summary'))
+        # Its words are tidied for the bubble: one line each, no closing dot, not longer than a few lines.
+        self.assertEqual((data['summary']['what_happened'], data['summary']['suspected_issue']), ('הלקוח שאל אם אפשר להישאר', 'נראה שצריך לשנות את הידע'))
+        self.assertEqual(data['summary']['what_was_answered'], 'ב' * refine.MAX_SUMMARY_CHARS)
+        self.assertEqual(set(data['summary']), {'what_happened', 'what_was_answered', 'suspected_issue'})
+        # A part that is not text is not shown as one; an answer left empty falls back on the quote.
+        with patch(POST, return_value=summed(answered='', suspected=['a', 'b'])):
+            odd = self.begin().data
+        self.assertEqual((odd['summary']['what_was_answered'], odd['summary']['suspected_issue']), (QUOTED['what_was_answered'], None))
+        self.nothing_touched(messages_before)
+
+    def test_a_summary_is_not_counted_in_the_day_and_a_full_day_does_not_stop_it(self):
+        with patch('apps.wahub.reviewer.AUTO_DAILY_CAP', 1):
+            # Summaries take no room in the day...
+            for _ in range(3):
+                with patch(POST, return_value=summed()):
+                    self.assertEqual(self.begin().status_code, 201)
+            self.assertEqual((reviewer.auto_applied_today(), reviewer.auto_room()), (0, 1))
+            with patch(POST, return_value=said(change(action='create', kind='fact', title='עובדה 1', body='גוף 1'))):
+                self.assertTrue(self.refine().data['changes'][0]['applied'])
+            self.assertEqual(reviewer.auto_room(), 0)
+            # ...and a day that is full does not keep the system from summarising.
+            with patch(POST, return_value=summed()):
+                opened = self.begin()
+            self.assertEqual((opened.status_code, opened.data['summary']['what_happened']), (201, 'הלקוח שאל אם אפשר להישאר עם הילד בשיעור'))
+            self.assertEqual(reviewer.auto_applied_today(), 1)
+            # What her answer brings is a change like any other, and the day's rule holds for it.
+            with patch(POST, return_value=said(self.new_rule())):
+                after = self.post(f'refine/{opened.data["thread"]}/say/', {'text': 'כן, בדיוק'}).data
+            self.assertIn('כבר נעשו היום 1 שינויים אוטומטיים', after['reply'])
+            self.assertEqual((after['changes'][0]['applied'], after['changes'][0]['status']), (False, 'pending'))
+
+    def test_her_answer_is_read_as_the_first_text_and_the_change_is_applied(self):
+        with patch(POST, return_value=summed()):
+            opened = self.begin().data
+        with patch(POST, return_value=said(self.new_rule())) as post:
+            response = self.post(f'refine/{opened["thread"]}/say/', {'text': 'כן, בדיוק'})
+        self.assertEqual(response.status_code, 200, response.data)
+        data = response.data
+        self.assertEqual((data['status'], data['needs_answer']), ('done', False))
+        self.assertIn('שיניתי: הוספתי כלל התנהגות "הורים לא נשארים בשיעור"', data['reply'])
+        item = KnowledgeItem.objects.get(title='הורים לא נשארים בשיעור')
+        self.assertEqual((item.is_active, item.updated_by), (True, self.manager))
+        self.assertEqual(KnowledgeHistory.objects.get(item=item).note, 'דיוק: כן, בדיוק')
+        proposal = KnowledgeProposal.objects.get()
+        self.assertEqual((proposal.source, proposal.status, proposal.auto_applied, proposal.applied_item_id), ('refine', 'applied', True, item.id))
+        self.assertEqual((proposal.contact_id, proposal.message_id), (self.who.id, self.asked.id))
+        self.assertEqual((data['changes'][0]['proposal_id'], data['changes'][0]['applied']), (proposal.id, True))
+        # The summary stays on the turn that made it; the answer of the thread is now its last turn.
+        self.assertEqual([(turn['role'], turn['outcome']) for turn in data['turns']], [('system', 'summary'), ('operator', None), ('system', 'applied')])
+        self.assertEqual((data['summary'], data['turns'][0]['summary'], data['turns'][2]['summary']), (None, opened['summary'], None))
+        self.assertEqual(data['turns'][1]['by_name'], 'דנה מנהלת')
+
+        # Claude read her answer as the description of the problem, with the summary beside it as data — as a first text, not as a correction.
+        body = post.call_args.kwargs['json']
+        told = body['messages'][0]['content']
+        self.assertIn('# הסיכום שבו המערכת פתחה את הדיוק, והשאלה ששאלה (נתונים; הסיכום הוא השערה של המערכת, לא עובדה)', told)
+        self.assertIn('מה נראה לא טוב: נראה שהתשובה לא נכונה: לפי מה שידוע לבוט, ההורים מחכים מחוץ לשיעור\nמה לא היה טוב כאן?\n"""', told)
+        self.assertIn('# מה המפעילה ענתה על הסיכום (נתונים — התיאור שלה של מה שלא היה טוב)\n"""\nכן, בדיוק\n"""', told)
+        self.assertIn('▶ ', told)
+        self.assertNotIn('מהלך הדיוק עד עכשיו', told)
+        self.assertNotIn('מה כבר שונה או הוצע בידע', told)
+        self.assertNotIn('על זה עונים', told)
+        self.assertEqual((body['output_config']['effort'], post.call_args.kwargs['timeout']), (refine.EFFORT, (5, refine.TIMEOUT_SECONDS)))
+        self.assertIn('דיוק שנפתח בסיכום', body['system'])
+        self.assertIn('הסיכום הוא השערה של המערכת ולא עובדה', body['system'])
+        self.assertNotIn('כן, בדיוק', body['system'])
+
+        # From here the chat is any chat: a correction is told the whole of it, and "undo" gives the knowledge back.
+        right = change(action='update', item_id=item.id, kind='behavior_rule', body='ההורים מחכים בחוץ. בשיעור ניסיון אפשר להישאר.')
+        with patch(POST, return_value=said(right, earlier='keep')) as post:
+            more = self.post(f'refine/{opened["thread"]}/say/', {'text': 'ותוסיף שבניסיון אפשר להישאר'}).data
+        told = post.call_args.kwargs['json']['messages'][0]['content']
+        self.assertIn('# מהלך הדיוק עד עכשיו (נתונים, מהישן לחדש)\nהמערכת (אתה): """מה קרה: הלקוח שאל', told)
+        self.assertIn('המפעילה: """כן, בדיוק"""', told)
+        self.assertIn(f'[הוחל על הידע] create · behavior_rule · רשומה #{item.id}', told)
+        self.assertIn('# מה המפעילה כתבה עכשיו (נתונים — על זה עונים)\n"""\nותוסיף שבניסיון אפשר להישאר\n"""', told)
+        item.refresh_from_db()
+        self.assertEqual((item.body, more['status']), ('ההורים מחכים בחוץ. בשיעור ניסיון אפשר להישאר.', 'done'))
+        self.assertEqual(self.post(f'refine/{opened["thread"]}/undo/').status_code, 200)
+        item.refresh_from_db()
+        self.assertFalse(item.is_active)
+        self.assertEqual(set(KnowledgeProposal.objects.values_list('status', flat=True)), {'undone'})
+
+    def test_her_answer_follows_the_usual_rules(self):
+        # A question of Claude's: nothing is applied, and the thread waits for her again.
+        with patch(POST, return_value=summed(suspected='')):
+            opened = self.begin().data
+        asks = said(understood='לא ברור מה לא היה טוב', question='מה הבוט היה צריך לענות?', confidence='low')
+        with patch(POST, return_value=asks):
+            asked = self.post(f'refine/{opened["thread"]}/say/', {'text': 'כן'}).data
+        self.assertEqual((asked['needs_answer'], asked['status'], asked['changes'], asked['summary']), (True, 'open', [], None))
+        self.assertIn('מה הבוט היה צריך לענות?', asked['reply'])
+        self.assertEqual((KnowledgeProposal.objects.count(), KnowledgeItem.objects.count()), (0, 3))
+        # A doubt: the proposal waits for a click.
+        with patch(POST, return_value=said(self.new_rule(), confidence='low')):
+            unsure = self.post(f'refine/{opened["thread"]}/say/', {'text': 'שההורים מחכים בחוץ'}).data
+        self.assertEqual((unsure['changes'][0]['applied'], KnowledgeProposal.objects.get().status), (False, 'pending'))
+        # The switch off: her answer to a summary waits like any fix.
+        settings_store.set_review_auto_apply(False)
+        with patch(POST, return_value=summed()):
+            second = self.begin().data
+        with patch(POST, return_value=said(self.new_rule())):
+            off = self.post(f'refine/{second["thread"]}/say/', {'text': 'כן, בדיוק'}).data
+        self.assertIn('האישור האוטומטי כבוי', off['reply'])
+        self.assertEqual((off['changes'][0]['applied'], off['auto_apply']), (False, False))
+        self.assertFalse(KnowledgeItem.objects.filter(title='הורים לא נשארים בשיעור').exists())
+        # And a price is not written after a summary either.
+        settings_store.set_review_auto_apply(True)
+        with patch(POST, return_value=summed()):
+            third = self.begin().data
+        with patch(POST, return_value=said(change(action='create', kind='fact', title='מחיר', body='השיעור עולה ₪60'))):
+            priced = self.post(f'refine/{third["thread"]}/say/', {'text': 'שיכתוב שזה עולה 60 שקל'}).data
+        self.assertEqual(priced['changes'], [])
+        self.assertIn('מתקנים את המחיר בכרטיס החוג ב-Kogo', priced['reply'])
+        self.assertFalse(KnowledgeItem.objects.filter(title='מחיר').exists())
+
+    def test_when_claude_does_not_answer_the_summary_is_made_by_rules(self):
+        messages_before = Message.objects.count()
+        refused = MagicMock(status_code=200)
+        refused.json.return_value = {'stop_reason': 'refusal', 'content': []}
+        broken = MagicMock(status_code=200)
+        broken.json.return_value = {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'not json'}]}
+        for answer, reason in (
+            ({'side_effect': requests.Timeout('slow')}, 'Claude לא ענה (Timeout)'),
+            ({'side_effect': requests.ConnectionError('down')}, 'Claude לא ענה (ConnectionError)'),
+            ({'return_value': MagicMock(status_code=529)}, 'Claude ענה 529'),
+            ({'return_value': refused}, 'Claude סירב לענות'),
+            ({'return_value': broken}, 'תשובה לא קריאה מ-Claude'),
+            ({'return_value': summed(stop='max_tokens')}, 'התשובה נקטעה'),
+            ({'return_value': summed(happened='  ')}, 'Claude החזיר סיכום ריק'),
+        ):
+            with self.subTest(reason=reason):
+                with patch(POST, **answer):
+                    response = self.begin()
+                self.assertEqual(response.status_code, 201, response.data)
+                data = response.data
+                self.assertEqual(data['summary'], QUOTED)
+                self.assertEqual(data['reply'], 'מה קרה: הלקוח כתב: "אפשר להישאר עם הילד בשיעור?"\nמה נענה: הבוט הישן: "בטח, אין בעיה!"\nמה לא היה טוב כאן?')
+                self.assertEqual((data['needs_answer'], data['status'], data['changes']), (True, 'open', []))
+                meta = RefineTurn.objects.get(thread_id=data['thread']).meta
+                self.assertEqual((meta['outcome'], meta['model'], meta['reason']), ('summary', 'stub', reason))
+        self.nothing_touched(messages_before)
+        # Once Claude answers, her answer is read like any first text.
+        with patch(POST, return_value=said(self.new_rule())):
+            fixed = self.post(f'refine/{data["thread"]}/say/', {'text': 'ההורים מחכים בחוץ, הבוט לא היה צריך לומר שאפשר'}).data
+        self.assertTrue(fixed['changes'][0]['applied'])
+        self.assertEqual(KnowledgeProposal.objects.get().status, 'applied')
+
+    def test_when_claude_is_gone_for_her_answer_what_the_summary_suspected_is_kept_beside_it(self):
+        with patch(POST, return_value=summed()):
+            opened = self.begin().data
+        with patch(POST, side_effect=requests.Timeout('slow')):
+            data = self.post(f'refine/{opened["thread"]}/say/', {'text': 'כן, בדיוק'}).data
+        self.assertIn('לא הצלחתי לפענח כרגע (Claude לא ענה (Timeout))', data['reply'])
+        proposal = KnowledgeProposal.objects.get()
+        self.assertEqual((proposal.status, proposal.pattern, proposal.change['kind']), ('pending', 'refine_stub', 'behavior_rule'))
+        # "כן, בדיוק" alone would say nothing to whoever reads the proposal: the suspicion is there, marked as the system's.
+        self.assertEqual(proposal.change['after']['body'], '(מהסיכום שפתח את הדיוק: נראה שהתשובה לא נכונה: לפי מה שידוע לבוט, ההורים מחכים מחוץ לשיעור)\nכן, בדיוק')
+        self.assertEqual((data['changes'][0]['applied'], KnowledgeItem.objects.count()), (False, 3))
+
+    @override_settings(ANTHROPIC_API_KEY='')
+    def test_without_a_key_the_summary_is_two_short_quotes(self):
+        messages_before = Message.objects.count()
+        with patch(POST, side_effect=AssertionError('no key, no call')) as post:
+            response = self.begin()
+            data = response.data
+            self.assertEqual(response.status_code, 201, data)
+            self.assertEqual(data['summary'], QUOTED)
+            self.assertEqual(data['reply'], 'מה קרה: הלקוח כתב: "אפשר להישאר עם הילד בשיעור?"\nמה נענה: הבוט הישן: "בטח, אין בעיה!"\nמה לא היה טוב כאן?')
+            self.assertEqual((data['needs_answer'], data['status'], data['changes'], data['turns'][0]['outcome']), (True, 'open', [], 'summary'))
+            meta = RefineTurn.objects.get().meta
+            self.assertEqual((meta['model'], meta['reason']), ('stub', 'אין מפתח Anthropic'))
+            self.nothing_touched(messages_before)
+            # Her answer, still with no key: kept as a waiting rule, as the first text of any thread is.
+            more = self.post(f'refine/{data["thread"]}/say/', {'text': 'הבוט לא צריך לומר שאפשר להישאר, ההורים מחכים בחוץ'}).data
+        post.assert_not_called()
+        proposal = KnowledgeProposal.objects.get()
+        self.assertEqual((proposal.source, proposal.status, proposal.pattern), ('refine', 'pending', 'refine_stub'))
+        self.assertEqual(proposal.change['after']['body'], 'הבוט לא צריך לומר שאפשר להישאר, ההורים מחכים בחוץ')
+        self.assertIn('אין חיבור ל-Claude (חסר מפתח Anthropic)', more['reply'])
+        self.assertEqual((more['summary'], more['turns'][0]['summary'], KnowledgeItem.objects.count()), (None, QUOTED, 3))
+
+    @override_settings(ANTHROPIC_API_KEY='')
+    def test_which_two_messages_the_rules_quote(self):
+        office = self.line(self.who, 'לא נשארים בשיעור, ההורים מחכים בחוץ', sender='office', sender_name='מיכל')
+        voice = self.line(self.who, '', direction='in', sender='customer', message_type='voice', transcript='אפשר לבוא לשיעור ניסיון?')
+        self.line(self.who, 'מילה ' * 100)                                        # longer than a quote may be
+        failed = self.line(self.who, 'נשמח לראות אתכם', sender='office')
+        Message.objects.filter(pk=failed.pk).update(status='failed')
+        last = self.line(self.who, 'תודה', direction='in', sender='customer')
+        shadow_reply = ShadowReply.objects.create(contact=self.who, after_message=self.asked, text='כן,  אפשר\nלהישאר')
+        other = self.make_contact(phone='972505550188')
+        template = self.line(other, 'תזכורת: שיעור ניסיון מחר', sender='system', message_type='template')
+        asked = QUOTED['what_happened']
+        cases = (
+            # Only the answer was picked: the customer's message it came after.
+            ('answer only', {'message_ids': [self.answered.id]}, 'לפני כן הלקוח כתב: "אפשר להישאר עם הילד בשיעור?"', 'הבוט הישן: "בטח, אין בעיה!"'),
+            # Only the customer's message: what was sent after it.
+            ('question only', {'message_ids': [self.asked.id]}, asked, 'אחר כך — הבוט הישן: "בטח, אין בעיה!"'),
+            # Several answers picked: the last of them, and the customer's last message before it.
+            ('office over the bot', {'message_ids': [self.asked.id, self.answered.id, office.id]}, asked, 'נציג מהמשרד (מיכל): "לא נשארים בשיעור, ההורים מחכים בחוץ"'),
+            ('a voice message', {'message_ids': [voice.id]}, 'הלקוח כתב: "[🎤 הודעה קולית] אפשר לבוא לשיעור ניסיון?"', 'אחר כך — הבוט הישן: "' + ('מילה ' * 32).strip() + '…"'),
+            ('an answer that was not sent', {'message_ids': [voice.id, failed.id]}, 'הלקוח כתב: "[🎤 הודעה קולית] אפשר לבוא לשיעור ניסיון?"', 'נציג מהמשרד (לא נשלחה): "נשמח לראות אתכם"'),
+            ('nothing was answered', {'message_ids': [last.id]}, 'הלקוח כתב: "תודה"', 'לא נשלחה תשובה בקטע שנבחר'),
+            # "לתקן" on a shadow reply: that is the answer, and the message it answers is the question.
+            ('a shadow reply', {'shadow_ids': [shadow_reply.id]}, asked, 'הבוט החדש היה עונה (בצל, לא נשלח): "כן, אפשר להישאר"'),
+            ('no customer at all', {'contact': other.id, 'message_ids': [template.id]}, 'לא נבחרה הודעה של הלקוח', 'המערכת (תבנית שנשלחה ללקוח): "תזכורת: שיעור ניסיון מחר"'),
+        )
+        for name, picked, happened, answered in cases:
+            with self.subTest(name=name):
+                response = self.post('refine/', {'contact': self.who.id, 'text': '', **picked})
+                self.assertEqual(response.status_code, 201, response.data)
+                self.assertEqual(response.data['summary'], {'what_happened': happened, 'what_was_answered': answered, 'suspected_issue': None})
+        self.assertEqual(KnowledgeProposal.objects.count(), 0)
+
+    def test_what_is_refused_at_the_summarys_door(self):
+        other = self.make_contact(phone='972505550188')
+        stranger = self.line(other, 'הודעה של מישהו אחר', direction='in', sender='customer')
+        with patch(POST, side_effect=AssertionError('a refused request reached Claude')):
+            for body, word in (
+                ({'contact': self.who.id, 'message_ids': [], 'text': ''}, 'לפחות הודעה אחת'),
+                ({'contact': self.who.id, 'text': ''}, 'לפחות הודעה אחת'),
+                ({'contact': self.who.id, 'message_ids': 'x', 'text': ''}, 'רשימה של מספרים'),
+                ({'contact': self.who.id, 'message_ids': [stranger.id], 'text': ''}, 'לא שייכת לשיחה'),
+                ({'contact': self.who.id, 'message_ids': [self.answered.id], 'shadow_ids': [999999], 'text': ''}, 'תשובת הצל'),
+                ({'contact': 999999, 'message_ids': [self.answered.id], 'text': ''}, 'איש הקשר לא נמצא'),
+                ({'message_ids': [self.answered.id]}, 'איש הקשר לא נמצא'),
+                ({'proposal': 999999, 'text': ''}, 'ההצעה לא נמצאה'),
+            ):
+                with self.subTest(word=word, body=body):
+                    response = self.post('refine/', body)
+                    self.assertEqual(response.status_code, 400, response.data)
+                    self.assertIn(word, response.data['detail'])
+        self.assertEqual((RefineThread.objects.count(), RefineTurn.objects.count()), (0, 0))
+        # In the chat itself an empty line is still nothing to answer: the summary asked, and waits for words.
+        with patch(POST, return_value=summed()):
+            opened = self.begin().data
+        with patch(POST, side_effect=AssertionError('an empty answer reached Claude')):
+            for text in ('', '   ', None):
+                self.assertEqual(self.post(f'refine/{opened["thread"]}/say/', {'text': text}).status_code, 400)
+        self.assertEqual(RefineTurn.objects.count(), 1)
+
+    def test_managers_only(self):
+        with patch(POST, return_value=summed()):
+            opened = self.begin().data
+        waiting = KnowledgeProposal.objects.create(
+            source='service_note', contact=self.who, message=self.asked, title='להוסיף עובדה', dedup_key='x',
+            change={'action': 'create', 'item_id': None, 'kind': 'fact', 'before': None, 'after': {'kind': 'fact', 'title': 'חניה', 'body': 'יש חניה'}},
+        )
+        calls = [
+            ('post', 'refine/', {'contact': self.who.id, 'message_ids': [self.answered.id], 'text': ''}),
+            ('post', 'refine/', {'contact': self.who.id, 'message_ids': [self.answered.id]}),
+            ('post', 'refine/', {'proposal': waiting.id, 'text': ''}),
+            ('post', f'refine/{opened["thread"]}/say/', {'text': 'כן, בדיוק'}),
+            ('get', f'refine/{opened["thread"]}/', None),
+            ('get', 'refine/', None),
+        ]
+        partner = client_for(make_user('partner@wahub.test', UserProfile.ROLE_PARTNER))
+        instructor = client_for(make_user('worker@wahub.test', UserProfile.ROLE_WORKER))
+        with patch(POST, side_effect=AssertionError('a refused caller reached Claude')):
+            for name, client, allowed in (('partner', partner, (403,)), ('instructor', instructor, (403,)), ('stranger', APIClient(), (401, 403))):
+                for method, path, data in calls:
+                    with self.subTest(who=name, call=f'{method} {path}'):
+                        response = getattr(client, method)(f'{BASE}/{path}', data, format='json') if data is not None \
+                            else getattr(client, method)(f'{BASE}/{path}')
+                        self.assertIn(response.status_code, allowed)
+                        self.assertNotIn('summary', response.data or {})
+        self.assertEqual((RefineThread.objects.count(), RefineTurn.objects.count()), (1, 1))
+        waiting.refresh_from_db()
+        self.assertEqual((waiting.status, KnowledgeItem.objects.count()), ('pending', 3))
 
 
 # --- the sweep under the standing approval ---------------------------------------------------------------
@@ -1192,9 +1624,79 @@ class RefineAProposalTests(RefineTestCase):
         self.assertIn('ההצעה נשארה כמו שהיא', data['reply'])
         self.assertEqual((data['changes'], data['status']), ([], 'open'))
 
+    def test_with_no_text_the_proposal_is_summarised_and_left_as_it_is(self):
+        before = (self.waiting.title, self.waiting.explanation, dict(self.waiting.change), list(self.waiting.evidence))
+        about = summed(suspected='נראה שההצעה כפולה: כבר יש בידע כלל על הורים בשיעור')
+        with patch(POST, return_value=about) as post:
+            response = self.press('')
+        self.assertEqual(response.status_code, 201, response.data)
+        data = response.data
+        self.assertEqual(data['summary']['suspected_issue'], 'נראה שההצעה כפולה: כבר יש בידע כלל על הורים בשיעור')
+        self.assertEqual(data['reply'].splitlines()[-1], 'מה לשנות בהצעה?')
+        self.assertEqual((data['proposal_id'], data['needs_answer'], data['status'], data['changes']), (self.waiting.id, True, 'open', []))
+        self.assertEqual([(turn['role'], turn['outcome']) for turn in data['turns']], [('system', 'summary')])
+        # The proposal she pressed on is exactly as it was — with the standing approval on — and nothing stands beside it.
+        self.waiting.refresh_from_db()
+        self.assertEqual((self.waiting.title, self.waiting.explanation, self.waiting.change, self.waiting.evidence), before)
+        self.assertEqual((self.waiting.status, self.waiting.auto_applied, KnowledgeProposal.objects.count()), ('pending', False, 1))
+        self.assertEqual((KnowledgeItem.objects.count(), KnowledgeHistory.objects.count(), reviewer.auto_applied_today()), (3, 3, 0))
+
+        # Claude was shown the proposal, its evidence, the change it proposes, and the conversation around its messages.
+        body = post.call_args.kwargs['json']
+        told = body['messages'][0]['content']
+        self.assertIn('# ההצעה שהמפעילה לחצה עליה "דיוק" (נתונים)', told)
+        self.assertIn('כותרת: להוסיף נוסח: לא נשארים בשיעור', told)
+        self.assertIn('  המשרד: לא נשארים', told)
+        self.assertIn('# השינוי שההצעה מציעה בידע (נתונים)\n- [ממתין, לא הוחל] create · phrasing · רשומה חדשה', told)
+        self.assertIn('▶ ', told)
+        self.assertIn('סיכום של הצעה קיימת', body['system'])
+        self.assertEqual(body['output_config']['format']['schema']['required'], ['what_happened', 'what_was_answered', 'suspected_issue'])
+
+        # Her answer is what to change in it: the same proposal is rewritten in place and applied, as with a first text.
+        with patch(POST, return_value=self.corrected()) as post:
+            after = self.post(f'refine/{data["thread"]}/say/', {'text': 'זה צריך להיות כלל ולא נוסח'}).data
+        self.waiting.refresh_from_db()
+        self.assertEqual((self.waiting.status, self.waiting.auto_applied, self.waiting.change['kind'], KnowledgeProposal.objects.count()), ('applied', True, 'behavior_rule', 1))
+        self.assertEqual((after['changes'][0]['proposal_id'], after['changes'][0]['applied'], after['summary']), (self.waiting.id, True, None))
+        told = post.call_args.kwargs['json']['messages'][0]['content']
+        self.assertIn('# מה המפעילה ענתה על הסיכום (נתונים — מה לשנות בהצעה)\n"""\nזה צריך להיות כלל ולא נוסח\n"""', told)
+        self.assertIn('מה לשנות בהצעה?\n"""', told)
+        self.assertIn('[ממתין, לא הוחל] create · phrasing · רשומה חדשה · זו ההצעה שהמפעילה לחצה עליה "דיוק"', told)
+        self.assertNotIn('מהלך הדיוק עד עכשיו', told)
+
+    def test_with_no_text_and_no_claude_the_summary_quotes_the_evidence(self):
+        with patch(POST, side_effect=requests.Timeout('slow')):
+            data = self.press('').data
+        self.assertEqual(data['summary'], QUOTED)                                 # the bot's answer, the first after the customer's message
+        self.assertEqual(data['reply'], 'מה קרה: הלקוח כתב: "אפשר להישאר עם הילד בשיעור?"\nמה נענה: הבוט הישן: "בטח, אין בעיה!"\nמה לשנות בהצעה?')
+        self.waiting.refresh_from_db()
+        self.assertEqual((self.waiting.status, KnowledgeProposal.objects.count(), data['changes']), ('pending', 1, []))
+        # A line an earlier "דיוק" left in the evidence is not an answer to the customer; a proposal with no
+        # conversation behind it says so; and an applied one is summarised as well.
+        bare = KnowledgeProposal.objects.create(
+            source='service_note', title='להוסיף כלל', dedup_key='y', evidence=[{'message_id': None, 'who': 'office', 'text': 'דיוק: לא מדויק'}],
+            change={'action': 'create', 'item_id': None, 'kind': 'behavior_rule', 'before': None, 'after': {'kind': 'behavior_rule', 'title': 'כלל', 'body': 'גוף'}},
+        )
+        with override_settings(ANTHROPIC_API_KEY=''), patch(POST, side_effect=AssertionError('no key, no call')):
+            empty = self.press('', proposal=bare).data
+            self.post(f'review/proposals/{bare.id}/approve/')
+            applied = self.press('', proposal=bare)
+        self.assertEqual(empty['summary'], {'what_happened': 'אין בהצעה ציטוט של הלקוח', 'what_was_answered': 'אין בהצעה ציטוט של תשובה', 'suspected_issue': None})
+        self.assertEqual((empty['contact_id'], empty['message_ids']), (None, []))
+        self.assertEqual((applied.status_code, applied.data['needs_answer']), (201, True))
+        bare.refresh_from_db()
+        self.assertEqual(bare.status, 'applied')
+        # One that was decided against has nothing to summarise.
+        self.post(f'review/proposals/{self.waiting.id}/reject/')
+        with patch(POST, side_effect=AssertionError('a refused request reached Claude')):
+            refused = self.press('')
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn('"נדחה"', refused.data['detail'])
+
     def test_managers_only(self):
         partner = client_for(make_user('partner@wahub.test', UserProfile.ROLE_PARTNER))
         with patch(POST, side_effect=AssertionError('a refused caller reached Claude')):
+            self.assertEqual(partner.post(f'{BASE}/refine/', {'proposal': self.waiting.id, 'text': ''}, format='json').status_code, 403)
             self.assertEqual(partner.post(f'{BASE}/refine/', {'proposal': self.waiting.id, 'text': 'משהו לשנות'}, format='json').status_code, 403)
             self.assertIn(APIClient().post(f'{BASE}/refine/', {'proposal': self.waiting.id, 'text': 'משהו לשנות'}, format='json').status_code, (401, 403))
         self.waiting.refresh_from_db()

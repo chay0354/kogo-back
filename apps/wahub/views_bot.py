@@ -291,8 +291,11 @@ class RefineViewSet(_ManagerViewSet):
     """
     refine/ — the operator picked messages and wrote what was wrong, or pressed
     "דיוק" on a proposal and wrote what to change in it; the system answers what
-    it understood and what it changed (refine.py). One answer shape for every
-    door: {thread, status, reply, needs_answer, changes, turns}.
+    it understood and what it changed (refine.py). With no text (`text` empty or
+    missing) the system speaks first: the thread opens with a summary of what
+    she picked and a question, and nothing is changed or proposed until she
+    answers through say/ (docs/WAHUB-CONTRACT-POLISH-1.md, ב). One answer shape
+    for every door: {thread, status, reply, needs_answer, summary, changes, turns}.
     """
     queryset = RefineThread.objects.select_related('contact', 'created_by', 'proposal')
 
