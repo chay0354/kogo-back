@@ -29,6 +29,7 @@ TOOLS = [
         'description': (
             'החוגים והמועדים כפי שהם במערכת Kogo (מקור האמת היחיד לחוג, יום, שעה, מדריך, מחיר, ניסיון ותפוסה). '
             'מסננים לפי עיר, סניף, גיל הילד ותחום. חובה לקרוא לפני כל תשובה שמכילה פרט על חוג. '
+            '"מה להביא לשיעור ניסיון" הוא trial.bring של החוג — מצטטים אותו; ריק = "אין לי את הפרט הזה, אפשר לבדוק במשרד". '
             'סניף חיצוני חוזר עם is_external=true ובלי חוגים — אז אומרים "לבדוק מול העירייה" ושולחים את קישור ההרשמה.'
         ),
         'input_schema': {
@@ -258,6 +259,10 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
             'trial': {
                 'is_paid': course.trial_lesson_is_paid,
                 'price': str(course.trial_lesson_price) if course.trial_lesson_is_paid and course.trial_lesson_price is not None else None,
+                # "מה להביא לשיעור ניסיון" lives on the course TYPE (apps/courses/models.py),
+                # the same text the trial calendar event sends (apps/customers/trial_calendar.py).
+                # The bot quotes it; it never invents what to bring.
+                'bring': ((course.course_type.trial_bring_note if course.course_type_id else '') or '').strip(),
             },
             'min_age': course.min_age,
             'max_age': course.max_age,
