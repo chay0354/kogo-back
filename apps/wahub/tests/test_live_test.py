@@ -1080,6 +1080,40 @@ class LiveMediaTests(LiveTestCase):
         # The screen now gets a signed address of the copy.
         self.assertIn('/object/sign/', self.client.get(f'{BASE}/messages/{recording.id}/media/').data['url'])
 
+    @override_settings(OPENAI_API_KEY='openai-test-key')
+    def test_the_bucket_is_made_when_the_storage_says_not_found_the_way_supabase_does(self):
+        """Production, 11.10.2026: HTTP 400 with statusCode "404" in the body — and the bucket was never made."""
+        self.storage.bucket_missing = True
+        self.manychat_message(OGG_URL)
+        with patch(FETCH, return_value=fetched(OGG, 'audio/ogg')), \
+                patch(OPENAI_POST, return_value=_json_response({'text': 'יש חוג קפוארה בראש העין לבן 6?'})), \
+                patch(REQUEST, return_value=OK):
+            response = self.reply()
+        self.assertEqual(response.data['outcome'], 'sent', response.data)
+        recording = self.latest()
+        self.assertTrue(recording.media_url.startswith('manychat/'), recording.media_url)
+        self.assertEqual(recording.transcript, 'יש חוג קפוארה בראש העין לבן 6?')
+        self.assertFalse(self.storage.bucket_missing)
+
+    @override_settings(OPENAI_API_KEY='openai-test-key')
+    def test_a_recording_is_heard_even_when_the_storage_refuses_the_copy(self):
+        """The customer's words do not wait for the storage: transcribed straight from ManyChat's file."""
+        self.storage.upload_status = 400
+        self.manychat_message(OGG_URL)
+        with patch(FETCH, return_value=fetched(OGG, 'audio/ogg')), \
+                patch(OPENAI_POST, return_value=_json_response({'text': 'יש חוג קפוארה בראש העין לבן 6?'})) as transcribe, \
+                patch(REQUEST, return_value=OK) as request:
+            response = self.reply()
+        self.assertEqual(response.data['outcome'], 'sent', response.data)
+        recording = self.latest()
+        self.assertEqual(recording.media_url, OGG_URL)                      # the copy failed: ManyChat's address stays
+        self.assertEqual(recording.transcript, 'יש חוג קפוארה בראש העין לבן 6?')
+        _filename, audio, media_type = transcribe.call_args.kwargs['files']['file']
+        self.assertEqual((audio, media_type), (OGG, 'audio/ogg'))
+        [(_, text)] = sends(request)
+        self.assertIn('שלישי', text)
+        self.assertNotIn('לא ניתן לשמוע', text)
+
     def test_a_picture_reaches_claude_as_an_image_block(self):
         import json
         answer = _json_response({

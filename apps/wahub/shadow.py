@@ -600,17 +600,23 @@ def _image_block(ctx: Context, target: Target) -> dict | None:
     ManyChat's address (it could not be fetched); a storage failure is a
     ShadowModelError — the answer must not pretend it saw the picture.
     """
-    if media.is_external(target.media_url):
-        ctx.notes.append('התמונה לא הורדה מ-ManyChat; נשלח רק הכיתוב')
-        return None
-    media_type = media.media_type_of(target.media_url)
-    if media_type not in CLAUDE_IMAGE_TYPES:
+    external = media.is_external(target.media_url)
+    # A kept file says its type by its name: one Claude does not read is not fetched at all.
+    media_type = '' if external else media.media_type_of(target.media_url)
+    if not external and media_type not in CLAUDE_IMAGE_TYPES:
         ctx.notes.append(f'התמונה בפורמט {media_type or "לא ידוע"} ש-Claude לא קורא; נשלח רק הכיתוב')
         return None
     try:
-        data = media.download(target.media_url)
+        # From the bucket, or straight from ManyChat when the copy failed.
+        data, media_type, _name = media.read(target.media_url)
     except media.MediaError as exc:
+        if external:
+            ctx.notes.append(f'התמונה לא הורדה מ-ManyChat ({exc}); נשלח רק הכיתוב')
+            return None
         raise ShadowModelError(f'לא ניתן לקרוא את התמונה מהאחסון ({exc})') from exc
+    if media_type not in CLAUDE_IMAGE_TYPES:
+        ctx.notes.append(f'התמונה בפורמט {media_type or "לא ידוע"} ש-Claude לא קורא; נשלח רק הכיתוב')
+        return None
     if len(data) > media.IMAGE_MAX_BYTES:
         # An upload from the screen is refused above this size; a file ManyChat passed may be larger, and Claude refuses it.
         ctx.notes.append(f'התמונה גדולה מ-{media.IMAGE_MAX_BYTES // media.MB}MB ו-Claude לא קורא אותה; נשלח רק הכיתוב')
@@ -824,10 +830,9 @@ def _hear(row: Message, *, deadline: float | None) -> str:
     timeout = TRANSCRIBE_TIMEOUT
     if deadline is not None:
         timeout = max(3.0, min(timeout, deadline - time_module.monotonic()))
-    audio = media.download(row.media_url)
-    transcript = transcribe.transcribe(
-        audio, filename=row.media_url.rsplit('/', 1)[-1], media_type=media.media_type_of(row.media_url), timeout=timeout,
-    )
+    # From the bucket, or straight from ManyChat when the copy failed: the words do not wait for the storage.
+    audio, media_type, filename = media.read(row.media_url, timeout=timeout)
+    transcript = transcribe.transcribe(audio, filename=filename, media_type=media_type, timeout=timeout)
     Message.objects.filter(pk=row.pk).update(transcript=transcript)
     row.transcript = transcript
     return transcript
@@ -850,7 +855,7 @@ def prepare_media(contact: Contact, *, deadline: float | None = None, skip=()) -
         seen.append(row.id)
         try:
             _archive(row, [], deadline=deadline)
-            if row.message_type == TYPE_VOICE and not row.transcript and not media.is_external(row.media_url) and transcribe.configured():
+            if row.message_type == TYPE_VOICE and not row.transcript and transcribe.configured():
                 _hear(row, deadline=deadline)
         except (media.MediaError, transcribe.TranscriptionError) as exc:
             logger.warning('wahub shadow: the recording of message %s was not transcribed ahead of the answer: %s', row.pk, exc)
@@ -868,9 +873,7 @@ def _target_of(row: Message, notes: list, *, strict: bool, deadline: float | Non
     """
     _archive(row, notes, deadline=deadline)
     transcript = row.transcript or ''
-    if row.message_type == TYPE_VOICE and row.media_url and media.is_external(row.media_url) and not transcript:
-        notes.append('ההקלטה לא הורדה מ-ManyChat; הבוט ענה לפי כלל "הודעה קולית"')
-    elif row.message_type == TYPE_VOICE and row.media_url and not transcript:
+    if row.message_type == TYPE_VOICE and row.media_url and not transcript:
         if not transcribe.configured():
             notes.append(transcribe.NO_KEY_REASON)
         else:

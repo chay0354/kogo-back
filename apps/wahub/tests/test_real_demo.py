@@ -45,7 +45,7 @@ class FakeStorage:
     """
     Supabase Storage, as far as apps/wahub/media.py talks to it: uploads are
     kept by path, a sign call answers a token address, a read serves the bytes.
-    `bucket_missing` makes the first upload answer 404 until the bucket is made.
+    `bucket_missing` makes the first upload answer "Bucket not found" (HTTP 400, as Supabase does) until the bucket is made.
     """
 
     def __init__(self, *, bucket_missing=False, upload_status=200):
@@ -66,7 +66,8 @@ class FakeStorage:
             return _json_response({'signedURL': f'/object/sign/{BUCKET}/{path}?token=abc'})
         if method == 'POST' and rest.startswith(f'object/{BUCKET}/'):
             if self.bucket_missing:
-                return _json_response({'statusCode': '404', 'error': 'Bucket not found', 'message': 'Bucket not found'}, 404)
+                # Supabase Storage answers a missing bucket with HTTP 400; the 404 is in the body.
+                return _json_response({'statusCode': '404', 'error': 'Bucket not found', 'message': 'Bucket not found'}, 400)
             if self.upload_status != 200:
                 return _json_response({'message': 'nope'}, self.upload_status)
             path = rest[len(f'object/{BUCKET}/'):]
