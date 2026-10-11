@@ -30,7 +30,7 @@ from apps.core.manychat_service import (
     _manychat_error_text,
     manychat_error_detail,
 )
-from apps.wahub import state
+from apps.wahub import lead_ai, state
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     DIRECTION_OUT,
@@ -241,6 +241,39 @@ def send_new_bot_reply(contact: Contact, text: str) -> Message:
     )
 
 
+def send_lead_followup(contact: Contact, text: str) -> Message:
+    """
+    The bot coming back to a lead by itself (lead_followups.py), as free text —
+    inside the 24 hours WhatsApp allows after the customer's last message. The
+    same path as every other send, so the same three doors: a demo contact gets
+    nothing, the owner's switch (or the contact's own live test) decides, and a
+    developer's machine only records. Kept with sender "bot" and `new_bot=True`:
+    it is Kogo's own bot that wrote, not the vendor's.
+    """
+    text = (text or '').strip()[:MAX_TEXT_CHARS]
+    if not can_free_text(contact):
+        return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_FAILED, WINDOW_CLOSED_DETAIL, sender=SENDER_BOT, new_bot=True)
+    return _deliver(
+        contact, None, text=text, message_type=TYPE_TEXT,
+        call=lambda service, subscriber_id: service.send_whatsapp_text(subscriber_id, text),
+        sender=SENDER_BOT, new_bot=True,
+    )
+
+
+def send_lead_followup_flow(contact: Contact, flow_ns: str, text: str) -> Message:
+    """
+    The same, after the 24 hours: only an approved template may leave, and it
+    leaves as the ManyChat flow the owner mapped to this follow-up
+    (settings_store.lead_templates). `text` is what the conversation shows —
+    the wording that actually reaches the customer is the template's own.
+    """
+    return _deliver(
+        contact, None, text=(text or '').strip()[:MAX_TEXT_CHARS] or flow_ns, message_type=TYPE_TEMPLATE,
+        call=lambda service, subscriber_id: service.send_flow(subscriber_id, flow_ns),
+        sender=SENDER_BOT, new_bot=True,
+    )
+
+
 def keep_new_bot_reply(contact: Contact, text: str) -> Message:
     """
     The NEW bot's answer inside a DEMO conversation (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב).
@@ -287,5 +320,8 @@ def _keep_outbound(contact: Contact, user, text: str, message_type: str, status:
             if sender == SENDER_OFFICE:
                 # The office answered, so it has read the conversation; a bot's answer reads nothing.
                 changes['unread_count'] = 0
+            if message_type == TYPE_TEXT and lead_ai.has_registration_link(text):
+                # "קיבל קישור ועוד לא נרשם" starts here (lead_stage.py).
+                changes['lead_link_sent_at'] = now
         state.touch(contact.pk, **changes)
     return message

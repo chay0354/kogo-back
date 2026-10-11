@@ -1,5 +1,6 @@
 """
-"מצב הליד" (docs/WAHUB-CONTRACT-LEAD-STAGES.md): every stage with its sentence of
+"מצב הליד" (docs/WAHUB-CONTRACT-LEAD-STAGES.md; the stages, labels and owners of
+docs/WAHUB-CONTRACT-LEADS-V2.md are tried in test_leads_v2.py): every stage with its sentence of
 why and of what to do, the order of the rules, the thresholds under a clock the
 test holds, what is written and when, the cron's look, the board, the lists and
 the "today" tab.
@@ -39,6 +40,8 @@ ASKED = 'שאל על קפוארה בראש העין'
 LEAD_FIELDS = (
     'lead_stage', 'lead_stage_since', 'lead_reason', 'lead_next_step', 'lead_human_touched',
     'lead_checked_at', 'lead_recheck_at',
+    # leads, version 2: who makes the next move, the columns the lists filter by, the rules' version
+    'lead_owner', 'lead_branch_id', 'lead_course_type', 'lead_come_back_on', 'lead_version',
 )
 
 
@@ -99,7 +102,7 @@ class LeadStageTestCase(WahubTestCase):
 class ActStageTests(LeadStageTestCase):
     def test_asked_and_got_no_answer_for_half_an_hour(self):
         result = self.stage(self.lead(40 * MINUTE, answer=None))
-        self.assertEqual((result['stage'], result['group'], result['label']), ('needs_reply', 'act', 'שאל ולא קיבל תשובה'))
+        self.assertEqual((result['stage'], result['group'], result['label']), ('needs_reply', 'act', 'שאל ולא קיבל מענה'))
         self.assertEqual(result['reason'], f'{ASKED} היום ב-11:20. עוד לא קיבל תשובה.')
         self.assertEqual(result['next_step'], 'לענות לו')
         self.assertEqual(result['since'], self.now - 40 * MINUTE)
@@ -213,7 +216,7 @@ class WaitStageTests(LeadStageTestCase):
     def test_waiting_for_a_day_that_is_still_ahead(self):
         after_the_holidays = self.today + timedelta(days=9)
         said = self.stage(self.lead(3 * DAY, known_callback_on=after_the_holidays))
-        self.assertEqual((said['stage'], said['group'], said['label']), ('waiting_date', 'wait', 'ממתין לתאריך'))
+        self.assertEqual((said['stage'], said['group'], said['label']), ('waiting_date', 'wait', 'מחכה למועד'))
         self.assertEqual(said['reason'], f'{ASKED} לפני 3 ימים. לפי השיחה, לחזור אליו ב-{self.day(after_the_holidays)}.')
         self.assertEqual(said['next_step'], f'לחזור אליו ב-{self.day(after_the_holidays)}')
 
@@ -253,22 +256,23 @@ class ClosedStageTests(LeadStageTestCase):
         self.assertEqual((result['stage'], result['group'], result['label']), ('customer', 'closed', 'לקוח קיים'))
         self.assertEqual((result['reason'], result['next_step']), ('לקוח רשום מ-1.9 · נועה לוי.', ''))
 
-    def test_not_relevant_by_a_mark_or_by_what_the_summary_already_knows(self):
-        marked = self.stage(self.lead(HOUR, followup_status='not_relevant', followup_at=self.now - 10 * MINUTE))
-        self.assertEqual((marked['stage'], marked['group'], marked['label']), ('not_relevant', 'closed', 'לא רלוונטי'))
+    def test_closed_by_the_offices_mark_and_what_the_older_summary_knew_no_longer_closes(self):
+        # The office's "לא רלוונטי" closes the lead, under the stage's name of 12.10.2026.
+        marked = self.stage(self.lead(3 * HOUR, followup_status='not_relevant', followup_at=self.now - 10 * MINUTE))
+        self.assertEqual((marked['stage'], marked['group'], marked['label']), ('not_interested', 'closed', 'לא מעוניין'))
         self.assertEqual((marked['reason'], marked['next_step']), (f'הצוות סימן "לא רלוונטי" ב-{self.day(self.today)}.', ''))
 
+        # No branch nearby is kept, not closed: "אין כרגע מה להציע" (docs/WAHUB-CONTRACT-LEADS-V2.md, ב).
         asked_on = self.day(self.today - timedelta(days=1))
         far = self.stage(self.lead(DAY, known_city='חולון', known_branch_name='', known_flags=['no_branch_nearby']))
-        self.assertEqual(far['stage'], 'not_relevant')
-        self.assertEqual(far['reason'], f'שאל על קפוארה בחולון ב-{asked_on}. אין לנו סניף באזור שלו.')
+        self.assertEqual((far['stage'], far['group']), ('nothing_to_offer', 'wait'))
+        self.assertEqual(far['reason'], f'שאל על קפוארה בחולון ב-{asked_on}. אין סניף באזור שלו.')
 
-        cold = self.stage(self.lead(DAY, known_interest='cold'))
-        self.assertEqual(cold['stage'], 'not_relevant')
-        self.assertEqual(cold['reason'], f'{ASKED} ב-{asked_on}. אמר שלא מעוניין כרגע.')
+        # "Not now" in the older summary is no "not interested": that takes the customer's own words.
+        self.assertEqual(self.stage(self.lead(DAY, known_interest='cold'))['stage'], 'in_conversation')
 
     def test_nothing_else_in_the_summary_closes_a_lead(self):
-        # Only the two the contract names. "Lives far", "too young", "the price" are not "not relevant".
+        # Until the summary has read a conversation as a lead, nothing else it kept moves the stage.
         for flags in (['lives_far'], ['child_too_young'], ['price'], ['class_full'], ['says_registered']):
             with self.subTest(flags=flags):
                 self.assertEqual(self.stage(self.lead(HOUR, known_flags=flags))['stage'], 'in_conversation')
@@ -278,7 +282,7 @@ class ClosedStageTests(LeadStageTestCase):
 
     def test_an_old_lead(self):
         result = self.stage(self.lead(45 * DAY))
-        self.assertEqual((result['stage'], result['group'], result['label']), ('cold', 'closed', 'ליד ישן'))
+        self.assertEqual((result['stage'], result['group'], result['label']), ('cold', 'closed', 'רדום'))
         self.assertEqual(
             result['reason'], f'{ASKED} ב-{self.day(self.today - timedelta(days=45))}. רק הבוט ענה. לא נרשם.',
         )
@@ -333,16 +337,20 @@ class WordsTests(LeadStageTestCase):
 
     def test_every_stage_has_a_group_a_label_a_hint_and_a_next_step(self):
         keys = [stage for stage, _label in LEAD_STAGE_CHOICES]
-        self.assertEqual(len(keys), 14)
+        self.assertEqual(len(keys), 19)
         self.assertEqual(set(LEAD_STAGE_GROUPS), set(keys))
         self.assertEqual(set(lead_stage.HINTS), set(keys))
         self.assertEqual(set(lead_stage.NEXT_STEPS), set(keys))
         by_group = {group: [key for key in keys if LEAD_STAGE_GROUPS[key] == group] for group, _label in LEAD_GROUP_CHOICES}
         self.assertEqual(by_group, {
-            'act': ['needs_reply', 'signup_failed', 'signup_started', 'trial_no_show', 'trial_done', 'callback_due', 'answered_silent'],
-            'wait': ['trial_booked', 'waiting_date', 'in_conversation'],
-            'closed': ['registered', 'customer', 'not_relevant', 'cold'],
+            'act': [
+                'signup_stuck', 'needs_reply', 'signup_failed', 'signup_started', 'link_sent', 'trial_no_show', 'trial_done',
+                'callback_due', 'answered_silent',
+            ],
+            'wait': ['will_check', 'trial_booked', 'waiting_date', 'nothing_to_offer', 'in_conversation'],
+            'closed': ['registered', 'customer', 'not_interested', 'deleted', 'cold'],
         })
+        self.assertEqual(set(lead_stage.STAGE_OWNERS), set(keys))
         # Every stage that asks for something says what; a closed one asks for nothing.
         for key in keys:
             self.assertTrue(lead_stage.HINTS[key])
@@ -361,7 +369,7 @@ class RuleOrderTests(LeadStageTestCase):
         far = dict(known_flags=['no_branch_nearby'])
         steps = [
             # (what is true about the contact, the stage)
-            (dict(followup_status='not_relevant', kogo_outcome='registered_after', needs_human=True), 'not_relevant'),
+            (dict(followup_status='not_relevant', kogo_outcome='registered_after', needs_human=True), 'not_interested'),
             (dict(followup_status='registered', kogo_outcome='customer_before', needs_human=True), 'registered'),
             (dict(kogo_outcome='registered_after', needs_human=True, **waiting), 'registered'),
             (dict(kogo_outcome='customer_before', needs_human=True, **waiting), 'customer'),
@@ -376,8 +384,8 @@ class RuleOrderTests(LeadStageTestCase):
             (dict(**due, **far, known_interest='cold'), 'callback_due'),
             (dict(followup_status='waiting_us', followup_at=self.now - 3 * HOUR, **far), 'callback_due'),
             (dict(known_callback_on=tomorrow, **far, known_interest='cold'), 'waiting_date'),
-            (dict(wrote=HOUR, **far), 'not_relevant'),
-            (dict(wrote=5 * DAY, known_interest='cold'), 'not_relevant'),
+            (dict(wrote=HOUR, **far), 'nothing_to_offer'),
+            (dict(wrote=5 * DAY, known_interest='cold'), 'answered_silent'),
             (dict(wrote=HOUR), 'in_conversation'),
             (dict(wrote=5 * DAY), 'answered_silent'),
             (dict(wrote=40 * DAY), 'cold'),
@@ -464,7 +472,7 @@ class RuleOrderTests(LeadStageTestCase):
             self.stage(self.lead(
                 5 * DAY, known_callback_on=yesterday, followup_status='not_relevant', followup_at=self.now - HOUR,
             ))['stage'],
-            'not_relevant',
+            'not_interested',
         )
 
 
@@ -542,7 +550,7 @@ class ThresholdTests(LeadStageTestCase):
                 self.assertGreater(result['recheck_at'], self.now)
         closed = [
             self.lead(HOUR, kogo_outcome='registered_after'), self.lead(HOUR, kogo_outcome='customer_before'),
-            self.lead(HOUR, followup_status='not_relevant'), self.lead(HOUR, known_interest='cold'), self.lead(45 * DAY),
+            self.lead(HOUR, followup_status='not_relevant'), self.lead(45 * DAY),
         ]
         for contact in closed:
             result = self.stage(contact)
@@ -615,7 +623,7 @@ class RefreshTests(LeadStageTestCase):
     def test_a_second_look_that_finds_nothing_new_writes_nothing_the_screen_sees(self):
         contact = self.staged(self.lead(4 * DAY))
         events = ContactEvent.objects.count()
-        with self.assertNumQueries(3):      # the row, "did the office write", the stamp
+        with self.assertNumQueries(4):      # the row, "did the office write", the stamp, the bot's open follow-up
             self.assertFalse(lead_stage.refresh(contact, now=self.now))
         after = Contact.objects.get(pk=contact.pk)
         self.assertEqual((after.touched_at, after.updated_at), (contact.touched_at, contact.updated_at))
@@ -681,7 +689,7 @@ class RefreshTests(LeadStageTestCase):
         self.assertIn('נציג ענה לו', staged.lead_reason)
 
         Message.objects.all().delete()
-        with self.assertNumQueries(2):      # the row and the stamp: once true, it is not asked again
+        with self.assertNumQueries(3):      # the row, the stamp, the bot's open follow-up: once true, it is not asked again
             lead_stage.refresh(contact, now=self.now)
         self.assertTrue(Contact.objects.get(pk=contact.pk).lead_human_touched)
 
@@ -798,8 +806,9 @@ class ScanTests(LeadStageTestCase):
     def test_the_look_does_not_ask_about_each_contact_separately(self):
         for index in range(8):
             self.lead(HOUR, name=f'ליד {index}')
-        # Two lists (touched, timed), one "who did the office write to", and one write per contact.
-        with self.assertNumQueries(2 + 1 + 8):
+        # Two lists (touched, timed), one "who did the office write to" and one "which follow-ups are open"
+        # for the batch, and one write per contact.
+        with self.assertNumQueries(2 + 2 + 8):
             lead_stage.scan(now=self.now)
 
     def test_one_contact_that_fails_does_not_stop_the_rest(self):
@@ -888,7 +897,7 @@ class CommandTests(LeadStageTestCase):
             call_command('wahub_lead_scan', stdout=out)
         self.assertEqual(Contact.objects.filter(lead_stage='').count(), 0)
         self.assertIn('נבדקו 2 אנשי קשר', out.getvalue())
-        self.assertIn('שאל ולא קיבל תשובה (needs_reply)', out.getvalue())
+        self.assertIn('שאל ולא קיבל מענה (needs_reply)', out.getvalue())
 
     def test_it_refuses_a_database_that_is_not_local(self):
         # The test database itself (test_…) is not a kogo_local one — nor is production's.
@@ -936,16 +945,19 @@ class BoardTests(ApiTestCase):
         self.assertEqual(
             [[stage['key'] for stage in group['stages']] for group in data['groups']],
             [
-                ['needs_reply', 'signup_failed', 'signup_started', 'trial_no_show', 'trial_done', 'callback_due', 'answered_silent'],
-                ['trial_booked', 'waiting_date', 'in_conversation'],
-                ['registered', 'customer', 'not_relevant', 'cold'],
+                [
+                    'signup_stuck', 'needs_reply', 'signup_failed', 'signup_started', 'link_sent', 'trial_no_show',
+                    'trial_done', 'callback_due', 'answered_silent',
+                ],
+                ['will_check', 'trial_booked', 'waiting_date', 'nothing_to_offer', 'in_conversation'],
+                ['registered', 'customer', 'not_interested', 'deleted', 'cold'],
             ],
         )
-        first = data['groups'][0]['stages'][0]
+        first = data['groups'][0]['stages'][1]
         self.assertEqual(set(first), {'key', 'label', 'hint', 'next_step', 'count', 'oldest_days'})
         self.assertEqual(
             (first['label'], first['hint'], first['next_step'], first['count'], first['oldest_days']),
-            ('שאל ולא קיבל תשובה', 'ביקש נציג, או כתב ולא נענה יותר מ-30 דקות', 'לענות לו', 0, None),
+            ('שאל ולא קיבל מענה', 'ביקש נציג, שאל ולא קיבל תשובה, או כתב ולא נענה יותר מ-30 דקות', 'לענות לו', 0, None),
         )
         self.assertEqual((data['checked_at'], data['pending_scan']), (None, 0))
 
@@ -1039,7 +1051,7 @@ class ListTests(ApiTestCase):
         # with page_size and search as on every list, and reads `lead` off every row.
         registered = self.placed(2, kogo_outcome='registered_after', kogo_detail='נרשם ב-9.10 · נועה לוי', name='נרשמה')
         marked = self.placed(4, followup_status='registered', followup_at=timezone.now() - DAY, name='סומן נרשם')
-        lead_keys = {'stage', 'stage_label', 'group', 'since', 'days', 'reason', 'next_step', 'human_touched', 'temperature'}
+        lead_keys = {'stage', 'stage_label', 'group', 'since', 'days', 'reason', 'next_step', 'human_touched', 'temperature', 'owner'}
 
         for view in ({'view': 'chats'}, {}, {'view': 'leads'}):
             with self.subTest(view=view):
@@ -1083,7 +1095,7 @@ class ListTests(ApiTestCase):
         row = self.get('contacts/', lead_stage='answered_silent').data['results'][0]
         self.assertEqual(
             set(row['lead']),
-            {'stage', 'stage_label', 'group', 'since', 'days', 'reason', 'next_step', 'human_touched', 'temperature'},
+            {'stage', 'stage_label', 'group', 'since', 'days', 'reason', 'next_step', 'human_touched', 'temperature', 'owner'},
         )
         lead = row['lead']
         self.assertEqual((lead['stage'], lead['stage_label'], lead['group']), ('answered_silent', 'קיבל תשובה ולא נרשם', 'act'))
@@ -1100,7 +1112,7 @@ class ListTests(ApiTestCase):
         fresh = self.lead(HOUR)
         self.assertEqual(self.get(f'contacts/{fresh.id}/').data['lead'], {
             'stage': '', 'stage_label': '', 'group': '', 'since': None, 'days': None, 'reason': '', 'next_step': '',
-            'human_touched': False, 'temperature': 'cold',
+            'human_touched': False, 'temperature': 'cold', 'owner': '',
         })
 
     def test_the_small_dot(self):
@@ -1143,7 +1155,7 @@ class SummaryTests(ApiTestCase):
         self.assertEqual(data['lead_act'], {
             'total': 4,
             'stages': [
-                {'key': 'needs_reply', 'label': 'שאל ולא קיבל תשובה', 'count': 1},
+                {'key': 'needs_reply', 'label': 'שאל ולא קיבל מענה', 'count': 1},
                 {'key': 'signup_failed', 'label': 'ניסה להירשם והחיוב נכשל', 'count': 1},
                 {'key': 'answered_silent', 'label': 'קיבל תשובה ולא נרשם', 'count': 2},
             ],
@@ -1194,8 +1206,8 @@ class FollowsEventsTests(LeadStageTestCase):
         self.assertIn('רק הבוט ענה', contact.lead_reason)
         journal = list(ContactEvent.objects.filter(kind='lead_stage_changed').order_by('id').values_list('text', flat=True))
         self.assertEqual(len(journal), 2)
-        self.assertTrue(journal[0].startswith('בשיחה ← שאל ולא קיבל תשובה ('), journal[0])
-        self.assertTrue(journal[1].startswith('שאל ולא קיבל תשובה ← בשיחה ('), journal[1])
+        self.assertTrue(journal[0].startswith('בשיחה ← שאל ולא קיבל מענה ('), journal[0])
+        self.assertTrue(journal[1].startswith('שאל ולא קיבל מענה ← בשיחה ('), journal[1])
 
     def test_asking_for_a_person_is_a_stage_at_once(self):
         self.incoming('אפשר לדבר עם נציג?')
@@ -1217,7 +1229,7 @@ class FollowsEventsTests(LeadStageTestCase):
         def mark(**data):
             return self.lead_of(self.client.patch(url, data, format='json'))
 
-        self.assertEqual(mark(status='not_relevant')['stage'], 'not_relevant')
+        self.assertEqual(mark(status='not_relevant')['stage'], 'not_interested')
         self.assertEqual(mark(status='registered')['stage'], 'registered')
         due = (self.today + timedelta(days=6)).isoformat()
         waiting = mark(status='later', due=due)
@@ -1252,7 +1264,7 @@ class FollowsEventsTests(LeadStageTestCase):
         self.assertEqual(contact.lead_stage, 'in_conversation')       # the summary has not read it yet
         with override_settings(ANTHROPIC_API_KEY=''):
             lead = self.lead_of(self.post(f'contacts/{contact.id}/analyze/'))
-        self.assertEqual((lead['stage'], lead['group']), ('not_relevant', 'closed'))
+        self.assertEqual((lead['stage'], lead['group']), ('not_interested', 'closed'))
 
     @override_settings(MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=True)
     def test_an_answer_from_the_office(self):
@@ -1288,7 +1300,7 @@ class FollowsEventsTests(LeadStageTestCase):
         self.assertEqual((typed.data['is_demo'], typed.data['lead']['stage']), (True, 'needs_reply'))
         # On the board like everybody.
         board = self.get('leads/board/').data
-        self.assertEqual(board['groups'][0]['stages'][0]['count'], 1)
+        self.assertEqual(board['groups'][0]['stages'][1]['count'], 1)       # needs_reply, after "נתקע בהרשמה"
 
     def test_a_database_fault_in_the_stage_does_not_take_the_callers_work_with_it(self):
         def broken(contact, **kwargs):
@@ -1408,7 +1420,7 @@ class TrialFactsTests(LeadStageTestCase):
 class SchemaTests(LeadStageTestCase):
     def test_the_database_itself_fills_the_new_columns_for_code_that_does_not_know_them(self):
         # A branch's build migrates production while the previous code still creates a contact for every
-        # new number (migration 0006): the defaults must be the database's own, not only Django's.
+        # new number (migrations 0006 and 0007): the defaults must be the database's own, not only Django's.
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT column_name, is_nullable, column_default FROM information_schema.columns "
@@ -1417,13 +1429,22 @@ class SchemaTests(LeadStageTestCase):
             )
             self.assertEqual(cursor.fetchall(), [
                 ('kogo_trial', 'NO', "'{}'::jsonb"),
+                ('lead_ai', 'NO', "'{}'::jsonb"),
+                ('lead_bot', 'NO', "'{}'::jsonb"),
+                ('lead_branch_id', 'YES', None),
                 ('lead_checked_at', 'YES', None),
+                ('lead_come_back_on', 'YES', None),
+                ('lead_course_type', 'NO', "''::character varying"),
                 ('lead_human_touched', 'NO', 'false'),
+                ('lead_link_sent_at', 'YES', None),
+                ('lead_manual', 'NO', "'{}'::jsonb"),
                 ('lead_next_step', 'NO', "''::character varying"),
+                ('lead_owner', 'NO', "''::character varying"),
                 ('lead_reason', 'NO', "''::character varying"),
                 ('lead_recheck_at', 'YES', None),
                 ('lead_stage', 'NO', "''::character varying"),
                 ('lead_stage_since', 'YES', None),
+                ('lead_version', 'NO', '0'),
             ])
             # The insert the previous code makes: none of the new columns named.
             cursor.execute(
@@ -1439,6 +1460,8 @@ class SchemaTests(LeadStageTestCase):
         contact = Contact.objects.get(phone=PHONE)
         self.assertEqual((contact.lead_stage, contact.lead_reason, contact.lead_next_step), ('', '', ''))
         self.assertEqual((contact.lead_human_touched, contact.kogo_trial), (False, {}))
+        self.assertEqual((contact.lead_ai, contact.lead_bot, contact.lead_manual), ({}, {}, {}))
+        self.assertEqual((contact.lead_owner, contact.lead_course_type, contact.lead_version), ('', '', 0))
         # ... and the new code picks such a contact up on its next look.
         self.assertEqual(lead_stage.scan()['lead_checked'], 1)
 

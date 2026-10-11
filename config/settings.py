@@ -579,6 +579,12 @@ CRON_TOKEN = config('CRON_TOKEN', default='')
 ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
 WAHUB_AI_MODEL = config('WAHUB_AI_MODEL', default='claude-sonnet-5-5')
 WAHUB_AI_TIMEOUT_SECONDS = config('WAHUB_AI_TIMEOUT_SECONDS', default=12, cast=int)
+# Leads, version 2 (docs/WAHUB-CONTRACT-LEADS-V2.md, ו): the one-time pass over the conversations of
+# the last months, a few contacts on every cron call (0 stops it). It reads them by the keyword
+# rules; with WAHUB_LEAD_BACKFILL_AI on it asks Claude instead — one call for every old
+# conversation, which is why it is off until the owner says otherwise.
+WAHUB_LEAD_BACKFILL_PER_TICK = config('WAHUB_LEAD_BACKFILL_PER_TICK', default=3, cast=int)
+WAHUB_LEAD_BACKFILL_AI = config('WAHUB_LEAD_BACKFILL_AI', default=False, cast=bool)
 # The shadow bot (apps/wahub/shadow.py): the model that drafts what the new bot
 # would answer, how hard it thinks, and how long one request may take. Without
 # ANTHROPIC_API_KEY a rule-built stub answers instead (model "stub").

@@ -206,10 +206,21 @@ def claude(card, stop_reason='end_turn', status=200, thinking=True):
     return response
 
 
+# What Claude returns about the lead when the conversation says nothing of it (tests/test_leads_v2.py fills it in).
+NO_LEAD = {
+    'intent': '', 'empty_opening': False, 'interest': '', 'quote': '', 'blocker': '', 'blocker_text': '',
+    'child': {'name': '', 'age_years': None, 'age_months': None, 'grade': '', 'birth_date': ''},
+    'come_back': {
+        'kind': '', 'said_on': '', 'years': None, 'months': None, 'weeks': None, 'days': None, 'until_years': None,
+        'what': '', 'iso': '',
+    },
+    'come_back_why': '', 'summary': '',
+}
 CARD = {
     'topic': 'trial', 'course_type': 'קפוארה', 'city': 'ראש העין', 'branch_name': 'קרל וגרטי קורי 8',
     'child_age': '5', 'interest': 'warm', 'callback_on': '2026-10-24', 'flags': ['price'],
     'summary': 'שאלה על שיעור ניסיון בקפוארה לבן 5. אמרה שתחזור בעוד שבועיים.',
+    'lead': NO_LEAD,
 }
 
 

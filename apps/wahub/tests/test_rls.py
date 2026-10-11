@@ -20,6 +20,8 @@ TABLES = {
     'wahub_settings', 'wahub_refine_threads', 'wahub_refine_turns',
     # "בדיקות הבוט" (0007): the runs of the bot's self-checks
     'wahub_bot_eval_runs',
+    # leads, version 2 (0008): the bot's own follow-ups
+    'wahub_lead_followups',
 }
 
 
