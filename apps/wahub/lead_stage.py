@@ -59,6 +59,7 @@ from django.utils import timezone
 from apps.wahub import matching, queries, state
 from apps.wahub.models import (
     CALLBACK_COUNTS_UNDER,
+    Contact,
     DELIVERED_STATUSES,
     DIRECTION_IN,
     DIRECTION_OUT,
@@ -66,10 +67,11 @@ from apps.wahub.models import (
     FOLLOWUP_ANSWERED,
     FOLLOWUP_CHOICES,
     FOLLOWUP_LATER,
-    FOLLOWUP_NO_ANSWER,
     FOLLOWUP_NOT_RELEVANT,
+    FOLLOWUP_NO_ANSWER,
     FOLLOWUP_REGISTERED,
     FOLLOWUP_WAITING_US,
+    HANDLED_HUMAN,
     LEAD_ANSWERED_SILENT,
     LEAD_CALLBACK_DUE,
     LEAD_COLD,
@@ -88,6 +90,8 @@ from apps.wahub.models import (
     LEAD_TRIAL_DONE,
     LEAD_TRIAL_NO_SHOW,
     LEAD_WAITING_DATE,
+    MESSAGE_SOURCE_MANYCHAT,
+    Message,
     OUTCOME_CUSTOMER_BEFORE,
     OUTCOME_PENDING,
     OUTCOME_REGISTERED_AFTER,
@@ -96,8 +100,6 @@ from apps.wahub.models import (
     OUTCOME_TRIAL_UPCOMING,
     SENDER_BOT,
     SENDER_OFFICE,
-    Contact,
-    Message,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,6 +264,39 @@ def _trial_day(contact: Contact):
         return None
 
 
+# --- does Kogo see who answered? ---------------------------------------------------
+
+# The old bot answers in ManyChat, and its answer reaches Kogo only when ManyChat
+# copies it (docs/WAHUB-MANYCHAT-SETUP.md, §3). Until it does, a customer's
+# message with no answer on record says nothing: the bot answered, and we never
+# saw it. Calling every such lead "asked and got no answer" would be a false
+# alarm on every conversation.
+BOT_REPLIES_SEEN_FOR = timedelta(days=7)
+_SEEN_TTL = timedelta(seconds=60)
+_seen = {'at': None, 'value': False}
+
+
+def old_bot_replies_seen(now=None) -> bool:
+    """ManyChat copied a reply of the old bot in the last week. One query a minute, whoever asks."""
+    now = now or timezone.now()
+    if _seen['at'] is None or abs(now - _seen['at']) >= _SEEN_TTL:
+        _seen['value'] = Message.objects.filter(
+            sender=SENDER_BOT, source=MESSAGE_SOURCE_MANYCHAT, created_at__gte=now - BOT_REPLIES_SEEN_FOR,
+        ).exists()
+        _seen['at'] = now
+    return _seen['value']
+
+
+def replies_visible(contact: Contact, now=None) -> bool:
+    """
+    Kogo sees the answers this contact gets: they are its own (a demo, a live
+    test, a conversation a person took), or ManyChat copies the old bot's.
+    """
+    if contact.is_demo or contact.live_test or contact.handled_by == HANDLED_HUMAN:
+        return True
+    return old_bot_replies_seen(now)
+
+
 class _Facts:
     """What the rules ask about a contact, read once from the row in hand."""
 
@@ -286,6 +321,10 @@ class _Facts:
                     waiting = None
                 elif spoke_at >= waiting:
                     waiting = newest
+        # Without the answers on record, "nobody answered" cannot be said of this contact.
+        self.replies_visible = replies_visible(contact, now)
+        if not self.replies_visible:
+            waiting = None
         self.waiting_from = waiting
         self.reply_overdue = waiting is not None and now - waiting >= REPLY_AFTER
 

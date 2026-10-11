@@ -45,6 +45,11 @@ LEAD_FIELDS = (
 class LeadStageTestCase(WahubTestCase):
     def setUp(self):
         super().setUp()
+        # The world these tests describe: ManyChat copies the old bot's replies, so an
+        # unanswered message means what it says. RepliesNotCopiedTests is the other world.
+        self.replies_seen = patch.object(lead_stage, 'old_bot_replies_seen', return_value=True)
+        self.replies_seen.start()
+        self.addCleanup(self.replies_seen.stop)
         self.today = state.now_israel_date()
         self.now = timezone.make_aware(datetime.combine(self.today, time(12)))
         self.made = 0
@@ -1434,3 +1439,51 @@ class SchemaTests(LeadStageTestCase):
         self.assertEqual((contact.lead_human_touched, contact.kogo_trial), (False, {}))
         # ... and the new code picks such a contact up on its next look.
         self.assertEqual(lead_stage.scan()['lead_checked'], 1)
+
+
+class RepliesNotCopiedTests(WahubTestCase):
+    """
+    ManyChat copies the customers' messages and not the old bot's replies (production,
+    11.10.2026): a message with no answer on record is not "asked and got no answer".
+    """
+
+    def setUp(self):
+        super().setUp()
+        lead_stage._seen.update(at=None, value=False)
+        self.addCleanup(lambda: lead_stage._seen.update(at=None, value=False))
+        self.now = timezone.now()
+
+    def waiting(self, **fields):
+        self.incoming('יש חוג קפוארה לבן 6?')
+        contact = self.contact()
+        two_hours_ago = self.now - timedelta(hours=2)
+        Contact.objects.filter(pk=contact.pk).update(
+            waiting_since=two_hours_ago, last_inbound_at=two_hours_ago, last_message_at=two_hours_ago, **fields,
+        )
+        return Contact.objects.get(pk=contact.pk)
+
+    def test_a_real_lead_is_not_called_unanswered_while_the_bots_replies_are_not_copied(self):
+        result = lead_stage.compute(self.waiting(), self.now)
+        self.assertEqual(result['stage'], 'in_conversation')
+        self.assertNotIn('עוד לא קיבל תשובה', result['reason'])
+
+    def test_asking_for_a_person_still_needs_a_reply(self):
+        result = lead_stage.compute(self.waiting(needs_human=True, needs_human_at=self.now), self.now)
+        self.assertEqual(result['stage'], 'needs_reply')
+
+    def test_a_contact_kogo_answers_itself_is_still_measured(self):
+        for fields in ({'is_demo': True}, {'live_test': True}, {'handled_by': 'human'}):
+            with self.subTest(fields=fields):
+                contact = self.waiting(**fields)
+                self.assertEqual(lead_stage.compute(contact, self.now)['stage'], 'needs_reply')
+                Contact.objects.filter(pk=contact.pk).delete()
+
+    def test_once_manychat_copies_a_reply_the_rule_is_back(self):
+        contact = self.waiting()
+        Message.objects.create(
+            contact=contact, direction='out', sender='bot', source='manychat', text='היי', sent_at=self.now - timedelta(days=1),
+        )
+        lead_stage._seen.update(at=None, value=False)
+        self.assertTrue(lead_stage.old_bot_replies_seen(self.now))
+        self.assertEqual(lead_stage.compute(Contact.objects.get(pk=contact.pk), self.now)['stage'], 'needs_reply')
+
