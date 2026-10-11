@@ -567,14 +567,21 @@ def _stored_inbound_key():
     return IntegrationCredential.objects.filter(key=INBOUND_KEY_NAME).first()
 
 
+API_PREFIX = '/api/v1'
+
+
 def _own_url(request, path: str) -> str:
     """
     This server's address for one of its wahub endpoints. The public address
-    when it is configured (CRM_API_BASE_URL already ends with /api/v1); on a
-    developer's machine, the address this request came to.
+    when it is configured; on a developer's machine, the address this request
+    came to. CRM_API_BASE_URL is written with or without the /api/v1 at its end
+    (production has it without: the self-call of the live test went to
+    /wahub/live-test/reply/ and got 404, 11.10.2026) — both are read.
     """
     base = (getattr(settings, 'CRM_API_BASE_URL', '') or '').strip().rstrip('/')
     if base and 'localhost' not in base and '127.0.0.1' not in base:
+        if not base.endswith(API_PREFIX):
+            base = f'{base}{API_PREFIX}'
         return f'{base}/wahub/{path}'
     return request.build_absolute_uri(f'/api/v1/wahub/{path}')
 
@@ -698,7 +705,9 @@ def _start_media(contact_id: int, url: str) -> None:
         token = live_test.cron_token()
         if not token:
             return
-        requests.post(url, json={'contact': contact_id}, headers={'X-Cron-Token': token}, timeout=live_test.KICK_TIMEOUT)
+        response = requests.post(url, json={'contact': contact_id}, headers={'X-Cron-Token': token}, timeout=live_test.KICK_TIMEOUT)
+        if response.status_code != 200:
+            logger.warning('wahub inbound: preparing the file of contact %s answered %s', contact_id, response.status_code)
     except requests.ReadTimeout:
         pass
     except Exception as exc:
