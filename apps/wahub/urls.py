@@ -23,6 +23,10 @@ urlpatterns = [
     path('demo/scenarios/', views.DemoScenariosView.as_view(), name='wahub-demo-scenarios'),
     path('demo/scenario/', views.DemoScenarioView.as_view(), name='wahub-demo-scenario'),
     path('demo/contacts/', views.DemoContactsView.as_view(), name='wahub-demo-contacts'),
+    # A real conversation with a demo contact (docs/WAHUB-CONTRACT-REAL-DEMO.md): the new bot answers now;
+    # a message's recording or picture, by a short-lived signed address.
+    path('demo/contacts/<int:pk>/reply/', views.DemoReplyView.as_view(), name='wahub-demo-reply'),
+    path('messages/<int:pk>/media/', views.MessageMediaView.as_view(), name='wahub-message-media'),
     # Stage 3 — who asked and did not register; the WhatsApp block of a customer's card (docs/WAHUB-CONTRACT-STAGE3.md).
     path('leads/unregistered/', views.UnregisteredLeadsView.as_view(), name='wahub-leads-unregistered'),
     path('for-customer/', views.ForCustomerView.as_view(), name='wahub-for-customer'),

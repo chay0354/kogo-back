@@ -133,11 +133,13 @@ SENDER_CHOICES = [
 ]
 
 TYPE_TEXT = 'text'
+TYPE_VOICE = 'voice'
+TYPE_IMAGE = 'image'
 TYPE_TEMPLATE = 'template'
 MESSAGE_TYPE_CHOICES = [
     (TYPE_TEXT, 'טקסט'),
-    ('voice', 'הודעה קולית'),
-    ('image', 'תמונה'),
+    (TYPE_VOICE, 'הודעה קולית'),
+    (TYPE_IMAGE, 'תמונה'),
     (TYPE_TEMPLATE, 'תבנית'),
     ('other', 'אחר'),
 ]
@@ -336,7 +338,15 @@ class Message(models.Model):
     )
     text = models.TextField(blank=True)
     message_type = models.CharField(max_length=10, choices=MESSAGE_TYPE_CHOICES, default=TYPE_TEXT)
+    # A demo contact's recording or picture: the object's path in the private
+    # bucket (apps/wahub/media.py), never a public address. The screen asks
+    # messages/{id}/media/ for a short-lived signed URL.
     media_url = models.TextField(blank=True)
+    # What a recording said, when a transcription key was set (apps/wahub/transcribe.py).
+    transcript = models.TextField(blank=True)
+    # The NEW bot's answer written into a demo conversation (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב):
+    # sender "bot", status "simulated", never sent. The old bot's real replies carry False.
+    new_bot = models.BooleanField(default=False)
     status = models.CharField(max_length=10, choices=MESSAGE_STATUS_CHOICES, default=STATUS_RECEIVED)
     error = models.CharField(max_length=300, blank=True)
     sent_at = models.DateTimeField(default=timezone.now)

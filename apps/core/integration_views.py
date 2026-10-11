@@ -35,6 +35,8 @@ class IntegrationCredentialView(APIView):
         # key for the automatic summary of a conversation.
         'WAHUB_INBOUND_KEY': 'וואטסאפ ולידים — מפתח הכניסה מ-ManyChat',
         'ANTHROPIC_API_KEY': 'וואטסאפ ולידים — סיכום אוטומטי (Claude)',
+        # The transcription of a recording in a demo conversation (apps/wahub/transcribe.py).
+        'OPENAI_API_KEY': 'וואטסאפ ולידים — תמלול הקלטות בשיחת דמו (OpenAI)',
     }
 
     def _source(self, key, stored):

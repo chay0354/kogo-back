@@ -585,6 +585,11 @@ WAHUB_AI_TIMEOUT_SECONDS = config('WAHUB_AI_TIMEOUT_SECONDS', default=12, cast=i
 WAHUB_SHADOW_MODEL = config('WAHUB_SHADOW_MODEL', default='claude-opus-5-5')
 WAHUB_SHADOW_EFFORT = config('WAHUB_SHADOW_EFFORT', default='medium')
 WAHUB_SHADOW_TIMEOUT_SECONDS = config('WAHUB_SHADOW_TIMEOUT_SECONDS', default=40, cast=int)
+# A recording a demo contact "sent" is transcribed for the shadow bot with
+# OpenAI (apps/wahub/transcribe.py); Claude never gets the audio. Without a key
+# the bot answers by its "הודעה קולית" rule and says why. May also be stored
+# from inside the app (IntegrationCredential), like ANTHROPIC_API_KEY.
+OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 # A developer's machine only: a send from the screen is recorded as "simulated"
 # and nothing leaves. Not read at all outside DEBUG, so no value of it can
 # switch real sending off in production.

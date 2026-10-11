@@ -19,6 +19,7 @@ shape does not justify one.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -32,7 +33,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.wahub import analysis, inbound, knowledge, shadow_tools, state
+from apps.wahub import analysis, inbound, knowledge, media, shadow_tools, state, transcribe
 from apps.wahub.analysis import ANTHROPIC_URL, ANTHROPIC_VERSION, P_CLASS, P_COLD, P_INFO, P_REG, P_TRIAL, Line
 from apps.wahub.models import (
     DIRECTION_IN,
@@ -46,7 +47,9 @@ from apps.wahub.models import (
     SENDER_SYSTEM,
     SHADOW_MODEL_STUB,
     STATUS_FAILED,
+    TYPE_IMAGE,
     TYPE_TEMPLATE,
+    TYPE_VOICE,
     Contact,
     Message,
     ShadowReply,
@@ -66,6 +69,10 @@ DEFAULT_TIMEOUT = 40
 # Claude Opus 5.5 declines some requests through its safety classifiers; the
 # server-side fallback re-runs the request on another model inside the same call.
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+# A demo contact's picture goes to Claude as an image block; these are the types it reads.
+CLAUDE_IMAGE_TYPES = ('image/jpeg', 'image/png', 'image/gif', 'image/webp')
+# How long a recording's transcription may take inside one shadow call.
+TRANSCRIBE_TIMEOUT = 25
 
 REPLY_SCHEMA = {
     'type': 'object',
@@ -143,11 +150,17 @@ def _timeout_seconds() -> float:
 
 @dataclass
 class Target:
-    """A customer message the draft answers (or the question typed in "נסה שאלה")."""
+    """
+    A customer message the draft answers (or the question typed in "נסה שאלה").
+    For a recording `text` is its transcript when there is one; for a picture,
+    its caption — the picture itself goes to Claude from `media_url`.
+    """
     id: int | None
     text: str
     message_type: str = 'text'
     sent_at: object = None
+    media_url: str = ''
+    transcript: str = ''
 
 
 @dataclass
@@ -163,6 +176,8 @@ class Context:
     customer: dict | None
     places: list = field(default_factory=list)
     tool_ctx: ToolContext = None
+    # Lines for the reasoning that are about the input, not the answer: "אין תמלול: חסר מפתח", a picture Claude cannot read.
+    notes: list = field(default_factory=list)
 
 
 @dataclass
@@ -188,12 +203,13 @@ def _conversation(contact: Contact, before_id: int | None = None) -> list[dict]:
     rows = Message.objects.filter(contact=contact).exclude(status=STATUS_FAILED)
     if before_id:
         rows = rows.filter(id__lte=before_id)
-    rows = list(rows.order_by('-id').values('id', 'direction', 'sender', 'text', 'sent_at', 'message_type')[:MAX_CONTEXT_MESSAGES])
+    rows = list(rows.order_by('-id').values('id', 'direction', 'sender', 'text', 'sent_at', 'message_type', 'transcript')[:MAX_CONTEXT_MESSAGES])
     rows.reverse()
     return [{
         'id': row['id'],
         'who': SENDER_CUSTOMER if row['direction'] == DIRECTION_IN else row['sender'],
-        'text': row['text'] or '',
+        # A recording reads as what it said, once transcribed.
+        'text': row['transcript'] or row['text'] or '',
         'sent_at': row['sent_at'],
         'message_type': row['message_type'],
         'is_template': row['message_type'] == TYPE_TEMPLATE,
@@ -506,13 +522,28 @@ def _transcript(ctx: Context) -> str:
     who_label = {SENDER_CUSTOMER: 'לקוח', SENDER_BOT: 'הבוט הישן', SENDER_OFFICE: 'נציג מהמשרד', SENDER_SYSTEM: 'מערכת'}
     target_ids = {target.id for target in ctx.targets if target.id}
     parts = []
+    kinds = {TYPE_VOICE: '🎤 הודעה קולית', TYPE_IMAGE: '📷 תמונה'}
     for row in ctx.lines:
         if row['id'] in target_ids:
             continue
         when = timezone.localtime(row['sent_at']).strftime('%d.%m %H:%M') if row['sent_at'] else ''
         tag = who_label.get(row['who'], 'מערכת') + (' (תבנית ששלחה המערכת)' if row['is_template'] else '')
-        parts.append(f'[{when}] {tag}: {row["text"]}')
+        kind = kinds.get(row['message_type'])
+        text = f'[{kind}] {row["text"]}'.strip() if kind else row['text']
+        parts.append(f'[{when}] {tag}: {text}')
     return '\n'.join(parts) if parts else '(אין היסטוריה)'
+
+
+def _describe_target(target: Target) -> str:
+    """One line of "what to answer now": a text, a recording (with or without its transcript), a picture."""
+    if target.message_type == TYPE_VOICE:
+        if target.transcript:
+            return f'- הודעה קולית (תמלול): {target.transcript}'
+        return f'- הודעה קולית (לא תומללה){": " + target.text if target.text else ""}'
+    if target.message_type == TYPE_IMAGE:
+        where = ' — הלקוח שלח תמונה, היא מצורפת להודעה הזאת' if target.media_url else ''
+        return f'- תמונה{where}; כיתוב: {target.text or "(בלי כיתוב)"}'
+    return f'- {target.text or "(בלי טקסט)"}'
 
 
 def _user_message(ctx: Context) -> str:
@@ -527,13 +558,36 @@ def _user_message(ctx: Context) -> str:
     else:
         parts.append('ההודעה האחרונה שהמערכת שלחה ללקוח: אין (לא תבנית ולא תפוצה בשבוע האחרון)')
     parts.append('השיחה עד עכשיו (מהישנה לחדשה):\n' + _transcript(ctx))
-    kinds = {'voice': 'הודעה קולית', 'image': 'תמונה'}
-    targets = '\n'.join(
-        f'- {kinds.get(target.message_type, "")}{": " if target.message_type in kinds else ""}{target.text or "(בלי טקסט)"}'
-        for target in ctx.targets
-    )
+    targets = '\n'.join(_describe_target(target) for target in ctx.targets)
     parts.append(f'ההודעה/ות של הלקוח שעליהן צריך לענות עכשיו ({len(ctx.targets)}):\n{targets}')
     return '\n\n'.join(parts)
+
+
+def _image_block(ctx: Context, target: Target) -> dict | None:
+    """
+    The picture a demo contact sent, as Claude's image block (base64). None, with
+    a note, for a type Claude does not read (HEIC); a storage failure is a
+    ShadowModelError — the answer must not pretend it saw the picture.
+    """
+    media_type = media.media_type_of(target.media_url)
+    if media_type not in CLAUDE_IMAGE_TYPES:
+        ctx.notes.append(f'התמונה בפורמט {media_type or "לא ידוע"} ש-Claude לא קורא; נשלח רק הכיתוב')
+        return None
+    try:
+        data = media.download(target.media_url)
+    except media.MediaError as exc:
+        raise ShadowModelError(f'לא ניתן לקרוא את התמונה מהאחסון ({exc})') from exc
+    return {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': base64.b64encode(data).decode('ascii')}}
+
+
+def _user_content(ctx: Context):
+    """The user turn: plain text, or text plus the pictures being answered."""
+    text = _user_message(ctx)
+    blocks = [_image_block(ctx, target) for target in ctx.targets if target.message_type == TYPE_IMAGE and target.media_url]
+    blocks = [block for block in blocks if block is not None]
+    if not blocks:
+        return text
+    return [{'type': 'text', 'text': text}, *blocks]
 
 
 def _claude(ctx: Context, deadline: float | None) -> Draft:
@@ -545,7 +599,7 @@ def _claude(ctx: Context, deadline: float | None) -> Draft:
     tctx = ctx.tool_ctx
     tools_used: list[dict] = []
     system = SYSTEM_TASK + '\n\n# הידע של הבוט\n\n' + knowledge.describe_for_prompt(ctx.items, ctx.hours)
-    messages = [{'role': 'user', 'content': _user_message(ctx)}]
+    messages = [{'role': 'user', 'content': _user_content(ctx)}]
     body = {
         'model': model_name(),
         # A ceiling, not a spend: thinking counts toward it.
@@ -644,23 +698,34 @@ def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) ->
 
 # --- drafting, proposing, trying ----------------------------------------------------------------------------
 
-def draft(ctx: Context, *, deadline: float | None = None) -> Draft:
-    """Claude when there is a key, the stub otherwise — and the stub when Claude fails, saying why."""
+def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True) -> Draft:
+    """
+    Claude when there is a key, the stub otherwise — and the stub when Claude
+    fails, saying why. With `fallback=False` (the demo conversation's "answer
+    now") a failure of Claude is raised as ShadowModelError instead: the owner
+    is testing the new bot, and a rule-built line in its place would mislead.
+    """
     started = time_module.monotonic()
     result = None
     if shadow_configured():
         try:
             result = _claude(ctx, deadline)
         except ShadowModelError as exc:
+            if not fallback:
+                raise
             logger.warning('wahub shadow: %s; the stub answers', exc)
             result = _stub(ctx)
             result.reasoning = f'• Claude לא נתן תשובה ({exc}); התשובה נבנתה מהכלים ומהנוסחים\n' + result.reasoning
-        except Exception:
+        except Exception as exc:
             logger.exception('wahub shadow: Claude call failed unexpectedly; the stub answers')
+            if not fallback:
+                raise ShadowModelError('תקלה בקריאה ל-Claude') from exc
             result = _stub(ctx)
             result.reasoning = '• תקלה בקריאה ל-Claude; התשובה נבנתה מהכלים ומהנוסחים\n' + result.reasoning
     else:
         result = _stub(ctx)
+    if ctx.notes:
+        result.reasoning = '\n'.join(f'• {note}' for note in ctx.notes) + '\n' + result.reasoning
     result.took_ms = int((time_module.monotonic() - started) * 1000)
     return result
 
@@ -682,10 +747,48 @@ def unanswered_messages(contact: Contact) -> list[Message]:
     return list(rows.order_by('id'))
 
 
-def propose(contact: Contact, *, now=None, deadline: float | None = None) -> ShadowReply | None:
+def _target_of(row: Message, notes: list, *, strict: bool, deadline: float | None) -> Target:
+    """
+    The Target for one customer message. A recording with a file and no
+    transcript yet is transcribed here and the transcript kept on the message;
+    without a key the note says so and the bot answers by its voice rule. A
+    failed transcription is a note (the cron) or a ShadowModelError (strict).
+    """
+    transcript = row.transcript or ''
+    if row.message_type == TYPE_VOICE and row.media_url and not transcript:
+        if not transcribe.configured():
+            notes.append(transcribe.NO_KEY_REASON)
+        else:
+            timeout = TRANSCRIBE_TIMEOUT
+            if deadline is not None:
+                timeout = max(3.0, min(timeout, deadline - time_module.monotonic()))
+            try:
+                audio = media.download(row.media_url)
+                transcript = transcribe.transcribe(
+                    audio, filename=row.media_url.rsplit('/', 1)[-1], media_type=media.media_type_of(row.media_url), timeout=timeout,
+                )
+            except (media.MediaError, transcribe.TranscriptionError) as exc:
+                if strict:
+                    raise ShadowModelError(f'התמלול נכשל: {exc}') from exc
+                logger.warning('wahub shadow: transcription of message %s failed: %s', row.pk, exc)
+                notes.append(f'התמלול נכשל ({exc}); הבוט ענה לפי כלל "הודעה קולית"')
+            else:
+                Message.objects.filter(pk=row.pk).update(transcript=transcript)
+                row.transcript = transcript
+                if not transcript:
+                    notes.append('התמלול חזר ריק; הבוט ענה לפי כלל "הודעה קולית"')
+    return Target(
+        id=row.id, text=transcript or row.text or '', message_type=row.message_type, sent_at=row.sent_at,
+        media_url=row.media_url or '', transcript=transcript,
+    )
+
+
+def propose(contact: Contact, *, now=None, deadline: float | None = None, fallback: bool = True) -> ShadowReply | None:
     """
     The new bot's answer to what the customer wrote since the last one, kept as
     a ShadowReply. None when there is nothing to answer. Never sends anything.
+    `fallback=False` (see `draft`) raises ShadowModelError when Claude or the
+    transcription fails, and then nothing is kept — the messages stay unanswered.
     """
     now = now or timezone.now()
     messages = unanswered_messages(contact)
@@ -696,9 +799,11 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None) -> Sha
     # One answer per burst: the messages within the merge window of the last one.
     last_at = messages[-1].sent_at
     burst = [row for row in messages if last_at - row.sent_at <= MERGE_WINDOW * 3] or messages[-1:]
-    targets = [Target(id=row.id, text=row.text, message_type=row.message_type, sent_at=row.sent_at) for row in burst]
+    notes: list[str] = []
+    targets = [_target_of(row, notes, strict=not fallback, deadline=deadline) for row in burst]
     ctx = build_context(contact, targets=targets, now=now)
-    result = draft(ctx, deadline=deadline)
+    ctx.notes.extend(notes)
+    result = draft(ctx, deadline=deadline, fallback=fallback)
     with transaction.atomic():
         reply = ShadowReply.objects.create(
             contact=contact, after_message=burst[-1], covers_message_ids=[row.id for row in burst],
@@ -725,7 +830,10 @@ def old_bot_reply_for(reply: ShadowReply) -> dict | None:
     if not reply.after_message_id:
         return None
     next_in = Message.objects.filter(contact_id=reply.contact_id, direction=DIRECTION_IN, id__gt=reply.after_message_id).order_by('id').values_list('id', flat=True).first()
-    rows = Message.objects.filter(contact_id=reply.contact_id, direction=DIRECTION_OUT, sender=SENDER_BOT, id__gt=reply.after_message_id).exclude(status=STATUS_FAILED)
+    # The OLD bot's line; the new bot's own answer written into a demo conversation (new_bot) is not it.
+    rows = Message.objects.filter(
+        contact_id=reply.contact_id, direction=DIRECTION_OUT, sender=SENDER_BOT, new_bot=False, id__gt=reply.after_message_id,
+    ).exclude(status=STATUS_FAILED)
     if next_in:
         rows = rows.filter(id__lt=next_in)
     row = rows.order_by('id').values('text', 'sent_at').first()

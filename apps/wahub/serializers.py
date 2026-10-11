@@ -143,7 +143,12 @@ def message_payload(message: Message) -> dict:
         'sender_name': (message.sender_name or None) if message.sender == SENDER_OFFICE else None,
         'text': message.text,
         'message_type': message.message_type,
+        # The object's path in the private bucket, not an address: the screen asks messages/{id}/media/ for one.
         'media_url': message.media_url or None,
+        'has_media': bool(message.media_url),
+        'transcript': message.transcript or '',
+        # The new bot's answer written into a demo conversation (never sent).
+        'new_bot': message.new_bot,
         'status': message.status,
         'error': message.error,
         'sent_at': _iso(message.sent_at),

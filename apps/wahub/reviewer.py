@@ -365,7 +365,9 @@ def _mark_needs_human(contact: Contact, reason: str) -> None:
 
 
 def _messages_of(contact: Contact) -> list[Message]:
-    rows = list(Message.objects.filter(contact=contact).exclude(status=STATUS_FAILED).order_by('-id')[:MAX_MESSAGES])
+    # The patterns are the OLD bot's failures. The new bot's answers written into
+    # a demo conversation (new_bot) are not its; their review is the ShadowReply's verdict.
+    rows = list(Message.objects.filter(contact=contact, new_bot=False).exclude(status=STATUS_FAILED).order_by('-id')[:MAX_MESSAGES])
     rows.reverse()
     return rows
 
