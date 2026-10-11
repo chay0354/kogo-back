@@ -69,8 +69,20 @@ SENDING_OFF = 'השליחה ללקוחות כבויה. מפעילים אותה �
 DEMO_CONTACT = 'איש קשר דמו — לא שולחים אליו הודעות, גם כשהשליחה דלוקה.'
 
 
-def sending_enabled() -> bool:
-    """The owner's switch. Simulation on a developer's machine does not need it."""
+def sending_enabled(contact: Contact | None = None) -> bool:
+    """
+    May a message leave for this contact? The owner's switch, or simulation on
+    a developer's machine. With a contact in hand two things come first
+    (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב): a demo contact never gets anything,
+    whatever the switch says; a live-test contact (the owner's own number, the
+    NEW bot answering it for real) does, even while the switch is off. Without
+    a contact this is the general switch, as the status screen shows it.
+    """
+    if contact is not None:
+        if contact.is_demo:
+            return False
+        if contact.live_test:
+            return True
     return bool(getattr(settings, 'WAHUB_SENDING_ENABLED', False)) or simulate_send()
 
 
@@ -182,14 +194,15 @@ def flow_name(flow_ns: str) -> str:
     return ''
 
 
-def _deliver(contact: Contact, user, *, text: str, message_type: str, call) -> Message:
+def _deliver(contact: Contact, user, *, text: str, message_type: str, call,
+             sender: str = SENDER_OFFICE, new_bot: bool = False) -> Message:
     status, error = STATUS_SENT, ''
     if contact.is_demo:
         # An invented contact: the message is kept so the screen shows it, nothing leaves.
         status, error = STATUS_FAILED, DEMO_CONTACT
     elif simulate_send():
         status = STATUS_SIMULATED
-    elif not sending_enabled():
+    elif not sending_enabled(contact):
         # Kept, so the office sees the attempt and the reason; nothing leaves.
         status, error = STATUS_FAILED, SENDING_OFF
     else:
@@ -204,7 +217,28 @@ def _deliver(contact: Contact, user, *, text: str, message_type: str, call) -> M
         except Exception:  # a send is reported under the message, never thrown at the screen
             logger.exception('wahub send to contact %s failed unexpectedly', contact.pk)
             status, error = STATUS_FAILED, 'תקלה לא צפויה בשליחה. לא ידוע אם ההודעה נשלחה.'
-    return _keep_outbound(contact, user, text, message_type, status, error)
+    return _keep_outbound(contact, user, text, message_type, status, error, sender=sender, new_bot=new_bot)
+
+
+def send_new_bot_reply(contact: Contact, text: str) -> Message:
+    """
+    The NEW bot's answer, sent for real to a LIVE-TEST contact through ManyChat
+    (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב): the same path as the office's free
+    text, kept with sender "bot" and `new_bot=True` and the status the send got
+    (sent, or failed with the reason). Refuses every other contact — a demo
+    never gets anything, and a real customer is answered by the old bot until
+    the owner says otherwise.
+    """
+    if contact.is_demo or not contact.live_test:
+        raise ValueError('the new bot sends only to a live-test contact')
+    text = (text or '').strip()[:MAX_TEXT_CHARS]
+    if not can_free_text(contact):
+        return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_FAILED, WINDOW_CLOSED_DETAIL, sender=SENDER_BOT, new_bot=True)
+    return _deliver(
+        contact, None, text=text, message_type=TYPE_TEXT,
+        call=lambda service, subscriber_id: service.send_whatsapp_text(subscriber_id, text),
+        sender=SENDER_BOT, new_bot=True,
+    )
 
 
 def keep_new_bot_reply(contact: Contact, text: str) -> Message:

@@ -8,10 +8,12 @@ The slice of background work one cron call does (every five minutes):
      checked more than twelve hours ago;
   3. the shadow bot's answer to every customer message it has not answered yet,
      twenty seconds after the last one of a burst (apps/wahub/shadow.py);
-  4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py).
+  4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py);
+  5. a look at the live test: a message of a live-test contact that nobody
+     answered is marked on the contact (apps/wahub/live_test.py).
 
-Nothing in 3 or 4 sends a message or changes the knowledge: the shadow keeps
-proposals, the reviewer keeps proposals-to-approve.
+Nothing in 3, 4 or 5 sends a message or changes the knowledge: the shadow keeps
+proposals, the reviewer keeps proposals-to-approve, the look only marks.
 
 A call stops when its time is spent and the next one carries on: every contact
 is finished and saved on its own, so a call that is cut loses nothing.
@@ -25,7 +27,7 @@ from datetime import timedelta
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.wahub import analysis, matching, reviewer, shadow
+from apps.wahub import analysis, live_test, matching, reviewer, shadow
 from apps.wahub.models import ANALYSIS_AI, SHADOW_MODEL_STUB, Contact
 
 logger = logging.getLogger(__name__)
@@ -119,6 +121,12 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
             counts['review_proposals'] = review['proposals']
         except Exception:
             logger.exception('wahub cron: the reviewer sweep failed')
+
+    # 5. the live test: a message nobody answered is said on the contact (nothing is sent from here)
+    try:
+        counts['live_test_unanswered'] = live_test.flag_unanswered()
+    except Exception:
+        logger.exception('wahub cron: the look at the live test failed')
 
     now = timezone.now()
     counts['pending_analysis'] = _to_analyze(now).count()

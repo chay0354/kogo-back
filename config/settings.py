@@ -605,6 +605,22 @@ WAHUB_HUMAN_START_TAG = config('WAHUB_HUMAN_START_TAG', default='התחיל טי
 WAHUB_HUMAN_END_TAG = config('WAHUB_HUMAN_END_TAG', default='סיים טיפול: נציג אנושי')
 WAHUB_HUMAN_STATUS_FIELD = config('WAHUB_HUMAN_STATUS_FIELD', default='סטטוס ט.אנושי')
 WAHUB_HUMAN_STATUS_VALUE = config('WAHUB_HUMAN_STATUS_VALUE', default='בטיפול נציג (Kogo)')
+# The live test from the owner's own WhatsApp (apps/wahub/live_test.py,
+# docs/WAHUB-CONTRACT-LIVE-TEST.md): the value the status field gets so
+# ManyChat says why the old bot is quiet; how long the answer waits for the
+# burst to end (extended while messages keep coming, three times at most);
+# Claude's token ceiling for a live answer (a customer is waiting).
+WAHUB_LIVE_TEST_STATUS_VALUE = config('WAHUB_LIVE_TEST_STATUS_VALUE', default='בדיקה חיה (Kogo)')
+WAHUB_LIVE_TEST_SETTLE_SECONDS = config('WAHUB_LIVE_TEST_SETTLE_SECONDS', default=4, cast=float)
+WAHUB_LIVE_TEST_MAX_TOKENS = config('WAHUB_LIVE_TEST_MAX_TOKENS', default=4000, cast=int)
+# Claude's effort for a live answer: empty = the shadow's own (WAHUB_SHADOW_EFFORT),
+# so the live test answers exactly as the shadow and the demo do. "low" is the
+# lever if the journal's timings show Claude is what keeps the customer waiting.
+WAHUB_LIVE_TEST_EFFORT = config('WAHUB_LIVE_TEST_EFFORT', default='')
+# A recording or a picture reaches Kogo as an address on ManyChat's own bucket
+# (apps/wahub/media.py); only such an address is fetched. Another host ManyChat
+# turns out to serve customers' files from is named here, comma-separated.
+WAHUB_MEDIA_HOSTS = config('WAHUB_MEDIA_HOSTS', default='')
 
 # ==========================
 # DOCUMENT SIGNING (apps/documents/signing)

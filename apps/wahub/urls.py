@@ -27,6 +27,9 @@ urlpatterns = [
     # a message's recording or picture, by a short-lived signed address.
     path('demo/contacts/<int:pk>/reply/', views.DemoReplyView.as_view(), name='wahub-demo-reply'),
     path('messages/<int:pk>/media/', views.MessageMediaView.as_view(), name='wahub-message-media'),
+    # The live test from the owner's phone (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב): the inbound door calls this
+    # on itself, fire-and-forget, for a live-test contact's message; the same token as the cron.
+    path('live-test/reply/', views.LiveTestReplyView.as_view(), name='wahub-live-test-reply'),
     # Stage 3 — who asked and did not register; the WhatsApp block of a customer's card (docs/WAHUB-CONTRACT-STAGE3.md).
     path('leads/unregistered/', views.UnregisteredLeadsView.as_view(), name='wahub-leads-unregistered'),
     path('for-customer/', views.ForCustomerView.as_view(), name='wahub-for-customer'),

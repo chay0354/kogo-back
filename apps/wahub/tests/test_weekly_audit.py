@@ -27,6 +27,8 @@ class WeeklyAuditTests(WahubTestCase):
             'api/v1/wahub/contacts/{pk}/read/', 'api/v1/wahub/contacts/{pk}/followup/',
             'api/v1/wahub/contacts/{pk}/tags/', 'api/v1/wahub/contacts/{pk}/needs-human/',
             'api/v1/wahub/contacts/{pk}/recheck/', 'api/v1/wahub/contacts/{pk}/analyze/',
+            # The live test: the switch writes in ManyChat, the reply sends a real message.
+            'api/v1/wahub/contacts/{pk}/live-test/', 'api/v1/wahub/live-test/reply/',
         ):
             self.assertFalse(by_template[template].callable_get, template)
 
