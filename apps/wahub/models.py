@@ -907,6 +907,8 @@ class RefineTurn(models.Model):
     # A system turn that ends with a question to the operator.
     needs_answer = models.BooleanField(default=False)
     # A system turn: {outcome, understood, question, confidence, earlier_changes, model, took_ms}.
+    # The turn the system opens a thread with (no text came with the request): {outcome: "summary",
+    # summary: {what_happened, what_was_answered, suspected_issue}, model, took_ms}.
     meta = models.JSONField(default=dict, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
