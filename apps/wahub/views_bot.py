@@ -24,11 +24,13 @@ from rest_framework.views import APIView
 
 from apps.core.permissions import IsManager
 from apps.wahub import knowledge, knowledge_import, refine, reviewer, settings_store, shadow
+from apps.wahub.evals import runner as evals
 from apps.wahub.models import (
     PROPOSAL_PENDING,
     PROPOSAL_STATUS_CHOICES,
     VERDICT_BAD,
     VERDICT_CHOICES,
+    BotEvalRun,
     Contact,
     KnowledgeHistory,
     KnowledgeItem,
@@ -42,6 +44,8 @@ from apps.wahub.models import (
 logger = logging.getLogger(__name__)
 
 TRY_DEADLINE_SECONDS = 50
+# One request of "בדיקות הבוט" plays turns for this long, then answers; the screen calls again while the run says `running`.
+EVAL_REQUEST_SECONDS = 45
 VERDICTS = dict(VERDICT_CHOICES)
 PROPOSAL_STATUSES = dict(PROPOSAL_STATUS_CHOICES)
 
@@ -420,3 +424,47 @@ class ReviewSummaryView(APIView):
 
     def get(self, request):
         return Response(reviewer.summary())
+
+
+# --- "בדיקות הבוט": the bot's self-checks (docs/WAHUB-CONTRACT-BOT-EVALS.md) ----------------------------------------
+
+class BotEvalsView(APIView):
+    """GET bot/evals/ — every written conversation with its last run, and how many passed and failed."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        return Response(evals.listing())
+
+
+class BotEvalRunView(APIView):
+    """
+    POST bot/evals/run/ — plays ONE conversation against the bot and keeps the
+    result. {scenario_id} starts a run; {scenario_id, run_id} continues one
+    that answered `running` (a conversation of several turns does not fit in
+    one request of a server function). The conversation is played in memory:
+    no contact, no message, nothing sent.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        scenario_id = str(data.get('scenario_id') or '').strip()
+        run_id = data.get('run_id')
+        if not scenario_id and run_id in (None, ''):
+            return _error('נדרש scenario_id.')
+        try:
+            run = evals.continue_or_start(scenario_id, run_id, request.user, deadline=time.monotonic() + EVAL_REQUEST_SECONDS)
+        except evals.EvalError as exc:
+            return _error(str(exc))
+        return Response(evals.run_payload(run))
+
+
+class BotEvalRunDetailView(APIView):
+    """GET bot/evals/runs/{id}/ — one kept run in full, for opening a result without playing it again."""
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request, pk: int):
+        run = BotEvalRun.objects.filter(pk=pk).first()
+        if run is None:
+            return _error('הריצה לא נמצאה.', http=status.HTTP_404_NOT_FOUND)
+        return Response(evals.run_payload(run))

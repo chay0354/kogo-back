@@ -18,6 +18,8 @@ TABLES = {
     'wahub_trial_questions', 'wahub_knowledge_proposals', 'wahub_service_notes',
     # "דיוק" and the automatic approval (0005): the app's settings, the threads, their turns
     'wahub_settings', 'wahub_refine_threads', 'wahub_refine_turns',
+    # "בדיקות הבוט" (0007): the runs of the bot's self-checks
+    'wahub_bot_eval_runs',
 }
 
 

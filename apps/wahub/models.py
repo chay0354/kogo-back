@@ -924,3 +924,66 @@ class RefineTurn(models.Model):
 
     def __str__(self):
         return f'{self.get_role_display()} · {self.text[:40]}'
+
+
+# =====================================================================================
+# "בדיקות הבוט" — the bot's self-checks (docs/WAHUB-CONTRACT-BOT-EVALS.md)
+# =====================================================================================
+
+EVAL_RUNNING = 'running'
+EVAL_PASSED = 'passed'
+EVAL_FAILED = 'failed'
+EVAL_SKIPPED = 'skipped'
+EVAL_ERROR = 'error'
+EVAL_STATUS_CHOICES = [
+    (EVAL_RUNNING, 'רץ'),
+    (EVAL_PASSED, 'עבר'),
+    (EVAL_FAILED, 'נכשל'),
+    (EVAL_SKIPPED, 'דולג'),
+    (EVAL_ERROR, 'לא רץ'),
+]
+EVAL_FINAL_STATUSES = (EVAL_PASSED, EVAL_FAILED, EVAL_SKIPPED, EVAL_ERROR)
+
+
+class BotEvalRun(models.Model):
+    """
+    One run of one written conversation against the bot (apps/wahub/evals/).
+    The conversation is played in memory: no contact, no message and no shadow
+    reply is made by it, and nothing is sent. What is kept is this row alone —
+    what the customer of the script wrote, what the bot answered, the tools it
+    called with what they returned, and every check with its verdict.
+
+    A run may take more than one request (a server function is cut after a
+    minute): `turns` holds what was played so far, and the next request
+    continues from there with the same `world`.
+    """
+    scenario_id = models.CharField(max_length=80)
+    status = models.CharField(max_length=10, choices=EVAL_STATUS_CHOICES, default=EVAL_RUNNING)
+    # Who answered: a Claude model id, or "stub" on a machine with no key.
+    engine = models.CharField(max_length=80, blank=True)
+    # The words and the facts the script was filled with, read from the system when the run began.
+    world = models.JSONField(default=dict, blank=True)
+    # [{customer: [{text, kind}], at, reply, reasoning, tools: [{name, input, summary, result}], …}]
+    turns = models.JSONField(default=list, blank=True)
+    # [{id, turn, kind: hard | rubric, title, status: passed | failed | not_judged, explain}]
+    checks = models.JSONField(default=list, blank=True)
+    # Why it was skipped or did not run, in plain Hebrew.
+    detail = models.TextField(blank=True)
+    # How many times a turn was tried again after the model did not answer in time.
+    attempts = models.PositiveSmallIntegerField(default=0)
+    took_ms = models.PositiveIntegerField(default=0)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'wahub_bot_eval_runs'
+        ordering = ['-id']
+        verbose_name = 'בדיקת בוט'
+        verbose_name_plural = 'בדיקות הבוט'
+        indexes = [models.Index(fields=['scenario_id', '-id'], name='wahub_eval_scenario')]
+
+    def __str__(self):
+        return f'{self.scenario_id} · {self.get_status_display()}'

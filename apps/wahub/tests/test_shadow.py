@@ -84,11 +84,11 @@ class StubTests(ShadowTestCase):
         kind = self.course.course_type
         kind.trial_bring_note = ' בגדים נוחים, בקבוק מים וחיוך '
         kind.save(update_fields=['trial_bring_note'])
-        result = shadow_tools.find_courses(shadow_tools.ToolContext(), city='ראש העין', course_type='קפוארה')
+        result = shadow_tools.find_courses(shadow_tools.ToolContext(), city='ראש העין', course_type='קפוארה', age=6)
         self.assertEqual(result['courses'][0]['trial']['bring'], 'בגדים נוחים, בקבוק מים וחיוך')
         kind.trial_bring_note = None
         kind.save(update_fields=['trial_bring_note'])
-        result = shadow_tools.find_courses(shadow_tools.ToolContext(), city='ראש העין', course_type='קפוארה')
+        result = shadow_tools.find_courses(shadow_tools.ToolContext(), city='ראש העין', course_type='קפוארה', age=6)
         self.assertEqual(result['courses'][0]['trial']['bring'], '')
 
     def test_a_price_question_names_the_price_from_the_course_card(self):
@@ -277,7 +277,7 @@ class ClaudeTests(ShadowTestCase):
         self.assertEqual(body['tool_choice'], {'type': 'auto'})
         self.assertEqual([tool['name'] for tool in body['tools']], [
             'find_courses', 'course_card', 'quote_registration', 'instructor_info', 'branch_info',
-            'office_hours_now', 'customer_card', 'request_human',
+            'office_hours_now', 'customer_card', 'request_human', 'tag_conversation',
         ])
         self.assertEqual(body['fallbacks'], 'default')
         self.assertEqual(headers['anthropic-beta'], 'server-side-fallback-2026-07-01')
