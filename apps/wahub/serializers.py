@@ -78,6 +78,8 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
         'source': contact.source,
         'source_label': SOURCE_LABELS.get(contact.source, contact.source),
         'is_demo': contact.is_demo,
+        # The owner's own number under the live test: the NEW bot answers it for real (docs/WAHUB-CONTRACT-LIVE-TEST.md).
+        'live_test': contact.live_test,
         'first_inbound_at': _iso(contact.first_inbound_at),
         'last_inbound_at': _iso(contact.last_inbound_at),
         'last_message_at': _iso(contact.last_message_at),
@@ -147,7 +149,7 @@ def message_payload(message: Message) -> dict:
         'media_url': message.media_url or None,
         'has_media': bool(message.media_url),
         'transcript': message.transcript or '',
-        # The new bot's answer written into a demo conversation (never sent).
+        # The NEW bot's answer: written into a demo conversation (never sent), or sent for real under the live test.
         'new_bot': message.new_bot,
         'status': message.status,
         'error': message.error,

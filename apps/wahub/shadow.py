@@ -48,6 +48,7 @@ from apps.wahub.models import (
     SHADOW_MODEL_STUB,
     STATUS_FAILED,
     TYPE_IMAGE,
+    TYPE_OTHER,
     TYPE_TEMPLATE,
     TYPE_VOICE,
     Contact,
@@ -66,6 +67,7 @@ LAST_OUTBOUND_WITHIN = timedelta(days=7)
 DEFAULT_MODEL = 'claude-opus-5-5'
 DEFAULT_EFFORT = 'medium'
 DEFAULT_TIMEOUT = 40
+DEFAULT_MAX_TOKENS = 16000
 # Claude Opus 5.5 declines some requests through its safety classifiers; the
 # server-side fallback re-runs the request on another model inside the same call.
 FALLBACK_BETA = 'server-side-fallback-2026-07-01'
@@ -73,6 +75,10 @@ FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 CLAUDE_IMAGE_TYPES = ('image/jpeg', 'image/png', 'image/gif', 'image/webp')
 # How long a recording's transcription may take inside one shadow call.
 TRANSCRIBE_TIMEOUT = 25
+# Files in messages older than the answered burst that one call still fetches from ManyChat.
+MAX_PASSED_OVER_FILES = 3
+# How the new bot's own earlier answers are named in the conversation Claude reads.
+OWN_ANSWER_LABEL = 'את (הבוט החדש)'
 
 REPLY_SCHEMA = {
     'type': 'object',
@@ -144,9 +150,16 @@ def model_name() -> str:
     return (getattr(settings, 'WAHUB_SHADOW_MODEL', '') or DEFAULT_MODEL).strip()
 
 
-def _effort() -> str:
+EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+
+
+def _effort(wanted: str | None = None) -> str:
+    """The effort Claude is asked for: the caller's own when it names a real one (the live test may), else the shadow's setting."""
+    wanted = (wanted or '').strip()
+    if wanted in EFFORTS:
+        return wanted
     value = (getattr(settings, 'WAHUB_SHADOW_EFFORT', '') or DEFAULT_EFFORT).strip()
-    return value if value in ('low', 'medium', 'high', 'xhigh', 'max') else DEFAULT_EFFORT
+    return value if value in EFFORTS else DEFAULT_EFFORT
 
 
 def _timeout_seconds() -> float:
@@ -210,11 +223,13 @@ def _conversation(contact: Contact, before_id: int | None = None) -> list[dict]:
     rows = Message.objects.filter(contact=contact).exclude(status=STATUS_FAILED)
     if before_id:
         rows = rows.filter(id__lte=before_id)
-    rows = list(rows.order_by('-id').values('id', 'direction', 'sender', 'text', 'sent_at', 'message_type', 'transcript')[:MAX_CONTEXT_MESSAGES])
+    rows = list(rows.order_by('-id').values('id', 'direction', 'sender', 'text', 'sent_at', 'message_type', 'transcript', 'new_bot')[:MAX_CONTEXT_MESSAGES])
     rows.reverse()
     return [{
         'id': row['id'],
         'who': SENDER_CUSTOMER if row['direction'] == DIRECTION_IN else row['sender'],
+        # The new bot's own earlier answer (a demo conversation, the live test), not the old bot's.
+        'new_bot': bool(row['new_bot']),
         # A recording reads as what it said, once transcribed.
         'text': row['transcript'] or row['text'] or '',
         'sent_at': row['sent_at'],
@@ -381,9 +396,12 @@ def _stub(ctx: Context) -> Draft:
         return say('handoff_notice') or 'הפנייה הועברה לנציג מהמשרד, נחזור אליך בהקדם'
 
     text = ''
-    # 1. a voice message we cannot read
-    if any(target.message_type == 'voice' for target in ctx.targets) and not merged:
-        reasons.append('הודעה קולית בלי טקסט')
+    # 1. a voice message we cannot read — or a file nobody can (media ManyChat did not pass on): the same answer
+    if any(target.message_type in (TYPE_VOICE, TYPE_OTHER) for target in ctx.targets) and not merged:
+        if any(target.message_type == TYPE_VOICE for target in ctx.targets):
+            reasons.append('הודעה קולית בלי טקסט')
+        else:
+            reasons.append('קובץ או מדיה שלא ניתן לקרוא — עונים כמו להודעה קולית')
         text = say('voice_message') or 'לא ניתן לשמוע הודעות קוליות, בבקשה להשאיר הודעה כתובה'
     # 2. asks for a person
     elif inbound.asks_for_human(merged):
@@ -529,12 +547,14 @@ def _transcript(ctx: Context) -> str:
     who_label = {SENDER_CUSTOMER: 'לקוח', SENDER_BOT: 'הבוט הישן', SENDER_OFFICE: 'נציג מהמשרד', SENDER_SYSTEM: 'מערכת'}
     target_ids = {target.id for target in ctx.targets if target.id}
     parts = []
-    kinds = {TYPE_VOICE: '🎤 הודעה קולית', TYPE_IMAGE: '📷 תמונה'}
+    kinds = inbound.MEDIA_PREVIEW
     for row in ctx.lines:
         if row['id'] in target_ids:
             continue
         when = timezone.localtime(row['sent_at']).strftime('%d.%m %H:%M') if row['sent_at'] else ''
-        tag = who_label.get(row['who'], 'מערכת') + (' (תבנית ששלחה המערכת)' if row['is_template'] else '')
+        # Its own earlier answers are its side of the conversation, not something the old bot said.
+        tag = OWN_ANSWER_LABEL if row.get('new_bot') else who_label.get(row['who'], 'מערכת')
+        tag += ' (תבנית ששלחה המערכת)' if row['is_template'] else ''
         kind = kinds.get(row['message_type'])
         text = f'[{kind}] {row["text"]}'.strip() if kind else row['text']
         parts.append(f'[{when}] {tag}: {text}')
@@ -548,8 +568,11 @@ def _describe_target(target: Target) -> str:
             return f'- הודעה קולית (תמלול): {target.transcript}'
         return f'- הודעה קולית (לא תומללה){": " + target.text if target.text else ""}'
     if target.message_type == TYPE_IMAGE:
-        where = ' — הלקוח שלח תמונה, היא מצורפת להודעה הזאת' if target.media_url else ''
+        attached = bool(target.media_url) and not media.is_external(target.media_url)
+        where = ' — הלקוח שלח תמונה, היא מצורפת להודעה הזאת' if attached else ' — הלקוח שלח תמונה שלא ניתן לקרוא'
         return f'- תמונה{where}; כיתוב: {target.text or "(בלי כיתוב)"}'
+    if target.message_type == TYPE_OTHER:
+        return '- קובץ או מדיה שהמערכת לא יכולה לקרוא (עונים כמו להודעה קולית שלא ניתן לשמוע)'
     return f'- {target.text or "(בלי טקסט)"}'
 
 
@@ -572,10 +595,14 @@ def _user_message(ctx: Context) -> str:
 
 def _image_block(ctx: Context, target: Target) -> dict | None:
     """
-    The picture a demo contact sent, as Claude's image block (base64). None, with
-    a note, for a type Claude does not read (HEIC); a storage failure is a
+    The picture the customer sent, as Claude's image block (base64). None, with
+    a note, for a type Claude does not read (HEIC) or for a file still at
+    ManyChat's address (it could not be fetched); a storage failure is a
     ShadowModelError — the answer must not pretend it saw the picture.
     """
+    if media.is_external(target.media_url):
+        ctx.notes.append('התמונה לא הורדה מ-ManyChat; נשלח רק הכיתוב')
+        return None
     media_type = media.media_type_of(target.media_url)
     if media_type not in CLAUDE_IMAGE_TYPES:
         ctx.notes.append(f'התמונה בפורמט {media_type or "לא ידוע"} ש-Claude לא קורא; נשלח רק הכיתוב')
@@ -584,6 +611,10 @@ def _image_block(ctx: Context, target: Target) -> dict | None:
         data = media.download(target.media_url)
     except media.MediaError as exc:
         raise ShadowModelError(f'לא ניתן לקרוא את התמונה מהאחסון ({exc})') from exc
+    if len(data) > media.IMAGE_MAX_BYTES:
+        # An upload from the screen is refused above this size; a file ManyChat passed may be larger, and Claude refuses it.
+        ctx.notes.append(f'התמונה גדולה מ-{media.IMAGE_MAX_BYTES // media.MB}MB ו-Claude לא קורא אותה; נשלח רק הכיתוב')
+        return None
     return {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': base64.b64encode(data).decode('ascii')}}
 
 
@@ -597,7 +628,7 @@ def _user_content(ctx: Context):
     return [{'type': 'text', 'text': text}, *blocks]
 
 
-def _claude(ctx: Context, deadline: float | None) -> Draft:
+def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = None, effort: str | None = None) -> Draft:
     from apps.core.scoping import integration_credential
 
     api_key = integration_credential('ANTHROPIC_API_KEY')
@@ -609,13 +640,14 @@ def _claude(ctx: Context, deadline: float | None) -> Draft:
     messages = [{'role': 'user', 'content': _user_content(ctx)}]
     body = {
         'model': model_name(),
-        # A ceiling, not a spend: thinking counts toward it.
-        'max_tokens': 16000,
+        # A ceiling, not a spend: thinking counts toward it. The live test lowers it
+        # (docs/WAHUB-CONTRACT-LIVE-TEST.md): a customer is waiting for the answer.
+        'max_tokens': int(max_tokens or DEFAULT_MAX_TOKENS),
         'system': system,
         'tools': TOOLS,
         'tool_choice': {'type': 'auto'},
         'messages': messages,
-        'output_config': {'effort': _effort(), 'format': {'type': 'json_schema', 'schema': REPLY_SCHEMA}},
+        'output_config': {'effort': _effort(effort), 'format': {'type': 'json_schema', 'schema': REPLY_SCHEMA}},
         'fallbacks': 'default',
     }
     headers = {
@@ -705,18 +737,20 @@ def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) ->
 
 # --- drafting, proposing, trying ----------------------------------------------------------------------------
 
-def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True) -> Draft:
+def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True, max_tokens: int | None = None,
+          effort: str | None = None) -> Draft:
     """
     Claude when there is a key, the stub otherwise — and the stub when Claude
     fails, saying why. With `fallback=False` (the demo conversation's "answer
-    now") a failure of Claude is raised as ShadowModelError instead: the owner
-    is testing the new bot, and a rule-built line in its place would mislead.
+    now", the live test) a failure of Claude is raised as ShadowModelError
+    instead: the owner is testing the new bot, and a rule-built line in its
+    place would mislead.
     """
     started = time_module.monotonic()
     result = None
     if shadow_configured():
         try:
-            result = _claude(ctx, deadline)
+            result = _claude(ctx, deadline, max_tokens=max_tokens, effort=effort)
         except ShadowModelError as exc:
             if not fallback:
                 raise
@@ -738,9 +772,14 @@ def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True)
 
 
 def pending(now=None):
-    """Contacts with a customer message the shadow has not answered, once the burst has settled."""
+    """
+    Contacts with a customer message the shadow has not answered, once the burst
+    has settled. A live-test contact is not among them: the NEW bot answers it
+    for real within seconds (live_test.py), and a shadow answer written by the
+    cron in between would count its message as answered while nothing was sent.
+    """
     now = now or timezone.now()
-    return Contact.objects.filter(needs_shadow=True).filter(
+    return Contact.objects.filter(needs_shadow=True, live_test=False).filter(
         Q(last_inbound_at__lte=now - MERGE_WINDOW) | Q(last_inbound_at__isnull=True)
     )
 
@@ -754,6 +793,72 @@ def unanswered_messages(contact: Contact) -> list[Message]:
     return list(rows.order_by('id'))
 
 
+def _archive(row: Message, notes: list, *, deadline: float | None) -> None:
+    """
+    A file still at ManyChat's address is fetched into the bucket now and the
+    message points at the copy; a file of a kind the address did not say
+    (`other`) takes the kind the bytes turned out to be. A failure is a note,
+    never an error: the message keeps ManyChat's address and the bot answers by
+    its voice rule, as for a recording it cannot hear.
+    """
+    if not row.media_url or not media.is_external(row.media_url):
+        return
+    timeout = media.FETCH_TIMEOUT
+    if deadline is not None:
+        timeout = max(3.0, min(timeout, deadline - time_module.monotonic()))
+    try:
+        path, kind = media.archive(row.contact_id, row.media_url, timeout=timeout)
+    except media.MediaError as exc:
+        logger.warning('wahub shadow: the file of message %s was not fetched from ManyChat: %s', row.pk, exc)
+        notes.append(f'הקובץ לא הורד מ-ManyChat ({exc})')
+        return
+    changes = {'media_url': path}
+    if row.message_type == TYPE_OTHER:
+        changes['message_type'] = kind
+    Message.objects.filter(pk=row.pk).update(**changes)
+    row.media_url, row.message_type = path, changes.get('message_type', row.message_type)
+
+
+def _hear(row: Message, *, deadline: float | None) -> str:
+    """What a recording kept in the bucket said, written on the message. Raises MediaError or TranscriptionError."""
+    timeout = TRANSCRIBE_TIMEOUT
+    if deadline is not None:
+        timeout = max(3.0, min(timeout, deadline - time_module.monotonic()))
+    audio = media.download(row.media_url)
+    transcript = transcribe.transcribe(
+        audio, filename=row.media_url.rsplit('/', 1)[-1], media_type=media.media_type_of(row.media_url), timeout=timeout,
+    )
+    Message.objects.filter(pk=row.pk).update(transcript=transcript)
+    row.transcript = transcript
+    return transcript
+
+
+def prepare_media(contact: Contact, *, deadline: float | None = None, skip=()) -> list[int]:
+    """
+    Ahead of the answer: the files of the customer's unanswered messages are
+    fetched into the bucket and the recordings transcribed, so the draft finds
+    them ready. The live test does this while it waits for the burst to end
+    (live_test.py) — that wait is otherwise idle, and the customer is holding
+    the phone. Best effort and silent: what fails here is tried once more, and
+    reported, when the answer is drafted (`_target_of`). Returns the ids of the
+    messages it went over; given back as `skip`, they are not tried again.
+    """
+    seen = []
+    for row in unanswered_messages(contact):
+        if row.id in skip or not row.media_url:
+            continue
+        seen.append(row.id)
+        try:
+            _archive(row, [], deadline=deadline)
+            if row.message_type == TYPE_VOICE and not row.transcript and not media.is_external(row.media_url) and transcribe.configured():
+                _hear(row, deadline=deadline)
+        except (media.MediaError, transcribe.TranscriptionError) as exc:
+            logger.warning('wahub shadow: the recording of message %s was not transcribed ahead of the answer: %s', row.pk, exc)
+        except Exception:
+            logger.exception('wahub shadow: preparing the file of message %s failed unexpectedly', row.pk)
+    return seen
+
+
 def _target_of(row: Message, notes: list, *, strict: bool, deadline: float | None) -> Target:
     """
     The Target for one customer message. A recording with a file and no
@@ -761,36 +866,34 @@ def _target_of(row: Message, notes: list, *, strict: bool, deadline: float | Non
     without a key the note says so and the bot answers by its voice rule. A
     failed transcription is a note (the cron) or a ShadowModelError (strict).
     """
+    _archive(row, notes, deadline=deadline)
     transcript = row.transcript or ''
-    if row.message_type == TYPE_VOICE and row.media_url and not transcript:
+    if row.message_type == TYPE_VOICE and row.media_url and media.is_external(row.media_url) and not transcript:
+        notes.append('ההקלטה לא הורדה מ-ManyChat; הבוט ענה לפי כלל "הודעה קולית"')
+    elif row.message_type == TYPE_VOICE and row.media_url and not transcript:
         if not transcribe.configured():
             notes.append(transcribe.NO_KEY_REASON)
         else:
-            timeout = TRANSCRIBE_TIMEOUT
-            if deadline is not None:
-                timeout = max(3.0, min(timeout, deadline - time_module.monotonic()))
             try:
-                audio = media.download(row.media_url)
-                transcript = transcribe.transcribe(
-                    audio, filename=row.media_url.rsplit('/', 1)[-1], media_type=media.media_type_of(row.media_url), timeout=timeout,
-                )
+                transcript = _hear(row, deadline=deadline)
             except (media.MediaError, transcribe.TranscriptionError) as exc:
                 if strict:
                     raise ShadowModelError(f'התמלול נכשל: {exc}') from exc
                 logger.warning('wahub shadow: transcription of message %s failed: %s', row.pk, exc)
                 notes.append(f'התמלול נכשל ({exc}); הבוט ענה לפי כלל "הודעה קולית"')
             else:
-                Message.objects.filter(pk=row.pk).update(transcript=transcript)
-                row.transcript = transcript
                 if not transcript:
                     notes.append('התמלול חזר ריק; הבוט ענה לפי כלל "הודעה קולית"')
+    # A file nobody can read carries no words of the customer's: the line kept in its place is ours.
+    words = '' if row.message_type == TYPE_OTHER else (transcript or row.text or '')
     return Target(
-        id=row.id, text=transcript or row.text or '', message_type=row.message_type, sent_at=row.sent_at,
+        id=row.id, text=words, message_type=row.message_type, sent_at=row.sent_at,
         media_url=row.media_url or '', transcript=transcript,
     )
 
 
-def propose(contact: Contact, *, now=None, deadline: float | None = None, fallback: bool = True) -> ShadowReply | None:
+def propose(contact: Contact, *, now=None, deadline: float | None = None, fallback: bool = True,
+            max_tokens: int | None = None, effort: str | None = None) -> ShadowReply | None:
     """
     The new bot's answer to what the customer wrote since the last one, kept as
     a ShadowReply. None when there is nothing to answer. Never sends anything.
@@ -810,7 +913,7 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
     targets = [_target_of(row, notes, strict=not fallback, deadline=deadline) for row in burst]
     ctx = build_context(contact, targets=targets, now=now)
     ctx.notes.extend(notes)
-    result = draft(ctx, deadline=deadline, fallback=fallback)
+    result = draft(ctx, deadline=deadline, fallback=fallback, max_tokens=max_tokens, effort=effort)
     with transaction.atomic():
         reply = ShadowReply.objects.create(
             contact=contact, after_message=burst[-1], covers_message_ids=[row.id for row in burst],
@@ -820,7 +923,27 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
         newer = Message.objects.filter(contact=contact, direction=DIRECTION_IN, id__gt=burst[-1].id).exists()
         state.touch(contact.pk, needs_shadow=newer, last_shadow_at=now)
     contact.needs_shadow, contact.last_shadow_at = newer, now
+    # Older messages this answer passed over (a recording, then a question minutes later) count as
+    # answered from here on, so their files are fetched now or never: a few, with the time that is left.
+    passed_over = [row for row in messages if row not in burst and media.is_external(row.media_url)]
+    for row in passed_over[-MAX_PASSED_OVER_FILES:]:
+        try:
+            _archive(row, [], deadline=deadline)
+        except Exception:  # the answer is kept already; a file must not undo it
+            logger.exception('wahub shadow: the file of message %s could not be fetched', row.pk)
     return reply
+
+
+def answer_now(contact: Contact, *, deadline: float, max_tokens: int | None = None,
+               effort: str | None = None) -> ShadowReply | None:
+    """
+    The one computation behind "the new bot answers NOW": the demo conversation's
+    reply (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב) and the live test from the owner's
+    phone (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב) — `propose` on the unanswered
+    burst, with no fall to the stub: a failure of Claude or of the transcription
+    is a ShadowModelError and nothing is kept.
+    """
+    return propose(contact, now=timezone.now(), deadline=deadline, fallback=False, max_tokens=max_tokens, effort=effort)
 
 
 def answer(question: str, *, contact: Contact | None = None, pretend_now=None, last_outbound: str | None = None,

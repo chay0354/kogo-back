@@ -30,7 +30,7 @@ from rest_framework.views import APIView
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
 from apps.customers.models import Family
-from apps.wahub import analysis, cron, demo, handoff, inbound, matching, media, queries, reviewer, sending, shadow, state
+from apps.wahub import analysis, cron, demo, handoff, inbound, live_test, matching, media, queries, reviewer, sending, shadow, state
 from apps.wahub.models import (
     EVENT_CREATED,
     EVENT_FOLLOWUP,
@@ -310,6 +310,27 @@ class ContactViewSet(viewsets.GenericViewSet):
             return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY)
         return Response(self._payload(contact.id))
 
+    @action(detail=True, methods=['post'], url_path='live-test')
+    def live_test_switch(self, request, pk=None):
+        """
+        POST contacts/{id}/live-test/ {on: true|false} — the live test from the
+        owner's phone (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב). On: the old bot is
+        muted for this contact in ManyChat and the NEW bot answers it for real;
+        off: the old bot answers again. `handled_by` is not touched. A demo
+        contact is refused: nothing is ever sent to it.
+        """
+        contact = self.get_object()
+        on = request.data.get('on')
+        if not isinstance(on, bool):
+            return _error('נדרש on (true או false).')
+        if contact.is_demo:
+            return _error(handoff.LIVE_TEST_DEMO, code='demo')
+        try:
+            (handoff.start_live_test if on else handoff.stop_live_test)(contact, request.user)
+        except handoff.HandoffError as exc:
+            return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY)
+        return Response(self._payload(contact.id))
+
     @action(detail=True, methods=['post'], url_path='needs-human')
     def needs_human(self, request, pk=None):
         contact = self.get_object()
@@ -531,16 +552,21 @@ def _stored_inbound_key():
     return IntegrationCredential.objects.filter(key=INBOUND_KEY_NAME).first()
 
 
-def _inbound_url(request) -> str:
+def _own_url(request, path: str) -> str:
     """
-    The address to paste into ManyChat. The server's own public address when it
-    is configured (CRM_API_BASE_URL already ends with /api/v1); on a developer's
-    machine, the address this request came to.
+    This server's address for one of its wahub endpoints. The public address
+    when it is configured (CRM_API_BASE_URL already ends with /api/v1); on a
+    developer's machine, the address this request came to.
     """
     base = (getattr(settings, 'CRM_API_BASE_URL', '') or '').strip().rstrip('/')
     if base and 'localhost' not in base and '127.0.0.1' not in base:
-        return f'{base}/wahub/inbound/manychat/'
-    return request.build_absolute_uri('/api/v1/wahub/inbound/manychat/')
+        return f'{base}/wahub/{path}'
+    return request.build_absolute_uri(f'/api/v1/wahub/{path}')
+
+
+def _inbound_url(request) -> str:
+    """The address to paste into ManyChat."""
+    return _own_url(request, 'inbound/manychat/')
 
 
 class StatusView(APIView):
@@ -567,6 +593,8 @@ class StatusView(APIView):
             'send_configured': ManyChatService().is_configured,
             'sending_enabled': sending.sending_enabled(),
             'simulate_send': sending.simulate_send(),
+            # The contacts the NEW bot answers for real while the switch is off (docs/WAHUB-CONTRACT-LIVE-TEST.md).
+            'live_test_contacts': Contact.objects.filter(live_test=True).count(),
             'last_inbound_at': contacts['last_inbound'],
             'contacts_total': contacts['total'],
             'messages_last_24h': Message.objects.filter(sent_at__gte=now - timedelta(hours=24)).count(),
@@ -632,6 +660,13 @@ class ManyChatInboundView(APIView):
             # ManyChat would only send it again; the fault is ours to read in the log.
             logger.exception('wahub inbound: could not store an event')
             return Response({'ok': True, 'stored': False})
+        if result.live_test:
+            # At once, before anything else: the owner is waiting on his phone for the NEW
+            # bot's answer (docs/WAHUB-CONTRACT-LIVE-TEST.md). The call does not wait and never raises.
+            try:
+                live_test.kick(result.contact_id, _own_url(request, live_test.REPLY_PATH))
+            except Exception:
+                logger.exception('wahub inbound: the live answer for contact %s could not be started', result.contact_id)
         return Response({'ok': True, 'stored': result.stored})
 
 
@@ -644,6 +679,33 @@ def cron_tick(request):
     if not _cron_request_authorized(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
     return Response({'ok': True, **cron.tick()})
+
+
+class LiveTestReplyView(APIView):
+    """
+    POST live-test/reply/ {contact} — the NEW bot answers a live-test contact's
+    unanswered messages NOW and sends the answer through ManyChat
+    (apps/wahub/live_test.py). Called by this server on itself from the inbound
+    door; auth is the cron token. Always 200 with `outcome` (sent, failed, busy,
+    nothing, daily_limit, human_handles, model_error, not_live_test); 404 for a
+    contact that does not exist. A second call while one is answering is "busy":
+    the first one answers what arrived meanwhile.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from apps.customers.views import _cron_request_authorized
+
+        if not _cron_request_authorized(request):
+            return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+        raw = request.data.get('contact') if isinstance(request.data, dict) else None
+        if isinstance(raw, bool) or not str(raw or '').strip().isdigit():
+            return _error('נדרש contact (מזהה איש הקשר).')
+        result = live_test.reply(int(raw))
+        if result['outcome'] == live_test.OUTCOME_NOT_FOUND:
+            return _error('איש הקשר לא נמצא.', http=status.HTTP_404_NOT_FOUND)
+        return Response({'ok': True, **result})
 
 
 
@@ -729,7 +791,8 @@ class DemoReplyView(APIView):
             }
 
         try:
-            reply = shadow.propose(contact, now=timezone.now(), deadline=time.monotonic() + REPLY_SECONDS, fallback=False)
+            # The very computation the live test runs for the owner's phone (live_test.py).
+            reply = shadow.answer_now(contact, deadline=time.monotonic() + REPLY_SECONDS)
         except shadow.ShadowModelError as exc:
             logger.warning('wahub demo reply for contact %s: %s', contact.pk, exc)
             return Response({'shadow': {'error': str(exc)}, **payload_of(None)})
@@ -747,8 +810,9 @@ class MessageMediaView(APIView):
         message = Message.objects.filter(pk=pk).only('id', 'media_url').first()
         if message is None or not message.media_url:
             return _error('להודעה הזאת אין קובץ.', code='no_media', http=status.HTTP_404_NOT_FOUND)
-        if message.media_url.startswith('http://') or message.media_url.startswith('https://'):
-            # An address kept as it came (nothing writes one today); it is not ours to sign.
+        if media.is_external(message.media_url):
+            # ManyChat's own address of a customer's file, not fetched into the bucket yet (or the
+            # fetch failed): it is not ours to sign, and it is opened where it is.
             return Response({'url': message.media_url, 'expires_in': None})
         try:
             url = media.signed_url(message.media_url)

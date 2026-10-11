@@ -19,11 +19,11 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.wahub import state
+from apps.wahub import media, state
 from apps.wahub.models import (
     DIRECTION_IN,
     DIRECTION_OUT,
@@ -33,9 +33,11 @@ from apps.wahub.models import (
     SENDER_BOT,
     SENDER_CUSTOMER,
     SOURCE_WHATSAPP,
+    STATUS_FAILED,
     STATUS_RECEIVED,
     STATUS_SENT,
     TYPE_IMAGE,
+    TYPE_OTHER,
     TYPE_TEXT,
     TYPE_VOICE,
     Contact,
@@ -55,10 +57,13 @@ DUPLICATE_WINDOW = timedelta(seconds=30)
 # WhatsApp's own limit is 4,096 characters; the rest is not a message.
 MAX_TEXT_CHARS = 8000
 
-# A demo contact's recording or picture (docs/WAHUB-CONTRACT-REAL-DEMO.md, א), and
-# the line the list shows for one that came with no text.
-MEDIA_TYPES = (TYPE_VOICE, TYPE_IMAGE)
-MEDIA_PREVIEW = {TYPE_VOICE: '🎤 הודעה קולית', TYPE_IMAGE: '📷 תמונה'}
+# A recording or a picture — a demo contact's upload (docs/WAHUB-CONTRACT-REAL-DEMO.md, א)
+# or the address ManyChat passes for a real customer's file (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב) —
+# and the line the list shows for one that came with no text.
+MEDIA_TYPES = (TYPE_VOICE, TYPE_IMAGE, TYPE_OTHER)
+MEDIA_PREVIEW = {TYPE_VOICE: '🎤 הודעה קולית', TYPE_IMAGE: '🖼️ תמונה', TYPE_OTHER: '📎 קובץ'}
+# A live-test contact's message with no text and no address: media ManyChat did not pass on.
+MEDIA_NOT_FORWARDED = '(מדיה — ManyChat לא העביר)'
 
 NEEDS_HUMAN_REASON = 'ביקש נציג'
 
@@ -79,6 +84,8 @@ class StoreResult:
     reason: str = ''
     contact_id: int | None = None
     message_id: int | None = None
+    # A customer message kept for a live-test contact: the NEW bot answers it now (live_test.py).
+    live_test: bool = False
 
 
 def asks_for_human(text: str) -> bool:
@@ -176,17 +183,43 @@ def _moment(ts, now):
 # --- keeping it -----------------------------------------------------------------
 
 def handle_payload(data, query_event: str = '') -> StoreResult:
-    return store_event(**parse_payload(data, query_event))
+    # The body itself travels along: it is kept on a live-test contact's message (store_event).
+    return store_event(**parse_payload(data, query_event), raw=data if isinstance(data, dict) else None)
+
+
+def media_in_text(text: str) -> tuple[str, str]:
+    """
+    ManyChat passes a customer's recording or picture as a message whose whole
+    text is the file's address (seen 11.10.2026: `last_input_text` =
+    https://manybot-files.s3.eu-central-1.amazonaws.com/…/original_….ogg).
+    Returns (message_type, media_url): ('voice'|'image'|'other', the address)
+    for such a text, ('text', '') for anything else — a sentence with a link
+    in it, or a link to a site, stays the text it is.
+    """
+    kind = media.kind_of_url(text)
+    return (kind, text.strip()) if kind else (TYPE_TEXT, '')
 
 
 def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts=None,
-                message_type: str = TYPE_TEXT, media_url: str = '') -> StoreResult:
+                message_type: str = TYPE_TEXT, media_url: str = '', raw=None) -> StoreResult:
     """
-    `message_type` and `media_url` come only from the demo door (a recording or
-    a picture the manager uploaded, apps/wahub/media.py): ManyChat's copy of a
-    real message is text. A media message may have no text, and two of them a
-    moment apart are two messages — the duplicate window is for ManyChat's
-    repeats of one text, and a second picture is not a repeat.
+    `message_type` and `media_url` come from the demo door (a recording or a
+    picture the manager uploaded, apps/wahub/media.py); for ManyChat's copy of
+    a real message — of any contact — they are read from the text when it is a
+    bare address of a file (`media_in_text`). The address is kept as it came:
+    ManyChat is waiting on this door, so the file is fetched into the bucket a
+    moment later, when the message is answered (shadow.py — the live test
+    within seconds, the cron's shadow for everybody else), and stays at its
+    address if that fails. A media message may have no text. The duplicate
+    window is for ManyChat's repeats: of one text, or of one file's address — a
+    second picture has an address of its own, and a demo contact's second
+    upload is a second message.
+
+    `raw` is ManyChat's body; it is kept on the message for a live-test
+    contact only (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב). Such a contact's
+    message with neither text nor address is media ManyChat did not pass on,
+    and is kept as `other` so the bot answers it; for everybody else an empty
+    message is nothing, as before.
     """
     if event not in EVENTS:
         return StoreResult(False, 'unknown_event')
@@ -194,18 +227,24 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
     if not phone:
         return StoreResult(False, 'invalid_phone')
     text = _text(text)[:MAX_TEXT_CHARS]
+    incoming = event == EVENT_CUSTOMER_MESSAGE
+    if incoming and not media_url and message_type == TYPE_TEXT:
+        message_type, media_url = media_in_text(text)
+        if media_url:
+            text = ''
     is_media = message_type in MEDIA_TYPES and bool(media_url)
     if not is_media:
         message_type = TYPE_TEXT
         media_url = ''
     if not text and not is_media:
-        return StoreResult(False, 'empty_text')
+        if not (incoming and raw is not None and Contact.objects.filter(phone=phone, live_test=True, is_demo=False).exists()):
+            return StoreResult(False, 'empty_text')
+        message_type, text = TYPE_OTHER, MEDIA_NOT_FORWARDED
 
     now = timezone.now()
     sent_at = _moment(ts, now)
     name = _text(name)[:200]
     subscriber_id = _text(subscriber_id)[:40]
-    incoming = event == EVENT_CUSTOMER_MESSAGE
     direction = DIRECTION_IN if incoming else DIRECTION_OUT
 
     with transaction.atomic():
@@ -218,11 +257,23 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
         # are read before they are written.
         contact = Contact.objects.select_for_update().get(pk=contact.pk)
 
-        if not is_media and Message.objects.filter(
-            contact=contact, direction=direction, text=text, created_at__gte=now - DUPLICATE_WINDOW,
-        ).exists():
+        recent = Message.objects.filter(contact=contact, direction=direction, created_at__gte=now - DUPLICATE_WINDOW)
+        if message_type == TYPE_TEXT:
+            same = recent.filter(text=text)
+        elif media.is_external(media_url):
+            # ManyChat names every file once, so the same address again is the same message again —
+            # also when the first copy's file has been fetched into the bucket meanwhile.
+            kept = media.archived_stem(contact.id, media_url) + '.'
+            same = recent.filter(Q(media_url=media_url) | Q(media_url__startswith=kept))
+        else:
+            same = recent.none()
+        earlier = same.order_by('-id').values_list('id', flat=True).first()
+        # A repeat is ManyChat saying one thing twice, a moment apart. Once the other side has
+        # spoken in between it is a new message: "כן", an answer within seconds, and "כן" again.
+        if earlier and not Message.objects.filter(contact=contact, id__gt=earlier).exclude(direction=direction).exclude(status=STATUS_FAILED).exists():
             return StoreResult(False, 'duplicate', contact_id=contact.id)
 
+        live_test = bool(contact.live_test and incoming and not contact.is_demo)
         message = Message.objects.create(
             contact=contact,
             direction=direction,
@@ -230,6 +281,7 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
             text=text,
             message_type=message_type,
             media_url=media_url,
+            raw=raw if live_test and raw is not None else None,
             status=STATUS_RECEIVED if incoming else STATUS_SENT,
             sent_at=sent_at,
             source=MESSAGE_SOURCE_MANYCHAT,
@@ -270,7 +322,7 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
         if created:
             state.log_event(contact.id, EVENT_CREATED, 'נוצר מהודעת וואטסאפ')
 
-    return StoreResult(True, contact_id=contact.id, message_id=message.id)
+    return StoreResult(True, contact_id=contact.id, message_id=message.id, live_test=live_test)
 
 
 def _alert_office(contact, name: str, text: str) -> None:

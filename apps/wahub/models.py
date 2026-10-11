@@ -136,12 +136,15 @@ TYPE_TEXT = 'text'
 TYPE_VOICE = 'voice'
 TYPE_IMAGE = 'image'
 TYPE_TEMPLATE = 'template'
+# A file ManyChat passed that is neither a recording nor a picture we know, or
+# media it did not pass at all (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב).
+TYPE_OTHER = 'other'
 MESSAGE_TYPE_CHOICES = [
     (TYPE_TEXT, 'טקסט'),
     (TYPE_VOICE, 'הודעה קולית'),
     (TYPE_IMAGE, 'תמונה'),
     (TYPE_TEMPLATE, 'תבנית'),
-    ('other', 'אחר'),
+    (TYPE_OTHER, 'אחר'),
 ]
 
 STATUS_RECEIVED = 'received'
@@ -174,6 +177,7 @@ EVENT_ANALYZED = 'analyzed'
 EVENT_HANDLED_BY = 'handled_by_changed'
 EVENT_NEEDS_HUMAN = 'needs_human_changed'
 EVENT_NOTE = 'note'
+EVENT_LIVE_TEST = 'live_test'
 EVENT_KIND_CHOICES = [
     (EVENT_CREATED, 'נוצר'),
     (EVENT_FOLLOWUP, 'סימון מעקב'),
@@ -183,6 +187,7 @@ EVENT_KIND_CHOICES = [
     (EVENT_HANDLED_BY, 'מי עונה'),
     (EVENT_NEEDS_HUMAN, 'מבקש נציג'),
     (EVENT_NOTE, 'הערה'),
+    (EVENT_LIVE_TEST, 'בדיקה חיה'),
 ]
 
 LAST_MESSAGE_PREVIEW_CHARS = 300
@@ -276,6 +281,15 @@ class Contact(models.Model):
     # manager may type its messages in (contacts/{id}/simulate-inbound/).
     is_demo = models.BooleanField(default=False)
 
+    # --- the live test (docs/WAHUB-CONTRACT-LIVE-TEST.md): the owner's own number ---
+    # The old bot is muted for this contact in ManyChat and the NEW bot answers it
+    # for real, through ManyChat, even while the general sending switch is off
+    # (sending.sending_enabled). Turned on and off by a manager (handoff.py).
+    live_test = models.BooleanField(default=False)
+    # A live answer in progress claims the contact until this moment, so a second
+    # call for the same burst answers "busy" instead of answering twice (live_test.py).
+    live_test_busy_until = models.DateTimeField(null=True, blank=True)
+
     # --- what a person marked. Never written by automatic code. ---
     followup_status = models.CharField(max_length=20, choices=FOLLOWUP_CHOICES, blank=True)
     followup_due = models.DateField(null=True, blank=True)
@@ -344,9 +358,15 @@ class Message(models.Model):
     media_url = models.TextField(blank=True)
     # What a recording said, when a transcription key was set (apps/wahub/transcribe.py).
     transcript = models.TextField(blank=True)
-    # The NEW bot's answer written into a demo conversation (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב):
-    # sender "bot", status "simulated", never sent. The old bot's real replies carry False.
+    # The NEW bot's answer: written into a demo conversation (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב;
+    # sender "bot", status "simulated", never sent), or sent for real to a live-test
+    # contact (docs/WAHUB-CONTRACT-LIVE-TEST.md; the status is the send's). The old
+    # bot's real replies carry False.
     new_bot = models.BooleanField(default=False)
+    # ManyChat's body as it came, kept for a live-test contact's incoming messages
+    # only (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב) — to learn how a recording or a
+    # picture arrives. Null for everybody else.
+    raw = models.JSONField(null=True, blank=True)
     status = models.CharField(max_length=10, choices=MESSAGE_STATUS_CHOICES, default=STATUS_RECEIVED)
     error = models.CharField(max_length=300, blank=True)
     sent_at = models.DateTimeField(default=timezone.now)

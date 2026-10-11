@@ -100,6 +100,10 @@ def flag(value) -> bool:
     return str(value or '').strip().lower() in ('1', 'true', 'yes')
 
 
+# `common_filters` has a local of the same name (the `flag` filter of the lists).
+_truthy = flag
+
+
 def search_q(term: str) -> Q:
     """A name, a phone however it is typed, the last message, the summary."""
     cond = Q(name__icontains=term) | Q(last_message_text__icontains=term) | Q(known_summary__icontains=term)
@@ -144,6 +148,10 @@ def common_filters(queryset, params):
     flag = (params.get('flag') or '').strip()
     if flag:
         queryset = queryset.filter(known_flags__contains=[flag]) if flag in FLAG_LABELS else queryset.none()
+
+    # live_test=1 — only the contacts the NEW bot answers for real (docs/WAHUB-CONTRACT-LIVE-TEST.md).
+    if _truthy(params.get('live_test')):
+        queryset = queryset.filter(live_test=True)
     return queryset
 
 

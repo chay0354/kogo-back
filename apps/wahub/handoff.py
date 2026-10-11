@@ -23,7 +23,7 @@ from django.conf import settings
 
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.wahub import state
-from apps.wahub.models import EVENT_HANDLED_BY, HANDLED_BOT, HANDLED_HUMAN, Contact
+from apps.wahub.models import EVENT_HANDLED_BY, EVENT_LIVE_TEST, HANDLED_BOT, HANDLED_HUMAN, Contact
 from apps.wahub.sending import SENDING_OFF, failure_reason, sending_enabled, simulate_send, subscriber_id_for
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,10 @@ DEFAULT_START_TAG = 'התחיל טיפול: נציג אנושי'
 DEFAULT_END_TAG = 'סיים טיפול: נציג אנושי'
 DEFAULT_STATUS_FIELD = 'סטטוס ט.אנושי'
 DEFAULT_STATUS_VALUE = 'בטיפול נציג (Kogo)'
+# The live test (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב): the same three things mute the
+# old bot, with this value in the status field so ManyChat's screen says why.
+DEFAULT_LIVE_TEST_STATUS_VALUE = 'בדיקה חיה (Kogo)'
+LIVE_TEST_DEMO = 'איש קשר דמו לא נכנס לבדיקה חיה — לא שולחים אליו הודעות.'
 
 NOT_CONFIGURED_HERE = 'ManyChat לא מוגדר בשרת (MANYCHAT_KEY), ולכן אי אפשר להשתיק או להחזיר את הבוט.'
 
@@ -60,6 +64,10 @@ def status_value() -> str:
     return _setting('WAHUB_HUMAN_STATUS_VALUE', DEFAULT_STATUS_VALUE)
 
 
+def live_test_status_value() -> str:
+    return _setting('WAHUB_LIVE_TEST_STATUS_VALUE', DEFAULT_LIVE_TEST_STATUS_VALUE)
+
+
 def _tags_of(service: ManyChatService, subscriber_id) -> set | None:
     """The contact's tags by name; None when ManyChat's answer does not list them."""
     info = service.get_subscriber(subscriber_id)
@@ -84,11 +92,16 @@ def _remove_tag(service: ManyChatService, subscriber_id, tag: str, tags: set | N
             raise
 
 
-def _in_manychat(contact: Contact, change) -> None:
+def _in_manychat(contact: Contact, change, *, allowed: bool | None = None) -> None:
+    """
+    Write `change` in ManyChat. Allowed for this contact by `sending_enabled`
+    (the switch, or the contact's own live test), or by `allowed` when the
+    caller knows better — turning a live test on is what makes the contact one.
+    """
     if contact.is_demo or simulate_send():
         # An invented contact has nothing in ManyChat to mute; only the local state moves.
         return
-    if not sending_enabled():
+    if not (sending_enabled(contact) if allowed is None else allowed):
         # The bot would keep answering while the screen said a person took over.
         raise HandoffError(SENDING_OFF)
     service = ManyChatService()
@@ -117,9 +130,73 @@ def takeover(contact: Contact, user) -> None:
 
 
 def release(contact: Contact, user) -> None:
-    """Back to the bot."""
-    _in_manychat(contact, lambda service, subscriber_id, tags: _remove_tag(service, subscriber_id, start_tag(), tags))
+    """Back to the bot — the NEW one, for a live-test contact: its mute stays on, only the status field says so again."""
+    if contact.live_test:
+        _in_manychat(contact, lambda service, subscriber_id, tags: service.set_custom_field_by_name(
+            subscriber_id, status_field(), live_test_status_value(),
+        ))
+    else:
+        _in_manychat(contact, lambda service, subscriber_id, tags: _remove_tag(service, subscriber_id, start_tag(), tags))
     _set_handled_by(contact, HANDLED_BOT, user, 'השיחה הוחזרה לבוט')
+
+
+# --- the live test (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב) ---------------------------------------------
+
+def start_live_test(contact: Contact, user) -> None:
+    """
+    The old bot is muted for this contact in ManyChat (the same three things a
+    takeover writes, with the live-test value in the status field) and the NEW
+    bot answers it for real from now on (live_test.py). `handled_by` is not
+    touched: a bot answers, not a person. Refused for a demo contact.
+    """
+    if contact.is_demo:
+        raise HandoffError(LIVE_TEST_DEMO)
+    if contact.live_test:
+        return
+
+    def mute(service, subscriber_id, tags):
+        _remove_tag(service, subscriber_id, end_tag(), tags)
+        service.set_custom_field_by_name(subscriber_id, status_field(), live_test_status_value())
+        service.add_tag_by_name(subscriber_id, start_tag())
+
+    _in_manychat(contact, mute, allowed=True)
+    state.touch(contact.pk, live_test=True)
+    state.log_event(contact.pk, EVENT_LIVE_TEST, 'בדיקה חיה הופעלה: הבוט הישן הושתק ב-ManyChat, הבוט החדש עונה לו באמת', actor=user)
+    contact.live_test = True
+
+
+def stop_live_test(contact: Contact, user) -> None:
+    """
+    The old bot answers again: the start tag comes off.
+
+    A person who took the conversation over during the test keeps it only when
+    the general switch is on — then the mute stays and the status field goes
+    back to the takeover's value. With the switch off (as it is today) the
+    office can neither write to this contact nor hand it back once the test is
+    over, so leaving it muted would leave it with nobody: the conversation
+    goes back to the bot together with the tag.
+
+    The claim of an answer in progress is left alone: that answer looks at
+    `live_test` again before it sends, and a test turned back on within the
+    same seconds must not start a second answer beside it.
+    """
+    if not contact.live_test:
+        return
+    person_keeps_it = contact.handled_by == HANDLED_HUMAN and sending_enabled()
+    if person_keeps_it:
+        def change(service, subscriber_id, tags):
+            service.set_custom_field_by_name(subscriber_id, status_field(), status_value())
+        text = 'בדיקה חיה כובתה; נציג עדיין מטפל, הבוט הישן נשאר מושתק'
+    else:
+        def change(service, subscriber_id, tags):
+            _remove_tag(service, subscriber_id, start_tag(), tags)
+        text = 'בדיקה חיה כובתה: הבוט הישן עונה שוב'
+    _in_manychat(contact, change, allowed=True)
+    state.touch(contact.pk, live_test=False)
+    state.log_event(contact.pk, EVENT_LIVE_TEST, text, actor=user)
+    contact.live_test = False
+    if contact.handled_by == HANDLED_HUMAN and not person_keeps_it:
+        _set_handled_by(contact, HANDLED_BOT, user, 'השיחה הוחזרה לבוט עם כיבוי הבדיקה החיה')
 
 
 def _set_handled_by(contact: Contact, value: str, user, text: str) -> None:
