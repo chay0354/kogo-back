@@ -214,13 +214,34 @@ def _call(method: str, url: str, *, failure: str, **kwargs):
         raise MediaError(failure) from exc
 
 
+def _storage_error(response) -> str:
+    """The storage's own word for a refusal ("Bucket not found", "InvalidKey"…): its `error` field only, never the body."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ''
+    if not isinstance(body, dict):
+        return ''
+    return ' '.join(str(body.get('error') or '').split())[:60]
+
+
 def _bucket_missing(response) -> bool:
-    if response.status_code != 404:
+    """
+    The bucket is not there yet. Supabase Storage says so with HTTP 400 and
+    `"statusCode": "404"` in the body (production, 11.10.2026: every upload was
+    refused with 400 and the bucket was never made, because only a 404 status
+    was read as "missing"); a plain 404 is read the same way.
+    """
+    if response.status_code not in (400, 404):
         return False
     try:
-        return 'bucket' in str(response.json().get('message', '')).lower()
+        body = response.json()
     except ValueError:
         return False
+    if not isinstance(body, dict):
+        return False
+    words = f"{body.get('message', '')} {body.get('error', '')}".lower()
+    return 'bucket' in words and 'not found' in words
 
 
 def ensure_bucket() -> bool:
@@ -259,21 +280,21 @@ def _store(contact_id: int, data: bytes, media_type: str, *, path: str, replace:
         ensure_bucket()
         response = _call('POST', url, headers=headers, data=data, failure='שמירת הקובץ נכשלה. נסו שוב.')
     if response.status_code >= 300:
-        logger.error('wahub media: storage rejected upload for contact %s: %s', contact_id, response.status_code)
+        logger.error(
+            'wahub media: storage rejected upload for contact %s: %s %s', contact_id, response.status_code, _storage_error(response),
+        )
         raise MediaError('אחסון המדיה דחה את הקובץ.')
     return path
 
 
-def archive(contact_id: int, url: str, *, timeout: float = FETCH_TIMEOUT) -> tuple[str, str]:
+def fetch(url: str, *, timeout: float = FETCH_TIMEOUT) -> tuple[bytes, str, str, str]:
     """
-    Fetch the file ManyChat passed by address and keep it in the bucket under
-    manychat/<contact_id>/…; returns (path, kind) with kind 'voice' or 'image'.
-    The kind comes from the address's extension, else from the Content-Type the
-    file is served with. Only an address on ManyChat's own bucket is fetched,
-    and a redirect is not followed. Raises MediaError (another host, too big,
-    unknown type, no connection, storage refused).
+    The file ManyChat passed by address: (bytes, ext, kind, media_type) with
+    kind 'voice' or 'image'. The kind comes from the address's extension, else
+    from the Content-Type the file is served with. Only an address on
+    ManyChat's own bucket is fetched, and a redirect is not followed. Raises
+    MediaError (another host, too big, unknown type, no connection).
     """
-    _require()
     if not is_manychat_file(url):
         raise MediaError('הכתובת אינה של קובץ ב-ManyChat')
     try:
@@ -310,7 +331,30 @@ def archive(contact_id: int, url: str, *, timeout: float = FETCH_TIMEOUT) -> tup
     # An Opus recording is an Ogg container; the transcription knows that name.
     if ext == 'opus':
         ext = 'ogg'
+    return data, ext, kind, media_type
+
+
+def archive(contact_id: int, url: str, *, timeout: float = FETCH_TIMEOUT) -> tuple[str, str]:
+    """
+    Fetch the file ManyChat passed by address (`fetch`) and keep it in the
+    bucket under manychat/<contact_id>/…; returns (path, kind). Raises
+    MediaError (see `fetch`, or the storage refused).
+    """
+    _require()
+    data, ext, kind, media_type = fetch(url, timeout=timeout)
     return _store(contact_id, data, media_type, path=f'{archived_stem(contact_id, url)}.{ext}', replace=True), kind
+
+
+def read(location: str, *, timeout: float = FETCH_TIMEOUT) -> tuple[bytes, str, str]:
+    """
+    A message's file wherever it is: kept in the bucket (a path), or still at
+    ManyChat's address because the copy failed — the customer's words must not
+    wait for the storage. Returns (bytes, media_type, filename). Raises MediaError.
+    """
+    if is_external(location):
+        data, ext, _kind, media_type = fetch(location, timeout=timeout)
+        return data, media_type, f'file.{ext}'
+    return download(location), media_type_of(location), location.rsplit('/', 1)[-1]
 
 
 def is_external(path: str) -> bool:
