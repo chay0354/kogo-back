@@ -677,6 +677,68 @@ def validate_bundle_capacity(bundle: 'LessonBundle', *, seated_child=None) -> No
             raise ValueError(f"השיעור {lesson} מלא - קיבולת מקסימלית: {capacity} תלמידים")
 
 
+def lesson_price_for_index(lesson: Lesson, course_index: int) -> Tuple[Decimal, bool]:
+    """
+    The monthly price of one lesson as a child's Nth class, and whether a
+    per-lesson tier set it (then the generic "additional lesson" discount is
+    skipped, so the price is not lowered twice).
+
+    Asked with a child's real class count by `resolve_billing_price`, and with
+    a told one by the price a parent is quoted before they have a card here
+    (apps/core/registration_quote.py).
+    """
+    tier_price = get_lesson_price_for_course_index(lesson, course_index)
+    regular_price = lesson.course.price
+    base_price = tier_price if tier_price and tier_price > 0 else regular_price
+    used_lesson_tier = (
+        course_index >= 2
+        and tier_price is not None
+        and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
+    )
+    return base_price, used_lesson_tier
+
+
+def bundle_monthly_price(bundle: 'LessonBundle') -> Decimal:
+    """What a combined track bills a month: the course's price when every day is required, its own otherwise."""
+    if bundle.course.must_attend_all_lessons:
+        return bundle.course.price
+    return bundle.combined_price
+
+
+def first_month_charge(*, full_monthly_amount: Decimal, lesson: Lesson, today: date) -> Dict:
+    """
+    The lesson part of a signup's first charge: the month's price for the
+    lessons still ahead in it — never less than ₪1 — or nothing while monthly
+    billing is put off to a date (then the signup charges דמי רישום alone).
+
+    `amount` is that part; `next_billing_date` is when the standing order
+    first runs. One function for the registration itself
+    (`initiate_subscription_payment`) and for a quote from facts
+    (apps/core/registration_quote.py), so the two cannot round differently.
+    """
+    prorate_factor, lessons_remaining, total_lessons, _ = _compute_prorate(today, lesson.day_of_week)
+    deferred = deferred_first_charge_date(today)
+    if deferred:
+        prorate_factor = Decimal('0')
+        lessons_remaining = 0
+        amount = Decimal('0.00')
+    elif full_monthly_amount <= 0:
+        amount = Decimal('0.00')
+    else:
+        amount = max(
+            Decimal('1.00'),
+            (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
+        )
+    return {
+        'amount': amount,
+        'prorate_factor': prorate_factor,
+        'lessons_remaining': lessons_remaining,
+        'total_lessons': total_lessons,
+        'deferred_charge_date': deferred,
+        'next_billing_date': standing_order_next_billing_date(today=today, lesson=lesson),
+    }
+
+
 def resolve_billing_price(
     child: Child,
     lesson: Lesson,
@@ -722,18 +784,9 @@ def resolve_billing_price(
         if not bundle.lessons.filter(pk=lesson.pk).exists():
             raise ValueError("השיעור אינו חלק מהמסלול המשולב")
         validate_bundle_capacity(bundle, seated_child=seated_child)
-        if bundle.course.must_attend_all_lessons:
-            return bundle.course.price, True, course_index, bundle, None
-        return bundle.combined_price, True, course_index, bundle, None
+        return bundle_monthly_price(bundle), True, course_index, bundle, None
 
-    tier_price = get_lesson_price_for_course_index(lesson, course_index)
-    regular_price = lesson.course.price
-    base_price = tier_price if tier_price and tier_price > 0 else regular_price
-    used_lesson_tier = (
-        course_index >= 2
-        and tier_price is not None
-        and Decimal(str(tier_price)) != Decimal(str(regular_price or 0))
-    )
+    base_price, used_lesson_tier = lesson_price_for_index(lesson, course_index)
     return base_price, used_lesson_tier, course_index, None, None
 
 
@@ -1083,27 +1136,17 @@ class PaymentService:
             )
 
         # Pro-rate the first payment to the remaining lessons of the current month.
-        today_local = timezone.now().astimezone(JERUSALEM_TZ).date()
-        prorate_factor, prorate_lessons_remaining, total_lessons_this_month, next_billing_date = _compute_prorate(
-            today_local, lesson.day_of_week
-        )
-        full_monthly_amount = discount_calculation.final_price
-
         # When monthly billing only starts later, signup charges דמי רישום alone and the
         # full monthly price is first billed by the recurring cron on that date.
-        deferred_charge_date = deferred_first_charge_date(today_local)
-        next_billing_date = standing_order_next_billing_date(today=today_local, lesson=lesson)
-        if deferred_charge_date:
-            prorate_factor = Decimal('0')
-            prorate_lessons_remaining = 0
-            prorated_lesson = Decimal('0.00')
-        elif full_monthly_amount <= 0:
-            prorated_lesson = Decimal('0.00')
-        else:
-            prorated_lesson = max(
-                Decimal('1.00'),
-                (full_monthly_amount * prorate_factor).quantize(Decimal('0.01'))
-            )
+        today_local = timezone.now().astimezone(JERUSALEM_TZ).date()
+        full_monthly_amount = discount_calculation.final_price
+        first_month = first_month_charge(full_monthly_amount=full_monthly_amount, lesson=lesson, today=today_local)
+        prorate_factor = first_month['prorate_factor']
+        prorate_lessons_remaining = first_month['lessons_remaining']
+        total_lessons_this_month = first_month['total_lessons']
+        deferred_charge_date = first_month['deferred_charge_date']
+        next_billing_date = first_month['next_billing_date']
+        prorated_lesson = first_month['amount']
 
         def first_charge_figures():
             charge_fee = resolve_include_registration_fee(child, lesson, include_registration_fee)

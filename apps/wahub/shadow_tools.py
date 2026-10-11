@@ -1,35 +1,55 @@
 """
-The tools the shadow bot may call (docs/WAHUB-CONTRACT-STAGE2.md, ב.2).
+The tools the shadow bot may call (docs/WAHUB-CONTRACT-STAGE2.md, ב.2;
+docs/WAHUB-CONTRACT-BOT-TOOLS.md for everything about a class).
 
 Every tool reads Kogo in process — the same functions the public widget uses
-for classes, dates, prices and seats (apps/customers/widget_views.py) — so the
-bot's answer about a class is the widget's answer. Nothing here writes, and
-nothing here sends: `request_human` only marks the draft.
+for classes, dates, prices and seats (apps/customers/widget_views.py), and the
+registration's own pieces for "how much if I register now"
+(apps/core/registration_quote.py) — so the bot's answer about a class is the
+widget's answer. Nothing here writes, and nothing here sends: `request_human`
+only marks the draft. What a class costs the business — an instructor's pay, a
+bonus — and what a family paid are read by no tool.
 
-The same five tools serve Claude (as tool definitions) and the stub (called
+The same tools serve Claude (as tool definitions) and the stub (called
 directly), so a stub answer is built from the very data Claude would get.
+The payloads of a class are built in course_tools.py.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from django.conf import settings
 
-from apps.wahub import analysis, knowledge, matching
+from apps.courses import age_groups
+from apps.wahub import analysis, course_tools, knowledge, matching
 from apps.wahub.analysis import _same_city
-from apps.wahub.models import KIND_ALIAS, SCOPE_BRANCH, Contact, KnowledgeItem
+from apps.wahub.course_tools import DAY_NAMES, trial_line  # noqa: F401 — both are read from here too
+from apps.wahub.models import KIND_ALIAS, KIND_CONTACT, SCOPE_BRANCH, Contact, KnowledgeItem
 
-DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
+logger = logging.getLogger(__name__)
+
 MAX_COURSES = 12
 EXTERNAL_NOTE = 'סניף חיצוני (עירייה / מתנ"ס): ההרשמה, המחירים והפרטים מולם. לא לנחש — "לבדוק מול העירייה" + קישור ההרשמה.'
+# One line for every tool that speaks of a class: where the truth is, and where it is fixed.
+FROM_KOGO_ONLY = (
+    'מחיר, שיעור ניסיון, דמי רישום, הנחות, קיזוז, תפוסה, מועדים ומדריך נאמרים רק ממה שהכלי מחזיר עכשיו — '
+    'אף פעם לא מהזיכרון, מהשיחה או מהידע. מה שחוזר הוא מה שהאתר מציג; אם הוא לא נכון, התיקון הוא בכרטיס החוג ב-Kogo, לא בבוט. '
+)
 
 TOOLS = [
     {
         'name': 'find_courses',
         'description': (
-            'החוגים והמועדים כפי שהם במערכת Kogo (מקור האמת היחיד לחוג, יום, שעה, מדריך, מחיר, ניסיון ותפוסה). '
-            'מסננים לפי עיר, סניף, גיל הילד ותחום. חובה לקרוא לפני כל תשובה שמכילה פרט על חוג. '
+            'החוגים והמועדים כפי שהם במערכת Kogo: חוג, קבוצת גיל, יום, שעה, מדריך, מחיר חודשי, דמי רישום, שיעור ניסיון, '
+            'כמות רשומים, מקומות פנויים ותאריכים קרובים. מסננים לפי עיר, סניף, גיל הילד בשנים או כיתה, ותחום. '
+            'חובה לקרוא לפני כל תשובה שמכילה פרט על חוג. ' + FROM_KOGO_ONLY +
+            'שיעור ניסיון נקבע לכל חוג בנפרד (trial.is_paid, trial.price): באותו סניף יש חוגים שהניסיון בהם בתשלום וחוגים שלא, '
+            'ולכן לא אומרים "הניסיון בסניף הזה ללא עלות" — עונים על החוג שמתאים לגיל ולתחום של הילד, וכשלא ברור איזה חוג שואלים גיל או כיתה ותחום. '
+            'trial.is_paid=false פירושו ללא עלות, וזה מה שאומרים; is_paid=true — אומרים את trial.price ואת trial.credit_rule. '
+            'קבוצת הגיל של חוג היא ages (במילים); גיל על הגבול בין שתי קבוצות (בן 6: גן חובה או כיתה א) מחזיר את שתיהן, ואז שואלים באיזו כיתה הילד. '
             '"מה להביא לשיעור ניסיון" הוא trial.bring של החוג — מצטטים אותו; ריק = "אין לי את הפרט הזה, אפשר לבדוק במשרד". '
+            'כשיש הרבה חוגים, 12 מפורטים והשאר ב-more_courses בשורה אחת כל אחד — מצמצמים לפי תחום וגיל, או קוראים ל-course_card. '
             'סניף חיצוני חוזר עם is_external=true ובלי חוגים — אז אומרים "לבדוק מול העירייה" ושולחים את קישור ההרשמה.'
         ),
         'input_schema': {
@@ -37,15 +57,80 @@ TOOLS = [
             'properties': {
                 'city': {'type': 'string', 'description': 'עיר, כפי שהלקוח כתב'},
                 'branch': {'type': 'string', 'description': 'שם הסניף או כינוי שלו'},
-                'age': {'type': 'number', 'description': 'גיל הילד בשנים'},
+                'age': {'type': 'number', 'description': 'גיל הילד בשנים (4.5 = ארבע וחצי)'},
+                'grade': {'type': 'string', 'description': 'הכיתה או הגן, כשהלקוח אמר אותם: "ג", "כיתה ז", "גן חובה", "בוגרים"'},
                 'course_type': {'type': 'string', 'description': 'תחום: קפוארה, מחול, היפ הופ, אקרובטיקה…'},
             },
             'additionalProperties': False,
         },
     },
     {
+        'name': 'course_card',
+        'description': (
+            'כל מה שיש במערכת על חוג אחד: תיאור, קבוצת גיל, מחיר חודשי, דמי הרישום שייגבו בפועל לחוג הזה, שיעור ניסיון '
+            '(בתשלום או לא, מחיר, כלל הקיזוז, מה להביא, פתוח או סגור), כל המועדים עם מדריך, חדר, כמות רשומים, מגבלת המקומות, '
+            'מקומות פנויים ושלושת התאריכים הקרובים, מסלולים משולבים (פעמיים בשבוע) ומחירם, וההנחות שמוגדרות במערכת. '
+            'קוראים עם course_id מתוך find_courses (או שם החוג וסניף). ' + FROM_KOGO_ONLY
+        ),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'course_id': {'type': 'string', 'description': 'ה-id של החוג מתוך find_courses'},
+                'name': {'type': 'string', 'description': 'שם החוג, כשאין id'},
+                'branch': {'type': 'string', 'description': 'שם הסניף או כינוי שלו (עם name)'},
+                'city': {'type': 'string', 'description': 'עיר (עם name)'},
+            },
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'quote_registration',
+        'description': (
+            '"כמה יעלה אם נירשם עכשיו": התשלום הראשון והמחיר החודשי שאחריו, מחושבים באותו קוד שמחייב בהרשמה באתר — '
+            'החלק היחסי של החודש לפי השיעורים שעוד נשארו בו, דמי רישום, קיזוז שיעור ניסיון ששולם, וההנחות (ילד שני, חוג נוסף, רישום מוקדם). '
+            'חובה לקרוא כששואלים כמה יעלה להירשם, כמה משלמים עכשיו או כמה יוצא החודש — לא מחשבים לבד ולא מעריכים. '
+            'בתשובה מפרטים את first_charge.breakdown בשתיים–שלוש שורות ואז את monthly_after. '
+            'מה שלא ידוע על המשפחה לא מניחים: אח רשום או ניסיון ששולם נמסרים רק אם הלקוח אמר או שזה בכרטיס הלקוח; '
+            'אחרת משאירים ריק (ללקוח מזוהה המערכת בודקת לבד), ואומרים על מה החישוב מבוסס (based_on).'
+        ),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'course_id': {'type': 'string', 'description': 'ה-id של החוג מתוך find_courses'},
+                'lesson_id': {'type': 'string', 'description': 'ה-id של המועד שנבחר, כשיש לחוג כמה ימים. ריק = המועד הראשון'},
+                'track_id': {'type': 'string', 'description': 'ה-id של מסלול משולב (tracks), כשנרשמים לפעמיים בשבוע'},
+                'start_date': {'type': 'string', 'description': 'תאריך ההרשמה, YYYY-MM-DD. ריק = היום'},
+                'child_age': {'type': 'number', 'description': 'גיל הילד בשנים, אם ידוע'},
+                'grade': {'type': 'string', 'description': 'הכיתה או הגן, אם הלקוח אמר'},
+                'siblings_registered': {'type': 'boolean', 'description': 'אח או אחות כבר רשומים לחוג אצלנו. ריק כשלא ידוע'},
+                'took_paid_trial': {'type': 'boolean', 'description': 'הילד היה בשיעור ניסיון בתשלום בסניף הזה. ריק כשלא ידוע'},
+                'another_class_same_child': {'type': 'boolean', 'description': 'זה חוג נוסף לילד שכבר רשום ומשלם על חוג אחר'},
+            },
+            'required': ['course_id'],
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'instructor_info',
+        'description': (
+            'מדריך לפי שם (אפשר גם לפי סניף): התחומים שהוא מלמד, הסניפים, המועדים שלו ותמונה. '
+            'אין בכלי טלפון או פרט אישי של מדריך — את אלה לא מוסרים ללקוח; למי שמבקש לדבר עם מדריך יש נוסח משלו.'
+        ),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'name': {'type': 'string', 'description': 'שם המדריך או חלק ממנו. ריק = כל המדריכים של הסניף'},
+                'branch': {'type': 'string', 'description': 'שם הסניף, כינוי או עיר'},
+            },
+            'additionalProperties': False,
+        },
+    },
+    {
         'name': 'branch_info',
-        'description': 'כתובת, הוראות הגעה, טלפון ומנהל של סניף, והאם הוא סניף חיצוני. שדה ריק = אין את המידע; לא להמציא.',
+        'description': (
+            'סניף: כתובת, עיר, הוראות הגעה, טלפון הסניף, טלפון המשרד, מנהל, התחומים שיש בו, הימים והשעות שבהם יש בו חוגים, '
+            'והאם הוא סניף חיצוני. שדה ריק = אין את המידע; לא להמציא.'
+        ),
         'input_schema': {
             'type': 'object',
             'properties': {'branch': {'type': 'string', 'description': 'שם הסניף או כינוי'}},
@@ -187,100 +272,76 @@ def _branch_payload(branch) -> dict:
 
 # --- the tools -----------------------------------------------------------------------------------
 
-def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None, course_type: str = '') -> dict:
-    from django.db.models import Prefetch, Q
+def _office_phone(ctx: ToolContext) -> str:
+    """The office's phone as the knowledge holds it (the contact item of the office)."""
+    for item in ctx.items:
+        phone = (item.data or {}).get('phone')
+        if item.kind == KIND_CONTACT and phone and 'משרד' in (item.title or ''):
+            ctx.used(item)
+            return str(phone)
+    return ''
 
-    from apps.customers.widget_views import (
-        _batch_occurrence_context,
-        _batch_paying_enrollment_counts,
-        _batch_upcoming_trial_counts,
-        _lesson_widget_capacity,
-        _widget_catalog_courses,
-        _widget_lesson_queryset,
-    )
-    from apps.enrollments.trial_policy import trial_registration_open_for, trials_open_by_default
 
+def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None, grade: str = '', course_type: str = '') -> dict:
+    from django.db.models import Q
+
+    from apps.customers.widget_views import _widget_catalog_courses
+
+    registration_fee = getattr(settings, 'REGISTRATION_FEE_ILS', None)
     branches = resolve_branches(ctx, city=city, branch=branch)
     if not branches:
         hint = 'לא נמצא סניף כזה במערכת.' if (city or branch) else 'צריך עיר או סניף כדי לחפש חוגים.'
         if city and not branch:
-            hint = f'אין לנו סניף ב{city}.' if not analysis.OTHER_CITY.search(city or '') else f'אין לנו סניף ב{city}.'
-        return {'branches': [], 'courses': [], 'hint': hint, 'registration_fee': getattr(settings, 'REGISTRATION_FEE_ILS', None)}
+            hint = f'אין לנו סניף ב{city}.'
+        return {'branches': [], 'courses': [], 'hint': hint, 'registration_fee': registration_fee}
 
     try:
         age_value = float(age) if age not in (None, '') else None
     except (TypeError, ValueError):
         age_value = None
+    # The child's place on the age-group scale; a course's min/max are places on it, not years.
+    grade_codes = age_groups.codes_for_grade(grade)
+    age_codes = grade_codes or (age_groups.codes_for_age(age_value) if age_value is not None else set())
+    by_age = bool(grade_codes) or age_value is not None
 
     internal = [row for row in branches if not row.is_external]
     courses = list(
-        _widget_catalog_courses()
-        .filter(branch_id__in=[row.id for row in internal])
-        .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
-        .select_related('course_type', 'branch')
-        .prefetch_related(Prefetch('lessons', queryset=_widget_lesson_queryset()))
-        .order_by('branch__name', 'course_type__name', 'name')
+        course_tools.with_lessons(
+            _widget_catalog_courses()
+            .filter(branch_id__in=[row.id for row in internal])
+            .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
+        ).order_by('branch__name', 'course_type__name', 'name')
     ) if internal else []
     courses = [course for course in courses if _course_type_matches(course, course_type, ctx)]
-    if age_value is not None:
-        courses = [
-            course for course in courses
-            if (course.min_age is None or course.min_age <= age_value) and (course.max_age is None or age_value <= course.max_age)
-        ]
-    lesson_ids = [lesson.id for course in courses for lesson in course.lessons.all()]
-    enrolled = _batch_paying_enrollment_counts(lesson_ids)
-    trials = _batch_upcoming_trial_counts(lesson_ids)
-    occurrences = _batch_occurrence_context(lesson_ids)
-    trials_default = trials_open_by_default()
+    if by_age:
+        courses = [course for course in courses if age_groups.fits(course.min_age, course.max_age, age_codes)]
 
-    result_courses = []
-    for course in courses[:MAX_COURSES]:
-        lessons = []
-        for lesson in course.lessons.all():
-            cap = _lesson_widget_capacity(lesson, course, enrolled, trials, occurrences)
-            lessons.append({
-                'day': DAY_NAMES[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '',
-                'start': str(lesson.start_time)[:5],
-                'end': str(lesson.end_time)[:5],
-                'instructor': lesson.instructor.full_name if lesson.instructor_id else '',
-                'is_full': cap['is_full'],
-                'seats_left': cap['available_spots'],
-                'trial_open': trial_registration_open_for(lesson, default=trials_default),
-                'trial_is_full': cap['trial_is_full'],
-                'trial_seats_left': cap['trial_spots_left'],
-            })
-        result_courses.append({
-            'id': str(course.id),
-            'name': course.name,
-            'course_type': course.course_type.name if course.course_type_id else '',
-            'branch': course.branch.name,
-            'city': course.branch.city.name if course.branch.city_id else '',
-            'price_monthly': str(course.price) if course.price is not None else None,
-            'trial': {
-                'is_paid': course.trial_lesson_is_paid,
-                'price': str(course.trial_lesson_price) if course.trial_lesson_is_paid and course.trial_lesson_price is not None else None,
-                # "מה להביא לשיעור ניסיון" lives on the course TYPE (apps/courses/models.py),
-                # the same text the trial calendar event sends (apps/customers/trial_calendar.py).
-                # The bot quotes it; it never invents what to bring.
-                'bring': ((course.course_type.trial_bring_note if course.course_type_id else '') or '').strip(),
-            },
-            'min_age': course.min_age,
-            'max_age': course.max_age,
-            'is_adult': course.is_adult,
-            'all_lessons_required': course.must_attend_all_lessons,
-            'external_link': course.external_link or '',
-            'lessons': lessons,
-        })
+    shown, rest = courses[:MAX_COURSES], courses[MAX_COURSES:]
+    seats = course_tools.Seats(shown)
+    result_courses = [course_tools.course_payload(course, seats) for course in shown]
 
-    hint = ''
+    hints = []
     if internal and not result_courses:
-        hint = 'בסניפים האלה אין חוג שמתאים לסינון (גיל/תחום). אפשר להציע תחום אחר מאותו סניף, או להפנות למשרד.'
+        hints.append('בסניפים האלה אין חוג שמתאים לסינון (גיל/תחום). אפשר להציע תחום אחר מאותו סניף, או להפנות למשרד.')
+    if by_age and not age_codes:
+        hints.append('אין קבוצת גיל לגיל הזה: החוגים מגיל 3.')
+    if len({course['ages'] for course in result_courses}) > 1 and len(age_codes) > 1:
+        hints.append('הגיל יושב על הגבול בין שתי קבוצות גיל, ולכן חזרו חוגים משתיהן — לשאול באיזו כיתה או גן הילד לפני שמציעים חוג.')
+    if rest:
+        hints.append(
+            f'נמצאו {len(courses)} חוגים; {len(shown)} מפורטים והשאר ב-more_courses בקיצור. '
+            'לצמצם לפי תחום וגיל או כיתה, או לקרוא ל-course_card לחוג מסוים.'
+        )
     return {
         'branches': [_branch_payload(row) for row in branches],
         'courses': result_courses,
+        'more_courses': [course_tools.brief_course(course) for course in rest],
         'courses_total': len(courses),
-        'registration_fee': getattr(settings, 'REGISTRATION_FEE_ILS', None),
-        'hint': hint,
+        # Over every class found, not only the ones spelled out: one class must never be read as the branch.
+        'trial_summary': course_tools.trial_summary(courses),
+        # The general fee; each class carries the fee it will actually charge (courses[].registration_fee).
+        'registration_fee': registration_fee,
+        'hint': ' '.join(hints),
     }
 
 
@@ -288,7 +349,12 @@ def branch_info(ctx: ToolContext, *, branch: str = '') -> dict:
     rows = resolve_branches(ctx, branch=branch) or resolve_branches(ctx, city=branch)
     if not rows:
         return {'branches': [], 'hint': 'לא נמצא סניף כזה במערכת.'}
-    return {'branches': [_branch_payload(row) for row in rows]}
+    office_phone = _office_phone(ctx)
+    return {
+        'branches': [{**_branch_payload(row), **course_tools.branch_extras(row)} for row in rows],
+        'office_phone': office_phone,
+        'note': 'class_days הם הימים והשעות שבהם יש חוגים בסניף, לא שעות קבלה. שעות המשרד — בכלי office_hours_now.',
+    }
 
 
 def office_hours_now(ctx: ToolContext) -> dict:
@@ -328,6 +394,11 @@ def request_human(ctx: ToolContext, *, reason: str = '') -> dict:
     return {'ok': True, 'note': 'סומן (לא נשלח דבר). בתשובה ללקוח: נציג יחזור אליו; מחוץ לשעות — הודעת "סגור".'}
 
 
+def _flag(value):
+    """True, False, or None when the caller did not say."""
+    return value if isinstance(value, bool) else None
+
+
 def run_tool(name: str, arguments: dict, ctx: ToolContext) -> dict:
     """One tool call. A broken tool answers with an error line, never raises."""
     arguments = arguments if isinstance(arguments, dict) else {}
@@ -335,7 +406,26 @@ def run_tool(name: str, arguments: dict, ctx: ToolContext) -> dict:
         if name == 'find_courses':
             return find_courses(
                 ctx, city=str(arguments.get('city') or ''), branch=str(arguments.get('branch') or ''),
-                age=arguments.get('age'), course_type=str(arguments.get('course_type') or ''),
+                age=arguments.get('age'), grade=str(arguments.get('grade') or ''),
+                course_type=str(arguments.get('course_type') or ''),
+            )
+        if name == 'course_card':
+            return course_tools.course_card(
+                ctx, course_id=str(arguments.get('course_id') or ''), name=str(arguments.get('name') or ''),
+                branch=str(arguments.get('branch') or ''), city=str(arguments.get('city') or ''),
+            )
+        if name == 'quote_registration':
+            return course_tools.quote_registration(
+                ctx, course_id=str(arguments.get('course_id') or ''), lesson_id=str(arguments.get('lesson_id') or ''),
+                track_id=str(arguments.get('track_id') or ''), start_date=str(arguments.get('start_date') or ''),
+                child_age=arguments.get('child_age'), grade=str(arguments.get('grade') or ''),
+                siblings_registered=_flag(arguments.get('siblings_registered')),
+                took_paid_trial=_flag(arguments.get('took_paid_trial')),
+                another_class_same_child=_flag(arguments.get('another_class_same_child')),
+            )
+        if name == 'instructor_info':
+            return course_tools.instructor_info(
+                ctx, name=str(arguments.get('name') or ''), branch=str(arguments.get('branch') or ''),
             )
         if name == 'branch_info':
             return branch_info(ctx, branch=str(arguments.get('branch') or ''))
@@ -345,9 +435,16 @@ def run_tool(name: str, arguments: dict, ctx: ToolContext) -> dict:
             return customer_card(ctx)
         if name == 'request_human':
             return request_human(ctx, reason=str(arguments.get('reason') or ''))
-    except Exception as exc:  # the answer must still come; the fault is logged by the caller
+    except Exception as exc:  # the answer must still come, and the fault is not lost
+        logger.exception('wahub tool %s failed', name)
         return {'error': f'הכלי נכשל: {type(exc).__name__}'}
     return {'error': f'כלי לא מוכר: {name}'}
+
+
+def _shekel_text(amount) -> str:
+    """ "260.00" → ₪260, "187.50" → ₪187.50."""
+    text = str(amount or '0')
+    return '₪' + (text[:-3] if text.endswith('.00') else text)
 
 
 def summarize_result(name: str, result: dict) -> str:
@@ -359,10 +456,46 @@ def summarize_result(name: str, result: dict) -> str:
         if not branches:
             return result.get('hint') or 'לא נמצא סניף'
         external = [row['name'] for row in branches if row.get('is_external')]
-        text = f'{len(branches)} סניפים, {len(result.get("courses") or [])} חוגים'
+        shown, total = len(result.get('courses') or []), result.get('courses_total') or 0
+        text = f'{len(branches)} סניפים, {shown} חוגים'
+        if total > shown:
+            text += f' מפורטים מתוך {total}'
+        trial = result.get('trial_summary') or {}
+        if trial.get('paid_courses'):
+            text += f'; ניסיון בתשלום ב-{trial["paid_courses"]}, ללא עלות ב-{trial.get("free_courses", 0)}'
         if external:
             text += f'; חיצוניים: {", ".join(external)}'
         return text
+    if name == 'course_card':
+        if not result.get('found'):
+            return result.get('hint') or 'החוג לא נמצא'
+        if result.get('is_external'):
+            return f'{result["course"]["name"]}: סניף חיצוני — לבדוק מול העירייה'
+        course = result['course']
+        trial = course['trial']
+        return (
+            f'{course["name"]} ({course["branch"]}): {_shekel_text(course["price_monthly"])} לחודש, '
+            f'דמי רישום {_shekel_text(course["registration_fee"])}, '
+            f'{"ניסיון " + _shekel_text(trial["price"]) if trial["price"] else ("ניסיון בתשלום, בלי מחיר" if trial["is_paid"] else "ניסיון ללא עלות")}, '
+            f'{len(course["lessons"])} מועדים'
+        )
+    if name == 'quote_registration':
+        if not result.get('can_quote'):
+            return f'אין חישוב: {result.get("reason") or "חסר מידע"}'
+        parts = ' '.join(
+            ('− ' if row['amount'].startswith('-') else '+ ') + f'{row["label"].split(" — ")[0].split(" (")[0]} {_shekel_text(row["amount"].lstrip("-"))}'
+            for row in result['first_charge']['breakdown']
+        ).lstrip('+ ')
+        return (
+            f'הרשמה ב-{result["as_of"]} ל{result["course"]["name"]}: תשלום ראשון {_shekel_text(result["first_charge"]["amount"])}'
+            f'{" (" + parts + ")" if parts else ""}, אחר כך {_shekel_text(result["monthly_after"]["amount"])} לחודש'
+        )
+    if name == 'instructor_info':
+        rows = result.get('instructors') or []
+        if not rows:
+            return result.get('hint') or 'לא נמצא מדריך'
+        names = ', '.join(f'{row["name"]} ({", ".join(row["course_types"]) or "בלי תחום"})' for row in rows[:3])
+        return names + (f' ועוד {len(rows) - 3}' if len(rows) > 3 else '')
     if name == 'branch_info':
         rows = result.get('branches') or []
         return ', '.join(f'{row["name"]} ({"חיצוני" if row["is_external"] else "שלנו"})' for row in rows) or 'לא נמצא'

@@ -87,11 +87,56 @@ class DiscountService:
         Returns:
             DiscountCalculation with all applicable discounts and final price
         """
+        return self._combine(
+            payment_date=payment_date,
+            base_price=base_price,
+            additional_lesson=(
+                (lambda: self.check_additional_lesson_discount(child_id, lesson_id)) if lesson_id else None
+            ),
+            second_child=lambda: self.check_second_child_discount(family_id, child_id),
+        )
+
+    def evaluate_discounts_for_facts(
+        self,
+        *,
+        payment_date: date,
+        base_price: Decimal,
+        sibling_registered: bool = False,
+        another_class: bool = False,
+    ) -> DiscountCalculation:
+        """
+        The same evaluation for someone who has no card here yet: what
+        `evaluate_discounts_for_payment` looks up about a child — a sibling on
+        a team, another class of their own — is told instead. The discounts
+        themselves, their amounts and the way they combine are the same rows
+        and the same code (`_combine`).
+
+        A price a parent is quoted before registering is worked out with this
+        (apps/core/registration_quote.py).
+        """
+        return self._combine(
+            payment_date=payment_date,
+            base_price=base_price,
+            additional_lesson=(
+                (lambda: self.built_in_discount(self.ADDITIONAL_LESSON_IDENTIFIER)) if another_class else None
+            ),
+            second_child=lambda: self.built_in_discount(self.SECOND_CHILD_IDENTIFIER) if sibling_registered else None,
+        )
+
+    def _combine(self, *, payment_date: date, base_price: Decimal, additional_lesson, second_child) -> DiscountCalculation:
+        """
+        How the discounts that apply add up into a price.
+
+        `additional_lesson` and `second_child` are asked only when their turn
+        comes (a fixed final price ends the evaluation before the ones after
+        it are looked at); `additional_lesson` is None when the lesson is not
+        in question.
+        """
         applicable_discounts = []
         
         # Check Additional Lesson Discount (takes precedence as it's most specific)
-        if lesson_id:
-            additional_lesson = self.check_additional_lesson_discount(child_id, lesson_id)
+        if additional_lesson is not None:
+            additional_lesson = additional_lesson()
             if additional_lesson and additional_lesson.discount_type == 'fixed_final_price':
                 # "מחיר קבוע לחוג נוסף": that figure is the price, and nothing else comes off it.
                 if self._fixed_price_lowers(additional_lesson, base_price):
@@ -154,7 +199,7 @@ class DiscountService:
             ))
         
         # Check Second Child Discount
-        second_child = self.check_second_child_discount(family_id, child_id)
+        second_child = second_child()
         if second_child and second_child.discount_type == 'fixed_final_price':
             # Fixed final price takes precedence - return immediately
             if self._fixed_price_lowers(second_child, base_price):
@@ -268,12 +313,7 @@ class DiscountService:
         if not (siblings_on_team.exists() or siblings_paying.exists()):
             return None
 
-        return Discount.objects.filter(
-            is_active=True,
-            is_built_in=True,
-            value__gt=0,
-            name__contains=self.SECOND_CHILD_IDENTIFIER
-        ).first()
+        return self.built_in_discount(self.SECOND_CHILD_IDENTIFIER)
     
     def check_additional_lesson_discount(
         self,
@@ -334,17 +374,22 @@ class DiscountService:
                     is_additional = self._child_pays_for_another_lesson(child, lesson_id)
 
             if is_additional:
-                return Discount.objects.filter(
-                    is_active=True,
-                    is_built_in=True,
-                    value__gt=0,
-                    name__contains=self.ADDITIONAL_LESSON_IDENTIFIER
-                ).first()
+                return self.built_in_discount(self.ADDITIONAL_LESSON_IDENTIFIER)
 
             return None
 
         except Child.DoesNotExist:
             return None
+
+    @staticmethod
+    def built_in_discount(identifier: str) -> Optional[Discount]:
+        """The built-in discount of that name as the CRM configured it; None while it is off or still at 0."""
+        return Discount.objects.filter(
+            is_active=True,
+            is_built_in=True,
+            value__gt=0,
+            name__contains=identifier,
+        ).first()
 
     @classmethod
     def _child_pays_for_another_lesson(cls, child: Child, lesson_id: str) -> bool:
