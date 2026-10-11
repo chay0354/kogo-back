@@ -599,6 +599,12 @@ class PriceTests(RefineTestCase):
     def test_how_a_sum_of_money_is_recognised(self):
         self.assertEqual(reviewer.money_in('המחיר ₪260, ובחודש הבא 280 ש"ח או 300 שקלים'), {'260', '280', '300'})
         self.assertEqual(reviewer.money_in('₪ לפני המספר; הילד בן 6; חוג ב-17:00'), set())
+        # The ways a sum is really typed: with no quotation mark at all, with one, with two single ones, in English.
+        self.assertEqual(
+            reviewer.money_in("250 שח, או 260 ש'ח, או 270 ש׳׳ח, או 280 NIS, או 290שח"), {'250', '260', '270', '280', '290'},
+        )
+        # A number beside a word that only begins like it is not a sum.
+        self.assertEqual(reviewer.money_in('3 שחקנים בקבוצה; 12 שחיינים; כיתה 4 שחר'), set())
         update = {'action': 'update', 'before': {'body': 'משלמים ₪50 מקדמה'}, 'after': {'body': 'משלמים ₪50 מקדמה בהרשמה'}}
         self.assertFalse(reviewer.names_money(update))                    # the sum was already there; the change did not bring it
         self.assertTrue(reviewer.names_money({**update, 'after': {'body': 'משלמים ₪60 מקדמה'}}))

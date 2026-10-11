@@ -112,8 +112,13 @@ AUTO_DAILY_CAP = 20
 AUTO_NOTE = 'אושר אוטומטית'
 # The sources a person's act stands behind. The sweep's patterns (SOURCE_REVIEWER) always wait.
 AUTO_SOURCES = (SOURCE_HUMAN_OVERRIDE, SOURCE_BAD_VERDICT, SOURCE_SERVICE_NOTE)
-# A sum of money: ₪ beside a number, or a number beside ש"ח / שקל. Never written to the knowledge by itself.
-_MONEY = re.compile(r'₪\s*(\d[\d,.]*)|(\d[\d,.]*)\s*(?:₪|ש"ח|ש״ח|שקל)')
+# A sum of money: ₪ beside a number, or a number beside ש"ח / שקל — and the ways people really type it:
+# "250 שח", "250 ש'ח", "250 ש׳׳ח", "250 שקלים", "250 nis". Never written to the knowledge by itself.
+_MONEY = re.compile(
+    r'₪\s*(\d[\d,.]*)'
+    r'|(\d[\d,.]*)\s*(?:₪|ש\s*["״\'׳]{1,2}\s*ח|שח(?![א-ת])|שקל|nis\b)',
+    re.I,
+)
 MONEY_FIELDS = ('title', 'body', 'means')
 
 # --- the one-time sweep over the old conversations ------------------------------------------------------
