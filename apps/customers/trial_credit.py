@@ -39,6 +39,25 @@ def shekels(value: Decimal) -> str:
     return f'{whole:f}'
 
 
+def capped_credit(paid, first_charge) -> Decimal:
+    """
+    What a trial that cost `paid` takes off a first charge: all of it, up to
+    the charge itself — nothing is carried over (the owner's rule).
+    """
+    return max(Decimal('0.00'), min(money(paid), money(first_charge)))
+
+
+def credit_rule(price) -> str:
+    """
+    The rule in one line, for whoever asks before paying (the WhatsApp bot
+    quotes it; the form says the same in its paid-trial notice).
+    """
+    return (
+        f'₪{shekels(money(price))} יורדים מהתשלום הראשון כשנרשמים לחוג באותו סניף '
+        f'בתוך {TRIAL_CREDIT_WINDOW_DAYS} יום משיעור הניסיון (פעם אחת, עד גובה התשלום הראשון)'
+    )
+
+
 MIN_ID_DIGITS = 5
 
 
@@ -191,7 +210,7 @@ def quote_trial_credit(child, *, branch_id, first_charge: Decimal, today: date |
     if trial is None:
         return empty
     paid = money(trial.final_amount)
-    amount = min(paid, charge)
+    amount = capped_credit(paid, charge)
     if amount <= 0:
         return empty
     when = trial.trial_lesson_date.strftime('%d/%m/%Y') if trial.trial_lesson_date else ''

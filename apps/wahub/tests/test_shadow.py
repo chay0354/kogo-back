@@ -20,11 +20,15 @@ HANDOFF = 'apps.wahub.handoff._in_manychat'
 
 
 def catalogue():
-    """Invented Kogo data: one branch of ours with one class, and one external branch."""
+    """
+    Invented Kogo data: one branch of ours with one class, and one external branch.
+    The class is for "גיל 4.5-6 עד כיתה א": min_age / max_age are positions on
+    the age-group scale (apps/courses/age_groups.py), not years.
+    """
     city = TestDataFactory.create_city('ראש העין')
     ours = TestDataFactory.create_branch(name='קרל וגרטי קורי 8', city=city, address='קרל וגרטי קורי 8, ראש העין', phone='03-5550000')
     kind = TestDataFactory.create_course_type('קפוארה')
-    course = TestDataFactory.create_course(name='קפוארה צעירים', branch=ours, course_type=kind, price=Decimal('260.00'), min_age=5, max_age=7, capacity=12)
+    course = TestDataFactory.create_course(name='קפוארה צעירים', branch=ours, course_type=kind, price=Decimal('260.00'), min_age=2, max_age=3, capacity=12)
     instructor = TestDataFactory.create_instructor(first_name='משה', last_name='לוי', branch=ours)
     lesson = TestDataFactory.create_lesson(course=course, instructor=instructor, day_of_week=2, start_time=time(17, 0), end_time=time(17, 45))
     external = TestDataFactory.create_branch(
@@ -271,7 +275,10 @@ class ClaudeTests(ShadowTestCase):
         self.assertEqual(body['output_config']['effort'], 'medium')
         self.assertEqual(body['output_config']['format']['type'], 'json_schema')
         self.assertEqual(body['tool_choice'], {'type': 'auto'})
-        self.assertEqual([tool['name'] for tool in body['tools']], ['find_courses', 'branch_info', 'office_hours_now', 'customer_card', 'request_human'])
+        self.assertEqual([tool['name'] for tool in body['tools']], [
+            'find_courses', 'course_card', 'quote_registration', 'instructor_info', 'branch_info',
+            'office_hours_now', 'customer_card', 'request_human',
+        ])
         self.assertEqual(body['fallbacks'], 'default')
         self.assertEqual(headers['anthropic-beta'], 'server-side-fallback-2026-07-01')
         self.assertEqual(headers['x-api-key'], 'test-key')
