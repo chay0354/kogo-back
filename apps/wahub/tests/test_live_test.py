@@ -1263,6 +1263,48 @@ class LiveMediaTests(LiveTestCase):
 
 # --- the list of who is under the test ------------------------------------------------------------------------
 
+@override_settings(SUPABASE_URL=STORAGE_URL, SUPABASE_SERVICE_ROLE_KEY=SERVICE_KEY, OPENAI_API_KEY='openai-test-key')
+class MediaAtOnceTests(LiveTestCase):
+    """A plain contact's recording is fetched and transcribed when it arrives, not at the next cron."""
+
+    PLAIN = '972501112233'
+
+    def setUp(self):
+        super().setUp()
+        self.storage = FakeStorage()
+        patch(STORAGE_REQUEST, side_effect=self.storage).start()
+
+    def test_the_inbound_door_starts_the_preparation_for_a_file_and_not_for_text(self):
+        with patch('apps.wahub.views.requests.post', side_effect=requests.ReadTimeout('not waited for')) as post:
+            self.assertEqual(self.manychat_message('שלום', phone=self.PLAIN, subscriber_id='777').status_code, 200)
+            self.assertEqual(post.call_count, 0)
+            self.assertEqual(self.manychat_message(OGG_URL, phone=self.PLAIN, subscriber_id='777').status_code, 200)
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(post.call_args.args[0].endswith('/wahub/media/prepare/'))
+        self.assertEqual(post.call_args.kwargs['timeout'], (2, 1))
+        self.assertIn('X-Cron-Token', post.call_args.kwargs['headers'])
+
+    def test_prepare_fetches_keeps_and_transcribes_and_answers_nobody(self):
+        with patch('apps.wahub.views.requests.post', side_effect=requests.ReadTimeout('not waited for')):
+            self.manychat_message(OGG_URL, phone=self.PLAIN, subscriber_id='777')
+        contact = Contact.objects.get(phone=self.PLAIN)
+        client = APIClient()
+        self.assertEqual(client.post(f'{BASE}/media/prepare/', {'contact': contact.id}, format='json').status_code, 401)
+        with patch(FETCH, return_value=fetched(OGG, 'audio/ogg')), \
+                patch(OPENAI_POST, return_value=_json_response({'text': 'יש חוג קפוארה לבן 6?'})), \
+                patch(REQUEST, side_effect=AssertionError('nothing is sent')) :
+            response = client.post(
+                f'{BASE}/media/prepare/', {'contact': contact.id}, format='json', HTTP_X_CRON_TOKEN='cron-secret',
+            )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['prepared'], 1)
+        recording = Message.objects.get(contact=contact, direction='in')
+        self.assertEqual(recording.transcript, 'יש חוג קפוארה לבן 6?')
+        self.assertTrue(recording.media_url.startswith('manychat/'))
+        self.assertEqual(ShadowReply.objects.count(), 0)
+        self.assertEqual(Message.objects.filter(contact=contact, direction='out').count(), 0)
+
+
 class LiveTestListTests(LiveTestCase):
     def test_the_contacts_list_filters_by_live_test(self):
         self.incoming('שלום', phone='972505550102', subscriber_id='9')

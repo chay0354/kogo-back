@@ -12,6 +12,8 @@ import logging
 import secrets
 import time
 import uuid
+
+import requests
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
@@ -680,7 +682,59 @@ class ManyChatInboundView(APIView):
                 live_test.kick(result.contact_id, _own_url(request, live_test.REPLY_PATH))
             except Exception:
                 logger.exception('wahub inbound: the live answer for contact %s could not be started', result.contact_id)
+        elif result.media:
+            # A recording or a picture: fetched and transcribed now, not at the next cron — the office
+            # reads what the customer said within seconds. Not waited for; the cron does it anyway.
+            _start_media(result.contact_id, _own_url(request, MEDIA_PREPARE_PATH))
         return Response({'ok': True, 'stored': result.stored})
+
+
+MEDIA_PREPARE_PATH = 'media/prepare/'
+
+
+def _start_media(contact_id: int, url: str) -> None:
+    """POST our own media/prepare/ and let go (the read timeout is the normal way out). Never raises."""
+    try:
+        token = live_test.cron_token()
+        if not token:
+            return
+        requests.post(url, json={'contact': contact_id}, headers={'X-Cron-Token': token}, timeout=live_test.KICK_TIMEOUT)
+    except requests.ReadTimeout:
+        pass
+    except Exception as exc:
+        logger.warning('wahub inbound: the file of contact %s was not prepared at once: %s', contact_id, type(exc).__name__)
+
+
+class MediaPrepareView(APIView):
+    """
+    POST media/prepare/ {contact} — fetch the files of the customer's unanswered
+    messages into the bucket and transcribe the recordings now
+    (shadow.prepare_media). Called by this server on itself from the inbound
+    door; auth is the cron token. Sends nothing and answers nobody: the shadow
+    (or the live test) answers later and finds the words ready.
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from apps.customers.views import _cron_request_authorized
+
+        if not _cron_request_authorized(request):
+            return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
+        raw = request.data.get('contact') if isinstance(request.data, dict) else None
+        if isinstance(raw, bool) or not str(raw or '').strip().isdigit():
+            return _error('נדרש contact (מזהה איש הקשר).')
+        contact = Contact.objects.filter(pk=int(raw)).first()
+        if contact is None:
+            return _error('איש הקשר לא נמצא.', http=status.HTTP_404_NOT_FOUND)
+        seen = shadow.prepare_media(contact, deadline=time.monotonic() + MEDIA_PREPARE_SECONDS)
+        if seen:
+            # The screen learns that the messages changed (a transcript, a kept file).
+            state.touch(contact.pk)
+        return Response({'ok': True, 'prepared': len(seen)})
+
+
+MEDIA_PREPARE_SECONDS = 50
 
 
 @api_view(['GET', 'POST'])

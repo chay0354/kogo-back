@@ -87,6 +87,8 @@ class StoreResult:
     message_id: int | None = None
     # A customer message kept for a live-test contact: the NEW bot answers it now (live_test.py).
     live_test: bool = False
+    # A customer message kept with a file (a recording, a picture): fetched and transcribed at once (views.py).
+    media: bool = False
 
 
 def asks_for_human(text: str) -> bool:
@@ -326,7 +328,10 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
     # The stage follows the message at once: a customer who wrote is "in conversation" again, an
     # answer takes them off "needs a reply". Rules over the row, no other company asked; it never raises.
     lead_stage.refresh_quietly(contact.id)
-    return StoreResult(True, contact_id=contact.id, message_id=message.id, live_test=live_test)
+    return StoreResult(
+        True, contact_id=contact.id, message_id=message.id, live_test=live_test,
+        media=bool(incoming and message.media_url),
+    )
 
 
 def _alert_office(contact, name: str, text: str) -> None:
