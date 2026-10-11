@@ -45,9 +45,11 @@ LEAD_FIELDS = (
 class LeadStageTestCase(WahubTestCase):
     def setUp(self):
         super().setUp()
-        # The world these tests describe: ManyChat copies the old bot's replies, so an
-        # unanswered message means what it says. RepliesNotCopiedTests is the other world.
-        self.replies_seen = patch.object(lead_stage, 'old_bot_replies_seen', return_value=True)
+        # The world these tests describe: ManyChat has been copying the old bot's replies for a year, so
+        # an unanswered message means what it says. RepliesNotCopiedTests is the other world.
+        self.replies_seen = patch.object(
+            lead_stage, 'replies_copied_since', return_value=timezone.now() - timedelta(days=365),
+        )
         self.replies_seen.start()
         self.addCleanup(self.replies_seen.stop)
         self.today = state.now_israel_date()
@@ -1449,8 +1451,8 @@ class RepliesNotCopiedTests(WahubTestCase):
 
     def setUp(self):
         super().setUp()
-        lead_stage._seen.update(at=None, value=False)
-        self.addCleanup(lambda: lead_stage._seen.update(at=None, value=False))
+        lead_stage._seen.update(at=None, since=None)
+        self.addCleanup(lambda: lead_stage._seen.update(at=None, since=None))
         self.now = timezone.now()
 
     def waiting(self, **fields):
@@ -1478,12 +1480,46 @@ class RepliesNotCopiedTests(WahubTestCase):
                 self.assertEqual(lead_stage.compute(contact, self.now)['stage'], 'needs_reply')
                 Contact.objects.filter(pk=contact.pk).delete()
 
+    def test_the_old_bots_line_in_a_demo_conversation_is_not_a_copy_from_manychat(self):
+        # "כתוב כבוט הישן" on a demo contact goes through the very door ManyChat's copies use, and a demo
+        # scenario's lines are kept with the same source: neither says ManyChat copies anything.
+        self.incoming('שלום', phone='972505550188')
+        Contact.objects.filter(phone='972505550188').update(is_demo=True, source='demo')
+        self.bot_reply('היי, כאן הבוט הישן', phone='972505550188')
+        lead_stage._seen.update(at=None)
+        self.assertFalse(lead_stage.old_bot_replies_seen(self.now))
+        self.assertEqual(lead_stage.compute(self.waiting(), self.now)['stage'], 'in_conversation')
+
+    def test_a_message_from_before_the_copying_began_is_not_judged_and_one_written_since_is(self):
+        waited_before = self.waiting()                      # wrote two hours ago, when nothing was copied
+        # ManyChat began copying an hour ago: its first copy, in somebody else's conversation.
+        self.incoming('שלום', phone='972505550177')
+        self.bot_reply('היי', phone='972505550177')
+        began = self.now - timedelta(hours=1)
+        Message.objects.filter(sender='bot').update(created_at=began)
+        lead_stage._seen.update(at=None)
+        self.assertEqual(lead_stage.replies_copied_since(self.now), began)
+
+        # Whether the bot answered the older message is not on record: it is not "asked and got no answer".
+        before = lead_stage.compute(waited_before, self.now)
+        self.assertEqual(before['stage'], 'in_conversation')
+        self.assertNotIn('עוד לא קיבל תשובה', before['reason'])
+        # The same customer wrote again forty minutes ago, and that one is measured — from its own moment.
+        forty_minutes_ago = self.now - timedelta(minutes=40)
+        Contact.objects.filter(pk=waited_before.pk).update(last_inbound_at=forty_minutes_ago, last_message_at=forty_minutes_ago)
+        since = lead_stage.compute(Contact.objects.get(pk=waited_before.pk), self.now)
+        self.assertEqual((since['stage'], since['since']), ('needs_reply', forty_minutes_ago))
+        # And when the copies stop for more than a week, nothing is judged again.
+        self.assertIsNone(lead_stage.replies_copied_since(self.now + timedelta(days=8)))
+
     def test_once_manychat_copies_a_reply_the_rule_is_back(self):
         contact = self.waiting()
         Message.objects.create(
             contact=contact, direction='out', sender='bot', source='manychat', text='היי', sent_at=self.now - timedelta(days=1),
         )
-        lead_stage._seen.update(at=None, value=False)
+        # Kept a day ago, before the message that is waiting: from then on Kogo sees the answers.
+        Message.objects.filter(sender='bot').update(created_at=self.now - timedelta(days=1))
+        lead_stage._seen.update(at=None)
         self.assertTrue(lead_stage.old_bot_replies_seen(self.now))
         self.assertEqual(lead_stage.compute(Contact.objects.get(pk=contact.pk), self.now)['stage'], 'needs_reply')
 
