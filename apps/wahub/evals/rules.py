@@ -200,3 +200,11 @@ GENERAL_COVERS = {
     'no_courtesy': ('M16',),
     'no_internal_money': ('B2',),
 }
+
+
+# --- exactness against the system (the owner, 12.10.2026; docs/WAHUB-BOT-ACCURACY-2026-10-12.md) ---
+RULES.update({
+    'A1': 'תאריך לשיעור ניסיון — רק תאריך שהאתר מציע עכשיו, באותו חישוב של טופס ההרשמה',
+    'A2': 'תאריך מלא, חופשה או שיעור שבוטל לא מוצעים; כשאין תאריך פנוי — אומרים זאת',
+})
+GENERAL_COVERS['open_trial_dates'] = ('A1', 'A2')

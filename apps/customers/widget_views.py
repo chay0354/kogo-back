@@ -288,7 +288,7 @@ def _resolve_lesson_capacity(lesson, course):
     return capacity if capacity is not None else resolve_lesson_capacity(lesson)
 
 
-def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, occurrence_context=None):
+def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, occurrence_context=None, *, now=None):
     """
     Two capacities, because two different things are being asked.
 
@@ -303,6 +303,10 @@ def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, 
     booked for one date reported itself closed to trials on every date, and the
     parent never reached the date picker to see that the following week was
     empty. `trial_spots_left` is now the best date's remaining seats.
+
+    `now` is the clock the dates are counted from. The form never passes it and
+    so reads the real one; whoever answers for another moment (the WhatsApp
+    bot's written conversations, apps/wahub/trial_offer.py) hands its own.
     """
     enrolled = enrolled_counts.get(lesson.id, 0)
     trials_by_date = (trial_counts or {}).get(lesson.id, {})
@@ -322,6 +326,7 @@ def _lesson_widget_capacity(lesson, course, enrolled_counts, trial_counts=None, 
         lesson, capacity, enrolled, trials_by_date,
         cancelled=(cancelled or {}).get(lesson.id, set()) if cancelled is not None else None,
         blocked=(blocked_by_lesson or {}).get(lesson.id) if blocked_by_lesson is not None else None,
+        now=now,
     )
     best = max((left for _d, left in seats), default=0)
     return {
@@ -388,7 +393,7 @@ def _batch_occurrence_context(lesson_ids):
     return cancelled, blocked_trial_dates_by_lesson(lesson_ids)
 
 
-def trial_seats_by_date(lesson, capacity, enrolled, trials_by_date, *, cancelled=None, blocked=None, count=None):
+def trial_seats_by_date(lesson, capacity, enrolled, trials_by_date, *, cancelled=None, blocked=None, count=None, now=None):
     """
     [(date, seats_left)] for the dates a trial could be booked on this lesson.
 
@@ -404,6 +409,7 @@ def trial_seats_by_date(lesson, capacity, enrolled, trials_by_date, *, cancelled
     dates = iter_upcoming_lesson_occurrences(
         lesson,
         count=count or TRIAL_LESSON_OCCURRENCE_LIMIT,
+        now=now,
         cancelled=cancelled,
         blocked=blocked,
     )

@@ -957,3 +957,151 @@ def run(checks, moment: Moment, *, turn: int) -> list:
             'status': 'failed' if explain else 'passed', 'explain': explain,
         })
     return rows
+
+
+# --- trial dates: only the ones the site offers now (the owner, 12.10.2026) ---------------------------------------------
+#
+# "The dates one can register on for a trial lesson — by the system, exactly." The tools hand the bot the dates the
+# registration form offers at that moment (`trial.dates`), the ones it shows as full (`trial.full_dates`) and the ones
+# it skips (`trial.not_offered`) — apps/wahub/trial_offer.py. `grounded_dates` above is content with any date a tool
+# returned; these hold an answer to the dates that can really be booked.
+
+# A date said to be taken or closed is the truth about it, not an offer of it.
+_UNAVAILABLE = re.compile(
+    r'מלא|אין מקום|לא נשאר|תפוס|לא מתקיים|לא יתקיים|בוטל|מבוטל|לא פתוח|סגור|אי אפשר|לא ניתן|לא אפשרי|אין שיעור|אין ניסיון|לא זמין|חופש|כבר התחיל'
+)
+_NOT = re.compile(r'לא|אין|אי אפשר')
+
+
+def _date_text(value: tuple) -> str:
+    return f'{value[0]:02d}.{value[1]:02d}'
+
+
+def trial_dates_evidence(calls: list) -> tuple:
+    """
+    (open, closed): the dates the tools returned as ones a trial can be booked
+    on, and the ones they returned as full or not offered — (day, month) each.
+    A date open in one class and closed in another counts as open: which class
+    the answer meant is not for a hard check to guess.
+    """
+    open_, closed = set(), set()
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            trial = value.get('trial')
+            if isinstance(trial, dict):
+                for row in trial.get('dates') or []:
+                    open_.update(dates_in(str(row.get('date') if isinstance(row, dict) else row)))
+                for key in ('full_dates', 'not_offered'):
+                    for row in trial.get(key) or []:
+                        closed.update(dates_in(str(row.get('date') if isinstance(row, dict) else row)))
+            for inner in value.values():
+                walk(inner)
+        elif isinstance(value, (list, tuple)):
+            for inner in value:
+                walk(inner)
+
+    for call in calls:
+        walk(call.get('result'))
+    return open_, closed - open_
+
+
+def _open_trial_dates(m: Moment) -> str:
+    _open, closed = trial_dates_evidence(m.all_calls)
+    for line in m.reply.split('\n'):
+        offered = [value for value in dates_in(line) if value in closed]
+        if offered and not _UNAVAILABLE.search(line):
+            return (
+                f'הבוט הציע את התאריך {", ".join(_date_text(value) for value in dict.fromkeys(offered))} — באתר התאריך הזה מלא או לא פתוח לשיעור ניסיון. '
+                'מציעים רק תאריך שהמערכת החזירה כפנוי'
+            )
+    return ''
+
+
+def only_open_trial_dates() -> Check:
+    """Every date in the answer is one the tools returned as open for a trial — or is said to be taken or closed."""
+    def test(m: Moment) -> str:
+        open_, _closed = trial_dates_evidence(m.all_calls)
+        for line in m.reply.split('\n'):
+            strange = [value for value in dates_in(line) if value not in open_]
+            if strange and not _UNAVAILABLE.search(line):
+                known = ', '.join(_date_text(value) for value in sorted(open_, key=lambda value: (value[1], value[0]))) or 'אין כרגע תאריך פנוי'
+                return (
+                    f'הבוט הציע את התאריך {", ".join(_date_text(value) for value in dict.fromkeys(strange))} — זה לא אחד מהתאריכים '
+                    f'שהמערכת החזירה כפנויים לשיעור ניסיון ({known})'
+                )
+        return ''
+
+    return Check('only_open_trial_dates', 'כל תאריך שהבוט מציע לשיעור ניסיון הוא תאריך שהאתר מציע עכשיו', test)
+
+
+def says_open_trial_date(path: str) -> Check:
+    """
+    The answer names a date the site offers now for the class at `path` — by
+    the facts read from the system, not by the tool. When the site offers none,
+    the answer says that there is none, and offers no date.
+    """
+    def test(m: Moment) -> str:
+        wanted = [str(value) for value in (_fact(m.world, f'{path}.trial_dates.open') or [])]
+        said = {_date_text(value) for line in m.reply.split('\n') if not _UNAVAILABLE.search(line) for value in dates_in(line)}
+        if not wanted:
+            if said:
+                return f'באתר אין כרגע תאריך פנוי לשיעור ניסיון בחוג הזה, והבוט הציע: {", ".join(sorted(said))}'
+            if not re.search(r'אין|מלא|סגור|אי אפשר|לא ניתן', m.reply):
+                return f'באתר אין כרגע תאריך פנוי לשיעור ניסיון בחוג הזה, וציפינו שהבוט יאמר זאת. הוא ענה: "{_quote(m.reply)}"'
+            return ''
+        if said & set(wanted):
+            return ''
+        return f'ציפינו לתאריך שהאתר מציע עכשיו לשיעור ניסיון ({", ".join(wanted[:3])}). הבוט ענה: "{_quote(m.reply)}"'
+
+    return Check(f'says_open_trial_date:{path}', 'הבוט אומר תאריך שהאתר מציע עכשיו לשיעור ניסיון — או שאין כרגע', test)
+
+
+def not_closed_trial_date(path: str) -> Check:
+    """No date the site shows as full, or skips, for the class at `path` is offered — by the facts read from the system."""
+    def test(m: Moment) -> str:
+        facts = _fact(m.world, f'{path}.trial_dates') or {}
+        closed = (set(facts.get('full') or []) | set(facts.get('skipped') or [])) - set(facts.get('open') or [])
+        for line in m.reply.split('\n'):
+            offered = [_date_text(value) for value in dates_in(line) if _date_text(value) in closed]
+            if offered and not _UNAVAILABLE.search(line):
+                what = 'מלא' if set(offered) & set(facts.get('full') or []) else 'לא פתוח לשיעור ניסיון (חופשה או שיעור שבוטל)'
+                return f'הבוט הציע את התאריך {", ".join(dict.fromkeys(offered))} — באתר התאריך הזה {what}'
+        return ''
+
+    return Check(f'not_closed_trial_date:{path}', 'הבוט לא מציע תאריך מלא, חופשה או שיעור שבוטל', test)
+
+
+def _said_without_no(reply: str, word: str) -> str:
+    """The line that says `word` ("היום", "השבוע") with no "לא" or "אין" beside it."""
+    return next((line for line in reply.split('\n') if word in line and not _NOT.search(line)), '')
+
+
+def today_as_the_system_has_it(path: str) -> Check:
+    """When no trial can be booked today for the class at `path`, the answer does not say that one can."""
+    def test(m: Moment) -> str:
+        facts = _fact(m.world, f'{path}.trial_dates') or {}
+        line = _said_without_no(m.reply, 'היום')
+        if not facts.get('today_open') and line:
+            return f'לפי המערכת אי אפשר להירשם היום לשיעור ניסיון בחוג הזה, והבוט כתב: "{_quote(line)}"'
+        return ''
+
+    return Check(f'today_as_the_system_has_it:{path}', '"היום" נאמר רק כשהאתר מציע שיעור ניסיון היום', test)
+
+
+def this_week_as_the_system_has_it(path: str) -> Check:
+    """When no trial can be booked this week for the class at `path`, the answer does not say that one can."""
+    def test(m: Moment) -> str:
+        facts = _fact(m.world, f'{path}.trial_dates') or {}
+        line = _said_without_no(m.reply, 'השבוע')
+        if not facts.get('this_week_open') and line:
+            return f'לפי המערכת אין השבוע תאריך פנוי לשיעור ניסיון בחוג הזה, והבוט כתב: "{_quote(line)}"'
+        return ''
+
+    return Check(f'this_week_as_the_system_has_it:{path}', '"השבוע" נאמר רק כשהאתר מציע שיעור ניסיון השבוע', test)
+
+
+GENERAL = GENERAL + (
+    Check('open_trial_dates', 'תאריך מלא או סגור לא מוצע לשיעור ניסיון', _open_trial_dates),
+)
+GENERAL_IDS = tuple(check.id for check in GENERAL)
