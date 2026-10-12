@@ -61,11 +61,12 @@ ACTIVITY_WORDS = (
 # (the owner's live test: "סליחה על העיכוב בימים האחרונים" to a customer nobody had kept waiting).
 SITUATIONAL = {
     'campaign_not_answered': (r'סליחה על העיכוב|עומס בימים האחרונים', 'התנצלות על עיכוב (הנוסח של "לא עניתם לי" אחרי פנייה יזומה)'),
-    'campaign_yes': (r'באיזו עיר אתם מחפשים חוג', 'הנוסח של תשובה לפנייה יזומה'),
+    # The whole line, with the word that opens it: "באיזו עיר אתם מחפשים חוג" alone is a question anybody may be asked.
+    'campaign_yes': (r'מעולה,?\s+באיזו עיר אתם מחפשים חוג', 'הנוסח של תשובה לפנייה יזומה'),
     'campaign_decline': (r'שיהיה שנה טובה', 'הנוסח של סירוב לפנייה יזומה'),
     'waiting_for_agent': (r'עומס חריג', 'הנוסח של "ממתינים לנציג"'),
-    'trial_reminder_yes': (r'רשמנו שאתם מגיעים', 'אישור הגעה לשיעור ניסיון'),
-    'trial_reminder_no': (r'רשמנו שלא תגיעו', 'אישור ביטול הגעה לשיעור ניסיון'),
+    'trial_reminder_yes': (r'נתראה בשיעור', 'אישור הגעה לשיעור ניסיון'),
+    'trial_reminder_no': (r'תודה שעדכנתם', 'אישור ביטול הגעה לשיעור ניסיון'),
     'birthday_party_gilad': (r'מנהל האירועים הפרטיים', 'ההפניה לגלעד בנושא ימי הולדת'),
     'birthday_greeting_name': (r'כתבו לנו מה השם', 'תסריט הברכה האישית'),
     'cancel_form': (r'studio-cancellation-form', 'טופס הביטול'),
@@ -90,7 +91,8 @@ _TRIAL_COST = re.compile(r'ניסיון[^\n]{0,40}(?:ללא עלות|חינם|ב
 _ASKED_ABOUT_COST = re.compile(r'ניסיון|נסיון|עלות|מחיר|כמה|עולה|תשלום|חינם|להירשם|הרשמה|לרשום|פרטים')
 _PRESSED = re.compile(r'מה יש|תגיד|הכול|הכל|כל החוגים|רשימה|תראו|כל מה ש')
 _COURTESY = re.compile(r'עוד משהו|עזרה נוספת|משהו נוסף שאוכל|צריכים עוד|אשמח לעזור|בוודאי!|מצוין!')
-_MISSING_INFO = re.compile(r'אין לי את הפרט')
+# The line for a detail the system lacks: today's ("בודקת מול המשרד") and the one before it.
+_MISSING_INFO = re.compile(r'בודק(?:ת|ים)? מול המשרד|אין לי את הפרט')
 # Something said to have been done. The bot registers nobody, holds no seat and updates nothing: it marks for the office.
 _DONE = re.compile(
     r'רשמנו|רשמתי|שריינו|שריינתי|שמרנו לכם|שמרתי לכם|שמרתי לך|עדכנתי|עדכנו אצלנו|מעודכן אצלנו|הזזתי|הזזנו|ביטלתי|ביטלנו את|הוספתי אות|צירפתי אות'
@@ -559,6 +561,38 @@ def _short(m: Moment) -> str:
     return ''
 
 
+_BULLET = '🔹'
+# The subjects an answer can carry about a class. More than two at once, unasked, is everything in one message.
+_SUBJECTS = (
+    ('ימים ושעות', re.compile(r'\b\d{1,2}:\d{2}\b'), re.compile(r'מתי|איזה יום|באיזה יום|באילו ימים|שעה|שעות|ימים|מערכת')),
+    ('מחיר', re.compile(r'₪\s*\d|\d\s*₪'), re.compile(r'מחיר|עולה|עלות|כמה|תשלום|לשלם|יקר|דמי')),
+    ('מה להביא', re.compile(r'להביא|ללבוש|לבוש|תלבושת'), re.compile(r'להביא|ללבוש|לבוש|תלבושת|ציוד')),
+    ('קישור', re.compile(r'https?://'), re.compile(r'קישור|לינק|להירשם|הרשמה|לרשום|ניסיון')),
+)
+
+
+def _list_of_four(m: Moment) -> str:
+    if _word_for_word(m) or any((call.get('input') or {}).get('show_all') is True for call in m.calls):
+        return ''                     # a line said word for word, or a customer who asked to see everything
+    items = [line for line in m.reply.split('\n') if line.lstrip().startswith(_BULLET)]
+    if len(items) > 4:
+        return f'רשימה של {len(items)} פריטים בתשובה אחת. עד 4 — ויותר מזה שואלים שאלה שמצמצמת, או כותבים את השמות בשורה אחת'
+    return ''
+
+
+def _one_subject(m: Moment) -> str:
+    if _word_for_word(m):
+        return ''
+    said = [(name, asked) for name, shows, asked in _SUBJECTS if shows.search(m.reply)]
+    unasked = [name for name, asked in said if not asked.search(m.customer_now)]
+    if len(said) >= 3 and len(unasked) >= 2:
+        return (
+            f'הבוט העמיס על תשובה אחת: {", ".join(name for name, _ in said)}. '
+            f'הלקוח לא שאל על: {", ".join(unasked)}. נושא אחד בכל הודעה, והשאר כששואלים'
+        )
+    return ''
+
+
 def _one_question(m: Moment) -> str:
     count = _plain(m.reply).count('?')
     return f'הבוט שאל {count} שאלות בתשובה אחת. שואלים שאלה אחת בכל פעם: "{_quote(m.reply)}"' if count > 1 else ''
@@ -572,8 +606,6 @@ def _one_emoji(m: Moment) -> str:
 
 
 def _nothing_claimed_done(m: Moment) -> str:
-    if any(key in ('trial_reminder_yes', 'trial_reminder_no') for key in m.allow):
-        return ''                     # the vendor's own wording for a reminder ("רשמנו שאתם מגיעים") — an open question to the owner
     found = _DONE.search(m.reply)
     if found:
         return f'הבוט כתב שנעשה משהו ("{found.group(0)}") — והוא לא רושם, לא משריין ולא מעדכן דבר. הוא רק מסמן לנציג'
@@ -598,6 +630,32 @@ def _no_internal_money(m: Moment) -> str:
     return ''
 
 
+# Second-person verbs that address one man, or one woman. "לך" and "את" are spelled alike for both and are left out.
+_TO_A_MAN = re.compile(r'(?<![א-ת])(?:תוכל|תרצה|תגיד|תכתוב|תשלח|תבדוק|תבחר|תספר|אתה|מעוניין|מוזמן|רשום)(?![א-ת])')
+_TO_A_WOMAN = re.compile(r'(?<![א-ת])(?:תוכלי|תרצי|תגידי|תכתבי|תשלחי|תבדקי|תבחרי|תספרי|מעוניינת|מוזמנת|רשומה)(?![א-ת])')
+# What tells who is writing: how she speaks of herself, or who she says she is.
+_WRITES_AS_A_WOMAN = re.compile(r'(?<![א-ת])(?:מעוניינת|מחפשת|שואלת|מתעניינת|רציתי לשאול כאמא|אמא של|אני אמא|הסבתא|סבתא של|אני סבתא)(?![א-ת])')
+_WRITES_AS_A_MAN = re.compile(r'(?<![א-ת])(?:מעוניין|מחפש|שואל|מתעניין|אבא של|אני אבא|הסבא|סבא של|אני סבא)(?![א-ת])')
+
+
+def _neutral_address(m: Moment) -> str:
+    """
+    Nobody is addressed as a man or as a woman by a guess: until the customer's
+    own words say which, the answer speaks in the plural or without addressing.
+    Once they do, the answer must not address the other one.
+    """
+    woman, man = _WRITES_AS_A_WOMAN.search(m.customer_all), _WRITES_AS_A_MAN.search(m.customer_all)
+    to_man, to_woman = _TO_A_MAN.search(m.reply), _TO_A_WOMAN.search(m.reply)
+    if woman and not man:
+        return f'הלקוחה כותבת על עצמה בלשון נקבה, והבוט פנה אליה בלשון זכר ("{to_man.group(0)}")' if to_man else ''
+    if man and not woman:
+        return f'הלקוח כותב על עצמו בלשון זכר, והבוט פנה אליו בלשון נקבה ("{to_woman.group(0)}")' if to_woman else ''
+    found = to_man or to_woman
+    if found:
+        return f'עוד לא ברור אם כותב גבר או אישה, והבוט פנה בלשון {"זכר" if to_man else "נקבה"} ("{found.group(0)}"). עד שברור — לשון ניטרלית'
+    return ''
+
+
 GENERAL = (
     Check('grounded_amounts', 'כל סכום בתשובה הגיע מהמערכת', _grounded_amounts),
     Check('grounded_times', 'כל שעה בתשובה הגיעה מהמערכת', _grounded_times),
@@ -618,10 +676,13 @@ GENERAL = (
     Check('hebrew_only', 'עברית בלבד', _hebrew_only),
     Check('short', 'תשובה קצרה', _short),
     Check('one_question', 'שאלה אחת בכל פעם', _one_question),
+    Check('list_of_four', 'רשימה — עד 4 פריטים', _list_of_four),
+    Check('one_subject', 'נושא אחד בכל הודעה, לא הכול בבת אחת', _one_subject),
     Check('one_emoji', 'אימוג׳י אחד לכל היותר', _one_emoji),
     Check('nothing_claimed_done', 'לא אומרים שנעשה משהו שלא נעשה', _nothing_claimed_done),
     Check('no_internal_text', 'שום טקסט פנימי של המערכת לא נכתב ללקוח', _no_internal_text),
     Check('no_courtesy', 'בלי שאלת נימוס בסוף ובלי "אשמח לעזור"', _no_courtesy),
+    Check('neutral_address', 'לא פונים בלשון זכר או נקבה בניחוש', _neutral_address),
     Check('no_internal_money', 'הכלים לא מחזירים כספים פנימיים', _no_internal_money),
 )
 GENERAL_IDS = tuple(check.id for check in GENERAL)
@@ -665,9 +726,13 @@ def offers_nothing() -> Check:
             return f'ציפינו שהבוט לא יציע חוג בשלב הזה. הוא כבר כתב: {", ".join(dict.fromkeys(said))}'
         catalog = m.catalog
         fields = {_norm(name) for name in (catalog.fields if catalog else ())}
+        # A field the bot lists to choose from is not a class it offers — and a class may be named like
+        # part of a field ("היפהופ" inside the field "היפהופ - מחול").
+        listed = [field for field in fields if field and field in _norm(m.reply)]
         named = [
             name for name in sorted(catalog.courses if catalog else ())
-            if len(_norm(name)) >= 6 and _norm(name) in _norm(m.reply) and _norm(name) not in fields and _norm(name) not in _norm(m.customer_all)
+            if len(_norm(name)) >= 6 and _norm(name) in _norm(m.reply) and _norm(name) not in fields
+            and not any(_norm(name) in field for field in listed) and _norm(name) not in _norm(m.customer_all)
         ]
         if named:
             return f'ציפינו שהבוט לא יציע חוג בשלב הזה. הוא כבר הציע: {", ".join(named)}'

@@ -86,7 +86,7 @@ class DemoScenarioTests(WahubTestCase):
         self.assertEqual(response.data['source'], 'demo')
         self.assertEqual(response.data['messages_count'], 3)
         self.assertEqual(len(response.data['shadow']), 1)
-        self.assertEqual(response.data['shadow'][0]['text'], 'מעולה, רשמנו שאתם מגיעים! נתראה בשיעור 🥳')
+        self.assertEqual(response.data['shadow'][0]['text'], 'מעולה, נתראה בשיעור 🥳')
         self.assertEqual(response.data['shadow'][0]['old_bot_reply']['text'], 'על מה אתה מאשר? במה אוכל לעזור?')
         self.assertIsNotNone(response.data['known']['analyzed_at'])
         self.assertEqual(response.data['kogo']['outcome'], 'not_found')

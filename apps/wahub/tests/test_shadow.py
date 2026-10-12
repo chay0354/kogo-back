@@ -57,7 +57,7 @@ class StubTests(ShadowTestCase):
     def test_a_greeting_gets_the_opening_phrasing_with_the_name(self):
         self.incoming('היי', name='רותם')
         reply = self.propose()
-        self.assertEqual(reply.text, 'היי *רותם*, במה אוכל לעזור?')
+        self.assertEqual(reply.text, 'היי רותם במה אוכל לעזור')
         self.assertEqual(reply.model, 'stub')
         greeting = KnowledgeItem.objects.get(kind='phrasing', key='greeting')
         self.assertIn(greeting.id, reply.knowledge_used)
@@ -136,7 +136,7 @@ class StubTests(ShadowTestCase):
         shadow.propose(contact)
         self.incoming('כן')
         reply = shadow.propose(self.contact())
-        self.assertEqual(reply.text, 'מעולה, רשמנו שאתם מגיעים! נתראה בשיעור 🥳')
+        self.assertEqual(reply.text, 'מעולה, נתראה בשיעור 🥳')
         self.assertIn('תזכורת - שיעור ניסיון', reply.reasoning)
 
     def test_a_cancellation_question_gets_the_policy_and_a_request_gets_the_form(self):
@@ -221,7 +221,7 @@ class ShadowApiTests(ShadowTestCase):
         self.assertEqual(TrialQuestion.objects.get().question, 'אפשר לדבר עם נציג?')
         self.assertEqual(ShadowReply.objects.count(), 0)
         response = self.post('shadow/try/', {'question': 'כן', 'last_outbound': 'תזכורת: האם אתם מגיעים לשיעור הניסיון מחר?'})
-        self.assertEqual(response.data['text'], 'מעולה, רשמנו שאתם מגיעים! נתראה בשיעור 🥳')
+        self.assertEqual(response.data['text'], 'מעולה, נתראה בשיעור 🥳')
         self.assertEqual(TrialQuestion.objects.count(), 1)
         self.assertEqual(self.post('shadow/try/', {'question': 'היי', 'pretend_now': 'not-a-date'}).status_code, 400)
         self.assertEqual(self.post('shadow/try/', {'question': 'היי', 'contact_id': 999999}).status_code, 400)
@@ -282,8 +282,8 @@ class ClaudeTests(ShadowTestCase):
         self.assertEqual(body['fallbacks'], 'default')
         self.assertEqual(headers['anthropic-beta'], 'server-side-fallback-2026-07-01')
         self.assertEqual(headers['x-api-key'], 'test-key')
-        self.assertIn('דנה', body['system'])
-        self.assertIn('אפס המצאות', body['system'])
+        self.assertIn('דנה', shadow.system_text(body))
+        self.assertIn('אפס המצאות', shadow.system_text(body))
         self.assertIn('יש חוג קפוארה לבן 6 בראש העין?', body['messages'][0]['content'])
 
         second = post.call_args_list[1].kwargs['json']
@@ -299,7 +299,7 @@ class ClaudeTests(ShadowTestCase):
             reply = self.propose()
         self.assertEqual(reply.model, 'stub')
         self.assertTrue(reply.reasoning.startswith('• Claude לא נתן תשובה (Claude ענה 500)'))
-        self.assertEqual(reply.text, 'היי *רותם*, במה אוכל לעזור?')
+        self.assertEqual(reply.text, 'היי רותם במה אוכל לעזור')
         self.incoming('שלום')
         with patch(POST, return_value=self._response({'model': 'm', 'stop_reason': 'refusal', 'content': []})):
             reply = self.propose()
@@ -363,3 +363,76 @@ class ShadowCronTests(ShadowTestCase):
             counts = cron.tick()
         self.assertEqual(counts['shadow_proposed'], 1)
         self.assertFalse(self.contact('972505550101').needs_shadow)   # not picked up again every five minutes
+
+
+class PromptCacheTests(WahubTestCase):
+    """The system text goes to Claude marked for the prompt cache; a refusal of the mark never costs an answer."""
+
+    def setUp(self):
+        super().setUp()
+        knowledge_import.run()
+
+    def _answer(self, status=200, usage=None):
+        import json
+        from unittest.mock import MagicMock
+
+        response = MagicMock()
+        response.status_code = status
+        response.json.return_value = {'error': {'message': 'system: Extra inputs are not permitted'}} if status != 200 else {
+            'model': 'claude-opus-5-5', 'stop_reason': 'end_turn', 'usage': usage or {},
+            'content': [{'type': 'text', 'text': json.dumps({'text': 'היי', 'reasoning': 'כי', 'knowledge_ids': []}, ensure_ascii=False)}],
+        }
+        return response
+
+    @override_settings(ANTHROPIC_API_KEY='test-key')
+    def test_the_system_text_is_one_block_marked_for_the_cache_and_reads_the_same(self):
+        with patch('apps.wahub.shadow.requests.post', return_value=self._answer(usage={'cache_read_input_tokens': 9000})) as post, \
+                self.assertLogs('apps.wahub.shadow', level='INFO') as logs:
+            shadow.answer('היי')
+        body = post.call_args.kwargs['json']
+        [block] = body['system']
+        self.assertEqual(block['cache_control'], {'type': 'ephemeral'})
+        self.assertIn('סדר השיחה על חוג', shadow.system_text(body))
+        self.assertTrue(any('9000 tokens read from the cache' in line for line in logs.output))
+        with override_settings(WAHUB_SHADOW_PROMPT_CACHE=False), patch('apps.wahub.shadow.requests.post', return_value=self._answer()) as post:
+            shadow.answer('היי')
+        self.assertIsInstance(post.call_args.kwargs['json']['system'], str)
+
+    @override_settings(ANTHROPIC_API_KEY='test-key')
+    def test_a_refused_mark_is_sent_again_as_plain_text_and_the_customer_still_gets_the_answer(self):
+        sent = []
+
+        def claude(url, **kwargs):
+            sent.append(type(kwargs['json']['system']).__name__)
+            return self._answer(400) if len(sent) == 1 else self._answer()
+
+        with patch('apps.wahub.shadow.requests.post', side_effect=claude), self.assertLogs('apps.wahub.shadow', level='WARNING'):
+            draft = shadow.answer('היי')
+        self.assertEqual(sent, ['list', 'str'])
+        self.assertEqual(draft.text, 'היי')
+
+
+class PolishTests(WahubTestCase):
+    """What every answer goes through before it is kept: easy on the customer's eye (owner, 12.10.2026)."""
+
+    def test_every_sum_is_in_bold_once(self):
+        self.assertEqual(shadow.polish('המחיר הוא ₪235 לחודש ובנוסף דמי רישום של ₪120 פעם בשנה'),
+                         'המחיר הוא *₪235* לחודש ובנוסף דמי רישום של *₪120* פעם בשנה')
+        # Already in bold, alone or inside a bold phrase: left as it is. "30 ₪" is turned round first.
+        self.assertEqual(shadow.polish('המחיר *₪260 לחודש*, וניסיון 30 ₪'), 'המחיר *₪260 לחודש*, וניסיון *₪30*')
+        self.assertEqual(shadow.polish('סך הכול *₪1,250.50*'), 'סך הכול *₪1,250.50*')
+        # A line with an asterisk that has no partner is not guessed at.
+        self.assertEqual(shadow.polish('מחיר* ₪100'), 'מחיר* ₪100')
+
+    def test_a_link_stands_on_its_own_line_after_the_link_mark(self):
+        self.assertEqual(
+            shadow.polish('מתחילים בשיעור ניסיון שנרשמים אליו מראש כאן: https://cogomelo.co.il/הרשמה-לחוגים-שיעור-ניסיון/'),
+            'מתחילים בשיעור ניסיון שנרשמים אליו מראש כאן:\n🔗 https://cogomelo.co.il/הרשמה-לחוגים-שיעור-ניסיון/',
+        )
+        self.assertEqual(shadow.polish('https://x.co/only'), '🔗 https://x.co/only')
+        # The punctuation that only followed the link goes; the words after it get their own line.
+        self.assertEqual(shadow.polish('הרשמה: https://x.co/a. נתראה'), 'הרשמה:\n🔗 https://x.co/a\nנתראה')
+        # A line that marks its link already — the cancellation form, the shows — is left as it is.
+        form = 'לביטול חוג יש למלא את הטופס בקישור הבא:\n\n🔗 https://x.co/form\n\nחשוב למלא את כל הפרטים'
+        self.assertEqual(shadow.polish(form), form)
+        self.assertEqual(shadow.polish('תוכלו למצוא *באתר שלנו*\n\n ➡️ https://x.co/shows'), 'תוכלו למצוא *באתר שלנו*\n\n ➡️ https://x.co/shows')

@@ -48,7 +48,7 @@ class ImportTests(WahubTestCase):
 
         cancel = KnowledgeItem.objects.get(kind='topic', title='ביטול חוג')
         self.assertIn('1.4', cancel.body)
-        self.assertEqual(len(cancel.data['steps']), 3)
+        self.assertEqual(len(cancel.data['steps']), 4)                 # the fourth: he keeps asking → a person (owner, 12.10)
         self.assertTrue(KnowledgeItem.objects.filter(kind='phrasing', key='cancel_after_deadline', is_active=True).exists())
 
         group = KnowledgeItem.objects.get(kind='topic', title='קבוצת וואטסאפ של חוג')
@@ -92,7 +92,8 @@ class ImportTests(WahubTestCase):
         if not docs:
             self.skipTest('docs/bot-knowledge is not beside this checkout')
         result = knowledge_import.run(today=TODAY)
-        self.assertGreater(result['verbatim_checked'], 20)
+        # The phrasings the owner rewrote on 12.10 (the opening, the trial reminder) are his wording and are not looked for.
+        self.assertGreater(result['verbatim_checked'], 15)
         self.assertEqual(result['verbatim_mismatch'], [])
 
     def test_a_dry_run_creates_nothing(self):
@@ -122,3 +123,40 @@ class ImportFromTheScreenTests(WahubTestCase):
         self.assertTrue(response.data['dry_run'])
         self.assertGreaterEqual(response.data['created_total'], 90)
         self.assertEqual(KnowledgeItem.objects.count(), 0)
+
+
+class SecondRewriteTests(WahubTestCase):
+    """A record the seed rewrote once is rewritten again by the seed — unless a person has edited it in between."""
+
+    def test_a_row_only_the_seed_has_rewritten_takes_the_next_rewrite_and_one_a_person_edited_keeps_hers(self):
+        from apps.wahub import knowledge
+        from apps.wahub.models import KnowledgeHistory
+
+        knowledge_import.run(today=TODAY)
+        handoff = KnowledgeItem.objects.get(title='העברה לנציג — רק במפורש או בנושאים שנקבעו')
+        # Filed as version 1 with today's text; put back to where production stands: the first rewrite only.
+        first = 'ביקורת הכללים 12.10.2026: בעל המערכת — "אם לא בטוח, שואל או מעביר לנציג"; בעיית תשלום ותלונה עוברות לנציג כברירת מחדל עד החלטה 13'
+        today_text = handoff.body
+        handoff = knowledge.update_item(handoff, {'body': 'הנוסח של הביקורת'}, None, note=first)
+        self.assertEqual(handoff.version, 2)
+
+        result = knowledge_import.run(today=TODAY)
+        handoff.refresh_from_db()
+        self.assertEqual((handoff.version, handoff.body), (3, today_text))
+        self.assertNotIn(handoff.title, result['revision_left'])
+        self.assertTrue(KnowledgeHistory.objects.filter(item=handoff, version=3, note__startswith='בעל המערכת 12.10.2026 (בוקר)').exists())
+        # Run again: nothing more to do.
+        knowledge_import.run(today=TODAY)
+        handoff.refresh_from_db()
+        self.assertEqual(handoff.version, 3)
+
+        # A person edited the opening since the import: the owner's own wording of 12.10 does not run over hers.
+        greeting = KnowledgeItem.objects.get(key='greeting')
+        KnowledgeHistory.objects.filter(item=greeting).delete()
+        KnowledgeItem.objects.filter(pk=greeting.pk).update(version=1, body='היי *{שם}*, במה אוכל לעזור?')
+        greeting.refresh_from_db()
+        knowledge.update_item(greeting, {'body': 'שלום {שם}'}, self.manager, note='עודכן')
+        result = knowledge_import.run(today=TODAY)
+        greeting.refresh_from_db()
+        self.assertEqual(greeting.body, 'שלום {שם}')
+        self.assertIn(greeting.title, result['revision_left'])
