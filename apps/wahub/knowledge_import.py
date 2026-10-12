@@ -92,16 +92,21 @@ def _verbatim_in_docs(record: dict, docs: str) -> bool:
     return re.search('.{0,80}?'.join(parts), docs) is not None
 
 
-def _revise(record: dict, data: dict, reason: str, user, result: dict) -> None:
+def _revise(record: dict, data: dict, reason: str, user, result: dict, before=()) -> None:
     """
     A record whose seed text changed after the import, against the row that is
-    already there. Untouched since it was filed → the new text, as version 2
-    with `reason` in the history. Edited by anybody since → theirs stands.
+    already there. Untouched since it was filed → the new text, as a new
+    version with `reason` in the history. Edited by anybody since → theirs
+    stands. `before` = the reasons of the seed's own earlier rewrites of it.
     """
     item = KnowledgeItem.objects.filter(source_note=record['source_note']).order_by('id').first()
-    if item is None or KnowledgeHistory.objects.filter(item=item, note=reason).exists():
+    if item is None or KnowledgeHistory.objects.filter(item=item, note=reason[:300]).exists():
         return
-    if item.version != 1:
+    # Rewritten before by the seed alone (every version after the first carries one of its own earlier
+    # reasons, and nobody's name) is still untouched by a person.
+    ours = {earlier[:300] for earlier in before}
+    later = KnowledgeHistory.objects.filter(item=item, version__gt=1).values_list('note', 'changed_by_id')
+    if item.version != 1 and not (later and all(note in ours and who is None for note, who in later)):
         result['revision_left'].append(item.title or item.key)
         return
     updated = knowledge.update_item(item, {**{name: record[name] for name in REVISED_COLUMNS}, 'data': data}, user, note=reason)
@@ -123,14 +128,16 @@ def run(*, today=None, docs_dir=None, user=None, dry_run: bool = False) -> dict:
         record = dict(record)
         data = dict(record.pop('data', {}) or {})
         revised = record.pop('_revised', '')
-        if record['kind'] == KIND_PHRASING and data.get('verbatim') and docs:
+        revised_before = record.pop('_revised_before', ())
+        # A phrasing rewritten after the import is the owner's wording: it is not looked for in the vendor's texts.
+        if record['kind'] == KIND_PHRASING and data.get('verbatim') and docs and not revised:
             result['verbatim_checked'] += 1
             if not _verbatim_in_docs(record, docs):
                 result['verbatim_mismatch'].append(record['key'])
         if record['source_note'] in existing:
             result['skipped'] += 1
             if revised and not dry_run:
-                _revise(record, data, revised, user, result)
+                _revise(record, data, revised, user, result, revised_before)
             continue
         if record['scope_level'] != SCOPE_BUSINESS:
             record['scope_id'], record['scope_label'] = _resolve_scope(record['scope_level'], record['scope_label'])

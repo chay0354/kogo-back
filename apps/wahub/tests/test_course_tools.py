@@ -310,7 +310,7 @@ class TrialIsSaidAsTheClassCardSaysItTest(CourseToolsTestCase):
         knowledge_import.run()
         self.incoming('רוצה שיעור ניסיון בקפוארה בראש העין לבן 5')
         reply = shadow.propose(self.contact())
-        self.assertIn('שיעור ניסיון בעלות ₪30', reply.text)
+        self.assertIn('שיעור ניסיון בעלות *₪30*', reply.text)
         self.assertNotIn('ללא עלות', reply.text)
         self.incoming('ולבן 9? יש שיעור ניסיון בקפוארה בראש העין?', phone='972505550177')
         reply = shadow.propose(self.contact('972505550177'))
@@ -808,7 +808,7 @@ class ClaudeAsksTheNewToolsTest(CourseToolsTestCase):
         self.assertIn('− קיזוז שיעור ניסיון ששולם ₪30', reply.tools_used[2]['summary'])
 
         body = post.call_args_list[0].kwargs['json']
-        self.assertIn('תמיד מהכלים, אף פעם לא מהזיכרון או מהידע', body['system'])
+        self.assertIn('תמיד מהכלים, אף פעם לא מהזיכרון או מהידע', shadow.system_text(body))
         found = json.loads(post.call_args_list[1].kwargs['json']['messages'][2]['content'][0]['content'])
         self.assertEqual(found['courses'][0]['trial']['price'], '30.00')
         results = post.call_args_list[2].kwargs['json']['messages'][4]['content']

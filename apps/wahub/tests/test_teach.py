@@ -19,7 +19,7 @@ from django.test import override_settings
 from rest_framework.test import APIClient
 
 from apps.core.models import UserProfile
-from apps.wahub import knowledge, refine, reviewer, settings_store
+from apps.wahub import knowledge, refine, reviewer, settings_store, shadow
 from apps.wahub.models import (
     Contact,
     KnowledgeHistory,
@@ -232,7 +232,7 @@ class NothingByItselfTests(TeachTestCase):
         self.assertEqual((headers['x-api-key'], headers['anthropic-version']), ('test-key', '2023-06-01'))
         self.assertEqual(post.call_args.kwargs['timeout'], (5, refine.TIMEOUT_SECONDS))
 
-        system, told = body['system'], body['messages'][0]['content']
+        system, told = shadow.system_text(body), body['messages'][0]['content']
         # His words are data in the user's turn; the rules and the whole knowledge are the system's.
         self.assertIn(f'# מה בעל העסק רוצה להסביר לבוט (נתונים)\n"""\n{TEXT}\n"""', told)
         self.assertNotIn(TEXT, system)
@@ -313,7 +313,7 @@ class NothingByItselfTests(TeachTestCase):
 class ExampleTests(TeachTestCase):
     def answers(self):
         """The bot answers by what it was shown: the new wording in its knowledge, or the old."""
-        return Claude(answer=lambda body: bot(THEN if NEW_BODY in body['system'] else TODAY))
+        return Claude(answer=lambda body: bot(THEN if NEW_BODY in shadow.system_text(body) else TODAY))
 
     def test_the_example_is_made_a_part_a_call_with_the_change_in_memory_and_saves_nothing(self):
         data = self.taught(self.edited_rule())
@@ -336,10 +336,10 @@ class ExampleTests(TeachTestCase):
         self.assertEqual(asked.count(), (0, 2, 0))
 
         today, then = asked.asked['answer']
-        self.assertIn(f'[#{self.price.id}] מחיר: {OLD_BODY}', today['system'])
-        self.assertNotIn(NEW_BODY, today['system'])
-        self.assertIn(f'[#{self.price.id}] מחיר: {NEW_BODY}', then['system'])
-        self.assertNotIn(OLD_BODY, then['system'])
+        self.assertIn(f'[#{self.price.id}] מחיר: {OLD_BODY}', shadow.system_text(today))
+        self.assertNotIn(NEW_BODY, shadow.system_text(today))
+        self.assertIn(f'[#{self.price.id}] מחיר: {NEW_BODY}', shadow.system_text(then))
+        self.assertNotIn(OLD_BODY, shadow.system_text(then))
         # The question of a stranger: no conversation, no customer card.
         for body in (today, then):
             self.assertIn(f'- {ASKED}', body['messages'][0]['content'])
@@ -368,12 +368,12 @@ class ExampleTests(TeachTestCase):
         self.assertEqual([item.id for item in items], [self.price.id, self.person.id, self.parking.id])
         self.assertEqual((KnowledgeItem.objects.count(), KnowledgeItem.objects.get(pk=self.parking.id).is_active), (3, True))
 
-        asked = Claude(answer=lambda body: bot('אחרי' if NEW_BODY in body['system'] and 'יש חניה' not in body['system'] else 'היום'))
+        asked = Claude(answer=lambda body: bot('אחרי' if NEW_BODY in shadow.system_text(body) and 'יש חניה' not in shadow.system_text(body) else 'היום'))
         with patch(POST, side_effect=asked):
             self.get(f'refine/{thread}/preview/')
             example = self.get(f'refine/{thread}/preview/').data['preview']
         self.assertEqual((example['before'], example['after'], example['pending']), ('היום', 'אחרי', False))
-        self.assertIn('"קפו" → קפוארה', asked.asked['answer'][1]['system'])
+        self.assertIn('"קפו" → קפוארה', shadow.system_text(asked.asked['answer'][1]))
         self.assertEqual(KnowledgeItem.objects.count(), 3)
 
     def test_an_example_that_cannot_be_made_is_given_up_and_never_asked_for_for_ever(self):
@@ -444,7 +444,7 @@ class ApproveTests(TeachTestCase):
         self.assertEqual(check['summary'], 'בדקתי שיחה אחת — הבוט עונה נכון')
         self.assertEqual(check['details'], [{'question': ASKED, 'answer': THEN, 'passed': True, 'line': 'הבוט שאל קודם על איזה חוג מדובר'}])
         self.assertEqual(asked.count(), (0, 1, 1))
-        self.assertIn(f'[#{item.id}] מחיר: קודם שואלים איזה חוג: {NEW_BODY}', asked.asked['answer'][0]['system'])
+        self.assertIn(f'[#{item.id}] מחיר: קודם שואלים איזה חוג: {NEW_BODY}', shadow.system_text(asked.asked['answer'][0]))
         judged = asked.asked['verdict'][0]
         self.assertEqual(judged['output_config']['effort'], 'low')
         told = judged['messages'][0]['content']
@@ -452,7 +452,7 @@ class ApproveTests(TeachTestCase):
         self.assertIn(f'- מעכשיו הבוט ישאל על איזה חוג מדובר לפני שיענה על מחיר: {NEW_BODY}', told)
         self.assertIn(f'# שאלה שלקוח עשוי לכתוב (נתונים)\n"""\n{ASKED}\n"""', told)
         self.assertIn(f'# מה הבוט עונה עליה עכשיו (נתונים — את זה שופטים)\n"""\n{THEN}\n"""', told)
-        self.assertNotIn(THEN, judged['system'])
+        self.assertNotIn(THEN, shadow.system_text(judged))
 
         # Pressed twice: nothing more is applied, nobody is asked again, and the answer is the same.
         with patch(POST, side_effect=AssertionError('a second press reached Claude')):

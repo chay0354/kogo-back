@@ -196,6 +196,36 @@ class ChecksTests(SimpleTestCase):
         # The same things, returned by the tools or written in the knowledge, pass: ₪260 as "260 שקלים", a date of the knowledge.
         self.assertEqual(self.failed('יום שלישי 17:00, 260 שקלים לחודש, אפשר לבטל עד *01.04*'), {})
 
+    def test_listing_the_fields_to_choose_from_is_not_offering_a_class(self):
+        # From the first run against the real bot: a class is named "היפהופ", and the field it was listing is "היפהופ - מחול".
+        class Names(_Names):
+            courses = {'היפהופ', 'קפוארה גיל 4.5-6'}
+            fields = {'קפוארה', 'היפהופ - מחול'}
+
+        check = checks.offers_nothing()
+        asking = self.moment('באיזה תחום מדובר?\n🔹 קפוארה\n🔹 היפהופ - מחול', calls=(GATED,), catalog=Names(), customer_all='ראש העין')
+        self.assertEqual(check.test(asking), '')
+        # The class itself, offered before the field was chosen, is still an offer.
+        offering = self.moment('יש לנו את החוג קפוארה גיל 4.5-6, מתאים?', calls=(GATED,), catalog=Names(), customer_all='ראש העין')
+        self.assertIn('קפוארה גיל 4.5-6', check.test(offering))
+
+    def test_asking_which_city_is_not_the_campaigns_line(self):
+        # From the same run: "באיזו עיר אתם מחפשים חוג?" is a question anybody may be asked; the campaign's line opens with "מעולה".
+        self.assertNotIn('phrasing_in_place', self.failed('היי 🙂 באיזו עיר אתם מחפשים חוג?', calls=(GATED,), customer_all='פרטים', customer_now='פרטים'))
+        self.assertIn('phrasing_in_place', self.failed('מעולה, באיזו עיר אתם מחפשים חוג', calls=(GATED,), customer_all='פרטים', customer_now='פרטים'))
+
+    def test_nobody_is_addressed_as_a_man_or_a_woman_by_a_guess(self):
+        asked = dict(calls=(GATED,), customer_now='פרטים')
+        guess = self.failed('היי, תוכל לכתוב באיזו עיר?', customer_all='היי, אפשר פרטים על החוגים?', **asked)
+        self.assertIn('לשון זכר', guess['neutral_address'])
+        self.assertNotIn('neutral_address', self.failed('היי, באיזו עיר אתם?', customer_all='היי, אפשר פרטים על החוגים?', **asked))
+        # She said who she is: the masculine is a mistake, the feminine is not.
+        mother = 'היי אני מעוניינת בחוג לבת שלי'
+        self.assertIn('בלשון נקבה, והבוט פנה אליה בלשון זכר', self.failed('בשמחה, תוכל לכתוב באיזו עיר?', customer_all=mother, **asked)['neutral_address'])
+        self.assertNotIn('neutral_address', self.failed('בשמחה, תוכלי לכתוב באיזו עיר?', customer_all=mother, **asked))
+        # Words that only look like it: "לך", "את", a class that is "רשום" in the system's own line are not an address.
+        self.assertNotIn('neutral_address', self.failed('שולחת לך את הקישור', customer_all='היי', **asked))
+
     def test_a_weekday_word_that_is_not_a_day(self):
         self.assertEqual(self.failed('לילד שני במשפחה יש הנחה, והתשלום הראשון יורד'), {})
         self.assertEqual(checks.days_in('ביום שלישי ורביעי, וגם ראשון 16:00'), ['שלישי', 'רביעי', 'ראשון'])
@@ -519,12 +549,12 @@ class ClaudeRunTests(EvalTestCase):
         ask = {**self.HERE, 'course_type': 'היפ הופ', 'age': 5}
         price = lambda found: f'המחיר ₪{found["courses"][0]["price_monthly"].split(".")[0]} לחודש'       # noqa: E731
         run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', price))
-        self.assertEqual((run.status, run.turns[0]['reply']), ('passed', 'המחיר ₪250 לחודש'))
+        self.assertEqual((run.status, run.turns[0]['reply']), ('passed', 'המחיר *₪250* לחודש'))
         course = self.rows['young_hip_hop']
         course.price = Decimal('310.00')
         course.save(update_fields=['price'])
         run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', price))
-        self.assertEqual((run.status, run.turns[0]['reply']), ('passed', 'המחיר ₪310 לחודש'))
+        self.assertEqual((run.status, run.turns[0]['reply']), ('passed', 'המחיר *₪310* לחודש'))
         # A bot that says yesterday's price fails on both counts: not what the system holds, and not what any tool returned.
         run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', 'המחיר ₪250 לחודש'))
         self.assertEqual(self.failed(run), {'grounded_amounts', 'says_amount:main.price_monthly'})

@@ -116,7 +116,7 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 וכך גם כל פרט אחר על חוג, תחום, יום, שעה, תאריך, כתובת או סניף: רק ממה שהכלים מחזירים עכשיו, ולא מהשיחה — גם אם הבוט הישן או נציג כתבו קודם משהו אחר. \
 לכל הפרטים של חוג אחד — course_card; למדריך — instructor_info; לסניף — branch_info. \
 פרט שתלוי בחוג (מה להביא, עלות, שעה) כשעוד לא ידוע איזה חוג — קודם מבררים איזה חוג. \
-פרט שלא חזר מהכלי — אין אותו, ואומרים את הנוסח missing_info, ורק אחרי שהכלי באמת לא החזיר אותו. כשלא בטוחים — שואלים או מעבירים לנציג, לא מנחשים.
+פרט שלא חזר מהכלי — אין אותו: אומרים את הנוסח missing_info (שבודקים מול המשרד ושיחזרו עם תשובה) ומסמנים לנציג עם request_human והשאלה — ורק אחרי שהכלי באמת לא החזיר אותו. כשלא בטוחים — שואלים או מעבירים לנציג, לא מנחשים.
 2. כל חוג עומד בפני עצמו: מחיר, ניסיון, דמי רישום, יום, שעה ומדריך נאמרים רק מהרשומה של אותו חוג. \
 לא מעבירים פרט מחוג אחד לאחר, ולא אומרים על הסניף כולו מה שנכון לחוג אחד. \
 שיעור ניסיון נקבע לכל חוג בנפרד — trial.is_paid=false: ללא עלות; true: המחיר וכלל הקיזוז. \
@@ -139,7 +139,9 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 ונוסח נאמר רק במצב שכתוב לצידו ("מתי") — לא במצב אחר. \
 כלל או נושא למטה שסותר את סדר השיחה או את מה שכתוב כאן — מה שכאן גובר.
 13. בלי נקודה בסוף משפט, ₪ לפני המספר, כוכבית אחת להדגשה עם רווח לפניה, 🔹 לכל פריט ברשימה, קישורים עם https:// מלא, עברית בלבד. \
-1–3 שורות (נוסח "מילה במילה" נאמר כמו שהוא), שאלה אחת בכל פעם, אימוג׳י אחד לכל היותר.
+1–3 שורות (נוסח "מילה במילה" נאמר כמו שהוא), שאלה אחת בכל פעם, אימוג׳י אחד לכל היותר. \
+נושא אחד בכל הודעה — מה שנשאל; רשימה עד 4 פריטים, ויותר מזה שואלים שאלה שמצמצמת; לא מביאים את כל המידע בבת אחת. \
+הודעה שנוח לקרוא: כל עובדה בשורה משלה, והעיקר בה מודגש (שם החוג, יום ושעה, מחיר) — הדגשה אחת בשורה, לא הכול; קישור תמיד בשורה משלו אחרי 🔗; שורה ריקה בין התשובה לבין הצעד הבא.
 
 הפלט הסופי: JSON בלבד לפי הסכמה — text (ההודעה ללקוח), reasoning (למה ככה, בעברית פשוטה, 2–4 שורות, עם [#id] של הרשומות ששימשו), knowledge_ids.
 """
@@ -169,6 +171,10 @@ _KINDERGARTEN = re.compile(r'גן חובה|טרום חובה|טרום-חובה')
 # "ב-17:00, ₪260" was rewritten to "17:₪00,260" until 12.10.2026 (the minutes of the hour were taken for the amount).
 _SHEKEL_AFTER = re.compile(r'(?<![\d:.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s?₪(?!\s?\d)')
 _TRAILING_DOT = re.compile(r'(?<!\.)\.(?=\s*$)', re.M)
+# A sum of money as the customer reads it, and a link up to the punctuation that only follows it.
+_AMOUNT = re.compile(r'₪\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?')
+_LINK = re.compile(r'https?://\S+?(?=[.,;:!?)\]]*(?:\s|$))')
+LINK_MARKS = ('🔗', '➡️', '➡', '👇')
 # A business's automatic answer to a broadcast: it says so itself, or it thanks for "your message" and promises to return.
 # Read strictly — a customer nobody answers is worse than an answer to a machine.
 _AUTOMATIC = re.compile(r'הודעה אוטומטית|מענה אוטומטי|תשובה אוטומטית|automatic reply|auto[- ]?reply', re.I)
@@ -334,12 +340,55 @@ def build_context(contact: Contact | None, *, targets: list, now=None, last_outb
 # --- style, enforced in code ------------------------------------------------------------------------
 
 def polish(text: str) -> str:
-    """The style rules nobody should have to remember: ₪ first, one asterisk, no final period."""
+    """
+    The style rules nobody should have to remember: ₪ first, one asterisk, no
+    final period — and what makes a message easy on the customer's eye (owner,
+    12.10.2026): every sum in bold, every link on a line of its own after 🔗.
+    """
     text = (text or '').replace('**', '*')
     text = _SHEKEL_AFTER.sub(r'₪\1', text)
+    text = _bold_amounts(text)
+    text = _links_stand_out(text)
     text = _space_before_opening_asterisk(text)
     text = _TRAILING_DOT.sub('', text)
     return text.strip()
+
+
+def _bold_amounts(text: str) -> str:
+    """₪235 → *₪235*, wherever it is not in bold already. Asterisks alternate open/close per line."""
+    out = []
+    for line in text.split('\n'):
+        parts = line.split('*')
+        if len(parts) % 2 == 0:
+            out.append(line)             # an asterisk with no partner: the line is left as it came
+            continue
+        parts[::2] = [_AMOUNT.sub(r'*\g<0>*', part) for part in parts[::2]]
+        out.append('*'.join(parts))
+    return '\n'.join(out)
+
+
+def _links_stand_out(text: str) -> str:
+    """A link stands on a line of its own, after 🔗 — unless the line already marks it (🔗, ➡️, 👇)."""
+    out = []
+    for line in text.split('\n'):
+        rest = line
+        while True:
+            match = _LINK.search(rest)
+            if not match:
+                if rest.strip() or rest == line:
+                    out.append(rest if rest == line else rest.strip())
+                break
+            before, url = rest[:match.start()].rstrip(), match.group(0)
+            rest = rest[match.end():].lstrip('.,;:!?)]').strip()
+            if before.endswith(LINK_MARKS):
+                out.append(f'{before} {url}')
+            else:
+                if before:
+                    out.append(before)
+                out.append(f'🔗 {url}')
+            if not rest:
+                break
+    return '\n'.join(out)
 
 
 def _space_before_opening_asterisk(text: str) -> str:
@@ -455,7 +504,7 @@ def _stub(ctx: Context) -> Draft:
         return None
 
     def missing() -> str:
-        return say('missing_info') or f'אין לי את הפרט הזה כרגע, אפשר לבדוק במשרד 📞 {office_phone}'.rstrip(' 📞')
+        return say('missing_info') or 'את זה אני בודקת מול המשרד, ונחזור אליכם עם תשובה'
 
     name = (ctx.contact.name.split(' ')[0] if ctx.contact and ctx.contact.name else '')
     merged = '\n'.join(target.text for target in ctx.targets if target.text).strip()
@@ -775,6 +824,34 @@ def _user_content(ctx: Context):
     return [{'type': 'text', 'text': text}, *blocks]
 
 
+def _for_the_cache(system: str):
+    """
+    The system text — the task and the whole knowledge — is the same from one
+    call to the next. Sent as one block marked for Anthropic's prompt cache, the
+    next call within five minutes (the next tool round, the next customer, the
+    next test conversation) reads it at a tenth of the price and answers sooner.
+    WAHUB_SHADOW_PROMPT_CACHE=0 sends it as plain text, as before.
+    """
+    if not getattr(settings, 'WAHUB_SHADOW_PROMPT_CACHE', True):
+        return system
+    return [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}]
+
+
+def system_text(body: dict) -> str:
+    """The system text of a request to Claude, whichever way it was sent."""
+    system = body.get('system')
+    if isinstance(system, str):
+        return system
+    return ''.join(block.get('text', '') for block in system or [] if isinstance(block, dict))
+
+
+def _error_of(response) -> str:
+    try:
+        return str((response.json().get('error') or {}).get('message', ''))[:200]
+    except (ValueError, AttributeError):
+        return ''
+
+
 def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = None, effort: str | None = None,
             superseded=None) -> Draft:
     from apps.core.scoping import integration_credential
@@ -791,7 +868,7 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
         # A ceiling, not a spend: thinking counts toward it. The live test lowers it
         # (docs/WAHUB-CONTRACT-LIVE-TEST.md): a customer is waiting for the answer.
         'max_tokens': int(max_tokens or DEFAULT_MAX_TOKENS),
-        'system': system,
+        'system': _for_the_cache(system),
         'tools': TOOLS,
         'tool_choice': {'type': 'auto'},
         'messages': messages,
@@ -816,15 +893,15 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
                 raise ShadowModelError('נגמר הזמן של הקריאה')
         try:
             response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
+            if response.status_code == 400 and not isinstance(body['system'], str):
+                # The mark for the cache was refused: the same request goes again as plain text, and from here on.
+                logger.warning('wahub shadow: Claude refused the cached system text (%s); sent again without it', _error_of(response))
+                body['system'] = system
+                response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
         except requests.RequestException as exc:
             raise ShadowModelError(f'Claude לא ענה ({type(exc).__name__})') from exc
         if response.status_code != 200:
-            detail = ''
-            try:
-                detail = (response.json().get('error') or {}).get('message', '')[:200]
-            except ValueError:
-                pass
-            logger.warning('wahub shadow: Claude answered %s %s', response.status_code, detail)
+            logger.warning('wahub shadow: Claude answered %s %s', response.status_code, _error_of(response))
             raise ShadowModelError(f'Claude ענה {response.status_code}')
         try:
             payload = response.json()
@@ -833,6 +910,13 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
         served_model = payload.get('model') or served_model
         stop = payload.get('stop_reason')
         content = payload.get('content') or []
+        usage = payload.get('usage') if isinstance(payload.get('usage'), dict) else {}
+        if usage.get('cache_read_input_tokens') or usage.get('cache_creation_input_tokens'):
+            logger.info(
+                'wahub shadow: round %s — %s tokens read from the cache, %s written to it, %s sent in full',
+                _round + 1, usage.get('cache_read_input_tokens') or 0, usage.get('cache_creation_input_tokens') or 0,
+                usage.get('input_tokens') or 0,
+            )
         if stop == 'refusal':
             raise ShadowModelError('Claude סירב לענות')
         if stop == 'max_tokens':

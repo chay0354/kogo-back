@@ -5,6 +5,7 @@ ends a conversation, what a customer's card says, the marks a topic leaves —
 and the knowledge the audit rewrote, reaching the rows nobody touched.
 """
 import json
+import re
 from datetime import timedelta
 from decimal import Decimal
 
@@ -24,13 +25,16 @@ HERE = 'ראש העין'
 
 class PolishTests(SimpleTestCase):
     def test_the_shekel_sign_moves_only_from_behind_its_own_number(self):
-        self.assertEqual(shadow.polish('המחיר 260₪ לחודש'), 'המחיר ₪260 לחודש')
-        self.assertEqual(shadow.polish('המחיר 1,200 ₪'), 'המחיר ₪1,200')
-        self.assertEqual(shadow.polish('המחיר 187.50₪'), 'המחיר ₪187.50')
+        # (Every sum also comes out in bold — owner, 12.10.2026.)
+        self.assertEqual(shadow.polish('המחיר 260₪ לחודש'), 'המחיר *₪260* לחודש')
+        self.assertEqual(shadow.polish('המחיר 1,200 ₪'), 'המחיר *₪1,200*')
+        self.assertEqual(shadow.polish('המחיר 187.50₪'), 'המחיר *₪187.50*')
         # The minutes of an hour are not an amount: this was sent as "17:₪00,260".
-        self.assertEqual(shadow.polish('יום שלישי ב-17:00, ₪260 לחודש'), 'יום שלישי ב-17:00, ₪260 לחודש')
-        self.assertEqual(shadow.polish('🔹 16:30–17:15 ₪250'), '🔹 16:30–17:15 ₪250')
-        self.assertEqual(shadow.polish('₪260 לחודש, דמי רישום ₪120.'), '₪260 לחודש, דמי רישום ₪120')
+        self.assertEqual(shadow.polish('יום שלישי ב-17:00, ₪260 לחודש'), 'יום שלישי ב-17:00, *₪260* לחודש')
+        self.assertEqual(shadow.polish('🔹 16:30–17:15 ₪250'), '🔹 16:30–17:15 *₪250*')
+        # The comma or the period after a sum stays outside the bold.
+        self.assertEqual(shadow.polish('₪260 לחודש, דמי רישום ₪120.'), '*₪260* לחודש, דמי רישום *₪120*')
+        self.assertEqual(shadow.polish('בעלות ₪30, נרשמים מראש'), 'בעלות *₪30*, נרשמים מראש')
 
 
 @override_settings(ANTHROPIC_API_KEY='', REGISTRATION_FEE_ILS=120)
@@ -45,7 +49,8 @@ class OrderOfTheConversationTests(WahubTestCase):
         return run_tool('find_courses', arguments, ToolContext())
 
     def assert_no_class(self, result):
-        text = json.dumps(result, ensure_ascii=False)
+        # Without the ids: a branch's random id may hold "260" by chance.
+        text = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '', json.dumps(result, ensure_ascii=False))
         self.assertEqual((result['courses'], result['more_courses']), ([], []))
         for word in ('price_monthly', 'trial', 'lessons', 'registration_fee', '260', '250', '17:00', '16:30', 'אורי', 'נועה'):
             self.assertNotIn(word, text)
@@ -299,7 +304,7 @@ class AutomaticReplyTests(WahubTestCase):
         Message.objects.filter(contact=contact).update(sent_at=timezone.now() - timedelta(minutes=30))
         self.incoming('היי')
         reply = shadow.propose(self.contact())
-        self.assertEqual(reply.text, 'היי, במה אוכל לעזור?')
+        self.assertEqual(reply.text, 'היי במה אוכל לעזור')
         self.assertEqual(len(reply.covers_message_ids), 1)
 
     def test_an_automatic_line_beside_a_real_question_is_answered(self):
