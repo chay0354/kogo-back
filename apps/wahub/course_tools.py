@@ -17,23 +17,31 @@ invoice, no card. Every function here only reads.
 (apps/courses/age_groups.py). The bot is told a child's age in years, so every
 comparison goes through that scale, and a class is described by its group in
 words ("גיל 4.5-6", "כיתות ג–ד") with the years beside it.
+
+The dates a trial lesson can be booked on are the form's, exactly: the ones a
+parent would find in its date picker now and could book (apps/wahub/trial_offer.py).
+A date that is full is said to be full, a date the form skips is not offered,
+and when there is none the answer says so in words — with the sentence ready,
+so that the bot puts no date together by itself.
 """
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.utils import timezone
 
 from apps.courses import age_groups
+from apps.wahub import trial_offer
+from apps.wahub.trial_offer import Seats  # noqa: F401 — the seats of a set of classes are built from here
 
 DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
 MONTH_NAMES = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר']
 STATUS_LABELS = {'scheduled': 'מתוכנן', 'completed': 'הושלם', 'cancelled': 'בוטל'}
 
-CARD_DATES = 3          # the dates the form's trial picker offers
-LIST_DATES = 2
+LIST_DATES = 3          # the trial dates a class of a list spells out: the nearest ones
+SENTENCE_DATES = 3      # the dates the ready sentence names
 MAX_INSTRUCTORS = 5
 MAX_INSTRUCTOR_NAMES = 40
 SHORT_DESCRIPTION = 280
@@ -50,6 +58,48 @@ TRIAL_WHEN_ASKED = (
 REGISTRATION_FEE_NOTE = 'דמי רישום נגבים פעם אחת לכל ילד, בהרשמה הראשונה שלו; ילד שכבר משלם על חוג לא משלם אותם שוב'
 HIDDEN_NOTE = 'החוג לא מוצג בהרשמה באתר, ואי אפשר להירשם אליו משם. לא מציעים אותו; מפנים למשרד'
 NOT_OPEN = 'חוג זה אינו פתוח להרשמה'
+
+# The one rule about trial dates, said with every answer that carries them.
+TRIAL_DATES_RULE = (
+    'תאריך לשיעור ניסיון נאמר רק מתוך trial.dates של החוג: אלה התאריכים שהאתר מציע עכשיו, ו-trial.dates_text הוא המשפט המוכן — אפשר לצטט אותו כמו שהוא. '
+    'לא מציעים תאריך אחר ולא מחשבים תאריך לבד (גם לא "השבוע", "מחר" או "בשבוע הבא"): מה שלא ברשימה, אי אפשר להירשם אליו. '
+    'תאריך שב-trial.full_dates מלא, ותאריך שב-trial.not_offered לא פתוח לניסיון — לא מציעים אותם; אם שואלים עליהם, אומרים זאת. '
+    'trial.can_book=false: אין כרגע תאריך להציע — אומרים את trial.dates_text, לא ממציאים תאריך ולא מבטיחים מקום.'
+)
+# Why no trial date can be booked, as a customer is told it.
+NO_TRIAL_DATE = 'אין כרגע תאריך פנוי לשיעור ניסיון בחוג הזה'
+NO_TRIAL_WORDS = {
+    trial_offer.HIDDEN: 'החוג הזה לא פתוח להרשמה באתר, גם לא לשיעור ניסיון',
+    trial_offer.EXTERNAL_LINK: 'ההרשמה לחוג הזה, גם לשיעור ניסיון, נעשית בקישור של החוג ולא באתר שלנו',
+    trial_offer.NO_LESSONS: 'לחוג הזה אין כרגע מועדים באתר, ולכן אין תאריך לשיעור ניסיון',
+    trial_offer.NO_PRICE: 'כרגע אי אפשר להירשם באתר לשיעור ניסיון בחוג הזה, צריך לבדוק במשרד',
+    trial_offer.CLOSED: 'ההרשמה לשיעור ניסיון בחוג הזה סגורה כרגע',
+    trial_offer.CLASS_FULL: 'החוג מלא כרגע, ולכן אי אפשר להירשם אליו באתר — גם לא לשיעור ניסיון',
+    trial_offer.TRIAL_FULL: 'כל התאריכים הקרובים לשיעור ניסיון מלאים',
+    trial_offer.NO_DATES: NO_TRIAL_DATE,
+    trial_offer.STARTED: 'השיעור של היום כבר התחיל, ואין כרגע תאריך נוסף פתוח לשיעור ניסיון',
+}
+# The same, of one lesson of a class that has several.
+LESSON_TRIAL_WORDS = {
+    '': 'אפשר להירשם לניסיון',
+    trial_offer.HIDDEN: 'לא פתוח להרשמה באתר',
+    trial_offer.EXTERNAL_LINK: 'ההרשמה בקישור של החוג',
+    trial_offer.NO_LESSONS: 'אין מועד באתר',
+    trial_offer.NO_PRICE: 'אי אפשר להירשם לניסיון באתר — לבדוק במשרד',
+    trial_offer.CLOSED: 'ההרשמה לניסיון סגורה',
+    trial_offer.CLASS_FULL: 'המועד מלא',
+    trial_offer.TRACK_FULL: 'המסלול מלא (אחד מהימים שלו מלא)',
+    trial_offer.TRIAL_FULL: 'מלא לניסיון בתאריכים הקרובים',
+    trial_offer.NO_DATES: 'אין תאריך קרוב לניסיון',
+    trial_offer.STARTED: 'השיעור של היום כבר התחיל',
+    trial_offer.TRACK_ONLY: 'נרשמים רק דרך מסלול משולב',
+    trial_offer.MIXED: 'אין תאריך פנוי לניסיון',
+}
+SKIP_WORDS = {
+    trial_offer.SKIP_CANCELLED: 'השיעור בתאריך הזה בוטל',
+    trial_offer.SKIP_BLOCKED: 'אין שיעורי ניסיון בתאריך הזה',
+    trial_offer.SKIP_STARTED: 'השיעור של היום כבר התחיל',
+}
 
 
 def today_of(ctx) -> date:
@@ -74,6 +124,20 @@ def _shekels(value) -> str:
 
 def _day(value: date) -> str:
     return value.strftime('%d.%m.%Y')
+
+
+def _short_day(value: date) -> str:
+    """ "13.10" — a date as it is written to a customer."""
+    return value.strftime('%d.%m')
+
+
+def _weekday(value: date) -> str:
+    return DAY_NAMES[(value.weekday() + 1) % 7]
+
+
+def _today(seats: Seats) -> date:
+    """The day the seats were counted on: the conversation's, or today."""
+    return (seats.now or timezone.localtime()).date()
 
 
 def _short(text, limit: int) -> str:
@@ -104,37 +168,11 @@ def with_lessons(queryset):
     )
 
 
-class Seats:
-    """Who sits where, for a set of courses: the form's own counts, fetched once for all their lessons."""
-
-    def __init__(self, courses):
-        from apps.customers.widget_views import (
-            _batch_occurrence_context,
-            _batch_paying_enrollment_counts,
-            _batch_upcoming_trial_counts,
-        )
-        from apps.enrollments.trial_policy import trials_open_by_default
-
-        lesson_ids = [lesson.id for course in courses for lesson in course.lessons.all()]
-        self.enrolled = _batch_paying_enrollment_counts(lesson_ids)
-        self.trials = _batch_upcoming_trial_counts(lesson_ids)
-        self.occurrences = _batch_occurrence_context(lesson_ids)
-        self.trials_default = trials_open_by_default()
-
-
 # --- one lesson, one class -----------------------------------------------------------------------------
 
-def lesson_payload(lesson, course, seats: Seats, *, dates: int, detail: bool = False) -> dict:
-    """A weekly lesson: when, with whom, how full, and its coming dates."""
-    from apps.customers.widget_views import _lesson_widget_capacity, trial_seats_by_date
-    from apps.enrollments.trial_policy import trial_registration_open_for
-
-    cap = _lesson_widget_capacity(lesson, course, seats.enrolled, seats.trials, seats.occurrences)
-    cancelled, blocked = seats.occurrences
-    coming = trial_seats_by_date(
-        lesson, cap['capacity'], cap['enrolled_count'], seats.trials.get(lesson.id, {}),
-        cancelled=cancelled.get(lesson.id, set()), blocked=blocked.get(lesson.id), count=dates,
-    )
+def lesson_payload(lesson, course, seats: Seats, *, offer=None, detail: bool = False) -> dict:
+    """A weekly lesson: when, with whom, how full, and — with the class's `offer` — the dates a trial can be booked on."""
+    cap = seats.cap(lesson, course)
     payload = {
         'id': str(lesson.id),
         # Whose lesson this is, on the lesson itself: a day or an hour lifted out of here still says its class.
@@ -147,11 +185,14 @@ def lesson_payload(lesson, course, seats: Seats, *, dates: int, detail: bool = F
         'enrolled': cap['enrolled_count'],
         'seats_left': cap['available_spots'],
         'is_full': cap['is_full'],
-        'trial_open': trial_registration_open_for(lesson, default=seats.trials_default),
+        'trial_open': seats.trial_open(lesson),
         'trial_is_full': cap['trial_is_full'],
         'trial_seats_left': cap['trial_spots_left'],
-        'next_dates': [{'date': _day(day), 'trial_seats_left': left} for day, left in coming],
     }
+    if offer is not None:
+        # In words, whether a trial can be booked on this day of the class — and on which dates. Only those.
+        payload['trial_status'] = LESSON_TRIAL_WORDS.get(offer.by_lesson.get(lesson.id, ''), NO_TRIAL_DATE)
+        payload['trial_dates'] = [_day(slot.day) for slot in offer.open if slot.lesson.id == lesson.id]
     if lesson.status != 'scheduled' or detail:
         payload['status'] = STATUS_LABELS.get(lesson.status, lesson.status)
     if not lesson.is_recurring:
@@ -181,12 +222,80 @@ def _second_class_price(lesson, course):
     return price if tiered else None
 
 
-def trial_payload(course, lessons: list) -> dict:
+def _when(day: date, today: date) -> str:
+    """ "היום", "מחר" — said beside a date so that nobody has to count days."""
+    return {0: 'היום', 1: 'מחר'}.get((day - today).days, '')
+
+
+def _this_week(day: date, today: date) -> bool:
+    """The same week, Sunday to Saturday, as today."""
+    first = today - timedelta(days=(today.weekday() + 1) % 7)
+    return first <= day < first + timedelta(days=7)
+
+
+def _dated(slot, today: date) -> str:
+    """ "13.10 (מחר)" """
+    when = _when(slot.day, today)
+    return _short_day(slot.day) + (f' ({when})' if when else '')
+
+
+def _join(parts: list) -> str:
+    return parts[0] if len(parts) == 1 else ', '.join(parts[:-1]) + ' או ' + parts[-1]
+
+
+def trial_dates_text(offer, today: date) -> str:
+    """
+    The sentence a customer is told about when a trial can be booked — ready,
+    so that no date is put together by the bot: the nearest dates the form
+    offers, or in plain words that there is none now.
+    """
+    slots = offer.open[:SENTENCE_DATES]
+    if not slots:
+        text = NO_TRIAL_WORDS.get(offer.reason, NO_TRIAL_DATE)
+        if offer.reason == trial_offer.TRIAL_FULL and offer.full:
+            text += f' ({", ".join(dict.fromkeys(_short_day(slot.day) for slot in offer.full))})'
+        return text
+    if len({slot.lesson.id for slot in slots}) == 1:
+        lesson = slots[0].lesson
+        hour = str(lesson.start_time)[:5]
+        if len(slots) == 1:
+            return f'אפשר להגיע לשיעור ניסיון ביום {_weekday(slots[0].day)} {_dated(slots[0], today)} בשעה {hour}'
+        return (
+            f'אפשר להגיע לשיעור ניסיון ביום {_weekday(slots[0].day)} בשעה {hour}, '
+            f'בתאריכים {_join([_dated(slot, today) for slot in slots])}'
+        )
+    return 'אפשר להגיע לשיעור ניסיון ' + _join([
+        f'ביום {_weekday(slot.day)} {_dated(slot, today)} בשעה {str(slot.lesson.start_time)[:5]}' for slot in slots
+    ])
+
+
+def _slot_row(slot, today: date, *, detail: bool) -> dict:
+    row = {
+        'date': _day(slot.day),
+        'day': _weekday(slot.day),
+        'start': str(slot.lesson.start_time)[:5],
+        'this_week': _this_week(slot.day, today),
+        'trial_seats_left': slot.seats_left,
+    }
+    when = _when(slot.day, today)
+    if when:
+        row['when'] = when
+    if detail:
+        # Which of the class's lessons the date belongs to — the card of one class says it; a list is kept light.
+        row['end'] = str(slot.lesson.end_time)[:5]
+        row['lesson_id'] = str(slot.lesson.id)
+    return row
+
+
+def trial_payload(course, lessons: list, offer=None, *, today: date | None = None, limit: int | None = None) -> dict:
     """
     The trial lesson of a class as the form shows it: paid or not and for how
     much come from the course's own card (`trial_lesson_is_paid`,
     `trial_lesson_price`) and from nowhere else — the form reads the same two
-    fields (widget_views.WidgetTrialRegisterView, the catalogue payload).
+    fields (widget_views.WidgetTrialRegisterView, the catalogue payload). With
+    the class's `offer`, also the dates a trial can be booked on now: `dates`
+    are the ones the form lets a parent choose, `full_dates` the ones it shows
+    as "מלא", `not_offered` the ones it skips, and `dates_text` the sentence.
     """
     from apps.customers.trial_credit import credit_rule
 
@@ -200,7 +309,7 @@ def trial_payload(course, lessons: list) -> dict:
     else:
         text = TRIAL_NO_PRICE
     is_open = any(lesson['trial_open'] for lesson in lessons)
-    return {
+    payload = {
         # Whose trial this is: one class's trial is never the next class's, nor the branch's.
         'course': course.name,
         'is_paid': is_paid,
@@ -213,9 +322,31 @@ def trial_payload(course, lessons: list) -> dict:
         'open': is_open,
         'full': bool(is_open and all(lesson['trial_is_full'] for lesson in lessons if lesson['trial_open'])),
     }
+    if offer is None:
+        return payload
+    today = today or timezone.localtime().date()
+    shown = offer.open if limit is None else offer.open[:limit]
+    payload['can_book'] = offer.can_book
+    payload['dates'] = [_slot_row(slot, today, detail=limit is None) for slot in shown]
+    if len(offer.open) > len(shown):
+        payload['more_dates'] = len(offer.open) - len(shown)      # the card of the class has them all
+    if offer.full:
+        payload['full_dates'] = [
+            {'date': _day(slot.day), 'day': _weekday(slot.day), 'start': str(slot.lesson.start_time)[:5]} for slot in offer.full
+        ]
+    if offer.skipped:
+        payload['not_offered'] = [
+            {
+                'date': _day(skip.day), 'day': _weekday(skip.day), 'start': str(skip.lesson.start_time)[:5],
+                'why': SKIP_WORDS[skip.why] + (f' ({skip.reason})' if skip.reason else ''),
+            }
+            for skip in offer.skipped
+        ]
+    payload['dates_text'] = trial_dates_text(offer, today)
+    return payload
 
 
-def track_payloads(course) -> list:
+def track_payloads(course, seats: Seats | None = None) -> list:
     """The combined tracks (twice a week and the like) the form offers for the class, with their monthly price."""
     from apps.core.payment_service import bundle_monthly_price
     from apps.courses.bundles import catalog_bundles_for_course
@@ -227,6 +358,8 @@ def track_payloads(course) -> list:
             'id': str(bundle.id),
             'name': bundle.name or 'מסלול משולב',
             'price_monthly': _money(bundle_monthly_price(bundle)),
+            # As the form has it: a track is full when one of its days is.
+            **({'is_full': any(seats.cap(member, course)['is_full'] for member in members)} if seats is not None else {}),
             'lessons': [
                 f'{DAY_NAMES[member.day_of_week]} {str(member.start_time)[:5]}–{str(member.end_time)[:5]}'
                 for member in members if 0 <= member.day_of_week < 7
@@ -240,10 +373,8 @@ def course_payload(course, seats: Seats, *, detail: bool = False) -> dict:
     """A class as the bot may describe it. `detail` adds what only the card of one class carries."""
     from apps.core.payment_service import registration_fee_amount
 
-    lessons = [
-        lesson_payload(lesson, course, seats, dates=CARD_DATES if detail else LIST_DATES, detail=detail)
-        for lesson in course.lessons.all()
-    ]
+    offer = trial_offer.for_course(course, seats)
+    lessons = [lesson_payload(lesson, course, seats, offer=offer, detail=detail) for lesson in course.lessons.all()]
     youngest, oldest = age_groups.years_range(course.min_age, course.max_age)
     description = course.description or (course.course_type.description if course.course_type_id else '') or ''
     payload = {
@@ -261,17 +392,18 @@ def course_payload(course, seats: Seats, *, detail: bool = False) -> dict:
         'must_attend_all_lessons': course.must_attend_all_lessons,
         'price_monthly': _money(course.price),
         'registration_fee': _money(registration_fee_amount(course)),
-        'trial': trial_payload(course, lessons),
+        'trial': trial_payload(course, lessons, offer, today=_today(seats), limit=None if detail else LIST_DATES),
         'external_link': course.external_link or '',
         'lessons': lessons,
-        'tracks': track_payloads(course),
+        'tracks': track_payloads(course, seats),
     }
     if detail:
         payload['course_type_description'] = (course.course_type.description if course.course_type_id else '') or ''
         payload['registration_fee_note'] = REGISTRATION_FEE_NOTE
         payload['standing_order_starts_at_once'] = course.charge_standing_order_immediately
         payload['show_in_widget'] = course.show_in_widget
-        if not course.show_in_widget:
+        # A class of a field the office switched off is not on the form either.
+        if not trial_offer.in_catalogue(course):
             payload['note'] = HIDDEN_NOTE
     return payload
 
@@ -441,6 +573,33 @@ def _courses_by_name(ctx, *, name: str, branch: str, city: str) -> list:
     return exact or rows
 
 
+def _family_and_a_trial(ctx, course) -> list:
+    """
+    What the form would answer the family that writes, were they to book a
+    trial in this class: it books first trials only, and not for a child who
+    is already in the class (widget_views._repeat_trial_response,
+    _already_registered_response). Said so that the bot does not send them to
+    a form that will refuse them. Only of the contact's own children.
+    """
+    contact = getattr(ctx, 'contact', None)
+    ids = list(getattr(contact, 'kogo_child_ids', None) or []) if contact is not None else []
+    if not ids:
+        return []
+    from apps.core.payment_service import child_already_registered_for_lessons
+    from apps.customers.models import Child
+    from apps.enrollments.repeat_trial import child_had_trial
+
+    lessons = list(course.lessons.all())
+    notes = []
+    for child in Child.objects.filter(id__in=ids).order_by('first_name'):
+        name = (child.first_name or '').strip() or 'הילד'
+        if child_already_registered_for_lessons(child, lessons):
+            notes.append(f'{name} כבר רשום לחוג הזה — האתר לא ירשום אותו אליו שוב, גם לא לשיעור ניסיון')
+        elif child_had_trial(child):
+            notes.append(f'ל{name} כבר היה שיעור ניסיון — האתר רושם לניסיון ראשון בלבד; ניסיון נוסף מתאמים מול המשרד')
+    return notes
+
+
 def course_card(ctx, *, course_id: str = '', name: str = '', branch: str = '', city: str = '') -> dict:
     """Everything the system holds about one class that a parent may hear."""
     from apps.courses.models import Course
@@ -467,13 +626,17 @@ def course_card(ctx, *, course_id: str = '', name: str = '', branch: str = '', c
     course = with_lessons(Course.objects.filter(id=matches[0].id)).get()
     if course.branch.is_external:
         return _external_answer(course)
-    payload = course_payload(course, Seats([course]), detail=True)
+    payload = course_payload(course, Seats([course], now=getattr(ctx, 'now', None)), detail=True)
+    family = _family_and_a_trial(ctx, course)
+    if family:
+        payload['trial']['for_this_customer'] = family
     return {
         'found': True,
         'course': payload,
         'branch': shadow_tools._branch_payload(course.branch),
         'discounts_available': discounts_available(today_of(ctx)),
         'note': TRIAL_PER_COURSE,
+        'trial_dates_rule': TRIAL_DATES_RULE,
     }
 
 
@@ -659,9 +822,9 @@ def quote_registration(
     if credit > 0:
         breakdown.append({'label': 'קיזוז שיעור ניסיון ששולם', 'amount': _money(-credit)})
 
-    seats = Seats([course])
+    seats = Seats([course], now=getattr(ctx, 'now', None))
     members = list(bundle.lessons.all()) if bundle is not None else [lesson]
-    lesson_rows = [lesson_payload(row, course, seats, dates=1) for row in members]
+    lesson_rows = [lesson_payload(row, course, seats) for row in members]
     if any(row['is_full'] for row in lesson_rows):
         notes.append('השיעור מלא כרגע — אי אפשר להירשם אליו באתר; אפשר להציע מועד אחר או להפנות למשרד')
     grade_codes = age_groups.codes_for_grade(grade)

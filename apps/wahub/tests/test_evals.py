@@ -93,6 +93,7 @@ class ScriptsTests(SimpleTestCase):
         'place', 'field', 'child', 'course', 'instructor', 'paid_field', 'paid_child', 'free_field', 'free_child', 'second_field',
         'second_child', 'other_field', 'bring_field', 'bring_child', 'no_class_child', 'boundary_field', 'missing_field', 'multi_city',
         'external_place', 'far_city', 'young_child',
+        'trial_field', 'trial_child', 'full_field', 'full_child', 'skipped_field', 'skipped_child',
     }
 
     def test_the_scripts_are_well_formed(self):

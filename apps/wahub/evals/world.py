@@ -90,6 +90,30 @@ def _course_facts(course, child: dict) -> dict:
     }
 
 
+def _trial_dates(offer, at) -> dict:
+    """
+    The trial dates of a class as the registration form has them at `at` —
+    read through apps/wahub/trial_offer.py, which asks the form's own functions
+    and is held against the form itself (apps/wahub/tests/test_trial_offer.py).
+    Dates as they are written to a customer: "13.10".
+    """
+    from apps.wahub import trial_offer
+
+    today = timezone.localtime(at).date()
+    week = today - timedelta(days=(today.weekday() + 1) % 7)
+    opened = [slot.day for slot in offer.open]
+    return {
+        'can_book': offer.can_book,
+        'open': [day.strftime('%d.%m') for day in opened],
+        'full': list(dict.fromkeys(slot.day.strftime('%d.%m') for slot in offer.full)),
+        'skipped': list(dict.fromkeys(
+            skip.day.strftime('%d.%m') for skip in offer.skipped if skip.why != trial_offer.SKIP_STARTED
+        )),
+        'today_open': today in opened,
+        'this_week_open': any(week <= day < week + timedelta(days=7) for day in opened),
+    }
+
+
 def _same_question(course, others, child: dict, tool_ctx) -> list:
     """The classes a parent's question — this field, this child, this branch — is about: what the bot may answer with."""
     from apps.wahub.shadow_tools import _course_type_matches
@@ -161,13 +185,14 @@ def build(now=None) -> dict:
 
     from apps.core.models import Branch
     from apps.customers.widget_views import _widget_catalog_courses
-    from apps.wahub import course_tools, shadow_tools
+    from apps.wahub import course_tools, shadow_tools, trial_offer
 
     now = now or timezone.now()
     today = timezone.localtime(now).date()
     words: dict = {'young_child': YOUNG_CHILD}
     facts: dict = {}
     missing: dict = {}
+    clocks = _clocks(now)
     _knowledge_words(words, facts, missing, today)
     tool_ctx = shadow_tools.ToolContext(None, now=now)
 
@@ -183,6 +208,8 @@ def build(now=None) -> dict:
         ),
         key=lambda course: (course.branch.name, _field(course), course.name, str(course.id)),
     )
+    # As the tools have it: a class with nothing to choose on the form is not offered, and so not asked about.
+    courses = [course for course in courses if trial_offer.selections(course)]
     by_branch: dict = {}
     for course in courses:
         by_branch.setdefault(course.branch_id, []).append(course)
@@ -215,7 +242,7 @@ def build(now=None) -> dict:
     scored = sorted(((score(row), row) for row in ours if score(row) is not None), key=lambda pair: pair[0], reverse=True)
     if not scored:
         missing['stage'] = 'אין במערכת סניף שלנו עם שני תחומים לפחות ועם חוג שמוגדרת לו קבוצת גיל'
-        return {'words': words, 'facts': facts, 'missing': missing, 'clocks': _clocks(now)}
+        return {'words': words, 'facts': facts, 'missing': missing, 'clocks': clocks}
     stage = scored[0][1]
     stage_courses = by_branch[stage.id]
     alone = len(per_city.get(stage.city.name, [])) == 1 if stage.city_id else False
@@ -260,6 +287,44 @@ def build(now=None) -> dict:
         words.update(free_field=facts['free']['field'], free_child=facts['free']['child'])
     else:
         missing['free'] = 'בסניף שנבחר לבדיקה אין חוג ששיעור הניסיון שלו ללא עלות'
+
+    # --- when a trial can be booked: what the form offers, at the clock the scripts are played on -------
+    at = datetime.fromisoformat(clocks['open'])
+    seats = trial_offer.Seats(stage_courses, now=at)
+    offers = {course.id: trial_offer.for_course(course, seats) for course, _child_ in pairs}
+
+    def with_trial(pair) -> dict:
+        entry = describe(pair)
+        entry['trial_dates'] = _trial_dates(offers[pair[0].id], at)
+        return entry
+
+    by_narrow = [main] + [pair for pair in sorted(pairs, key=narrow) if pair[0].id != main[0].id]
+    # A class a trial can be booked in now — the main one when it is such.
+    bookable = next((pair for pair in by_narrow if offers[pair[0].id].can_book), None)
+    if bookable is not None:
+        facts['trial'] = with_trial(bookable)
+        words.update(trial_field=facts['trial']['field'], trial_child=facts['trial']['child'])
+    else:
+        missing['trial_field'] = missing['trial_child'] = 'בסניף שנבחר לבדיקה אין כרגע חוג שאפשר להירשם בו לשיעור ניסיון'
+    # A class one of whose coming dates is full for a trial.
+    taken = next((pair for pair in by_narrow if offers[pair[0].id].full), None)
+    if taken is not None:
+        facts['full_trial'] = with_trial(taken)
+        words.update(full_field=facts['full_trial']['field'], full_child=facts['full_trial']['child'])
+    else:
+        missing['full_field'] = missing['full_child'] = 'בסניף שנבחר לבדיקה אין כרגע חוג שאחד התאריכים הקרובים שלו לשיעור ניסיון מלא'
+    # A class with a coming date the form skips: a day closed to trials, a cancelled lesson.
+    skipped = next((
+        pair for pair in by_narrow
+        if any(skip.why != trial_offer.SKIP_STARTED for skip in offers[pair[0].id].skipped)
+    ), None)
+    if skipped is not None:
+        facts['skipped_trial'] = with_trial(skipped)
+        words.update(skipped_field=facts['skipped_trial']['field'], skipped_child=facts['skipped_trial']['child'])
+    else:
+        missing['skipped_field'] = missing['skipped_child'] = (
+            'בסניף שנבחר לבדיקה אין כרגע חוג שתאריך קרוב שלו סגור לשיעור ניסיון (חופשה או שיעור שבוטל)'
+        )
 
     # A second class, of another question, to ask about in the same conversation.
     main_key = (facts['main']['field'], main[1]['code'])
@@ -342,7 +407,7 @@ def build(now=None) -> dict:
         missing['far_city'] = 'לא נמצאה עיר לשאול עליה שאין לנו בה סניף'
 
     facts['cities'] = sorted({row.city.name for row in branches if row.city_id})
-    return {'words': words, 'facts': facts, 'missing': missing, 'clocks': _clocks(now)}
+    return {'words': words, 'facts': facts, 'missing': missing, 'clocks': clocks}
 
 
 class Catalog:

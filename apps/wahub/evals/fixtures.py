@@ -16,6 +16,9 @@ What it holds is what the scripts need the system to hold (world.py):
                  a registration fee of its own); hip hop for ages 4.5–6 and
                  for grades א–ב, both free — so that at six the two hip hop
                  groups meet, and at five there are two fields to choose from.
+                 The capoeira group of grades ג–ד is also where a trial cannot
+                 always be booked: its nearest Sunday is full, and its nearest
+                 Wednesday is closed for a holiday.
     פתח תקווה    two branches of ours — a city where the branch is asked first.
     רמת גן       an external branch, run by the municipality.
 """
@@ -23,6 +26,32 @@ from __future__ import annotations
 
 from datetime import time
 from decimal import Decimal
+
+
+def _trial_dates_that_cannot_be_taken(course, branch) -> None:
+    """
+    On the clock the scripts are played on (world.py, the "open" clock): the
+    nearest Sunday of the class is full for a trial — the lesson takes two, and
+    two invented children are booked — and its nearest Wednesday is a day the
+    office closed to trials. The dates after them are free.
+    """
+    from django.utils import timezone
+
+    from apps.core.tests.test_fixtures import TestDataFactory
+    from apps.enrollments.models import LessonEnrollment, TrialBlockedDate
+    from apps.enrollments.trial_reminders import iter_upcoming_lesson_occurrences
+    from apps.wahub.evals import world
+
+    at = timezone.localtime(world._clock(timezone.now(), is_open=True))
+    sunday, wednesday = course.lessons.order_by('day_of_week')
+    sunday.capacity = 2
+    sunday.save(update_fields=['capacity'])
+    full_on = iter_upcoming_lesson_occurrences(sunday, count=1, now=at)[0]
+    for number in (1, 2):
+        family = TestDataFactory.create_family(name=f'משפחת לדוגמה {number}', branch=branch, phone=f'050-00000{number}0')
+        child = TestDataFactory.create_child(family=family, first_name=f'ילד לדוגמה {number}', last_name='בדוי', status='trial_signed')
+        LessonEnrollment.objects.create(child=child, lesson=sunday, status='active', trial_lesson_date=full_on)
+    TrialBlockedDate.objects.create(date=iter_upcoming_lesson_occurrences(wednesday, count=1, now=at)[0], reason='חופשה לדוגמה')
 
 
 def build() -> dict:
@@ -80,6 +109,7 @@ def build() -> dict:
         name='רמת גן - הדגמה', city=TestDataFactory.create_city('רמת גן'), is_external=True,
         external_link='https://ramat-gan.example/signup',
     )
+    _trial_dates_that_cannot_be_taken(older_capoeira, stage)
     return {
         'stage': stage, 'external': external, 'young_capoeira': young_capoeira, 'older_capoeira': older_capoeira,
         'young_hip_hop': young_hip_hop, 'older_hip_hop': older_hip_hop,

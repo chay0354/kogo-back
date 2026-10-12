@@ -344,9 +344,11 @@ class FindCoursesTest(CourseToolsTestCase):
         lesson = course['lessons'][0]
         self.assertEqual((lesson['day'], lesson['start'], lesson['end'], lesson['instructor']), ('שלישי', '17:00', '17:45', 'משה לוי'))
         self.assertEqual((lesson['capacity'], lesson['enrolled'], lesson['seats_left'], lesson['is_full']), (10, 0, 10, False))
-        self.assertEqual(len(lesson['next_dates']), 2)
-        coming = iter_upcoming_lesson_occurrences(self.young_lesson, count=2)
-        self.assertEqual([row['date'] for row in lesson['next_dates']], [day.strftime('%d.%m.%Y') for day in coming])
+        # The dates a trial can be booked on are the form's own (test_trial_offer.py holds the two together).
+        coming = [day.strftime('%d.%m.%Y') for day in iter_upcoming_lesson_occurrences(self.young_lesson, count=3)]
+        self.assertEqual(lesson['trial_dates'][-2:], coming[-2:])
+        self.assertEqual([row['date'] for row in course['trial']['dates']], lesson['trial_dates'])
+        self.assertNotIn('next_dates', lesson)
 
     def test_the_description_falls_back_to_the_fields_and_the_fee_is_the_classs_own(self):
         course = self.find(age=9, course_type='קפוארה')['courses'][0]
@@ -380,7 +382,8 @@ class CourseCardTest(CourseToolsTestCase):
         self.assertEqual(trial['bring'], 'בגדים נוחים ובקבוק מים')
         lesson = course['lessons'][0]
         self.assertEqual((lesson['room'], lesson['status'], lesson['instructor']), ('סטודיו 1', 'מתוכנן', 'משה לוי'))
-        self.assertEqual(len(lesson['next_dates']), 3)
+        self.assertEqual((lesson['trial_status'], lesson['trial_dates']), ('אפשר להירשם לניסיון', [row['date'] for row in trial['dates']]))
+        self.assertTrue(trial['can_book'] and trial['dates_text'].startswith('אפשר להגיע לשיעור ניסיון ביום שלישי'))
         self.assertEqual(result['branch']['address'], 'קרל וגרטי קורי 8, ראש העין')
         self.assertEqual(result['branch']['directions'], 'חניה מאחור, קומה 2')
         self.assertIn('₪30', summarize_result('course_card', result))
@@ -396,8 +399,9 @@ class CourseCardTest(CourseToolsTestCase):
         lesson = self.card(self.young)['course']['lessons'][0]
         # The room holds ten and the group twelve: ten. Three pay; a trial sits in the room on its own date only.
         self.assertEqual((lesson['capacity'], lesson['enrolled'], lesson['seats_left']), (10, 3, 7))
-        self.assertEqual(lesson['next_dates'][0], {'date': first.strftime('%d.%m.%Y'), 'trial_seats_left': 6})
-        self.assertEqual(lesson['next_dates'][1], {'date': second.strftime('%d.%m.%Y'), 'trial_seats_left': 7})
+        by_date = {row['date']: row['trial_seats_left'] for row in self.card(self.young)['course']['trial']['dates']}
+        self.assertEqual(by_date[second.strftime('%d.%m.%Y')], 7)
+        self.assertEqual(by_date.get(first.strftime('%d.%m.%Y'), 6), 6)      # (absent when it is today's lesson and it has begun)
         # A limit of the lesson itself is the tightest of the three.
         self.young_lesson.capacity = 3
         self.young_lesson.save(update_fields=['capacity'])
@@ -410,8 +414,14 @@ class CourseCardTest(CourseToolsTestCase):
         self.young_lesson.trial_registration_open = False
         self.young_lesson.save(update_fields=['trial_registration_open'])
         course = self.card(self.young)['course']
-        self.assertEqual(course['lessons'][0]['next_dates'][0]['date'], second.strftime('%d.%m.%Y'))
+        # Closed to trials: no date is offered at all, and the cancelled one least of all.
+        self.assertEqual((course['lessons'][0]['trial_dates'], course['trial']['dates'], course['trial']['can_book']), ([], [], False))
         self.assertEqual((course['lessons'][0]['trial_open'], course['trial']['open']), (False, False))
+        self.young_lesson.trial_registration_open = None
+        self.young_lesson.save(update_fields=['trial_registration_open'])
+        course = self.card(self.young)['course']
+        self.assertNotIn(first.strftime('%d.%m.%Y'), course['lessons'][0]['trial_dates'])
+        self.assertIn(second.strftime('%d.%m.%Y'), course['lessons'][0]['trial_dates'])
 
     def test_tracks_a_price_of_its_own_for_a_second_class_and_an_extra_price(self):
         self.older_sunday.additional_course_prices = [{'course_index': 2, 'price': 220}]

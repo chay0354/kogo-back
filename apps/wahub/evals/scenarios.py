@@ -919,3 +919,74 @@ SCENARIOS = (
 
 BY_ID = {scenario.id: scenario for scenario in SCENARIOS}
 GROUP_TITLES = dict(GROUPS)
+
+
+# ================================ דיוק מול המערכת: תאריכי שיעור ניסיון ================================
+#
+# The owner, 12.10.2026: "the dates one can register on for a trial lesson — by the system, exactly". The tools
+# hand the bot the dates the registration form offers at that moment (apps/wahub/trial_offer.py); these hold the
+# answer to them. `only_open_trial_dates` reads what the tools returned in the conversation; the checks that name a
+# path ('trial', 'full_trial', 'skipped_trial') read the same dates from the system itself (world.py).
+TRIAL_CLASS = ('place', 'trial_field', 'trial_child')
+ASK_AGAIN_ABOUT_THE_CLASS = r'באיזו עיר|באיזה סניף|איזה תחום|בן כמה|בת כמה'
+
+TRIAL_DATES = (
+    Scenario(
+        'trial_dates_when_can_we_come', 'money', '"מתי אפשר להגיע לשיעור ניסיון?" לחוג ידוע',
+        'הבוט אומר את התאריכים שהאתר מציע עכשיו — ורק אותם', ('A1', 'D19', 'B1', 'M20'),
+        (
+            T('יש {trial_field} ב{place} לילד {trial_child}?'),
+            T('מתי אפשר להגיע לשיעור ניסיון?', expect=(
+                c.says_open_trial_date('trial'), c.only_open_trial_dates(),
+                c.has_not(ASK_AGAIN_ABOUT_THE_CLASS, 'הבוט לא שואל שוב מה שכבר נאמר'),
+            ), rubric=('הבוט אמר תאריך או תאריכים לשיעור ניסיון, עם היום והשעה של החוג, ולא חישב תאריך משלו',)),
+        ),
+        needs=TRIAL_CLASS,
+    ),
+    Scenario(
+        'trial_dates_this_week', 'money', '"אפשר להגיע השבוע?"',
+        '"השבוע" נאמר רק אם האתר מציע תאריך השבוע; אחרת — התאריך הקרוב שהוא מציע', ('A1', 'A2', 'P4'),
+        (T('אפשר להגיע השבוע לשיעור ניסיון ב{trial_field} ב{place}? הילד {trial_child}', expect=(
+            c.only_open_trial_dates(), c.this_week_as_the_system_has_it('trial'),
+        ), rubric=('אם האתר מציע תאריך השבוע הבוט אמר אותו; אם לא — אמר שהשבוע אי אפשר, ונתן את התאריך הקרוב שהמערכת החזירה',)),),
+        needs=TRIAL_CLASS,
+    ),
+    Scenario(
+        'trial_dates_today', 'money', '"אפשר לבוא היום?"',
+        '"היום" נאמר רק אם האתר מציע שיעור ניסיון היום', ('A1', 'A2', 'P6'),
+        (T('אפשר לבוא היום לשיעור ניסיון ב{trial_field} ב{place}? הילד {trial_child}', expect=(
+            c.only_open_trial_dates(), c.today_as_the_system_has_it('trial'),
+        ), rubric=(
+            'אם אין היום שיעור ניסיון פנוי בחוג הזה הבוט אמר זאת בפשטות, ונתן את התאריך הקרוב שהמערכת החזירה',
+            'הבוט לא כתב שרשם או ששמר מקום',
+        )),),
+        needs=TRIAL_CLASS,
+    ),
+    Scenario(
+        'trial_dates_a_date_is_full', 'money', 'חוג שאחד התאריכים הקרובים שלו מלא',
+        'הבוט לא מציע את התאריך המלא; הוא מציע תאריך פנוי, או אומר שאין', ('A2', 'A1', 'V9', 'P4'),
+        (T('מתי אפשר להגיע לשיעור ניסיון ב{full_field} ב{place}? הילד {full_child}', expect=(
+            c.says_open_trial_date('full_trial'), c.only_open_trial_dates(), c.not_closed_trial_date('full_trial'),
+            c.has_not(r'מבטיח|נשמור לכם|יהיה מקום', 'הבוט לא מבטיח מקום'),
+        ), rubric=('הבוט לא הציע תאריך שהמערכת סימנה כמלא; אם הזכיר אותו — אמר שהוא מלא', 'אם יש תאריך פנוי אחר, הבוט הציע אותו')),),
+        needs=('place', 'full_field', 'full_child'),
+    ),
+    Scenario(
+        'trial_dates_a_week_with_a_holiday', 'money', 'שבוע עם חופשה או שיעור שבוטל',
+        'התאריך שנסגר לשיעורי ניסיון לא מוצע; הבוט נותן את התאריך הבא שהאתר מציע', ('A2', 'A1', 'P6'),
+        (T('רוצים לבוא לשיעור ניסיון ב{skipped_field} ב{place}, הילד {skipped_child}', 'איזה תאריך הכי קרוב?', expect=(
+            c.says_open_trial_date('skipped_trial'), c.only_open_trial_dates(), c.not_closed_trial_date('skipped_trial'),
+        ), rubric=('הבוט לא הציע את התאריך שסגור לשיעורי ניסיון (חופשה או שיעור שבוטל)', 'הבוט לא המציא סיבה שלא חזרה מהמערכת')),),
+        needs=('place', 'skipped_field', 'skipped_child'),
+    ),
+    Scenario(
+        'trial_dates_a_date_the_customer_names', 'money', 'הלקוח מציע תאריך משלו',
+        'הבוט לא מאשר תאריך שהאתר לא מציע; הוא עונה מהתאריכים שהמערכת החזירה', ('A1', 'P4', 'V5'),
+        (T('אפשר לבוא לשיעור ניסיון ב{trial_field} ב{place} ב-31.12? הילד {trial_child}', expect=(
+            c.only_open_trial_dates(),
+        ), rubric=('הבוט לא אישר את התאריך שהלקוח כתב אם המערכת לא החזירה אותו כפנוי', 'הבוט הציע תאריך שהמערכת החזירה, או אמר שאין כרגע')),),
+        needs=TRIAL_CLASS,
+    ),
+)
+SCENARIOS = SCENARIOS + TRIAL_DATES
+BY_ID = {scenario.id: scenario for scenario in SCENARIOS}

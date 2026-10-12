@@ -30,7 +30,7 @@ import re
 from django.conf import settings
 
 from apps.courses import age_groups
-from apps.wahub import analysis, course_tools, knowledge, matching
+from apps.wahub import analysis, course_tools, knowledge, matching, trial_offer
 from apps.wahub.analysis import _same_city
 from apps.wahub.course_tools import DAY_NAMES, trial_line  # noqa: F401 — both are read from here too
 from apps.wahub.models import KIND_ALIAS, KIND_CONTACT, SCOPE_BRANCH, Contact, KnowledgeItem
@@ -64,7 +64,7 @@ TOOLS = [
         'name': 'find_courses',
         'description': (
             'החוגים והמועדים כפי שהם במערכת Kogo: חוג, קבוצת גיל, יום, שעה, מדריך, מחיר חודשי, דמי רישום, שיעור ניסיון, '
-            'כמות רשומים, מקומות פנויים ותאריכים קרובים. מסננים לפי עיר, סניף, גיל הילד בשנים או כיתה, ותחום. '
+            'כמות רשומים, מקומות פנויים והתאריכים שאפשר להירשם בהם עכשיו לשיעור ניסיון. מסננים לפי עיר, סניף, גיל הילד בשנים או כיתה, ותחום. '
             'הכלי שומר על סדר השיחה — עיר או סניף, אחר כך תחום, אחר כך גיל או כיתה — ומפרט חוגים רק כשכל אלה ידועים. '
             'כשחסר פרט הוא מחזיר need ו-ask ואת מה שיש לבחור ממנו (cities, branches, course_types, between), בלי חוגים: '
             '(בלי עיר ובלי סניף חוזרת רשימת הערים שיש לנו בהן סניף — cities.) '
@@ -79,6 +79,8 @@ TOOLS = [
             'trial.is_paid=false פירושו ללא עלות, וזה מה שאומרים; is_paid=true — אומרים את trial.price ואת trial.credit_rule. '
             'קבוצת הגיל של חוג היא ages (במילים); גיל על הגבול בין שתי קבוצות (בן 6: גן חובה או כיתה א) מחזיר את שתיהן, ואז שואלים באיזו כיתה הילד. '
             '"מה להביא לשיעור ניסיון" הוא trial.bring של החוג — מצטטים אותו; ריק = "אין לי את הפרט הזה, אפשר לבדוק במשרד". '
+            '"מתי אפשר להגיע לשיעור ניסיון", "אפשר השבוע", "אפשר היום" — עונים רק מ-trial.dates של החוג (התאריכים שהאתר מציע עכשיו; this_week ו-when אומרים אם זה השבוע, היום או מחר) '
+            'ומצטטים את trial.dates_text. תאריך שלא שם לא מציעים ולא מחשבים לבד; full_dates מלאים, not_offered לא פתוחים לניסיון, ו-can_book=false פירושו שאין כרגע תאריך. '
             'כשיש הרבה חוגים, 12 מפורטים והשאר ב-more_courses בשורה אחת כל אחד — מצמצמים לפי תחום וגיל, או קוראים ל-course_card. '
             'סניף חיצוני חוזר עם is_external=true ובלי חוגים — אז אומרים "לבדוק מול העירייה" ושולחים את קישור ההרשמה.'
         ),
@@ -103,7 +105,9 @@ TOOLS = [
         'description': (
             'כל מה שיש במערכת על חוג אחד: תיאור, קבוצת גיל, מחיר חודשי, דמי הרישום שייגבו בפועל לחוג הזה, שיעור ניסיון '
             '(בתשלום או לא, מחיר, כלל הקיזוז, מה להביא, פתוח או סגור), כל המועדים עם מדריך, חדר, כמות רשומים, מגבלת המקומות, '
-            'מקומות פנויים ושלושת התאריכים הקרובים, מסלולים משולבים (פעמיים בשבוע) ומחירם, וההנחות שמוגדרות במערכת. '
+            'מקומות פנויים, מסלולים משולבים (פעמיים בשבוע) ומחירם, וההנחות שמוגדרות במערכת. '
+            'ב-trial: כל התאריכים שהאתר מציע עכשיו לשיעור ניסיון (dates), המשפט המוכן (dates_text), התאריכים המלאים (full_dates) '
+            'ואלה שלא פתוחים לניסיון ולמה (not_offered); תאריך לניסיון נאמר רק מתוך dates. '
             'קוראים עם course_id מתוך find_courses (או שם החוג וסניף). ' + FROM_KOGO_ONLY
         ),
         'input_schema': {
@@ -424,6 +428,8 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
             .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
         ).order_by('branch__name', 'course_type__name', 'name')
     ) if internal else []
+    # A class with nothing to choose on the form — no lesson, or every day required and no track — is not on the form.
+    everything = [course for course in everything if trial_offer.selections(course)]
     for_age = [course for course in everything if age_groups.fits(course.min_age, course.max_age, age_codes)] if by_age else everything
     courses = [course for course in for_age if _course_type_matches(course, course_type, ctx)]
 
@@ -458,7 +464,7 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
         branches = chosen
 
     shown, rest = courses[:MAX_COURSES], courses[MAX_COURSES:]
-    seats = course_tools.Seats(shown)
+    seats = course_tools.Seats(shown, now=ctx.now)
     result_courses = [course_tools.course_payload(course, seats) for course in shown]
 
     result = {
@@ -472,6 +478,8 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
         # The general fee; each class carries the fee it will actually charge (courses[].registration_fee).
         'registration_fee': registration_fee,
     }
+    if result_courses:
+        result['trial_dates_rule'] = course_tools.TRIAL_DATES_RULE
     if internal and not result_courses:
         hints.append('בסניפים האלה אין חוג שמתאים לסינון (גיל/תחום). אפשר להציע תחום אחר מאותו סניף, או להפנות למשרד.')
         # What the branch does have for this child, so that another field is offered from the system and not from memory.
@@ -697,11 +705,13 @@ def summarize_result(name: str, result: dict) -> str:
             return f'{result["course"]["name"]}: סניף חיצוני — לבדוק מול העירייה'
         course = result['course']
         trial = course['trial']
+        dates = trial.get('dates') or []
+        coming = f'ניסיון קרוב ב-{dates[0]["date"][:5]}' if dates else 'אין כרגע תאריך פנוי לניסיון'
         return (
             f'{course["name"]} ({course["branch"]}): {_shekel_text(course["price_monthly"])} לחודש, '
             f'דמי רישום {_shekel_text(course["registration_fee"])}, '
             f'{"ניסיון " + _shekel_text(trial["price"]) if trial["price"] else ("ניסיון בתשלום, בלי מחיר" if trial["is_paid"] else "ניסיון ללא עלות")}, '
-            f'{len(course["lessons"])} מועדים'
+            f'{len(course["lessons"])} מועדים, {coming}'
         )
     if name == 'quote_registration':
         if not result.get('can_quote'):
