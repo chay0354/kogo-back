@@ -825,17 +825,45 @@ def _user_content(ctx: Context):
     return [{'type': 'text', 'text': text}, *blocks]
 
 
-def _for_the_cache(system: str):
+# How many of the marks below this process has seen Claude refuse: the next call starts after them.
+_REFUSED_MARKS = {'count': 0}
+
+
+def _cache_marks() -> list:
     """
-    The system text — the task and the whole knowledge — is the same from one
-    call to the next. Sent as one block marked for Anthropic's prompt cache, the
-    next call within five minutes (the next tool round, the next customer, the
-    next test conversation) reads it at a tenth of the price and answers sooner.
-    WAHUB_SHADOW_PROMPT_CACHE=0 sends it as plain text, as before.
+    The marks for Anthropic's prompt cache, from the most wanted to none at all:
+    kept for an hour (WAHUB_SHADOW_PROMPT_CACHE_TTL; customers write minutes
+    apart, and the five minutes' keep was gone before the next one wrote), kept
+    for five minutes, and plain text. A mark Claude refuses (HTTP 400) gives way
+    to the next one inside the same call, and is not tried again by this process.
     """
     if not getattr(settings, 'WAHUB_SHADOW_PROMPT_CACHE', True):
-        return system
-    return [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}]
+        return [None]
+    ttl = str(getattr(settings, 'WAHUB_SHADOW_PROMPT_CACHE_TTL', '1h') or '').strip()
+    marks = [{'type': 'ephemeral', 'ttl': ttl}] if ttl and ttl != '5m' else []
+    marks += [{'type': 'ephemeral'}, None]
+    return marks[min(_REFUSED_MARKS['count'], len(marks) - 1):]
+
+
+def _for_the_cache(steady: str, moving: str = '', mark: dict | None = None):
+    """
+    The task and the items of the knowledge are the same from one call to the
+    next. Sent as one block marked for Anthropic's prompt cache, the next call
+    while it is kept (the next tool round, the next customer, the next test
+    conversation) reads it at a tenth of the price and answers sooner.
+
+    What moves with the clock — the office's hours as of this minute — follows
+    in a block of its own, after the mark. Inside the marked block it changed
+    the text on every call, and the cache was written each time and read by no
+    other customer (production, 12.10.2026: "0 tokens read" on every first round).
+    With no mark (WAHUB_SHADOW_PROMPT_CACHE=0, or every mark refused) it all goes as plain text, as before.
+    """
+    if mark is None:
+        return steady + moving
+    blocks = [{'type': 'text', 'text': steady, 'cache_control': dict(mark)}]
+    if moving:
+        blocks.append({'type': 'text', 'text': moving})
+    return blocks
 
 
 def system_text(body: dict) -> str:
@@ -862,14 +890,17 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
         raise ShadowModelError('אין מפתח Anthropic')
     tctx = ctx.tool_ctx
     tools_used: list[dict] = []
-    system = SYSTEM_TASK + '\n\n# הידע של הבוט\n\n' + knowledge.describe_for_prompt(ctx.items, ctx.hours)
+    # The same words in the same order as one text; in two parts so that the first can be cached.
+    steady = SYSTEM_TASK + '\n\n# הידע של הבוט\n\n' + knowledge.describe_items(ctx.items)
+    moving = '\n\n' + knowledge.describe_hours(ctx.hours)
+    marks = _cache_marks()
     messages = [{'role': 'user', 'content': _user_content(ctx)}]
     body = {
         'model': model_name(),
         # A ceiling, not a spend: thinking counts toward it. The live test lowers it
         # (docs/WAHUB-CONTRACT-LIVE-TEST.md): a customer is waiting for the answer.
         'max_tokens': int(max_tokens or DEFAULT_MAX_TOKENS),
-        'system': _for_the_cache(system),
+        'system': _for_the_cache(steady, moving, marks[0]),
         'tools': TOOLS,
         'tool_choice': {'type': 'auto'},
         'messages': messages,
@@ -894,11 +925,16 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
                 raise ShadowModelError('נגמר הזמן של הקריאה')
         try:
             response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
-            if response.status_code == 400 and not isinstance(body['system'], str):
-                # The mark for the cache was refused: the same request goes again as plain text, and from here on.
-                logger.warning('wahub shadow: Claude refused the cached system text (%s); sent again without it', _error_of(response))
-                body['system'] = system
+            while response.status_code == 400 and len(marks) > 1:
+                # The mark for the cache was refused: the same request goes again with the next one, and from here on.
+                logger.warning('wahub shadow: Claude refused the system text marked %s (%s); sent again with %s',
+                               marks[0], _error_of(response), marks[1] or 'no mark')
+                marks = marks[1:]
+                body['system'] = _for_the_cache(steady, moving, marks[0])
                 response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
+                if response.status_code == 200:
+                    # It was the mark, not the request: this process does not offer it again.
+                    _REFUSED_MARKS['count'] += 1
         except requests.RequestException as exc:
             raise ShadowModelError(f'Claude לא ענה ({type(exc).__name__})') from exc
         if response.status_code != 200:

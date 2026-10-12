@@ -746,7 +746,15 @@ def render_phrasing(item: KnowledgeItem, **variables) -> str:
 
 
 def describe_for_prompt(items, hours: dict) -> str:
-    """The knowledge as the system prompt reads it, grouped by kind, each item numbered by id."""
+    """The knowledge as the system prompt reads it: the items, then the office's hours as of now."""
+    return '\n\n'.join(part for part in (describe_items(items), describe_hours(hours)) if part)
+
+
+def describe_items(items) -> str:
+    """
+    The items of the knowledge, grouped by kind, each numbered by id. Nothing here moves with the clock:
+    the same items read the same from one call to the next, which is what lets the text be cached.
+    """
     by_kind: dict = {}
     for item in items:
         by_kind.setdefault(item.kind, []).append(item)
@@ -802,6 +810,11 @@ def describe_for_prompt(items, hours: dict) -> str:
     lines(KIND_ALIAS, 'כינויים (מה הלקוח כותב → למה הכוונה)', lambda i: f'- [#{i.id}] "{(i.data or {}).get("what_customer_writes")}" → {(i.data or {}).get("means")}')
     lines(KIND_SPECIAL_DAY, 'ימים מיוחדים קרובים (להציג רק עתידיים, בפורמט 🔹 *תאריך* שם - מצב)', lambda i: f'- [#{i.id}] {(i.data or {}).get("date_from")}' + (f'–{(i.data or {}).get("date_to")}' if (i.data or {}).get('date_to') and (i.data or {}).get('date_to') != (i.data or {}).get('date_from') else '') + f' {i.title}{scope(i)}: {SPECIAL_STATE_LABELS.get((i.data or {}).get("state", ""), "")}' + (f' {(i.data or {}).get("hours_from") or ""}-{(i.data or {}).get("hours_to") or ""}'.rstrip('-') if (i.data or {}).get('state') in (SPECIAL_HOURS, SPECIAL_QUIET) and ((i.data or {}).get('hours_from') or (i.data or {}).get('hours_to')) else '') + (f' — "{(i.data or {}).get("message")}"' if (i.data or {}).get('message') else ''))
 
+    return '\n\n'.join(parts)
+
+
+def describe_hours(hours: dict) -> str:
+    """The office's hours as of this minute — the one part of the knowledge that changes between two calls."""
     today = hours.get('today') or {}
     status = 'פתוח עכשיו' if hours.get('open') else 'סגור עכשיו'
     hours_line = f'## שעות המשרד\nעכשיו: {hours.get("now", "")} — המשרד {status}.'
@@ -811,5 +824,4 @@ def describe_for_prompt(items, hours: dict) -> str:
         hours_line += f' היום ({today.get("day_label")}) המשרד סגור.'
     if hours.get('message_if_closed'):
         hours_line += f'\nהודעת "סגור" (לשלוח רק כשמבקשים נציג מחוץ לשעות, לפי מצב השליחה "{hours.get("send_mode_label")}"):\n"""{hours["message_if_closed"]}"""'
-    parts.append(hours_line)
-    return '\n\n'.join(parts)
+    return hours_line

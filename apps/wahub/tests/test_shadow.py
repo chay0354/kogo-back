@@ -371,6 +371,9 @@ class PromptCacheTests(WahubTestCase):
     def setUp(self):
         super().setUp()
         knowledge_import.run()
+        # What one test saw refused is not remembered by the next.
+        shadow._REFUSED_MARKS['count'] = 0
+        self.addCleanup(shadow._REFUSED_MARKS.update, count=0)
 
     def _answer(self, status=200, usage=None):
         import json
@@ -384,19 +387,55 @@ class PromptCacheTests(WahubTestCase):
         }
         return response
 
+    def _asked_at(self, hour, minute, second=0):
+        """The request Claude gets for a question asked at this time of Monday 12.10.2026."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        when = datetime(2026, 10, 12, hour, minute, second, tzinfo=ZoneInfo('Asia/Jerusalem'))
+        with patch('apps.wahub.shadow.requests.post', return_value=self._answer()) as post:
+            shadow.answer('היי', pretend_now=when)
+        return post.call_args.kwargs['json']
+
     @override_settings(ANTHROPIC_API_KEY='test-key')
-    def test_the_system_text_is_one_block_marked_for_the_cache_and_reads_the_same(self):
+    def test_the_knowledge_is_the_block_marked_for_the_cache_and_the_clock_follows_it(self):
         with patch('apps.wahub.shadow.requests.post', return_value=self._answer(usage={'cache_read_input_tokens': 9000})) as post, \
                 self.assertLogs('apps.wahub.shadow', level='INFO') as logs:
             shadow.answer('היי')
         body = post.call_args.kwargs['json']
-        [block] = body['system']
-        self.assertEqual(block['cache_control'], {'type': 'ephemeral'})
-        self.assertIn('סדר השיחה על חוג', shadow.system_text(body))
+        steady, moving = body['system']
+        # Kept for an hour: customers write minutes apart, and five minutes were over before the next one.
+        self.assertEqual(steady['cache_control'], {'type': 'ephemeral', 'ttl': '1h'})
+        self.assertIn('סדר השיחה על חוג', steady['text'])
+        # What moves with the clock is outside the mark: inside it, no two calls sent the same text.
+        self.assertNotIn('cache_control', moving)
+        self.assertIn('## שעות המשרד', moving['text'])
+        self.assertNotIn('## שעות המשרד', steady['text'])
         self.assertTrue(any('9000 tokens read from the cache' in line for line in logs.output))
         with override_settings(WAHUB_SHADOW_PROMPT_CACHE=False), patch('apps.wahub.shadow.requests.post', return_value=self._answer()) as post:
             shadow.answer('היי')
         self.assertIsInstance(post.call_args.kwargs['json']['system'], str)
+
+    @override_settings(ANTHROPIC_API_KEY='test-key')
+    def test_the_next_customer_sends_the_very_same_marked_block(self):
+        # A minute and seven seconds later, and again after the office has closed (18:00): the marked block
+        # is the same text to the letter, so the second call reads what the first one wrote.
+        open_, later, closed = self._asked_at(17, 58), self._asked_at(17, 59, 7), self._asked_at(18, 1)
+        self.assertEqual(open_['system'][0], later['system'][0])
+        self.assertEqual(open_['system'][0], closed['system'][0])
+        self.assertNotEqual(open_['system'][1], later['system'][1])
+        self.assertIn('פתוח עכשיו', open_['system'][1]['text'])
+        self.assertIn('סגור עכשיו', closed['system'][1]['text'])
+        # The tools come before the system text in what is cached: they do not move either.
+        self.assertEqual(open_['tools'], closed['tools'])
+
+    @override_settings(ANTHROPIC_API_KEY='test-key')
+    def test_in_two_blocks_or_as_one_text_claude_reads_the_same_words(self):
+        marked = self._asked_at(11, 30)
+        with override_settings(WAHUB_SHADOW_PROMPT_CACHE=False):
+            plain = self._asked_at(11, 30)
+        self.assertEqual(shadow.system_text(marked), plain['system'])
+        self.assertTrue(plain['system'].rstrip().endswith(marked['system'][1]['text'].strip()))
 
     @override_settings(ANTHROPIC_API_KEY='test-key')
     def test_a_refused_mark_is_sent_again_as_plain_text_and_the_customer_still_gets_the_answer(self):
@@ -408,8 +447,53 @@ class PromptCacheTests(WahubTestCase):
 
         with patch('apps.wahub.shadow.requests.post', side_effect=claude), self.assertLogs('apps.wahub.shadow', level='WARNING'):
             draft = shadow.answer('היי')
-        self.assertEqual(sent, ['list', 'str'])
+        self.assertEqual(sent, ['list', 'list'])
         self.assertEqual(draft.text, 'היי')
+
+    @override_settings(ANTHROPIC_API_KEY='test-key')
+    def test_a_refused_hour_gives_way_to_five_minutes_then_to_plain_text_and_is_not_offered_again(self):
+        sent = []
+
+        def mark_of(body):
+            system = body['system']
+            return 'plain' if isinstance(system, str) else system[0]['cache_control'].get('ttl', '5m')
+
+        def refuses(*refused):
+            def claude(url, **kwargs):
+                sent.append(mark_of(kwargs['json']))
+                return self._answer(400) if sent[-1] in refused else self._answer()
+            return claude
+
+        # The hour is refused, five minutes are taken: one more request, the answer arrives.
+        with patch('apps.wahub.shadow.requests.post', side_effect=refuses('1h')), self.assertLogs('apps.wahub.shadow', level='WARNING'):
+            self.assertEqual(shadow.answer('היי').text, 'היי')
+        self.assertEqual(sent, ['1h', '5m'])
+        # The next customer of this process is not made to wait for the same refusal.
+        del sent[:]
+        with patch('apps.wahub.shadow.requests.post', side_effect=refuses('1h')):
+            shadow.answer('היי')
+        self.assertEqual(sent, ['5m'])
+        # Every mark refused: plain text, as before there was a cache.
+        shadow._REFUSED_MARKS['count'] = 0
+        del sent[:]
+        with patch('apps.wahub.shadow.requests.post', side_effect=refuses('1h', '5m')), self.assertLogs('apps.wahub.shadow', level='WARNING'):
+            self.assertEqual(shadow.answer('היי').text, 'היי')
+        self.assertEqual(sent, ['1h', '5m', 'plain'])
+
+    @override_settings(ANTHROPIC_API_KEY='test-key')
+    def test_a_request_refused_for_another_reason_does_not_cost_the_next_customer_the_cache(self):
+        # 400 whatever the mark: the fault is not the mark's, so nothing is remembered against it.
+        with patch('apps.wahub.shadow.requests.post', return_value=self._answer(400)) as post, \
+                self.assertLogs('apps.wahub.shadow', level='WARNING'):
+            shadow.answer('היי')   # "נסה שאלה" falls to the stub; nothing is raised to the screen
+        self.assertEqual(post.call_count, 3)
+        self.assertEqual(shadow._REFUSED_MARKS['count'], 0)
+
+    @override_settings(ANTHROPIC_API_KEY='test-key', WAHUB_SHADOW_PROMPT_CACHE_TTL='5m')
+    def test_the_short_keep_can_be_asked_for(self):
+        with patch('apps.wahub.shadow.requests.post', return_value=self._answer()) as post:
+            shadow.answer('היי')
+        self.assertEqual(post.call_args.kwargs['json']['system'][0]['cache_control'], {'type': 'ephemeral'})
 
 
 class PolishTests(WahubTestCase):
