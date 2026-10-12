@@ -64,9 +64,9 @@ SITUATIONAL = {
     # The whole line, with the word that opens it: "באיזו עיר אתם מחפשים חוג" alone is a question anybody may be asked.
     'campaign_yes': (r'מעולה,?\s+באיזו עיר אתם מחפשים חוג', 'הנוסח של תשובה לפנייה יזומה'),
     'campaign_decline': (r'שיהיה שנה טובה', 'הנוסח של סירוב לפנייה יזומה'),
-    'waiting_for_agent': (r'עומס חריג', 'הנוסח של "ממתינים לנציג"'),
+    'waiting_for_agent': (r'עומס חריג|הפנייה שלך אצל הצוות', 'הנוסח של "ממתינים לנציג"'),
     'trial_reminder_yes': (r'נתראה בשיעור', 'אישור הגעה לשיעור ניסיון'),
-    'trial_reminder_no': (r'תודה שעדכנתם', 'אישור ביטול הגעה לשיעור ניסיון'),
+    'trial_reminder_no': (r'נשמח לתאם מועד חלופי', 'אישור ביטול הגעה לשיעור ניסיון'),
     'birthday_party_gilad': (r'מנהל האירועים הפרטיים', 'ההפניה לגלעד בנושא ימי הולדת'),
     'birthday_greeting_name': (r'כתבו לנו מה השם', 'תסריט הברכה האישית'),
     'cancel_form': (r'studio-cancellation-form', 'טופס הביטול'),
@@ -455,7 +455,9 @@ def _show_all_only_when_pressed(m: Moment) -> str:
 
 
 def _fresh_details(m: Moment) -> str:
-    said = _class_details(m.reply)
+    # The hours of the office are the knowledge's, not a class's.
+    office = set(times_in(m.knowledge_text))
+    said = [value for value in _class_details(m.reply) if value not in office]
     if said and not any(call.get('name') in CLASS_TOOLS for call in m.calls):
         return f'הבוט נתן פרטים של חוג ({", ".join(dict.fromkeys(said))}) בלי לבדוק אותם במערכת בתשובה הזאת'
     return ''
@@ -631,8 +633,8 @@ def _no_internal_money(m: Moment) -> str:
 
 
 # Second-person verbs that address one man, or one woman. "לך" and "את" are spelled alike for both and are left out.
-_TO_A_MAN = re.compile(r'(?<![א-ת])(?:תוכל|תרצה|תגיד|תכתוב|תשלח|תבדוק|תבחר|תספר|אתה|מעוניין|מוזמן|רשום)(?![א-ת])')
-_TO_A_WOMAN = re.compile(r'(?<![א-ת])(?:תוכלי|תרצי|תגידי|תכתבי|תשלחי|תבדקי|תבחרי|תספרי|מעוניינת|מוזמנת|רשומה)(?![א-ת])')
+_TO_A_MAN = re.compile(r'(?<![א-ת])(?:תוכל|תרצה|תגיד|תכתוב|תשלח|תבדוק|תבחר|תספר|אתה|מעוניין|מוזמן)(?![א-ת])')
+_TO_A_WOMAN = re.compile(r'(?<![א-ת])(?:תוכלי|תרצי|תגידי|תכתבי|תשלחי|תבדקי|תבחרי|תספרי|מעוניינת|מוזמנת)(?![א-ת])')
 # What tells who is writing: how she speaks of herself, or who she says she is.
 _WRITES_AS_A_WOMAN = re.compile(r'(?<![א-ת])(?:מעוניינת|מחפשת|שואלת|מתעניינת|רציתי לשאול כאמא|אמא של|אני אמא|הסבתא|סבתא של|אני סבתא)(?![א-ת])')
 _WRITES_AS_A_MAN = re.compile(r'(?<![א-ת])(?:מעוניין|מחפש|שואל|מתעניין|אבא של|אני אבא|הסבא|סבא של|אני סבא)(?![א-ת])')
@@ -726,9 +728,9 @@ def offers_nothing() -> Check:
             return f'ציפינו שהבוט לא יציע חוג בשלב הזה. הוא כבר כתב: {", ".join(dict.fromkeys(said))}'
         catalog = m.catalog
         fields = {_norm(name) for name in (catalog.fields if catalog else ())}
-        # A field the bot lists to choose from is not a class it offers — and a class may be named like
-        # part of a field ("היפהופ" inside the field "היפהופ - מחול").
-        listed = [field for field in fields if field and field in _norm(m.reply)]
+        # A field the bot names to choose from is not a class it offers — and a class may be named like
+        # part of a field ("היפהופ" inside the field "היפהופ - מחול"), which the bot may say in short.
+        listed = [field for field in fields if field]
         named = [
             name for name in sorted(catalog.courses if catalog else ())
             if len(_norm(name)) >= 6 and _norm(name) in _norm(m.reply) and _norm(name) not in fields
@@ -792,10 +794,36 @@ def not_amount(path: str, what: str) -> Check:
     return Check(f'not_amount:{path}', f'הבוט לא אומר את {what}', test)
 
 
+def _amounts_of_class(calls: list, name) -> set:
+    """Every sum the tools of this answer returned inside the record of the class of that name."""
+    found = set()
+    wanted = _norm(name)
+    if not wanted:
+        return found
+    for call in calls:
+        result = call.get('result') if isinstance(call.get('result'), dict) else {}
+        records = [row for row in result.get('courses') or [] if isinstance(row, dict)]
+        if isinstance(result.get('course'), dict):
+            records.append(result['course'])
+        for record in records:
+            if _norm(record.get('name')) != wanted:
+                continue
+            for key, value in _leaves(record):
+                if key in MONEY_KEYS and value not in (None, '') and not isinstance(value, bool):
+                    number = _number(str(value).lstrip('-'))
+                    if number is not None:
+                        found.add(number)
+    return found
+
+
 def not_amount_of_other(unwanted: str, wanted: str, what: str) -> Check:
     """The other class's amount is not in the answer — checked when the two classes really differ in it."""
     def test(m: Moment) -> str:
         other, own = _number(_fact(m.world, unwanted)), _number(_fact(m.world, wanted))
+        # The same sum may belong to the class asked about now as well (its twice-a-week price happens to be
+        # the first class's monthly one): then it stands in that class's own record, and it is nobody else's.
+        if other is not None and other in _amounts_of_class(m.calls, _fact(m.world, f"{wanted.split('.')[0]}.name")):
+            return ''
         if other is not None and other != own and other in amounts_in(m.reply):
             return f'הבוט כתב {_shekels(other)} — זה {what}, ולא של החוג שנשאל עליו עכשיו. פרט של חוג אחד נכנס לתשובה על חוג אחר'
         return ''

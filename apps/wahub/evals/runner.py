@@ -174,7 +174,7 @@ def _customer(scenario, built: dict, today) -> dict | None:
     }
 
 
-def _knowledge_text(items) -> str:
+def _knowledge_text(items, hours=None) -> str:
     """What the knowledge lets the bot say: the bodies and the data. Not the examples — a "wrong" example holds what must not be said."""
     def strings(value):
         if isinstance(value, dict):
@@ -190,6 +190,8 @@ def _knowledge_text(items) -> str:
     for item in items:
         parts.append(item.body or '')
         parts.extend(strings(item.data or {}))
+    # The office's hours and special days are read to the bot beside the items: "פתוח עד 18:00" is the knowledge's.
+    parts.extend(strings(hours or {}))
     return '\n'.join(part for part in parts if part)
 
 
@@ -240,7 +242,7 @@ def _play(run: BotEvalRun, scenario, index: int, catalog, deadline: float | None
         calls=calls, earlier_calls=earlier_calls,
         previous_reply=run.turns[index - 1]['reply'] if index else '',
         request_human=result.request_human, tags=list(ctx.tool_ctx.tags), world=run.world,
-        knowledge_text=_knowledge_text(ctx.items), office_days=_office_days(), catalog=catalog, allow=turn.allow,
+        knowledge_text=_knowledge_text(ctx.items, ctx.hours), office_days=_office_days(), catalog=catalog, allow=turn.allow,
     )
     verdicts = checks.run(checks.GENERAL + tuple(turn.expect), moment, turn=index + 1)
     return {
