@@ -540,9 +540,12 @@ class ManyChatService:
         payload = {'subscriber_id': int(subscriber_id), 'field_name': field_name, 'field_value': field_value}
         return self._request('POST', '/fb/subscriber/setCustomFieldByName', json_body=payload)
 
-    def get_flows(self) -> list[dict]:
-        """List automations from ManyChat (name + ns)."""
-        result = self._request('GET', '/fb/page/getFlows')
+    def get_flows(self, *, timeout: int | None = None) -> list[dict]:
+        """
+        List automations from ManyChat (name + ns). `timeout` is for a caller a
+        person is waiting on (a settings card); without one the client's own applies.
+        """
+        result = self._request('GET', '/fb/page/getFlows', **({'timeout': timeout} if timeout else {}))
         data = result.get('data')
 
         if isinstance(data, list):

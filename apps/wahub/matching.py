@@ -85,17 +85,30 @@ class Match:
     detail: str = ''
     family_id: object = None
     child_ids: list = field(default_factory=list)
-    # {on, outcome, course} for trial_upcoming / trial_only; empty otherwise.
+    # {on, outcome, course} for trial_upcoming / trial_only (and, for a trial that took place, what the system's
+    # own automations have already written about it: after_test_sent, didnt_arrive_sent); empty otherwise.
     trial: dict = field(default_factory=dict)
 
 
-def _trial_facts(when, outcome: str, course: str) -> dict:
-    """The trial as the contact keeps it. "Not marked" is no outcome, whichever way it was stored."""
-    return {
+def _trial_facts(when, outcome: str, course: str, *, asked_how=None, told_missed=None) -> dict:
+    """
+    The trial as the contact keeps it. "Not marked" is no outcome, whichever
+    way it was stored. Two facts are kept only when they are so — what the
+    system's own automations (apps/enrollments) have already written to the
+    family about this very trial, so that the bot does not ask the same thing
+    again (lead_stage.py): `after_test_sent`, the message that goes out two
+    hours after the lesson, and `didnt_arrive_sent`, the one about not coming.
+    """
+    facts = {
         'on': when.isoformat() if when else '',
         'outcome': outcome if outcome in ('attended', 'no_show') else '',
         'course': (course or '').strip()[:200],
     }
+    if asked_how is not None:
+        facts['after_test_sent'] = True
+    if told_missed is not None:
+        facts['didnt_arrive_sent'] = True
+    return facts
 
 
 def _day(value) -> str:
@@ -258,12 +271,15 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
         LessonEnrollment.objects
         .filter(child_id__in=list(by_id))
         .filter(Q(trial_lesson_date__isnull=False) | Q(trial_held_on__isnull=False) | ~Q(trial_outcome=''))
-        .values_list('child_id', 'status', 'trial_lesson_date', 'trial_held_on', 'trial_outcome', 'lesson__course__name')
+        .values_list(
+            'child_id', 'status', 'trial_lesson_date', 'trial_held_on', 'trial_outcome', 'lesson__course__name',
+            'trial_followup_reminder_sent_at', 'didnt_arrive_whatsapp_sent_at',
+        )
     )
 
     # 3. a trial still ahead
     ahead = sorted(
-        (trial_date, child_id, course or '') for child_id, status, trial_date, _held, _outcome, course in trials
+        (trial_date, child_id, course or '') for child_id, status, trial_date, _held, _outcome, course, *_told in trials
         if trial_date is not None and trial_date >= today and status in LIVE_ENROLLMENT_STATUSES
     )
     signed = [child for child in children if status_of(child) == STATUS_TRIAL_SIGNED]
@@ -282,8 +298,8 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
     former = _ever_registered(list(by_id))
     past = sorted(
         (
-            (held or trial_date, outcome, child_id, course)
-            for child_id, _status, trial_date, held, outcome, course in trials
+            (held or trial_date, outcome, child_id, course, asked_how, told_missed)
+            for child_id, _status, trial_date, held, outcome, course, asked_how, told_missed in trials
             if child_id not in former and (held or trial_date) is not None
             and ((held or trial_date) < today or outcome)
         ),
@@ -291,13 +307,13 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
     )
     completed = [child for child in children if status_of(child) == STATUS_TRIAL_COMPLETED]
     if past:
-        when, outcome, child_id, course = past[0]
+        when, outcome, child_id, course, asked_how, told_missed = past[0]
         child = by_id[child_id]
         return answer(
             OUTCOME_TRIAL_ONLY,
             f'ניסיון ב-{_day(when)}, {TRIAL_OUTCOME_LABELS.get(outcome, "לא סומן")} · {_names([child])}',
             child,
-            trial=_trial_facts(when, outcome, course),
+            trial=_trial_facts(when, outcome, course, asked_how=asked_how, told_missed=told_missed),
         )
     if completed:
         return answer(OUTCOME_TRIAL_ONLY, f'עשה שיעור ניסיון, לא סומן · {_names(completed)}', completed[0])

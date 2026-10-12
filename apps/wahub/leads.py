@@ -95,6 +95,12 @@ NEXT_BY_KIND = {
     NUDGE_OPENING: 'הבוט ישאל מה הם מחפשים',
     NUDGE_DORMANT: 'הבוט יודיע שנפתחה הרשמה',
 }
+# ... and where a later step of a round says something else than its first.
+NEXT_BY_STEP = {
+    (NUDGE_TRIAL_FEEDBACK, 2): 'הבוט ישלח את הקישור להרשמה',
+    (NUDGE_TRIAL_FEEDBACK, 3): 'הבוט ישאל אם החוג עדיין רלוונטי',
+    (NUDGE_TRIAL_NO_SHOW, 2): 'הבוט יציע ימים אחרים לניסיון',
+}
 NOTHING_PLANNED = 'אין חזרה מתוכננת'
 WAITING_FOR_AN_ANSWER = 'הבוט חזר אליו — מחכים לתשובה'
 KEPT_FOR_LATER = 'נשמר: נודיע כשנפתח'
@@ -248,7 +254,7 @@ def next_move(contact: Contact, follow: LeadFollowUp | None) -> dict:
     if follow is not None:
         return {
             'who': 'bot',
-            'what': NEXT_BY_KIND.get(follow.kind, ''),
+            'what': NEXT_BY_STEP.get((follow.kind, follow.step)) or NEXT_BY_KIND.get(follow.kind, ''),
             'when': _iso(follow.due_at),
             'state': 'due' if follow.status == NUDGE_DUE else 'planned',
             'note': follow.outcome_note if follow.status == NUDGE_DUE else '',

@@ -40,6 +40,12 @@ class Command(BaseCommand):
         self.stdout.write(
             f'נוסחי החזרה ללידים: {prefix} {nudges["created"]}; {nudges["skipped"]} כבר היו.'
         )
+        if nudges['revised'] or nudges['revision_left']:
+            self.stdout.write(
+                f'נוסחי החזרה ללידים עודכנו לנוסח החדש: {nudges["revised"]}; חזרות מתוכננות שנוסחו מחדש: {nudges["reworded"]}.'
+            )
+            for title in nudges['revision_left']:
+                self.stdout.write(self.style.WARNING(f'  "{title}" נערך מאז ונשאר כפי שהוא.'))
         self.stdout.write('לא יובאו (לפי טבלת המיפוי וההחלטות):')
         for source, what, why in result['dropped']:
             self.stdout.write(f'  {source}: {what} — {why}')

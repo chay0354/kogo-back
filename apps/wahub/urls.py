@@ -47,6 +47,11 @@ urlpatterns = [
     # full, and what a person does to a lead. The board above stays for the screen that still reads it.
     path('leads/', views_leads.LeadListView.as_view(), name='wahub-leads'),
     path('leads/templates/', views_leads.LeadTemplatesView.as_view(), name='wahub-leads-templates'),
+    # "חזרה אוטומטית ללידים" (the same contract, י): what is missing for the follow-ups to leave by themselves,
+    # the automations ManyChat has, and connecting one to a follow-up. `options/` before the key: it is no key.
+    path('leads/automation/', views_leads.LeadAutomationView.as_view(), name='wahub-leads-automation'),
+    path('leads/templates/options/', views_leads.LeadTemplateOptionsView.as_view(), name='wahub-leads-template-options'),
+    path('leads/templates/<slug:template_key>/', views_leads.LeadTemplateView.as_view(), name='wahub-leads-template'),
     path('leads/<int:pk>/', views_leads.LeadDetailView.as_view(), name='wahub-lead'),
     path('leads/<int:pk>/close/', views_leads.LeadCloseView.as_view(), name='wahub-lead-close'),
     path('leads/<int:pk>/reopen/', views_leads.LeadReopenView.as_view(), name='wahub-lead-reopen'),

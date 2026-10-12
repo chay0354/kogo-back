@@ -1,7 +1,9 @@
 """
 The API of the leads screen, version 2 — docs/WAHUB-CONTRACT-LEADS-V2.md, ד,
-endpoint for endpoint. Managers only, like the rest of the section. The lists
-and the payloads are apps/wahub/leads.py; nothing here sends a message.
+endpoint for endpoint — and of the "חזרה אוטומטית ללידים" card of the settings
+(the same contract, י). Managers only, like the rest of the section. The lists
+and the payloads are apps/wahub/leads.py and apps/wahub/lead_automation.py;
+nothing here sends a message.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsManager
-from apps.wahub import lead_followups, leads
+from apps.wahub import lead_automation, leads
 from apps.wahub.models import Contact
 
 
@@ -91,11 +93,60 @@ class LeadOwnerView(_LeadView):
 
 class LeadTemplatesView(_LeadView):
     """
-    GET leads/templates/ — every text the bot may come back to a lead with:
-    {kind, label, text, template_key, mapped} (and variant, step, when, days,
-    active). `mapped` says whether an approved WhatsApp template is connected to
-    it; without one, a follow-up that is due after the 24-hour window stays due.
+    GET leads/templates/ — every text the bot may come back to a lead with, the
+    five of stage 1 first: {template_key, kind_label, when_label, text, stage,
+    mapped, target, target_name} (and kind, variant, step, label, when, days,
+    active, required, suggested_name, connected_by, connected_at). `target` is
+    the ManyChat automation connected to it — the flow "שלח תבנית" sends — or
+    null; without one, a follow-up that is due after the 24-hour window stays due.
     """
 
     def get(self, request):
-        return Response(lead_followups.template_rows())
+        return Response(lead_automation.templates())
+
+
+class LeadTemplateView(_LeadView):
+    """
+    PUT leads/templates/{template_key}/ {target} — connect the text to a
+    ManyChat automation (its id from `options/`, or its name as ManyChat spells
+    it); {target: null} takes the connection off. Answers with the row as it now
+    is. 400 with `detail` when ManyChat has no such automation, 502 when
+    ManyChat could not be asked — nothing is kept either way. 404 for a key
+    that is no template.
+    """
+
+    def put(self, request, template_key):
+        data = request.data if isinstance(request.data, dict) else {}
+        if 'target' not in data:
+            return _refused('נדרש target: האוטומציה ב-ManyChat, או null כדי לנתק.')
+        try:
+            row = lead_automation.connect(
+                template_key, data.get('target'), request.user, target_name=str(data.get('target_name') or ''),
+            )
+        except LookupError:
+            return _refused('אין חזרה כזאת.', status.HTTP_404_NOT_FOUND)
+        except lead_automation.TemplateError as exc:
+            return _refused(str(exc), exc.status)
+        return Response(row)
+
+
+class LeadTemplateOptionsView(_LeadView):
+    """
+    GET leads/templates/options/ — the automations ManyChat has, to connect a
+    text to: {options: [{id, name}]}. {options: null, reason} when ManyChat
+    cannot be asked right now, and the screen takes the name typed in.
+    """
+
+    def get(self, request):
+        return Response(lead_automation.options())
+
+
+class LeadAutomationView(_LeadView):
+    """
+    GET leads/automation/ — "does it all run by itself, and if not, what is
+    missing": {ready, lines: [classify, schedule, sending, templates], today,
+    upcoming, banner}. Every text is ready to show.
+    """
+
+    def get(self, request):
+        return Response(lead_automation.status())

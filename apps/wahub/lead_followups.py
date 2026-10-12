@@ -10,9 +10,10 @@ moment comes, acts on it (`run`, a slice of the five-minute cron):
               Friday, a Saturday or a special day: a moment outside them moves
               to the next opening.
     due       the moment came and the message did not leave: the owner's switch
-              is off for this contact, or WhatsApp's 24 hours have passed and no
-              approved template is mapped to this follow-up. "The bot would
-              have sent this now." It is tried again for DUE_HOLD, then let go.
+              is off for this contact, the server has no ManyChat to send
+              through, or WhatsApp's 24 hours have passed and no approved
+              template is connected to this follow-up. "The bot would have
+              sent this now." It is tried again for DUE_HOLD, then let go.
     sent      it went out — or, for a demo contact, was written into the demo
               conversation as the new bot's line: nothing ever leaves for a demo.
     skipped   the customer wrote meanwhile, registered, was closed, a person
@@ -23,8 +24,9 @@ moment comes, acts on it (`run`, a slice of the five-minute cron):
 Nothing leaves except through sending.py, and only when
 `sending.sending_enabled(contact)` says a message may leave for this contact.
 The words are written when the row is planned — from the phrasings the owner
-edits (lead_followup_seed.py) and what is known about the lead — so no model is
-asked anything at sending time. Right before a send the registrations are read
+edits (lead_followup_seed.py) and what is known about the lead — and put
+together again from the same phrasing right before they leave, in case he has
+rewritten it since; no model is asked anything at sending time. Right before a send the registrations are read
 again (matching.recheck_contact: every phone the family has), because a lead
 who registered yesterday must not be asked today whether they still want to.
 
@@ -46,7 +48,9 @@ from datetime import date, datetime, time as day_time, timedelta
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.wahub import knowledge, lead_ai, lead_followup_seed, lead_stage, matching, sending, settings_store, state
+from apps.wahub import (
+    knowledge, lead_ai, lead_followup_seed, lead_stage, lead_templates, matching, sending, settings_store, state,
+)
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     EVENT_LEAD_FOLLOWUP,
@@ -64,6 +68,8 @@ from apps.wahub.models import (
     NUDGE_PLANNED,
     NUDGE_SENT,
     NUDGE_SKIPPED,
+    NUDGE_TRIAL_FEEDBACK,
+    NUDGE_TRIAL_NO_SHOW,
     SCOPE_BUSINESS,
     SPECIAL_OPEN,
     Contact,
@@ -100,10 +106,17 @@ DORMANT_BATCH = 100
 KIND_LABELS = dict(NUDGE_KIND_CHOICES)
 
 SENDING_OFF = 'השליחה ללקוחות כבויה'
-NO_TEMPLATE = 'עברו 24 שעות מההודעה האחרונה של הלקוח — וואטסאפ מרשה רק תבנית מאושרת, ולחזרה הזאת עוד לא חוברה תבנית'
+NO_TEMPLATE = 'חסרה תבנית: עברו 24 שעות מההודעה האחרונה של הלקוח, ואז וואטסאפ מרשה רק תבנית מאושרת'
+NO_MANYCHAT = 'השרת לא מחובר ל-ManyChat'
 DEMO_NOTE = 'נכתב לשיחת הדמו — לא נשלח לאף אחד'
 CUT_SHORT = 'השליחה נקטעה באמצע. לא ידוע אם ההודעה יצאה, ולכן היא לא נשלחת שוב'
 NO_WORDS = 'אין נוסח פעיל לחזרה הזאת'
+# The system's own automations (apps/enrollments) had already written this to the family: the bot does not repeat it.
+ALREADY_SAID = {
+    NUDGE_TRIAL_FEEDBACK: 'ההורה כבר קיבל את ההודעה האוטומטית שאחרי שיעור הניסיון — הבוט לא שואל שוב',
+    NUDGE_TRIAL_NO_SHOW: 'ההורה כבר קיבל הודעה אוטומטית על כך שלא הגיעו — הבוט לא כותב על זה שוב',
+}
+ALREADY_SAID_OTHER = 'ההודעה הזאת כבר נשלחה ללקוח באוטומציה אחרת של המערכת'
 
 
 # --- the office hours ------------------------------------------------------------------------------
@@ -295,15 +308,46 @@ def values_for(contact: Contact) -> dict:
     }
 
 
+def words_now(row: LeadFollowUp, contact: Contact) -> str:
+    """
+    The row's words as its phrasing stands this minute: the owner — or a
+    deploy that brought the phrasings to new words — may have rewritten it
+    since the row was planned. Still the phrasing put together with what is
+    known about the lead; no model is asked. When the phrasing has no live
+    words any more, what was planned stands.
+    """
+    rest = row.template_key[len(row.kind) + 1:] if row.template_key.startswith(f'{row.kind}_') else ''
+    variant = rest.rsplit('_', 1)[0] if '_' in rest else ''
+    body, _template_key = phrasing(row.kind, row.step, variant)
+    return (render(body, values_for(contact)) if body else '') or row.text
+
+
+def reword_open() -> int:
+    """
+    Bring every follow-up that is still ahead to the words its phrasing has
+    now — for the day the phrasings themselves are rewritten, so the screen
+    shows what will really be said. A row a cron call is acting on this moment
+    is left to that call (it rewords for itself). Returns how many changed.
+    """
+    changed = 0
+    for row in LeadFollowUp.objects.filter(status__in=NUDGE_OPEN_STATUSES, claimed_at__isnull=True).select_related('contact'):
+        words = words_now(row, row.contact)
+        if words != row.text:
+            changed += LeadFollowUp.objects.filter(
+                pk=row.pk, status__in=NUDGE_OPEN_STATUSES, claimed_at__isnull=True,
+            ).update(text=words)
+    return changed
+
+
 def template_rows() -> list[dict]:
-    """GET leads/templates/ — every text the bot may come back with, and whether a template is mapped to it."""
-    mapped = settings_store.lead_templates()
+    """GET leads/templates/ — every text the bot may come back with, and whether a template is connected to it."""
+    mapped = lead_templates.connections()
     rows = []
     for kind, variant, _title, _when, _body, _later, _active in lead_followup_seed.PHRASINGS:
         key = lead_followup_seed.phrasing_key(kind, variant)
         draft = lead_followup_seed.DEFAULTS[key]
         texts = _texts(key)
-        delays = lead_stage.NUDGE_DELAYS[kind]
+        delays = lead_stage.delays_for(kind, variant)
         for step, text in enumerate(texts or [], 1):
             if not text.strip():
                 continue
@@ -405,10 +449,13 @@ def _plan(contact: Contact, follow: dict, why: str, now, *, calendar=None) -> Le
         # The fact the round counts its days from is kept as it was when the round began: the bot's
         # own follow-ups are messages too, and must not move it.
         anchor = follow.get('anchor')
+        # A round the system's own automations have already begun (lead_stage: `from_step`) starts from
+        # the bot's first step of its own, on that step's own day.
+        passed = max(0, int(follow.get('from_step') or 1) - 1)
         round_ = {
             'episode': key, 'kind': kind, 'started_at': now.isoformat(), 'anchor': anchor.isoformat() if anchor else None,
-            'steps': len(delays), 'step': 0, 'attempts': 0, 'last_at': None, 'acted_at': None, 'done': False,
-            'hot': bool(follow.get('hot')), 'note': '',
+            'steps': len(delays), 'step': passed, 'attempts': 0, 'passed': passed, 'last_at': None, 'acted_at': None,
+            'done': False, 'hot': bool(follow.get('hot')), 'note': '',
         }
     if round_.get('done'):
         return None
@@ -437,6 +484,27 @@ def _plan(contact: Contact, follow: dict, why: str, now, *, calendar=None) -> Le
     return row
 
 
+def _already_said(row: LeadFollowUp, follow: dict | None) -> bool:
+    """The step this row is has meanwhile been said by one of the system's own automations."""
+    return follow is not None and row.kind != NUDGE_DORMANT and row.step < int(follow.get('from_step') or 1)
+
+
+def _pass_over(contact: Contact, row: LeadFollowUp, follow: dict, now) -> None:
+    """
+    Close a step the system's own automations have already said, and move the
+    round past it: the customer is not asked the same thing twice, and the
+    round goes on from its next step — nothing is counted as the bot's own.
+    """
+    why = ALREADY_SAID.get(row.kind, ALREADY_SAID_OTHER)
+    _close(row, NUDGE_SKIPPED, why, now)
+    _log(contact, row, f'בוטלה — {why}')
+    round_ = _round_of(contact, row.episode)
+    if round_:
+        passed = int(follow.get('from_step') or 1) - 1
+        round_.update(step=max(int(round_.get('step') or 0), passed), passed=max(int(round_.get('passed') or 0), passed))
+        _keep_round(contact, round_)
+
+
 def sync(contact_id, *, now=None) -> None:
     """
     Bring the contact's open follow-up in line with what the rules ask for
@@ -460,6 +528,10 @@ def sync(contact_id, *, now=None) -> None:
                     standing = True
                     continue
             elif (follow is not None and row.episode == follow['key']) or row.claimed_at is not None:
+                if row.claimed_at is None and _already_said(row, follow):
+                    # The same round, one step on: the next step is planned below.
+                    _pass_over(contact, row, follow, now)
+                    continue
                 standing = True
                 continue
             _close(row, NUDGE_SKIPPED, _why_skipped(contact, result, row), now)
@@ -567,11 +639,22 @@ def _act(row: LeadFollowUp, now, *, calendar=None) -> str:
         _log(contact, row, f'בוטלה — {why}')
         sync(contact.pk, now=now)
         return NUDGE_SKIPPED
+    if _already_said(row, result['follow']):
+        # Read this minute with the registrations: the system's own message went out since this was planned.
+        _pass_over(contact, row, result['follow'], now)
+        sync(contact.pk, now=now)
+        return NUDGE_SKIPPED
 
     opens = next_opening(now, calendar=calendar)
     if opens != now:
         _wait(row, opens)
         return 'waiting'
+
+    # The words as the phrasing stands now, not as it stood on the day this was planned.
+    words = words_now(row, contact)
+    if words != row.text:
+        row.text = words
+        row.save(update_fields=['text'])
 
     if contact.is_demo:
         # Nothing ever leaves for a demo contact. The line is written into its conversation, as the
@@ -583,10 +666,13 @@ def _act(row: LeadFollowUp, now, *, calendar=None) -> str:
         return NUDGE_SENT
     if not sending.sending_enabled(contact):
         return _hold(contact, row, SENDING_OFF, now)
+    if not sending.manychat_reachable():
+        # A certain "not sent": it waits like any message that may not leave, and costs the round no step.
+        return _hold(contact, row, NO_MANYCHAT, now)
     if sending.can_free_text(contact, now):
         message = sending.send_lead_followup(contact, row.text)
     else:
-        flow = settings_store.lead_templates().get(row.template_key)
+        flow = lead_templates.flow_for(row.template_key, now)
         if not flow:
             return _hold(contact, row, NO_TEMPLATE, now)
         message = sending.send_lead_followup_flow(contact, flow, row.text)

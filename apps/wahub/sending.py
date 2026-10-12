@@ -93,6 +93,15 @@ def simulate_send() -> bool:
     return bool(getattr(settings, 'WAHUB_SIMULATE_SEND', False))
 
 
+def manychat_reachable() -> bool:
+    """
+    Is there a ManyChat to send through at all: the server holds its key — or
+    sends are only recorded here, and none is needed. Without one every send is
+    a certain "not sent" (NOT_CONFIGURED), whatever the switch says.
+    """
+    return simulate_send() or ManyChatService().is_configured
+
+
 def window_closes_at(contact: Contact):
     return contact.last_inbound_at + FREE_TEXT_WINDOW if contact.last_inbound_at else None
 
@@ -161,11 +170,18 @@ def send_text(contact: Contact, text: str, user) -> Message:
     )
 
 
-def send_flow(contact: Contact, flow_ns: str, name: str, user) -> Message:
-    """A template (ManyChat automation). Allowed outside the 24-hour window."""
+def send_flow(contact: Contact, flow_ns: str, name: str, user, *,
+              sender: str = SENDER_OFFICE, new_bot: bool = False) -> Message:
+    """
+    A template (ManyChat automation). Allowed outside the 24-hour window.
+    "שלח תבנית" on the screen is this, as the office; the bot's own follow-up to
+    a lead after the 24 hours (send_lead_followup_flow) is this very function
+    too, kept as the bot's line — one way out for every template.
+    """
     return _deliver(
         contact, user, text=name or flow_ns, message_type=TYPE_TEMPLATE,
         call=lambda service, subscriber_id: service.send_flow(subscriber_id, flow_ns),
+        sender=sender, new_bot=new_bot,
     )
 
 
@@ -263,14 +279,14 @@ def send_lead_followup(contact: Contact, text: str) -> Message:
 def send_lead_followup_flow(contact: Contact, flow_ns: str, text: str) -> Message:
     """
     The same, after the 24 hours: only an approved template may leave, and it
-    leaves as the ManyChat flow the owner mapped to this follow-up
-    (settings_store.lead_templates). `text` is what the conversation shows —
-    the wording that actually reaches the customer is the template's own.
+    leaves as the ManyChat flow the owner connected to this follow-up
+    (settings_store.lead_templates) — through `send_flow`, the same function
+    the screen's "שלח תבנית" goes through, with the same three doors. `text` is
+    what the conversation shows — the wording that actually reaches the
+    customer is the template's own.
     """
-    return _deliver(
-        contact, None, text=(text or '').strip()[:MAX_TEXT_CHARS] or flow_ns, message_type=TYPE_TEMPLATE,
-        call=lambda service, subscriber_id: service.send_flow(subscriber_id, flow_ns),
-        sender=SENDER_BOT, new_bot=True,
+    return send_flow(
+        contact, flow_ns, (text or '').strip()[:MAX_TEXT_CHARS], None, sender=SENDER_BOT, new_bot=True,
     )
 
 
