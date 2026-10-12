@@ -45,6 +45,8 @@ The rules, in order:
     20. link_sent         got a registration link and has not registered                 bot
     21. in_conversation   the last message (or mark) is younger than IN_CONVERSATION_FOR
     22. answered_silent   answered, quiet for SILENT_AFTER or more                       bot
+        (in 21 and 22 the bot comes back, once, to two kinds of lead: one who wrote nothing
+        of their own — two hours later — and one afraid to commit who got no link — a day later)
     23. cold              quiet for COLD_AFTER or more — "רדום"
 
 "bot" is where a round of follow-ups starts (lead_followups.py): how many times
@@ -198,6 +200,17 @@ VARIANT_AGE = 'age'
 VARIANT_NOT_READY = 'not_ready'
 VARIANT_COMMITMENT = 'commitment'
 VARIANT_SIGNUP = 'signup'
+
+
+def delays_for(kind: str, variant: str = '') -> tuple:
+    """When the bot comes back in a round of this kind and variant — the one place that says so."""
+    if kind == NUDGE_DATE_ARRIVED and variant == VARIANT_AGE:
+        return DATE_ARRIVED_AGE
+    if kind == NUDGE_DATE_ARRIVED and variant == VARIANT_NOT_READY:
+        return DATE_ARRIVED_NOT_READY
+    return NUDGE_DELAYS[kind]
+
+
 # After the last time the bot came back, the customer has this long to answer.
 GIVE_UP_AFTER = timedelta(days=3)
 # A round begins only this close to the fact behind it: nobody is asked today how last month's trial was.
@@ -642,11 +655,12 @@ class _Said:
         except ValueError:
             self.said_on = None
         if come_back.get('kind') == lead_ai.COME_BACK_AGE:
-            self.day_variant, self.day_delays = VARIANT_AGE, DATE_ARRIVED_AGE
+            self.day_variant = VARIANT_AGE
         elif kept.get('blocker') == lead_ai.BLOCKER_CHILD_NOT_READY:
-            self.day_variant, self.day_delays = VARIANT_NOT_READY, DATE_ARRIVED_NOT_READY
+            self.day_variant = VARIANT_NOT_READY
         else:
-            self.day_variant, self.day_delays = '', NUDGE_DELAYS[NUDGE_DATE_ARRIVED]
+            self.day_variant = ''
+        self.day_delays = delays_for(NUDGE_DATE_ARRIVED, self.day_variant)
 
         self.external = bool(kept.get('external'))
         branch = kept.get('branch_id') or contact.known_branch_id
@@ -666,6 +680,8 @@ class _Round:
         self.steps = steps
         self.started_at = _moment(kept.get('started_at'))
         self.attempts = int(kept.get('attempts') or 0)
+        # Steps the bot never took, because the system's own automations had already said them.
+        self.passed = int(kept.get('passed') or 0)
         self.last_at = _moment(kept.get('last_at'))
         # No step of this round is still ahead: every one went out, or could not.
         self.done = bool(kept.get('done'))
@@ -677,7 +693,7 @@ class _Round:
 
     @property
     def all_sent(self) -> bool:
-        return self.attempts >= self.steps and self.last_at is not None
+        return self.attempts + self.passed >= self.steps and self.last_at is not None
 
     def said(self) -> str:
         """What the bot did in this round, in a sentence for the screen."""
@@ -703,8 +719,8 @@ def compute(contact: Contact, now=None) -> dict:
     None for a stage only a new fact can move. `next_step` is what a person
     would do; `owner` says whether it is theirs to do now. `follow` is the
     round of follow-ups the bot should have open for this contact —
-    {kind, key, anchor, hot, delays, variant} — or None (lead_followups.py
-    plans and cancels by it). A conversation that is not about a class has no
+    {kind, key, anchor, hot, delays, variant, from_step} — or None
+    (lead_followups.py plans and cancels by it). A conversation that is not about a class has no
     stage at all: '' everywhere, and the sentence says what it is about.
     """
     now = now or timezone.now()
@@ -755,13 +771,15 @@ def compute(contact: Contact, now=None) -> dict:
 
     def by_the_bot(stage: str, kind: str, key: str, anchor, *parts: str, then: str, delays=None, variant: str = '',
                    since=None, next_step: str | None = None, office_step: str | None = None, recheck_at=None,
-                   in_touch: bool = False, start_within=START_WITHIN):
+                   in_touch: bool = False, start_within=START_WITHIN, from_step: int = 1):
         """
         A stage the bot follows up by itself, for as long as its round lasts.
         `anchor` is the fact the round counts from; `then` — what becomes of the
         lead when the round is over and nobody answered; `in_touch` — the
-        customer has already written since that fact. None for a lead whose
-        round is over and that goes dormant: the caller says so in its words.
+        customer has already written since that fact; `from_step` — the first
+        step the bot itself takes, when the system's own automations have
+        already said what the earlier ones say. None for a lead whose round is
+        over and that goes dormant: the caller says so in its words.
         """
         delays = delays or NUDGE_DELAYS[kind]
         round_ = _Round(contact, key, len(delays))
@@ -799,7 +817,10 @@ def compute(contact: Contact, now=None) -> dict:
         if not round_.began and (anchor is None or now - anchor > start_within):
             # Too long ago to ask about: no round is begun. A hot lead is the office's, as it always was.
             return office() if hot else plain()
-        follow = {'kind': kind, 'key': key[:160], 'anchor': anchor, 'hot': hot, 'delays': tuple(delays), 'variant': variant}
+        follow = {
+            'kind': kind, 'key': key[:160], 'anchor': anchor, 'hot': hot, 'delays': tuple(delays), 'variant': variant,
+            'from_step': max(1, min(from_step, len(delays))),
+        }
         return plain(owner=LEAD_OWNER_BOT, follow=follow)
 
     def dormant(key: str, steps: int):
@@ -966,14 +987,20 @@ def compute(contact: Contact, now=None) -> dict:
         on = str((contact.kogo_trial or {}).get('on') or '')
         # Wrote on a later day than the trial: they are in touch already, and nobody asks them "how was it".
         in_touch = held is not None and facts.wrote_after(_midnight(timezone.localtime(held).date() + timedelta(days=1)))
+        # What the system's own automations have already written to the family about this trial
+        # (apps/enrollments; the matching keeps it beside the trial): nobody is asked the same thing
+        # twice. The bot's round then begins from its second step, on the second step's own day.
+        told = contact.kogo_trial if isinstance(contact.kogo_trial, dict) else {}
         if _did_not_come(contact):
             return by_the_bot(
                 LEAD_TRIAL_NO_SHOW, NUDGE_TRIAL_NO_SHOW, f'{NUDGE_TRIAL_NO_SHOW}|{on}', held,
                 _trial_line(contact, 'נרשם לניסיון ולא הגיע'), 'לא נרשם', then=THEN_OFFICE, since=held, in_touch=in_touch,
+                from_step=2 if told.get('didnt_arrive_sent') else 1,
             )
         return by_the_bot(
             LEAD_TRIAL_DONE, NUDGE_TRIAL_FEEDBACK, f'{NUDGE_TRIAL_FEEDBACK}|{on}', held,
             _trial_line(contact, 'עשה שיעור ניסיון'), 'לא נרשם אחרי הניסיון', then=THEN_OFFICE, since=held, in_touch=in_touch,
+            from_step=2 if told.get('after_test_sent') else 1,
         )
 
     # 16–17. the day the conversation named
@@ -1005,15 +1032,41 @@ def compute(contact: Contact, now=None) -> dict:
         )
         return result if result is not None else dormant(key, len(NUDGE_DELAYS[NUDGE_LINK_REMINDER]))
 
-    # 21. still talking. Somebody who wrote nothing of their own is asked, once, what they are looking for.
+    # 21–22. The two stages the conversation's own clock decides — and the two kinds of lead the bot
+    #        comes back to in them, once. Each round is the same one in both stages: a follow-up
+    #        planned while the lead was "talking" stands when the clock calls it "silent", so a
+    #        weekend between the message and the next opening of the office does not lose it.
+    def asked_what_they_look_for(stage: str, *parts: str, **common):
+        """Wrote nothing of their own (the ad's words, "היי"): asked what they are looking for, two hours later."""
+        return by_the_bot(
+            stage, NUDGE_OPENING, f'{NUDGE_OPENING}|{_stamp(contact.last_inbound_at)}', contact.last_inbound_at, *parts,
+            then=THEN_STAY, start_within=OPENING_START_WITHIN, **common,
+        )
+
+    def hesitant(stage: str, *parts: str, **common):
+        """
+        Asked what happens if the class does not fit, and no registration link
+        has gone out to them: the bot answers exactly that, a day later
+        ("מתחילים משיעור ניסיון אחד"). With a link they are in rule 20, and get
+        its three reminders instead.
+        """
+        key = f'{NUDGE_LINK_REMINDER}|{VARIANT_COMMITMENT}|{_stamp(contact.last_inbound_at)}|{_stamp(facts.marked_at)}'
+        return by_the_bot(
+            stage, NUDGE_LINK_REMINDER, key, facts.last_activity, *parts,
+            then=THEN_STAY, variant=VARIANT_COMMITMENT, delays=(DAY,), **common,
+        )
+
+    said_nothing = said.empty_opening and contact.last_inbound_at is not None
+    # (An external branch is told apart in the sentences of these two stages themselves.)
+    afraid_to_commit = said.blocker == lead_ai.BLOCKER_COMMITMENT and not said.external
+
+    # 21. still talking
     if facts.quiet < IN_CONVERSATION_FOR:
         talking = dict(since=facts.last_activity, recheck_at=facts.last_activity + IN_CONVERSATION_FOR)
-        if said.empty_opening and contact.last_inbound_at is not None:
-            return by_the_bot(
-                LEAD_IN_CONVERSATION, NUDGE_OPENING, f'{NUDGE_OPENING}|{_stamp(contact.last_inbound_at)}',
-                contact.last_inbound_at, facts.opening(), facts.who_answered(),
-                then=THEN_STAY, start_within=OPENING_START_WITHIN, **talking,
-            )
+        if said_nothing:
+            return asked_what_they_look_for(LEAD_IN_CONVERSATION, facts.opening(), facts.who_answered(), **talking)
+        if afraid_to_commit:
+            return hesitant(LEAD_IN_CONVERSATION, facts.opening(), facts.who_answered(), said.blocker_text, **talking)
         return done(LEAD_IN_CONVERSATION, _sentences(facts.opening(), facts.who_answered()), **talking)
 
     # 22. answered, and silent since
@@ -1024,6 +1077,12 @@ def compute(contact: Contact, now=None) -> dict:
             next_step = NOBODY_SPOKE_YET
         else:
             next_step = None
+        silent = dict(next_step=next_step, since=facts.last_activity, recheck_at=facts.last_activity + COLD_AFTER)
+        words = (facts.opening(), facts.who_answered(), said.blocker_text, 'לא נרשם')
+        if said_nothing and not said.external:
+            return asked_what_they_look_for(LEAD_ANSWERED_SILENT, *words, **silent)
+        if afraid_to_commit:
+            return hesitant(LEAD_ANSWERED_SILENT, *words, **silent)
         return done(
             LEAD_ANSWERED_SILENT,
             _sentences(
@@ -1153,18 +1212,30 @@ def refresh(contact, *, now=None, fresh: bool = False, human_touched: bool | Non
             )
         changed = True
     if follow:
-        _keep_round(contact.pk, result, open_follow, now)
+        _keep_round(contact.pk, result, open_follow, now, behind=_round_is_behind(contact, result['follow']))
     return changed
 
 
-def _keep_round(contact_id, result: dict, open_follow, now) -> None:
+def _round_is_behind(contact: Contact, follow: dict | None) -> bool:
+    """
+    The round that is open is the right one, but the rules now have it begin
+    from a later step than it stands on: one of the system's own automations
+    has meanwhile said what its open step would say.
+    """
+    kept = contact.lead_bot if isinstance(contact.lead_bot, dict) else {}
+    if follow is None or kept.get('episode') != follow['key'] or kept.get('done'):
+        return False
+    return int(kept.get('passed') or 0) < int(follow.get('from_step') or 1) - 1
+
+
+def _keep_round(contact_id, result: dict, open_follow, now, *, behind: bool = False) -> None:
     """The bot's open follow-up is the one the rules ask for — or it is put right. Never raises."""
     from apps.wahub import lead_followups
 
     try:
         wanted = (result['follow'] or {}).get('key', '')
         have = lead_followups.open_key(contact_id) if open_follow is _NOT_ASKED else (open_follow or '')
-        if wanted != have:
+        if wanted != have or behind:
             lead_followups.sync(contact_id, now=now)
     except Exception:
         logger.exception('wahub lead stage: the follow-ups of contact %s were not brought in line', contact_id)

@@ -557,6 +557,13 @@ def from_model(data, *, lines, known, course_types=(), external_places=(), today
         else:
             lead['quote'] = _short(data.get('quote'), QUOTE_CHARS)
             lead['quote_at'] = _moment(line.sent_at)
+    if interest not in QUOTED_INTERESTS:
+        # "לא" to our own "כתבו 'לא' ולא אשלח יותר" is kept by the words themselves, whatever the reader
+        # made of so short an answer: it is a promise we made, not a matter of understanding.
+        stop = asked_to_stop(lines)
+        if stop is not None:
+            interest = INTEREST_NO
+            lead['quote'], lead['quote_at'] = _short(stop.text, QUOTE_CHARS), _moment(stop.sent_at)
     lead['interest'] = interest
 
     lead['blocker'] = data.get('blocker') if data.get('blocker') in BLOCKERS else ''
@@ -586,10 +593,22 @@ def from_model(data, *, lines, known, course_types=(), external_places=(), today
 P_NO = re.compile(
     r'לא מעוניינ|לא מעונין|מצאנו (?:כבר )?(?:מקום|חוג|מסגרת|סטודיו) אחר|נרשמנו (?:כבר )?(?:ל|ב)מקום אחר'
     r'|תורידו אותי|תסירו אותי|הסירו אותי|להסיר אותי|אל תשלחו|לא לפנות אלי|ויתרנו|החלטנו לוותר'
+    # Asked, in so many words, that the messages stop — the bot writes by itself now, and this is how it is told to.
+    r'|תפסיקו לשלוח|תפסיקו לכתוב|הפסיקו לשלוח|להפסיק לשלוח|לא לשלוח לי|אל תכתבו לי|די לשלוח|די להטריד'
     r'|אני מוותרת|אני מוותר\b|אנחנו מוותרים|נוותר'
 )
 # The whole message, and nothing else in it.
 P_NO_WHOLE = re.compile(r'^[\s.,!]*(?:תודה,?\s*לא|לא,?\s*תודה|טעות|זו טעות|זאת טעות)[\s.,!🙏]*$')
+# The one bare "לא" that is a goodbye: the answer to our own last reminder, which asks for that very
+# word and promises to stop ("אם זה כבר לא רלוונטי תכתבו לי לא ואני מפסיקה", lead_followup_seed.LAST_TIME —
+# and, as it was first filed, "כתבו 'לא' ולא אשלח יותר"). Both halves are looked for: "ענו לא" alone
+# may be about a lesson, not about hearing from us.
+P_INVITED_NO = re.compile(
+    r'(?:כתבו|תכתבו|השיבו|ענו|שלחו)(?:\s+(?:לי|לנו))?\s*[\'"׳״‘’“”]?לא[\'"׳״‘’“”]?\s*,?\s*'
+    r'ו(?:לא\s+(?:אשלח|נשלח|אכתוב|נכתוב|אפנה|נפנה|אזכיר|נזכיר)'
+    r'|(?:אני\s+|אנחנו\s+)?(?:אפסיק|נפסיק|מפסיקה|מפסיק|מפסיקים))'
+)
+P_BARE_NO = re.compile(r'^[\s.,!\'"׳״‘’“”]*לא[\s.,!\'"׳״‘’“”🙏]*$')
 # "We already signed up" — not about a trial lesson, which is no registration.
 P_SAYS_REGISTERED = re.compile(
     r'כבר נרשמנו|בסוף נרשמנו|בסוף רשמנו|נרשמנו כבר|כבר רשמנו|כבר רשמתי|כבר רשומ|כבר אצלכם|כבר לקוח'
@@ -753,8 +772,27 @@ def _come_back_by_rules(lines, today: date) -> tuple[dict, str]:
     return {}, ''
 
 
+def asked_to_stop(lines):
+    """
+    The customer's bare "לא" that answers our own last reminder — the message
+    that says "כתבו 'לא' ולא אשלח יותר". Anywhere else a bare "לא" answers
+    whatever was asked last and closes nothing (ח.8); here it is the word we
+    asked for, and a promise: nobody writes to them again. None unless it is
+    the last thing they wrote, and the last thing we wrote before it asked for it.
+    """
+    spoken = [line for line in lines if line.text]
+    last = next((index for index in range(len(spoken) - 1, -1, -1) if spoken[index].who == SENDER_CUSTOMER), None)
+    if last is None or not P_BARE_NO.match(spoken[last].text):
+        return None
+    ours = next((line for line in reversed(spoken[:last]) if line.who != SENDER_CUSTOMER), None)
+    return spoken[last] if ours is not None and P_INVITED_NO.search(ours.text) else None
+
+
 def _says_no(lines):
     """The customer's message that says, outright, that they are not interested — among their last two."""
+    stop = asked_to_stop(lines)
+    if stop is not None:
+        return stop
     theirs = [line for line in lines if line.who == SENDER_CUSTOMER and line.text]
     for line in reversed(theirs[-2:]):
         text = line.text

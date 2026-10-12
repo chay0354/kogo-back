@@ -25,7 +25,8 @@ from apps.wahub.tests.test_leads_v2 import DAY, FOLLOWUP_MARKS, HOUR, MINUTE, TO
 REQUEST = 'apps.core.manychat_service.ManyChatService._request'
 OK = {'status': 'success'}
 SENDING_ON = dict(MANYCHAT_KEY='test-key', WAHUB_SENDING_ENABLED=True)
-LINK_FIRST = 'היי, כאן קוגומלו 🙂 שלחתי קישור לקפוארה בראש העין. הצלחתם להירשם, או שמשהו נתקע באתר?'
+LINK_FIRST = 'היי מה נשמע 🙂 רציתי לבדוק אם הצלחתם להירשם לקפוארה בראש העין או שמשהו נתקע בדרך'
+LAST_TIME = 'היי פעם אחרונה שאני מזכירה 🙂 אם זה כבר לא רלוונטי תכתבו לי לא ואני מפסיקה. ואם כן אני כאן'
 
 
 def at(year, month, day, hour=10, minute=30):
@@ -126,13 +127,14 @@ class WordsTests(LeadsCase):
         render = lead_followups.render
         first = lead_followup_seed.DEFAULTS['lead_link_reminder']['texts'][0]
         self.assertEqual(render(first, {'חוג': 'קפוארה', 'סניף': 'ראש העין'}), LINK_FIRST)
-        self.assertEqual(render(first, {'חוג': 'קפוארה'}), 'היי, כאן קוגומלו 🙂 שלחתי קישור לקפוארה. הצלחתם להירשם, או שמשהו נתקע באתר?')
-        self.assertEqual(render(first, {}), 'היי, כאן קוגומלו 🙂 שלחתי קישור לחוג. הצלחתם להירשם, או שמשהו נתקע באתר?')
+        self.assertEqual(render(first, {'חוג': 'קפוארה'}), 'היי מה נשמע 🙂 רציתי לבדוק אם הצלחתם להירשם לקפוארה או שמשהו נתקע בדרך')
+        self.assertEqual(render(first, {}), 'היי מה נשמע 🙂 רציתי לבדוק אם הצלחתם להירשם לחוג או שמשהו נתקע בדרך')
         feedback = lead_followup_seed.DEFAULTS['lead_trial_feedback']['texts'][0]
-        self.assertEqual(render(feedback, {'ילד': 'נועה'}), 'היי, איך היה לנועה בשיעור הניסיון? 🙂')
-        self.assertEqual(render(feedback, {'ילד': ''}), 'היי, איך היה בשיעור הניסיון? 🙂')               # no name is invented
+        self.assertEqual(render(feedback, {'ילד': 'נועה'}), 'היי איך היה לנועה בשיעור הניסיון? 🙂')
+        self.assertEqual(render(feedback, {'ילד': ''}), 'היי איך היה בשיעור הניסיון? 🙂')                 # no name is invented
         check = lead_followup_seed.DEFAULTS['lead_will_check']['texts'][0]
-        self.assertEqual(render(check, {}), 'היי, הספקתם לחשוב על החוג? אם נשארה שאלה פתוחה — אני כאן.')
+        self.assertEqual(render(check, {}), 'היי רק מזכירה לגבי החוג 🙂 יש כבר החלטה או שנשארה שאלה?')
+        self.assertEqual(render(check, {'חוג': 'קפוארה', 'ילד': 'נועה'}), 'היי רק מזכירה לגבי קפוארה לנועה 🙂 יש כבר החלטה או שנשארה שאלה?')
         self.assertEqual(render('שיעורי ניסיון[ ב{חוג}] גם במועדים אחרים', {}), 'שיעורי ניסיון גם במועדים אחרים')
         self.assertEqual(render('שיעור ב{חוג} מ{חוג}', {}), 'שיעור בחוג מהחוג')
         self.assertEqual(render('שורה {משהו} אחת\n  ושנייה {קישור} ', {'קישור': 'https://x.example/'}), 'שורה אחת\nושנייה https://x.example/')
@@ -150,11 +152,18 @@ class WordsTests(LeadsCase):
                     self.assertNotIn('[', filled)
                     for guess in ('תוכל ', 'תוכלי ', 'אתה ', '₪', 'הנחה', 'נשאר מקום'):       # no guessed gender, no price in a fixed text
                         self.assertNotIn(guess, filled)
+                    # The owner's word (12.10): the way a person writes on WhatsApp — "היי" with no comma after
+                    # it, no "כאן קוגומלו", no sales talk, no formal punctuation.
+                    self.assertTrue(filled.startswith('היי'), filled)
+                    for formal in ('היי,', 'כאן קוגומלו', 'אשמח', 'נשמח', '—', ';'):
+                        self.assertNotIn(formal, filled)
 
     def test_the_drafts_are_filed_once_and_the_owners_edits_are_what_is_sent(self):
         self.assertEqual(lead_followups.phrasing('link_reminder', 1)[1], 'link_reminder_1')
-        self.assertEqual(lead_followup_seed.run(), {'created': len(lead_followup_seed.PHRASINGS), 'skipped': 0})
-        self.assertEqual(lead_followup_seed.run(), {'created': 0, 'skipped': len(lead_followup_seed.PHRASINGS)})
+        filed_all = len(lead_followup_seed.PHRASINGS)
+        nothing_revised = {'revised': 0, 'revision_left': [], 'reworded': 0}
+        self.assertEqual(lead_followup_seed.run(), {'created': filed_all, 'skipped': 0, **nothing_revised})
+        self.assertEqual(lead_followup_seed.run(), {'created': 0, 'skipped': filed_all, **nothing_revised})
         filed = KnowledgeItem.objects.filter(kind='phrasing', key__startswith='lead_')
         self.assertEqual(filed.count(), len(lead_followup_seed.PHRASINGS))
         self.assertEqual(set(filed.filter(is_active=False).values_list('key', flat=True)), {'lead_dormant'})
@@ -173,7 +182,7 @@ class WordsTests(LeadsCase):
 
     def test_a_variant_has_its_own_first_words_and_the_kinds_for_the_rest(self):
         self.assertEqual(lead_followups.phrasing('link_reminder', 1, 'signup')[1], 'link_reminder_signup_1')
-        self.assertIn('התחלתם הרשמה', lead_followups.phrasing('link_reminder', 1, 'signup')[0])
+        self.assertIn('שהתחלתם להירשם', lead_followups.phrasing('link_reminder', 1, 'signup')[0])
         self.assertEqual(lead_followups.phrasing('link_reminder', 2, 'signup'), lead_followups.phrasing('link_reminder', 2))
         self.assertEqual(lead_followups.phrasing('link_reminder', 3, 'commitment')[1], 'link_reminder_3')
         self.assertEqual(lead_followups.phrasing('date_arrived', 2, 'age')[1], 'date_arrived_age_2')
@@ -227,8 +236,8 @@ class RoundTests(EngineCase):
         contact = self.link_lead(is_demo=True, source='demo')            # a demo: every step is written, nothing leaves
         for step, (moment, text) in enumerate((
             (at(2026, 10, 13), LINK_FIRST),
-            (at(2026, 10, 15), 'היי, רוצים שאשלח שוב את הקישור לשיעור ניסיון בקפוארה? אפשר להתחיל משיעור אחד.'),
-            (at(2026, 10, 19), "היי, פעם אחרונה שאני מזכירה 🙂 אם זה כבר לא רלוונטי — כתבו 'לא' ולא אשלח יותר. ואם כן, אני כאן."),
+            (at(2026, 10, 15), 'היי רק מזכירה 🙂 אם בא לכם לנסות שיעור אחד בקפוארה ולראות אם זה מתאים תכתבו לי ואשלח קישור'),
+            (at(2026, 10, 19), LAST_TIME),
         ), 1):
             row = self.open_row(contact)
             self.assertEqual((row.step, row.due_at, row.text, row.template_key), (step, moment, text, f'link_reminder_{step}'))
@@ -254,15 +263,15 @@ class RoundTests(EngineCase):
     def test_a_hot_lead_whose_round_is_over_waits_for_the_office(self):
         contact = self.trial_lead(is_demo=True, source='demo')
         row = self.open_row(contact)
-        self.assertEqual((row.kind, row.step, row.text), ('trial_feedback', 1, 'היי, איך היה בשיעור הניסיון? 🙂'))
+        self.assertEqual((row.kind, row.step, row.text), ('trial_feedback', 1, 'היי איך היה בשיעור הניסיון? 🙂'))
         self.assertEqual(row.due_at, self.clock())                       # the day after the trial is today, and the office is open
         for moment in (self.clock(), at(2026, 10, 14, 12, 0), at(2026, 10, 18)):
             self.assertEqual(self.open_row(contact).due_at, moment)
             self.clock.moment = moment
             lead_followups.run()
         texts = [row.text for row in self.rows(contact)]
-        self.assertNotIn('ההרשמה כאן', texts[0])                         # first "how was it" — never a link to pay
-        self.assertIn('ההרשמה כאן: https://cogomelo.co.il/', texts[1])
+        self.assertNotIn('http', texts[0])                               # first "how was it" — never a link to pay
+        self.assertIn('אפשר להירשם כאן\n🔗 https://cogomelo.co.il/', texts[1])
         after = self.fresh(contact)
         self.assertEqual((after.lead_stage, after.lead_owner), ('trial_done', 'bot'))
         self.clock.forward(days=3)
@@ -289,7 +298,7 @@ class RoundTests(EngineCase):
         contact = self.staged(self.lead(is_demo=True, source='demo', said={'blocker': 'ask_someone', 'blocker_text': 'אמרה שתבדוק עם בעלה'}))
         row = self.open_row(contact)
         self.assertEqual((row.kind, row.step, row.due_at), ('will_check', 1, at(2026, 10, 13)))
-        self.assertEqual(row.text, 'היי, הספקתם לחשוב על קפוארה? אם נשארה שאלה פתוחה — אני כאן.')
+        self.assertEqual(row.text, 'היי רק מזכירה לגבי קפוארה 🙂 יש כבר החלטה או שנשארה שאלה?')
         self.clock.moment = row.due_at
         lead_followups.run()
         self.assertEqual([row.status for row in self.rows(contact)], ['sent'])               # once: no second step
@@ -308,7 +317,7 @@ class RoundTests(EngineCase):
         row = self.open_row(contact)
         self.assertEqual((row.kind, row.step, row.template_key), ('date_arrived', 1, 'date_arrived_age_1'))
         self.assertEqual(row.due_at, at(2027, 3, 14))                    # 12.3.2027 is a Friday: Sunday morning
-        self.assertEqual(row.text, 'היי, לפני כמה זמן שאלתם על חוג. אצלנו מתחילים מגיל 3 — אז עכשיו אפשר 🎈 רוצים שאבדוק קבוצה בראש העין?')
+        self.assertEqual(row.text, 'היי 🙂 שאלתם אותנו פעם על חוג והילד היה עוד קטן מדי. עכשיו כבר אפשר, מתחילים מגיל 3. רוצים שאבדוק לכם קבוצה בראש העין?')
         # Until that day: nothing, whatever runs.
         self.clock.to(2026, 12, 1, 11)
         lead_stage.scan()
@@ -330,7 +339,7 @@ class RoundTests(EngineCase):
         self.assertEqual((contact.lead_stage, contact.lead_owner), ('in_conversation', 'bot'))
         row = self.open_row(contact)
         self.assertEqual((row.kind, row.due_at), ('opening', at(2026, 10, 12, 13, 50)))       # two hours after their message
-        self.assertEqual(row.text, 'היי 🙂 ראיתי שהתעניינתם בחוגים שלנו. לאיזה גיל, ובאיזו עיר?')
+        self.assertEqual(row.text, 'היי 🙂 ראיתי שהתעניינתם בחוגים שלנו. לאיזה גיל ובאיזו עיר?')
         self.clock.moment = row.due_at
         lead_followups.run()
         after = self.fresh(contact)
@@ -475,7 +484,8 @@ class SendingTests(EngineCase):
         self.clock.moment = at(2026, 10, 13)
         with patch(REQUEST, return_value=OK) as request:
             counts = lead_followups.run()
-        request.assert_not_called()
+        # ManyChat is asked once which automations it has — it has none under this follow-up's name — and nothing is sent.
+        request.assert_called_once_with('GET', '/fb/page/getFlows', timeout=8)
         row = self.open_row(contact)
         self.assertEqual((counts['followups_due'], row.status), (1, 'due'))
         self.assertIn('תבנית מאושרת', row.outcome_note)

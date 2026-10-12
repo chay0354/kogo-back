@@ -32,6 +32,8 @@ class WeeklyAuditTests(WahubTestCase):
             # Leads, version 2: what a person does to a lead.
             'api/v1/wahub/leads/{pk}/close/', 'api/v1/wahub/leads/{pk}/reopen/',
             'api/v1/wahub/leads/{pk}/snooze/', 'api/v1/wahub/leads/{pk}/owner/',
+            # Connecting a WhatsApp template to a follow-up answers PUT only.
+            'api/v1/wahub/leads/templates/{template_key}/',
         ):
             self.assertFalse(by_template[template].callable_get, template)
 
@@ -91,6 +93,11 @@ class WeeklyAuditTests(WahubTestCase):
                 'api/v1/wahub/leads/': 200,
                 'api/v1/wahub/leads/templates/': 200,
                 f'api/v1/wahub/leads/{contact.id}/': 200,
+                # "חזרה אוטומטית ללידים": what is missing for the follow-ups to leave by themselves, and the
+                # automations ManyChat has to connect them to — read only (the list is ManyChat's own getFlows,
+                # the one read the audit itself makes; with no key, as here, nobody is asked).
+                'api/v1/wahub/leads/automation/': 200,
+                'api/v1/wahub/leads/templates/options/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])

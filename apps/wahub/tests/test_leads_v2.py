@@ -1214,7 +1214,7 @@ class LeadsApiTests(LeadsCase):
         # What the bot planned, with the words it would say — the child by the name the conversation gave.
         (planned,) = details['followups']
         self.assertEqual((planned['kind'], planned['step'], planned['status'], planned['status_label']), ('trial_feedback', 1, 'planned', 'מתוכנן'))
-        self.assertEqual(planned['text'], 'היי, איך היה לנועה בשיעור הניסיון? 🙂')
+        self.assertEqual(planned['text'], 'היי איך היה לנועה בשיעור הניסיון? 🙂')
         self.assertEqual(data['next']['what'], 'הבוט ישאל איך היה בשיעור הניסיון')
         self.assertEqual(self.get('leads/99999/').status_code, 404)
 
