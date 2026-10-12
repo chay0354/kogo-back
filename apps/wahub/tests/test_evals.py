@@ -227,6 +227,19 @@ class ChecksTests(SimpleTestCase):
         # Words that only look like it: "לך", "את", a class that is "רשום" in the system's own line are not an address.
         self.assertNotIn('neutral_address', self.failed('שולחת לך את הקישור', customer_all='היי', **asked))
 
+    def test_a_sum_that_is_also_the_asked_class_own_is_not_a_mix_up(self):
+        # From the full run of 12.10: the first class cost ₪360 a month, and so did the second one twice a week.
+        world = {'facts': {'main': {'name': 'היפ הופ נוער', 'price_monthly': '360'}, 'second': {'name': 'קפוארה כיתות ג-ד', 'price_monthly': '260'}}}
+        check = checks.not_amount_of_other('main.price_monthly', 'second.price_monthly', 'המחיר של החוג הראשון')
+        own = {'name': 'course_card', 'input': {}, 'result': {'course': {
+            'name': 'קפוארה כיתות ג-ד', 'price_monthly': '260.00', 'tracks': [{'name': 'פעמיים בשבוע', 'price_monthly': '360.00'}],
+        }}}
+        reply = '🔹 *₪260* לחודש, פעם בשבוע\n🔹 פעמיים בשבוע *₪360* לחודש'
+        self.assertEqual(check.test(self.moment(reply, calls=(own,), world=world)), '')
+        # The same sum with nothing of the asked class behind it is the first class's price, carried over.
+        other = {'name': 'course_card', 'input': {}, 'result': {'course': {'name': 'היפ הופ נוער', 'price_monthly': '360.00'}}}
+        self.assertIn('פרט של חוג אחד נכנס לתשובה על חוג אחר', check.test(self.moment('המחיר *₪360* לחודש', calls=(other,), world=world)))
+
     def test_a_weekday_word_that_is_not_a_day(self):
         self.assertEqual(self.failed('לילד שני במשפחה יש הנחה, והתשלום הראשון יורד'), {})
         self.assertEqual(checks.days_in('ביום שלישי ורביעי, וגם ראשון 16:00'), ['שלישי', 'רביעי', 'ראשון'])
