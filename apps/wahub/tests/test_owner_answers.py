@@ -593,7 +593,12 @@ class TheAnswersInTheKnowledgeTests(WahubTestCase):
 
     def test_what_is_new_is_filed_under_his_name_and_what_he_changed_is_rewritten_where_it_stood(self):
         knowledge_import.run()
-        new = {item.title: item for item in KnowledgeItem.objects.filter(source_note__contains=self.SAID)}
+        # The waiting list is his word of the same day too; it is held by its own tests (test_waiting_list).
+        waiting = 'שיעור מלא — מועד אחר, ואז רשימת המתנה'
+        new = {
+            item.title: item
+            for item in KnowledgeItem.objects.filter(source_note__contains=self.SAID).exclude(title=waiting)
+        }
         self.assertEqual(set(new), {
             'חגים וחופשות — שולחים את לוח החופשות של הסניף', 'מנהל הסניף — השם כן, הקשר דרך המשרד', 'קייטנה בקיץ — לפי סניף, אצל המדריך',
         })
