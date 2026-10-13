@@ -33,8 +33,8 @@ from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
 from apps.customers.models import Family
 from apps.wahub import (
-    analysis, cron, demo, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending, shadow, state,
-    transcribe,
+    analysis, cron, demo, future_leads, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending,
+    shadow, state, transcribe, waiting_list,
 )
 from apps.wahub.models import (
     EVENT_CREATED,
@@ -52,6 +52,7 @@ from apps.wahub.models import (
     Message,
     QuickReply,
     Tag,
+    WaitingListEntry,
 )
 from apps.wahub.phones import normalize_phone
 from apps.wahub.serializers import (
@@ -222,6 +223,8 @@ class ContactViewSet(viewsets.GenericViewSet):
             for event in ContactEvent.objects.filter(contact=contact).select_related('actor').order_by('-id')[:EVENTS_PAGE]
         ]
         payload['kogo']['children'] = matching.children_of(contact)
+        # What a person wrote about the customer while talking to them — shown inside the conversation and on the card.
+        payload['notes'] = future_leads.notes(contact)
         return Response(payload)
 
     def partial_update(self, request, pk=None):
@@ -320,6 +323,94 @@ class ContactViewSet(viewsets.GenericViewSet):
         except handoff.HandoffError as exc:
             return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY)
         return Response(self._payload(contact.id))
+
+    # --- ✓, the clock and the notes (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג) ---
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        """
+        POST contacts/{id}/close/ — "השיחה נסגרה" (✓): nobody is asked for any more,
+        a future lead ends, the mark becomes "ענה", and the conversation goes
+        back to the bot. 502 with nothing changed when a person holds it and
+        ManyChat did not take it back.
+        """
+        contact = self.get_object()
+        try:
+            future_leads.close(contact, request.user)
+        except handoff.HandoffError as exc:
+            return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY)
+        return Response(self._payload(contact.id))
+
+    @action(detail=True, methods=['post'], url_path='hand-to-bot')
+    def hand_to_bot(self, request, pk=None):
+        """
+        POST contacts/{id}/hand-to-bot/ — the clock, "הבוט ימשיך לטפל": the
+        conversation is read now as a lead and, when the bot then has a step
+        with a time, handed back to it. 200 {contact, understood}: `understood.ok`
+        false means nothing was changed, and `understood.text` says why.
+        """
+        contact = self.get_object()
+        try:
+            _contact, understood = future_leads.hand_to_bot(contact, request.user)
+        except handoff.HandoffError as exc:
+            return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY)
+        return Response({'contact': self._payload(contact.id), 'understood': understood})
+
+    @action(detail=True, methods=['post'])
+    def future(self, request, pk=None):
+        """
+        POST contacts/{id}/future/ {due, reason} — the clock, "ליד עתידי שלי". A
+        day and a reason; the conversation is taken by a person so that no bot
+        answers meanwhile. 200 {contact, mute: {muted, detail}} — the lead is
+        kept also when the bot could not be muted, and `detail` says why.
+        """
+        contact = self.get_object()
+        try:
+            _contact, mute = future_leads.set_future(contact, request.data.get('due'), request.data.get('reason'), request.user)
+        except future_leads.FutureLeadError as exc:
+            return _error(str(exc))
+        return Response({'contact': self._payload(contact.id), 'mute': mute})
+
+    @action(detail=True, methods=['get', 'post'])
+    def notes(self, request, pk=None):
+        """
+        GET contacts/{id}/notes/ → {notes}; POST {text} → 201 {note, contact}. A
+        note is a line of the contact's journal: no message, sent to nobody.
+        """
+        contact = self.get_object()
+        if request.method == 'GET':
+            return Response({'notes': future_leads.notes(contact, future_leads.NOTES_LISTED)})
+        try:
+            event = future_leads.add_note(contact, request.data.get('text'), request.user)
+        except future_leads.FutureLeadError as exc:
+            return _error(str(exc))
+        return Response(
+            {'note': future_leads.note_payload(event), 'contact': self._payload(contact.id)}, status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['post'], url_path='waiting-list')
+    def waiting_list(self, request, pk=None):
+        """
+        POST contacts/{id}/waiting-list/ {lesson_id, child?} — the office puts the
+        contact on the waiting list of a lesson that is full. 201 {entry, contact};
+        409 when it is already there; 400 with `code` for a lesson that has room
+        (has_room) or that is not one (no_lesson, bad_lesson).
+        """
+        contact = self.get_object()
+        try:
+            entry, created = waiting_list.join(
+                contact, request.data.get('lesson_id'), child=str(request.data.get('child') or ''),
+                by=waiting_list.WAITING_BY_PERSON, user=request.user,
+            )
+        except waiting_list.WaitingListError as exc:
+            return _error(exc.detail, code=exc.code)
+        entry = WaitingListEntry.objects.select_related('contact', 'added_by', 'closed_by').get(pk=entry.pk)
+        body = {'entry': waiting_list.payloads([entry])[0], 'contact': self._payload(contact.id)}
+        if not created:
+            return Response(
+                {'detail': 'הלקוח כבר ברשימת ההמתנה לשיעור הזה.', 'code': 'exists', **body}, status=status.HTTP_409_CONFLICT,
+            )
+        return Response(body, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='live-test')
     def live_test_switch(self, request, pk=None):
@@ -936,6 +1027,49 @@ class LeadBoardView(APIView):
 
     def get(self, request):
         return Response(lead_stage.board())
+
+
+class WaitingListView(APIView):
+    """
+    GET waiting-list/?status=active|waiting|freed|closed|all&lesson=<uuid> — who
+    waits for which lesson (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ד.4): the rows
+    whose seat came free first, then whoever has waited longest. Reads only.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        try:
+            return Response(waiting_list.listed(request.query_params))
+        except waiting_list.WaitingListError as exc:
+            return _error(exc.detail, code=exc.code)
+
+
+class WaitingListEntryView(APIView):
+    """
+    POST waiting-list/{id}/handled/ — "טופל"; POST waiting-list/{id}/remove/ —
+    "להסיר מהרשימה". 200 {entry, contact}; a row already off the list comes back
+    as it is. Nothing is sent to anybody.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+    act = None
+
+    def post(self, request, pk):
+        try:
+            entry = type(self).act(pk, request.user)
+        except WaitingListEntry.DoesNotExist:
+            return _error('הרשומה לא נמצאה.', http=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'entry': waiting_list.payloads([entry])[0],
+            'contact': contact_payload(queries.listed().get(pk=entry.contact_id)),
+        })
+
+
+class WaitingListHandledView(WaitingListEntryView):
+    act = staticmethod(waiting_list.mark_handled)
+
+
+class WaitingListRemoveView(WaitingListEntryView):
+    act = staticmethod(waiting_list.remove)
 
 
 def _family_for(raw):

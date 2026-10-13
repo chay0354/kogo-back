@@ -457,6 +457,15 @@ GOOD = {
         [THE_PACKED, say('ביום שני ב-18:00 השיעור מלא כרגע. נציג מהמשרד יכול לבדוק אפשרות אחרת')],
         [THE_PACKED, say(lambda found: 'ביום שני ב-18:00 רשומים {enrolled} מתוך {capacity} מקומות'.format(**found['courses'][0]['lessons'][0]))],
     ],
+    # The lesson is full and only that day fits: the bot marks the waiting list of that very lesson, and promises nothing.
+    'waiting_list_full_lesson': [
+        [THE_PACKED, say('ביום שני ב-18:00 השיעור מלא כרגע. אפשר לבדוק מועד אחר, או להיכנס לרשימת ההמתנה')],
+        [
+            THE_PACKED,
+            ('tool', 'join_waiting_list', lambda found: {'lesson_id': found['courses'][0]['lessons'][0]['id'], 'child': 'כיתה ה'}),
+            say('אתם ברשימת ההמתנה לשיעור של יום שני ב-18:00, ונעדכן כשיתפנה מקום'),
+        ],
+    ],
     'seats_empty_lesson': [[THE_MAIN, say(seats('חמישי'))]],
     'seats_one_day_of_several': [[THE_OLDER, say(seats('רביעי'))]],
     'seats_several_days_no_day_named': [[THE_OLDER, say(every_day)]],

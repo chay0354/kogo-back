@@ -414,7 +414,35 @@ def ai_configured() -> bool:
     return bool(integration_credential('ANTHROPIC_API_KEY'))
 
 
-def _ai_input(lines: list[Line], places: list[Place], today: date, course_types=(), external_places=()) -> str:
+NOTE_WHO = 'note'
+MAX_NOTES = 5
+NOTES_HEADING = (
+    'פתקים שנציג מהמשרד כתב על הלקוח (אינם חלק מהשיחה ואינם דברי הלקוח — זה מה שהנציג יודע, למשל משיחת טלפון). '
+    'השתמש בהם ב-lead כדי להבין מה עוצר ומתי לחזור (child, blocker, come_back, come_back_why); לעולם לא כ-quote של הלקוח:'
+)
+HANDED_OVER = (
+    'הנציג העביר עכשיו את השיחה לבוט "לטיפול בהמשך". אם עולה מהשיחה או מהפתקים מתי נכון לחזור ללקוח ועל מה '
+    '(גיל הילד, "בעוד חודשיים", תאריך, "אבדוק ואחזור") — מלא את come_back ואת come_back_why, או את blocker המתאים.'
+)
+
+
+def office_notes(contact: Contact) -> list[Line]:
+    """
+    The last notes a person wrote about the customer (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.6),
+    oldest first — what the office knows and WhatsApp never showed. They are read
+    beside the conversation, never as the customer's own words.
+    """
+    from apps.wahub.models import EVENT_NOTE, ContactEvent
+
+    rows = list(
+        ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).order_by('-id').values_list('text', 'created_at')[:MAX_NOTES]
+    )
+    rows.reverse()
+    return [Line(who=NOTE_WHO, text=text or '', sent_at=created_at) for text, created_at in rows if (text or '').strip()]
+
+
+def _ai_input(lines: list[Line], places: list[Place], today: date, course_types=(), external_places=(),
+              notes=(), handed_over: bool = False) -> str:
     cities = sorted({place.city for place in places if place.city})
     kinds = [name for _type_id, name in course_types if name]
     parts = [
@@ -436,12 +464,19 @@ def _ai_input(lines: list[Line], places: list[Place], today: date, course_types=
         written = timezone.localtime(line.sent_at).strftime('%Y-%m-%d %H:%M') if line.sent_at else ''
         tag = who_label.get(line.who, 'מערכת') + (' (תבנית)' if line.is_template else '')
         parts.append(f'[{written}] {tag}: {line.text}')
+    if notes:
+        parts += ['', NOTES_HEADING]
+        for note in notes:
+            written = timezone.localtime(note.sent_at).strftime('%Y-%m-%d %H:%M') if note.sent_at else ''
+            parts.append(f'[{written}] פתק: {note.text}')
+    if handed_over:
+        parts += ['', HANDED_OVER]
     return '\n'.join(parts)
 
 
 def analyze_ai(
     lines: list[Line], places: list[Place], *, timeout: float | None = None, course_types=(), external_places=(),
-    link_sent: bool = False,
+    link_sent: bool = False, notes=(), handed_over: bool = False,
 ) -> Known | None:
     """
     Ask Claude. None for anything that is not a usable answer — no key, a
@@ -470,7 +505,9 @@ def analyze_ai(
         'system': AI_SYSTEM,
         'messages': [{
             'role': 'user',
-            'content': _ai_input(lines, places, state.now_israel_date(), course_types, external_places),
+            'content': _ai_input(
+                lines, places, state.now_israel_date(), course_types, external_places, notes=notes, handed_over=handed_over,
+            ),
         }],
         'output_config': {
             'effort': 'low',
@@ -517,7 +554,7 @@ def analyze_ai(
     known = _known_from_ai(data, places)
     known.lead = lead_ai.from_model(
         data.get('lead'), lines=lines, known=known, course_types=course_types, external_places=external_places,
-        today=state.now_israel_date(), link_sent=link_sent,
+        today=state.now_israel_date(), link_sent=link_sent, notes=notes,
     )
     _one_day_to_come_back(known)
     return known
@@ -616,29 +653,35 @@ def conversation_lines(contact: Contact) -> list[Line]:
 
 def analyze_contact(
     contact: Contact, *, places: list[Place] | None = None, timeout: float | None = None, use_ai: bool = True,
-    course_types: list | None = None, external_places: list | None = None,
+    course_types: list | None = None, external_places: list | None = None, handed_over: bool = False,
 ) -> Known:
     """
     Summarise one contact and keep it. Only the known_* fields are written, and
     — from the same pass — `lead_ai` and the moment a registration link last
     went out (`lead_link_sent_at`, found in the messages; never moved back).
+
+    The notes a person wrote about the customer are read beside the
+    conversation. `handed_over` says a person has just passed the conversation
+    to the bot "to deal with later" (future_leads.hand_to_bot), so the reader
+    looks for when to come back and about what.
     """
     places = load_places() if places is None else places
     course_types = load_course_types() if course_types is None else course_types
     external_places = load_external_places() if external_places is None else external_places
     lines = conversation_lines(contact)
+    notes = office_notes(contact)
     link_at = lead_ai.link_sent_at(contact)
     if contact.lead_link_sent_at is not None and (link_at is None or contact.lead_link_sent_at > link_at):
         link_at = contact.lead_link_sent_at
     known = analyze_ai(
         lines, places, timeout=timeout, course_types=course_types, external_places=external_places,
-        link_sent=link_at is not None,
+        link_sent=link_at is not None, notes=notes, handed_over=handed_over,
     ) if use_ai else None
     if known is None:
         known = analyze_rules(lines, places)
         known.lead = lead_ai.from_rules(
             lines, known, course_types=course_types, external_places=external_places, today=state.now_israel_date(),
-            link_sent=link_at is not None,
+            link_sent=link_at is not None, notes=notes,
         )
         _one_day_to_come_back(known)
 

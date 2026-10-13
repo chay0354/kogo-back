@@ -40,7 +40,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from apps.wahub import sending, shadow, state
+from apps.wahub import sending, shadow, state, waiting_list
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     DIRECTION_IN,
@@ -520,6 +520,9 @@ def _answer(contact: Contact, held: dict) -> dict:
         _needs_human(contact.pk, f'{SEND_FAILED_REASON}: {message.error}')
     if proposal.request_human:
         _needs_human(contact.pk, proposal.request_human_reason or 'הבוט החדש ביקש נציג')
+    if delivered:
+        # The answer told the customer they are on a waiting list: now they are (the tool itself only marked it).
+        waiting_list.apply_bot_marks(contact, proposal.tools_used)
 
     text = (
         f'{SENT_LINE if delivered else "תשובה חיה נכשלה"}: התקבלה {_clock(received)} → חישוב {_clock(started)} (+{_secs(received, started)}) → '
