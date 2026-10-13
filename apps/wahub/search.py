@@ -289,8 +289,7 @@ class Search:
                 found[contact.pk] = None
                 continue
             family = people.get(contact.kogo_family_id)
-            said = next((hit for hit in (_family_hit(token, family) for token in missing[contact.pk]) if hit), None) if family else None
-            found[contact.pk] = said or _said('text', '')
+            found[contact.pk] = (_family_hit(missing[contact.pk], family) if family else None) or _said('text', '')
         return found
 
     # --- the customers no contact stands for ---
@@ -334,8 +333,7 @@ class Search:
     def _customer(self, family, parents, children, contact_id) -> dict:
         primary = next((parent for parent in parents if parent.is_primary), parents[0] if parents else None)
         name = f'{primary.first_name} {primary.last_name}'.strip() if primary is not None else ''
-        person = _Family(family, parents, children)
-        said = next((hit for hit in (_family_hit(token, person, own=True) for token in self.tokens) if hit), None)
+        said = _family_hit(self.tokens, _Family(family, parents, children), own=True)
         first = children[0] if children else None
         return {
             'family_id': str(family.id),
@@ -409,25 +407,32 @@ def _people(family_ids) -> dict:
     return found
 
 
-def _family_hit(token, person: _Family, *, own: bool = False) -> dict | None:
+def _family_hit(tokens, person: _Family, *, own: bool = False) -> dict | None:
     """
-    What of a family a token is found in, said for a row: a child's name, a
-    parent's, the family's, a phone. `own` — the row IS the family (a customer
-    with no conversation), so its phone is "טלפון", not "another phone".
+    What of a family the tokens are found in, said for a row in one line: a
+    phone, when a number was typed; else the family's name, when that alone
+    answers every word; else the child — or the parent — whose name answers
+    the most of them. `own` — the row IS the family (a customer with no
+    conversation), so its phone is "טלפון", not "another phone".
     """
-    if isinstance(token, Phone):
-        for raw in [person.family.phone, *(parent.phone for parent in person.parents), *(child.phone_number for child in person.children)]:
-            if token.hits(raw):
-                return _said('phone' if own else 'family_phone', _shown_phone(raw))
+    for token in tokens:
+        if isinstance(token, Phone):
+            for raw in [person.family.phone, *(parent.phone for parent in person.parents), *(child.phone_number for child in person.children)]:
+                if token.hits(raw):
+                    return _said('phone' if own else 'family_phone', _shown_phone(raw))
+    words = [token.folded for token in tokens if isinstance(token, Word) and len(token.folded) >= MIN_FAMILY_WORD]
+    if not words:
         return None
-    if len(token.folded) < MIN_FAMILY_WORD:
-        return None
-    for child in person.children:
-        if token.folded in fold(child.first_name) or token.folded in fold(child.last_name):
-            return _said('child', f'{child.first_name} {child.last_name}'.strip())
-    for parent in person.parents:
-        if token.folded in fold(parent.first_name) or token.folded in fold(parent.last_name):
-            return _said('parent', f'{parent.first_name} {parent.last_name}'.strip())
-    if token.folded in fold(person.family.name):
+    family_name = fold(person.family.name)
+    if all(word in family_name for word in words):
         return _said('family', person.family.name)
-    return None
+    best, best_score = None, 0
+    for kind, people in (('child', person.children), ('parent', person.parents)):
+        for one in people:
+            first, last = fold(one.first_name), fold(one.last_name)
+            score = sum(1 for word in words if word in first or word in last)
+            if score > best_score:
+                best, best_score = _said(kind, f'{one.first_name} {one.last_name}'.strip()), score
+    if best is not None:
+        return best
+    return _said('family', person.family.name) if any(word in family_name for word in words) else None
