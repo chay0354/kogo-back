@@ -55,6 +55,90 @@ BOXES = {
     'bot': Q(handled_by=HANDLED_BOT),
 }
 
+# --- future leads, and what is "open" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג) -------------------
+# A future lead is the office's own "בזמן אחר" with a day: one mark, whichever screen made it.
+# Until the day it is parked — out of the list of open conversations — unless the customer
+# writes first; on the day (from midnight, Israel's clock) it is open again.
+FUTURE = Q(followup_status=FOLLOWUP_LATER, followup_due__isnull=False)
+FUTURE_PARKED = 'parked'
+FUTURE_DUE = 'due'
+FUTURE_WROTE = 'wrote'
+FUTURE_LABEL = 'ליד עתידי'
+
+OPEN_NEEDS_HUMAN = 'needs_human'
+OPEN_FUTURE_DUE = 'future_due'
+OPEN_FUTURE_WROTE = 'future_wrote'
+OPEN_HUMAN = 'human'
+OPEN_LABELS = {
+    OPEN_NEEDS_HUMAN: 'מבקש נציג',
+    OPEN_FUTURE_DUE: 'ליד עתידי — הגיע היום',
+    OPEN_FUTURE_WROTE: 'ליד עתידי — הלקוח כתב',
+    OPEN_HUMAN: 'בטיפול נציג',
+    '': '',
+}
+
+
+def _wrote_since_mark() -> Q:
+    return Q(last_inbound_at__gt=F('followup_at'))
+
+
+def parked_q(today) -> Q:
+    """A future lead that still waits for its day, and whose customer has not written since it was set."""
+    return FUTURE & Q(followup_due__gt=today) & ~_wrote_since_mark()
+
+
+def open_q(today) -> Q:
+    """
+    "פתוחות": the conversations a person has to deal with now — the customer asks
+    for one, a future lead whose day has come or whose customer wrote, or a
+    conversation a person holds that is not parked for a later day.
+    """
+    return (
+        Q(needs_human=True)
+        | (FUTURE & (Q(followup_due__lte=today) | _wrote_since_mark()))
+        | (Q(handled_by=HANDLED_HUMAN) & ~parked_q(today))
+    )
+
+
+def boxes(today=None) -> dict:
+    """The boxes above the conversations, as conditions for today's date in Israel."""
+    today = today or state.now_israel_date()
+    parked = parked_q(today)
+    return {
+        **BOXES,
+        'open': open_q(today),
+        'future': parked,
+        # A conversation a person holds — but not one put off to a day that has not come.
+        'human': Q(handled_by=HANDLED_HUMAN) & ~parked,
+    }
+
+
+def future_state(contact: Contact, today) -> str:
+    """'' for a contact that is no future lead; else parked / due / wrote — the same rule, for a contact in hand."""
+    if contact.followup_status != FOLLOWUP_LATER or contact.followup_due is None:
+        return ''
+    if contact.followup_due <= today:
+        return FUTURE_DUE
+    wrote = (
+        contact.last_inbound_at is not None and contact.followup_at is not None
+        and contact.last_inbound_at > contact.followup_at
+    )
+    return FUTURE_WROTE if wrote else FUTURE_PARKED
+
+
+def open_reason(contact: Contact, today) -> str:
+    """Why the conversation is open for a person now; '' when it is not. The first that holds decides."""
+    if contact.needs_human:
+        return OPEN_NEEDS_HUMAN
+    future = future_state(contact, today)
+    if future == FUTURE_DUE:
+        return OPEN_FUTURE_DUE
+    if future == FUTURE_WROTE:
+        return OPEN_FUTURE_WROTE
+    if contact.handled_by == HANDLED_HUMAN and future != FUTURE_PARKED:
+        return OPEN_HUMAN
+    return ''
+
 HIDDEN = Q(kogo_outcome__in=HIDDEN_OUTCOMES)
 
 
@@ -212,14 +296,14 @@ def contact_list(params):
         order = [F('last_inbound_at').desc(nulls_last=True), '-id']
     else:
         box = (params.get('box') or 'all').strip()
-        queryset = queryset.filter(BOXES.get(box, Q()))
+        queryset = queryset.filter(boxes().get(box, Q()))
         order = [F('last_message_at').desc(nulls_last=True), '-id']
     return queryset.order_by(*(_lead_order(stages, groups) if by_stage else order))
 
 
 def box_counts(queryset=None) -> dict:
     queryset = Contact.objects.all() if queryset is None else queryset
-    return queryset.aggregate(**{name: Count('id', filter=cond) for name, cond in BOXES.items()})
+    return queryset.aggregate(**{name: Count('id', filter=cond) for name, cond in boxes().items()})
 
 
 def all_counts(params) -> dict:
@@ -227,7 +311,7 @@ def all_counts(params) -> dict:
     queryset = common_filters(Contact.objects.all(), params)
     # A stage asked for by name is never hidden — in the list (contact_list) and so in its counts.
     shown = Q() if flag(params.get('show_hidden')) or any(_lead_filter(params)) else ~HIDDEN
-    wanted = {f'box_{name}': Count('id', filter=cond) for name, cond in BOXES.items()}
+    wanted = {f'box_{name}': Count('id', filter=cond) for name, cond in boxes().items()}
     wanted.update({
         f'queue_{name}': Count('id', filter=cond & shown)
         for name, cond in queues(state.now_israel_date()).items()

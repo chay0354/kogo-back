@@ -20,6 +20,7 @@ The rules, in order:
 
      1. deleted           a person deleted the lead, and the customer has not written since
      2. not_interested    a person closed it ("לא מעוניין" on the leads screen, "לא רלוונטי" of the office)
+    2w. waiting_list      a seat came free in the lesson they wait for                   office
      3. registered        registered after writing (kogo), the office marked "נרשם", or the customer
                           said they already had ("כבר נרשמנו") — on their word, with no argument
      4. customer          was a paying customer before writing: service, not a lead — unless they
@@ -40,6 +41,9 @@ The rules, in order:
     15. trial_done        a trial took place (came, or not marked), nobody registered    bot
     16. callback_due      the day the conversation named has come                        bot
     17. waiting_date      a day the conversation named, still ahead                      bot
+   17w. waiting_list      on the waiting list of a lesson that is full (waiting_list.py). While it
+                          lasts, rules 3, 4 and "no stage" do not close the lead: somebody who
+                          waits for a seat is a lead, whatever else they are
     18. nothing_to_offer  no branch nearby, no class that fits, or the class is full
     19. will_check        said they would check and come back                            bot
     20. link_sent         got a registration link and has not registered                 bot
@@ -98,7 +102,7 @@ from django.db import connection, transaction
 from django.db.models import Count, F, Max, Min, Q
 from django.utils import timezone
 
-from apps.wahub import lead_ai, matching, queries, state
+from apps.wahub import lead_ai, matching, queries, state, waiting_list
 from apps.wahub.models import (
     CALLBACK_COUNTS_UNDER,
     Contact,
@@ -141,6 +145,7 @@ from apps.wahub.models import (
     LEAD_TRIAL_DONE,
     LEAD_TRIAL_NO_SHOW,
     LEAD_WAITING_DATE,
+    LEAD_WAITING_LIST,
     LEAD_WILL_CHECK,
     MESSAGE_SOURCE_MANYCHAT,
     Message,
@@ -159,6 +164,8 @@ from apps.wahub.models import (
     OUTCOME_TRIAL_UPCOMING,
     SENDER_BOT,
     SENDER_OFFICE,
+    WAITING_FREED,
+    WAITING_WAITING,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,6 +246,7 @@ STAGE_OWNERS = {
     LEAD_WAITING_DATE: LEAD_OWNER_BOT,
     LEAD_ANSWERED_SILENT: LEAD_OWNER_BOT,
     LEAD_TRIAL_BOOKED: '',
+    LEAD_WAITING_LIST: '',
     LEAD_NOTHING_TO_OFFER: '',
     LEAD_IN_CONVERSATION: '',
     LEAD_REGISTERED: '',
@@ -249,7 +257,7 @@ STAGE_OWNERS = {
 }
 # Stages in which a person who holds the conversation has nothing to do right now: the customer's turn,
 # a lesson or a date ahead, nothing to offer yet.
-NOBODYS_MOVE = (LEAD_IN_CONVERSATION, LEAD_TRIAL_BOOKED, LEAD_WAITING_DATE, LEAD_NOTHING_TO_OFFER)
+NOBODYS_MOVE = (LEAD_IN_CONVERSATION, LEAD_TRIAL_BOOKED, LEAD_WAITING_DATE, LEAD_WAITING_LIST, LEAD_NOTHING_TO_OFFER)
 OWNER_LABELS = dict(LEAD_OWNER_CHOICES)
 
 # One cron call: how long the look may take, and how many contacts of each kind it reads.
@@ -290,6 +298,7 @@ NEXT_STEPS = {
     LEAD_WILL_CHECK: 'אין מה לעשות עכשיו — אמר שיחזור',
     LEAD_TRIAL_BOOKED: 'אין מה לעשות עכשיו — מחכים לשיעור הניסיון',
     LEAD_WAITING_DATE: 'אין מה לעשות עכשיו — מחכים לתאריך',
+    LEAD_WAITING_LIST: 'אין מה לעשות עכשיו — נתריע כשיתפנה מקום',
     LEAD_NOTHING_TO_OFFER: 'אין מה לעשות עכשיו — לחזור אליו כשייפתח משהו מתאים',
     LEAD_IN_CONVERSATION: 'אין מה לעשות עכשיו',
     LEAD_REGISTERED: '',
@@ -298,6 +307,8 @@ NEXT_STEPS = {
     LEAD_DELETED: '',
     LEAD_COLD: '',
 }
+OFFER_THE_SEAT = 'להציע ללקוח את המקום שהתפנה'
+WROTE_BEFORE_THE_DAY = 'הלקוח כתב לפני המועד — לענות לו'
 NOBODY_SPOKE_YET = 'אף נציג עוד לא דיבר איתו — להתקשר ולהציע שיעור ניסיון'
 TRY_AGAIN = 'ניסו להשיג אותו ולא ענה — לנסות שוב'
 
@@ -315,6 +326,7 @@ HINTS = {
     LEAD_WILL_CHECK: 'אמר שיבדוק, יחשוב או ישאל מישהו, ויחזור',
     LEAD_TRIAL_BOOKED: 'שיעור הניסיון עוד לפניו',
     LEAD_WAITING_DATE: 'נקבע יום לחזור אליו, והוא עוד לא הגיע',
+    LEAD_WAITING_LIST: 'מחכה למקום בשיעור מסוים שמלא; כשמתפנה מקום הליד עובר למשרד',
     LEAD_NOTHING_TO_OFFER: 'אין סניף באזור שלו, אין חוג שמתאים לו, או שהחוג מלא',
     LEAD_IN_CONVERSATION: f'ההודעה האחרונה ב-{_CONVERSATION_HOURS} השעות האחרונות',
     LEAD_REGISTERED: 'נרשם אחרי שפנה, או שסומן "נרשם"',
@@ -855,20 +867,31 @@ def compute(contact: Contact, now=None) -> dict:
     if facts.mark == FOLLOWUP_NOT_RELEVANT and not facts.wrote_after(facts.marked_at):
         return done(LEAD_NOT_INTERESTED, _sentences(facts.marked()), since=facts.marked_at)
 
+    # 2w. a seat came free in the lesson they wait for: the office offers it, before anything else is asked
+    waits = contact.lead_waiting if isinstance(contact.lead_waiting, dict) else {}
+    if waits.get('status') == WAITING_FREED:
+        return done(
+            LEAD_WAITING_LIST, _sentences(waiting_list.freed_reason(waits)), next_step=OFFER_THE_SEAT,
+            since=_moment(waits.get('freed_at')), owner=LEAD_OWNER_OFFICE,
+        )
+    # Somebody who waits for a seat is a lead whatever else they are: a customer, registered to
+    # another class, a conversation the summary did not read as one about a class.
+    on_a_list = waits.get('status') == WAITING_WAITING
+
     # 3. registered: the registrations say so, a person does — or the customer, whose word is taken
-    if outcome == OUTCOME_REGISTERED_AFTER:
+    if outcome == OUTCOME_REGISTERED_AFTER and not on_a_list:
         return done(LEAD_REGISTERED, _sentences(contact.kogo_detail or 'נרשם אחרי הפנייה'))
-    if facts.mark == FOLLOWUP_REGISTERED:
+    if facts.mark == FOLLOWUP_REGISTERED and not on_a_list:
         return done(LEAD_REGISTERED, _sentences(facts.marked()), since=facts.marked_at)
-    if said.registered:
+    if said.registered and not on_a_list:
         return done(LEAD_REGISTERED, _sentences(f'הלקוח אמר שכבר רשום: "{said.quote[:160]}"'), since=said.quote_at)
 
     # 4. a customer from before: the conversation is service — unless they ask for one more class
-    if outcome == OUTCOME_CUSTOMER_BEFORE and not said.add_class:
+    if outcome == OUTCOME_CUSTOMER_BEFORE and not said.add_class and not on_a_list:
         return done(LEAD_CUSTOMER, _sentences(contact.kogo_detail or 'לקוח רשום'))
 
     # Not about a class at all: no stage, no owner, nothing the bot comes back about.
-    if not said.is_lead:
+    if not said.is_lead and not on_a_list:
         return {
             'stage': '', 'group': '', 'label': '',
             'reason': _sentences(f'לא ליד לחוגים: {lead_ai.INTENT_LABELS.get(said.intent, said.intent)}'),
@@ -924,6 +947,14 @@ def compute(contact: Contact, now=None) -> dict:
             since=_noon(office_day),
         )
     if office_day is not None:
+        if facts.wrote_after(facts.marked_at):
+            # A future lead whose customer did not wait for the day: a person answers, now.
+            return done(
+                LEAD_WAITING_DATE,
+                _sentences(facts.opening(), f'הצוות קבע לחזור אליו ב-{facts.day(office_day)}', 'הלקוח כתב לפני המועד'),
+                next_step=WROTE_BEFORE_THE_DAY, since=contact.last_inbound_at, recheck_at=_midnight(office_day),
+                owner=LEAD_OWNER_OFFICE,
+            )
         return done(
             LEAD_WAITING_DATE, _sentences(facts.opening(), f'הצוות קבע לחזור אליו ב-{facts.day(office_day)}'),
             next_step=f'לחזור אליו ב-{facts.day(office_day)}', recheck_at=_midnight(office_day), owner='',
@@ -1007,6 +1038,13 @@ def compute(contact: Contact, now=None) -> dict:
     waiting = the_named_day() if said_day is not None else None
     if waiting is not None:
         return waiting
+
+    # 17w. on the waiting list of a lesson that is full: kept, by name of the lesson, until a seat comes free
+    if on_a_list:
+        return done(
+            LEAD_WAITING_LIST, _sentences(f'{waiting_list.ON_THE_LIST}: {waits.get("label") or ""}'.rstrip(': ')),
+            since=_moment(waits.get('since')),
+        )
 
     # 18. nothing the business has fits them today — kept, for the day something opens
     if said.blocker in lead_ai.NOTHING_TO_OFFER_BLOCKERS:

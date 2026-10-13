@@ -455,11 +455,15 @@ def _short(value, limit: int) -> str:
     return re.sub(r'\s+', ' ', value).strip()[:limit] if isinstance(value, str) else ''
 
 
-def _said_on(raw: dict, lines, today: date) -> date:
-    """The day it was said on: the model's, when it is a day of the conversation; else the customer's last message."""
+def _said_on(raw: dict, lines, today: date, notes=()) -> date:
+    """
+    The day it was said on: the model's, when it is a day of the conversation
+    (or of a note the office wrote about it); else the customer's last message.
+    """
     days = [timezone.localtime(line.sent_at).date() for line in lines if line.sent_at is not None]
     said = _iso_day(raw.get('said_on')) if isinstance(raw, dict) else None
-    if said is not None and days and min(days) <= said <= max(days):
+    spoken = days + [timezone.localtime(note.sent_at).date() for note in notes if note.sent_at is not None]
+    if said is not None and spoken and min(spoken) <= said <= max(spoken):
         return said
     theirs = [
         timezone.localtime(line.sent_at).date() for line in lines
@@ -511,9 +515,9 @@ def _place(lead: dict, known, course_types, external_places=()) -> None:
             lead['course_type_id'] = str(near[0])
 
 
-def _settle_day(lead: dict, raw: dict, known, lines, today: date) -> None:
+def _settle_day(lead: dict, raw: dict, known, lines, today: date, notes=()) -> None:
     """The day to come back and why, onto the lead; the card's own "they said when" answers when nothing else does."""
-    said_on = _said_on(raw, lines, today)
+    said_on = _said_on(raw, lines, today, notes)
     kind = raw.get('kind') if isinstance(raw, dict) else ''
     if kind in COME_BACK_KINDS:
         day = come_back_day(raw, said_on=said_on, child=lead['child'])
@@ -539,7 +543,8 @@ def _settle_day(lead: dict, raw: dict, known, lines, today: date) -> None:
         lead['come_back_why'] = 'הילד לא רצה — לנסות שוב בתחילת השנה הבאה'
 
 
-def from_model(data, *, lines, known, course_types=(), external_places=(), today: date, link_sent: bool = False) -> dict:
+def from_model(data, *, lines, known, course_types=(), external_places=(), today: date, link_sent: bool = False,
+               notes=()) -> dict:
     """Claude's `lead` object, checked field by field. Anything outside the contract is dropped, not kept."""
     data = data if isinstance(data, dict) else {}
     lead = _blank(ANALYSIS_AI)
@@ -581,7 +586,7 @@ def from_model(data, *, lines, known, course_types=(), external_places=(), today
     }
 
     lead['come_back_why'] = _short(data.get('come_back_why'), SENTENCE_CHARS)
-    _settle_day(lead, data.get('come_back') if isinstance(data.get('come_back'), dict) else {}, known, lines, today)
+    _settle_day(lead, data.get('come_back') if isinstance(data.get('come_back'), dict) else {}, known, lines, today, notes)
     lead['summary'] = _short(data.get('summary'), SUMMARY_CHARS)
     return lead
 
@@ -772,6 +777,13 @@ def _come_back_by_rules(lines, today: date) -> tuple[dict, str]:
     return {}, ''
 
 
+class _as_said:
+    """A note of the office, shaped like a line the rules about "when" can read. Used for nothing else."""
+
+    def __init__(self, note):
+        self.who, self.text, self.sent_at, self.is_template = SENDER_CUSTOMER, note.text, note.sent_at, False
+
+
 def asked_to_stop(lines):
     """
     The customer's bare "לא" that answers our own last reminder — the message
@@ -857,15 +869,20 @@ def _quoted(label: str, line) -> str:
     return f'{label}: "{said}"'[:SENTENCE_CHARS] if said else label
 
 
-def from_rules(lines, known, *, course_types=(), external_places=(), today: date, link_sent: bool = False) -> dict:
+def from_rules(lines, known, *, course_types=(), external_places=(), today: date, link_sent: bool = False,
+               notes=()) -> dict:
     """
     The same dictionary without Claude. The rules read the customer's own
     messages and say less than a reader would: what they cannot tell stays empty.
+    Of the notes the office wrote about the customer (`notes`) they read two
+    things only — the child's age and when to come back — which is what a person
+    writes down after a phone call; a note is never the customer's own word.
     """
     lead = _blank(ANALYSIS_RULES)
     lead['link_sent'] = bool(link_sent)
     _place(lead, known, course_types, external_places)
     theirs = [line for line in lines if line.who == SENDER_CUSTOMER and line.text]
+    noted = [note for note in notes if note.text]
     if not theirs:
         return lead
     everything = '\n'.join(line.text for line in theirs)
@@ -875,6 +892,8 @@ def from_rules(lines, known, *, course_types=(), external_places=(), today: date
 
     # --- the child ---
     age = spoken_age(everything)
+    if age is None:
+        age = next((found for found in (spoken_age(note.text) for note in reversed(noted)) if found is not None), None)
     if age is not None:
         lead['child']['age_years'], lead['child']['age_months'] = age[0], (age[1] or None)
     if (known.child_age or '').startswith('כיתה'):
@@ -951,15 +970,19 @@ def from_rules(lines, known, *, course_types=(), external_places=(), today: date
     # --- when to come back ---
     raw, why = {}, ''
     if too_young and age is not None and age[0] < MIN_AGE_YEARS:
-        said_on = next((line.sent_at for line in reversed(theirs) if spoken_age(line.text) is not None), None)
+        said_on = next((line.sent_at for line in reversed(theirs + noted) if spoken_age(line.text) is not None), None)
         raw = {
             'kind': COME_BACK_AGE, 'years': age[0], 'months': age[1],
             'said_on': (timezone.localtime(said_on).date() if said_on else today).isoformat(),
         }
     elif known.callback_on is None:
         raw, why = _come_back_by_rules(lines, today)
+        if not raw and noted:
+            # What the office wrote down ("לחזור בעוד חודשיים", "אחרי החגים"), read as the words about "when" that they are.
+            raw, why = _come_back_by_rules([_as_said(note) for note in noted], today)
+            why = why.replace('ביקש לחזור אליו', 'לפי פתק של המשרד: לחזור')
     lead['come_back_why'] = why
-    _settle_day(lead, raw, known, lines, today)
+    _settle_day(lead, raw, known, lines, today, noted)
 
     lead['summary'] = _rules_summary(lead, known)
     return lead
