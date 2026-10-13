@@ -63,7 +63,9 @@ office, any other goes dormant, GIVE_UP_AFTER later; a hot lead wrote (office:
 a person carries on from there); or the fact behind the round is too old to ask
 about (START_WITHIN). And there are leads the bot never comes back to by
 itself: an open complaint (office), an external branch (nobody can know from
-Kogo whether they registered), the price or the days (nothing new to say).
+Kogo whether they registered), the price or the days (nothing new to say), and
+whoever asked "הסר" — not to get messages the business starts (optout.py; a hot
+lead of theirs is the office's to call, any other is nobody's move).
 
 What the contracts leave open is settled here, and said in the sentence the
 screen shows:
@@ -103,7 +105,7 @@ from django.db import connection, transaction
 from django.db.models import Count, F, Max, Min, Q
 from django.utils import timezone
 
-from apps.wahub import lead_ai, matching, queries, state, waiting_list
+from apps.wahub import lead_ai, matching, optout, queries, state, waiting_list
 from apps.wahub.models import (
     CALLBACK_COUNTS_UNDER,
     Contact,
@@ -583,6 +585,8 @@ class _Facts:
         )
         spoke = self.mark in SPOKEN_MARKS and self.marked_at is not None and (newest is None or self.marked_at >= newest)
         self.person_answered = wrote_back or spoke
+        # "הסר": the customer asked not to get messages the business starts by itself (optout.py).
+        self.opted_out = optout.is_marked(contact)
 
     def wrote_after(self, moment) -> bool:
         """The customer wrote after `moment`. A moment nobody kept says nothing: False."""
@@ -816,6 +820,10 @@ def compute(contact: Contact, now=None) -> dict:
         if said.blocker in lead_ai.NO_NUDGE_BLOCKERS:
             hold = f'{said.blocker_text} — הבוט לא חוזר אליו לבד'
             return office(hold) if hot else plain(hold, owner='')
+        if facts.opted_out:
+            # Asked "הסר": nothing the bot starts by itself goes out to them. A hot lead is the office's to
+            # call, as every hot lead the bot cannot come back to is; the others are nobody's move.
+            return office(optout.HOLD) if hot else plain(optout.HOLD, owner='')
 
         if round_.done:
             if then == THEN_STAY:

@@ -720,3 +720,64 @@ class OfficeAlert(models.Model):
 
     def __str__(self):
         return f'{self.title} ({self.get_status_display()})'
+
+
+class WhatsAppOptOut(models.Model):
+    """
+    "הסר" — a phone that asked not to get broadcast messages on WhatsApp.
+
+    One list for the whole system: every broadcast reads it before its first
+    message and skips whoever is on it (apps/core/whatsapp_optout.py — the only
+    code that reads or writes this table). A phone is on the list while it has
+    a row that was not given back; at most one such row a phone. Giving a phone
+    back ("ביקש לחזור לתפוצה") keeps the row, with when and by whom, so the list
+    is also its own history.
+
+    Service messages — a registration, a payment, a trial lesson that was
+    booked — and answers inside a conversation are not broadcasts, and do not
+    look here.
+
+    The conversation and the message it came from are kept as plain ids: the
+    WhatsApp section's tables are its own, and nothing outside it points at them.
+    The table holds phones, so its migration turns row level security on.
+    """
+    SOURCE_MESSAGE = 'message'
+    SOURCE_OFFICE = 'office'
+    SOURCE_CHOICES = [
+        (SOURCE_MESSAGE, 'ביקש בהודעה'),
+        (SOURCE_OFFICE, 'סומן על ידי נציג'),
+    ]
+
+    # 9725XXXXXXXX — ManyChatService.normalize_phone_e164, the spelling every broadcast compares by.
+    phone = models.CharField(max_length=20, verbose_name="טלפון (בינלאומי)")
+    opted_out_at = models.DateTimeField(verbose_name="ביקש הסר")
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, verbose_name="מאיפה")
+    # The customer's message that did it, cut short; empty when a person marked it.
+    text = models.CharField(max_length=300, blank=True, verbose_name="ההודעה")
+    wahub_contact_id = models.BigIntegerField(null=True, blank=True)
+    wahub_message_id = models.BigIntegerField(null=True, blank=True)
+    opted_out_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        verbose_name="סומן על ידי",
+    )
+    restored_at = models.DateTimeField(null=True, blank=True, verbose_name="הוחזר לתפוצה")
+    restored_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        verbose_name="הוחזר על ידי",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'whatsapp_opt_outs'
+        verbose_name = 'ביקש הסר'
+        verbose_name_plural = 'ביקשו הסר'
+        ordering = ['-id']
+        constraints = [
+            # One standing row a phone — and the index every broadcast's read goes through.
+            models.UniqueConstraint(
+                fields=['phone'], condition=models.Q(restored_at__isnull=True), name='whatsapp_opt_out_one_standing',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.phone} · {self.get_source_display()}'

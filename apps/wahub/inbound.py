@@ -10,6 +10,10 @@ Nothing in this module calls another company, and nothing is matched against
 the registrations: the answer has to come back to ManyChat fast. The summary
 and the matching happen later, in the cron (apps/wahub/cron.py). The lead stage
 is worked out again at once, from the row alone (apps/wahub/lead_stage.py).
+
+A customer's message that asks to be taken off the broadcast list ("הסר") is
+recognised here, by rules (apps/wahub/optout.py), and the phone is put on the
+system's list at once — one small write, to our own database.
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.wahub import lead_ai, lead_stage, media, state
+from apps.wahub import lead_ai, lead_stage, media, optout, state
 from apps.wahub.models import (
     DIRECTION_IN,
     DIRECTION_OUT,
@@ -317,6 +321,12 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
                 state.log_event(contact.id, EVENT_NEEDS_HUMAN, f'{NEEDS_HUMAN_REASON}: "{state.preview(text)[:200]}"')
                 if not contact.is_demo:
                     _alert_office(contact, name or contact.name, text)
+            if message_type == TYPE_TEXT and optout.is_request(text):
+                # "הסר": the phone goes on the system's list of who gets no broadcast (optout.py), whichever bot
+                # answers this customer. Read by rules alone; it asks nobody for a person and alerts nobody.
+                marked = optout.from_message(contact, text, message.id, now)
+                if marked is not None:
+                    changes['opted_out'] = marked
         else:
             # The bot answered: nobody is waiting any more.
             changes['waiting_since'] = None

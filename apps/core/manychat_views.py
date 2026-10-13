@@ -15,6 +15,7 @@ from apps.core.manychat_contact_index import (
     contact_index_phones,
     contact_index_rows,
 )
+from apps.core import whatsapp_optout
 from apps.core.manychat_service import ContactLinkError, ManyChatError, ManyChatService, manychat_error_detail
 from apps.core.permissions import IsManager
 from apps.customers.models import Family, Parent
@@ -321,10 +322,18 @@ class WhatsAppViewSet(viewsets.ViewSet):
         max_batch = 100
         contacts = raw_contacts[:max_batch]
 
+        # Whoever asked "הסר" gets no broadcast. Read once, before the first message; when it cannot be
+        # read, nothing is sent to anybody.
+        try:
+            opted_out_phones = whatsapp_optout.blocked_phones()
+        except whatsapp_optout.OptOutListUnavailable as exc:
+            return Response({'error': exc.detail, 'code': exc.code}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         results: list[dict] = []
         sent = 0
         failed = 0
         skipped = 0
+        opted_out = 0
 
         for item in contacts:
             if not isinstance(item, dict):
@@ -335,6 +344,11 @@ class WhatsAppViewSet(viewsets.ViewSet):
             if not phone:
                 skipped += 1
                 results.append({'phone': '', 'name': name, 'status': 'skipped', 'reason': 'no_phone'})
+                continue
+            if whatsapp_optout.phone_key(phone) in opted_out_phones:
+                skipped += 1
+                opted_out += 1
+                results.append({'phone': phone, 'name': name, 'status': 'skipped', 'reason': whatsapp_optout.REASON})
                 continue
 
             if dry_run:
@@ -376,6 +390,8 @@ class WhatsAppViewSet(viewsets.ViewSet):
             'sent': sent,
             'failed': failed,
             'skipped': skipped,
+            # How many of the skipped were skipped because they asked "הסר".
+            'opted_out': opted_out,
             'preview_count': sum(1 for r in results if r.get('status') == 'preview'),
             'results': results[:50],
         })
@@ -430,10 +446,18 @@ class WhatsAppViewSet(viewsets.ViewSet):
             return Response({'error': 'ManyChat לא מוגדר'}, status=status.HTTP_400_BAD_REQUEST)
 
         contacts = raw_contacts[:100]
+        # Whoever asked "הסר" gets no broadcast. Read once, before the first message; when it cannot be
+        # read, nothing is sent to anybody.
+        try:
+            opted_out_phones = whatsapp_optout.blocked_phones()
+        except whatsapp_optout.OptOutListUnavailable as exc:
+            return Response({'error': exc.detail, 'code': exc.code}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         results: list[dict] = []
         sent = 0
         failed = 0
         skipped = 0
+        opted_out = 0
 
         for item in contacts:
             if not isinstance(item, dict):
@@ -445,6 +469,11 @@ class WhatsAppViewSet(viewsets.ViewSet):
             if not phone:
                 skipped += 1
                 results.append({'phone': '', 'name': name, 'status': 'skipped', 'reason': 'no_phone'})
+                continue
+            if whatsapp_optout.phone_key(phone) in opted_out_phones:
+                skipped += 1
+                opted_out += 1
+                results.append({'phone': phone, 'name': name, 'status': 'skipped', 'reason': whatsapp_optout.REASON})
                 continue
 
             if dry_run:
@@ -499,6 +528,8 @@ class WhatsAppViewSet(viewsets.ViewSet):
             'sent': sent,
             'failed': failed,
             'skipped': skipped,
+            # How many of the skipped were skipped because they asked "הסר".
+            'opted_out': opted_out,
             'preview_count': sum(1 for r in results if r.get('status') == 'preview'),
             'results': results[:50],
         })

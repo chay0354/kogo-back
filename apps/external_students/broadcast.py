@@ -12,12 +12,17 @@ day and time from a paying registration, and sending one to a municipality
 parent would arrive full of dashes.
 
 Nothing here sends unless ``dry_run`` is False; the default is a preview.
+
+A phone that asked "הסר" gets no broadcast (apps/core/whatsapp_optout.py): the
+list is read once, before the first message, and when it cannot be read
+nothing is sent at all — `OptOutListUnavailable` goes up to the caller.
 """
 from __future__ import annotations
 
 import logging
 from typing import Iterable
 
+from apps.core import whatsapp_optout
 from apps.core.manychat_service import ManyChatError, ManyChatService
 
 logger = logging.getLogger(__name__)
@@ -41,13 +46,20 @@ def broadcast_to_external_students(
     Returns a row per student with sent / failed / preview / skipped, and the
     E.164 phones used, so the caller can hand them back as ``skip_phones`` for
     the next chunk and two siblings on one phone still get a single message.
+
+    A phone that asked "הסר" is skipped with reason ``opted_out`` and counted
+    apart (``opted_out``) inside the skipped. Raises
+    ``whatsapp_optout.OptOutListUnavailable`` — before anything is sent — when
+    that list cannot be read.
     """
     svc = service or ManyChatService()
+    # Read once, before the first message: no row of this request is sent unless the list was read.
+    opted_out = whatsapp_optout.blocked_phones()
     seen_phones: set[str] = {ManyChatService.normalize_phone_e164(p) for p in skip_phones if p}
     seen_phones.discard('')
 
     results: list[dict] = []
-    counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0}
+    counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0}
     phones_used: list[str] = []
 
     for student in students:
@@ -66,6 +78,12 @@ def broadcast_to_external_students(
         if not phone_key:
             row['reason'] = 'no_phone'
             counts['skipped'] += 1
+            results.append(row)
+            continue
+        if phone_key in opted_out:
+            row['reason'] = whatsapp_optout.REASON
+            counts['skipped'] += 1
+            counts['opted_out'] += 1
             results.append(row)
             continue
         if phone_key in seen_phones:
@@ -118,6 +136,8 @@ def broadcast_to_external_students(
         'failed': counts['failed'],
         'skipped': counts['skipped'],
         'preview_count': counts['preview'],
+        # How many of the skipped were skipped because they asked "הסר".
+        'opted_out': counts['opted_out'],
         'phones': phones_used,
         'results': results,
     }
