@@ -318,6 +318,16 @@ class FutureLeadTests(ConversationCase):
         self.assertEqual(self.get(f'contacts/{contact.id}/').data['future']['state'], 'wrote')
         self.assertIn(contact.id, self.box('open'))
 
+    def test_a_lead_somebody_had_taken_by_name_is_parked_too(self):
+        """ "קח אליי" would keep it on the office's list of work every day until then; the future lead replaces the pin."""
+        contact = self.talk(handled_by='human')
+        self.post(f'leads/{contact.id}/owner/', {'owner': 'office'})
+        self.assertEqual(self.fresh(contact).lead_owner, 'office')
+        self.future(contact)
+        row = self.fresh(contact)
+        self.assertEqual((row.lead_stage, row.lead_owner), ('waiting_date', ''))
+        self.assertNotIn('owner', row.lead_manual)
+
     def test_putting_it_off_keeps_the_reason_and_parks_it_again(self):
         contact = self.parked()
         self.clock.forward(days=3)

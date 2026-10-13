@@ -174,7 +174,8 @@ def listed(params) -> dict:
     tab = (params.get('owner') or TAB_OFFICE).strip()
     if tab not in TABS:
         raise LeadError('owner: office, bot או closed.')
-    rows = Contact.objects.filter(tab_q(tab))
+    # With whoever set a future lead, read in the same query: a row says whose it is.
+    rows = Contact.objects.filter(tab_q(tab)).select_related('followup_by')
 
     stages = [key.strip() for key in (params.get('stage') or '').split(',') if key.strip()]
     if stages:

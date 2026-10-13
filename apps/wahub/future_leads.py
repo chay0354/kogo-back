@@ -52,6 +52,7 @@ from apps.wahub.models import (
     LEAD_GROUP_CLOSED,
     LEAD_OWNER_BOT,
     LEAD_OWNER_OFFICE,
+    LEAD_WAITING_LIST,
     NUDGE_DATE_ARRIVED,
     NUDGE_OPEN_STATUSES,
     Contact,
@@ -79,6 +80,8 @@ NO_STEP = (
 NOT_A_LEAD = 'השיחה הזאת אינה ליד לחוגים — אין לבוט על מה לחזור.'
 NO_WORDS = 'לבוט אין נוסח פעיל לחזרה מהסוג הזה — אין מה לתזמן.'
 OFFICE_ONLY = 'זה ליד שרק אדם יכול לקדם'
+MUTE_FAILED = 'תקלה לא צפויה בהשתקת הבוט. לא ידוע אם הבוט הושתק — אפשר לנסות "לקחת שיחה".'
+ON_A_WAITING_LIST = 'הלקוח ברשימת המתנה — המערכת תתריע כשיתפנה מקום. אין לבוט מה לתזמן מעבר לזה.'
 
 
 class FutureLeadError(ValueError):
@@ -168,8 +171,9 @@ def set_future(contact: Contact, due, reason, user) -> tuple[Contact, dict]:
         if reason:
             fields['followup_note'] = reason
         manual = dict(row.lead_manual) if isinstance(row.lead_manual, dict) else {}
-        if manual.pop('closed', None) is not None:
-            # A lead a person had closed is a lead again: somebody set a day to come back on.
+        # A lead a person had closed is a lead again: somebody set a day to come back on. And "קח אליי" comes
+        # off — the lead is this person's by the mark itself, and until its day it is on nobody's list of work.
+        if [manual.pop(name, None) for name in ('closed', 'owner')] != [None, None]:
             fields['lead_manual'] = manual
         state.touch(row.pk, **fields)
         why = reason or row.followup_note
@@ -187,6 +191,10 @@ def set_future(contact: Contact, due, reason, user) -> tuple[Contact, dict]:
             handoff.takeover(contact, user)
         except handoff.HandoffError as exc:
             mute = {'muted': False, 'detail': str(exc)}
+        except Exception:
+            # The lead is kept whatever happened to the mute; the answer still has to say the bot was not muted.
+            logger.exception('wahub future leads: muting the bot for contact %s failed unexpectedly', contact.pk)
+            mute = {'muted': False, 'detail': MUTE_FAILED}
     lead_stage.refresh_quietly(contact.pk)
     return Contact.objects.get(pk=contact.pk), mute
 
@@ -232,6 +240,8 @@ def _why_no_step(result: dict) -> str:
         return f'{result["label"]} — אין מה לתזמן.'
     if result['owner'] == LEAD_OWNER_OFFICE:
         return f'{OFFICE_ONLY}: {result["reason"] or result["label"]}'
+    if result['stage'] == LEAD_WAITING_LIST:
+        return ON_A_WAITING_LIST
     return NO_STEP
 
 
@@ -270,8 +280,8 @@ def hand_to_bot(contact: Contact, user, *, timeout: float = UNDERSTAND_SECONDS) 
         if manual is not None:
             fields['lead_manual'] = manual
         state.touch(row.pk, **fields)
-    # The stage, and with it the bot's step, planned at once.
-    lead_stage.refresh(contact.pk)
+    # The stage, and with it the bot's step, planned at once (a fault there is the cron's to put right).
+    lead_stage.refresh_quietly(contact.pk)
     contact = Contact.objects.get(pk=contact.pk)
     planned = LeadFollowUp.objects.filter(contact=contact, status__in=NUDGE_OPEN_STATUSES).order_by('-id').first()
     understood = _understood(contact, planned, now)

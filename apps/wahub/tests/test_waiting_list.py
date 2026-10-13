@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 from django.utils import timezone
 
-from apps.core.tests.test_fixtures import TestDataFactory
 from apps.enrollments.models import LessonEnrollment
 from apps.wahub import cron, lead_stage, live_test, shadow, waiting_list
 from apps.wahub.models import Contact, ContactEvent, Message, ShadowReply, WaitingListEntry
