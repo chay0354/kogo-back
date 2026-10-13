@@ -17,7 +17,7 @@ from rest_framework.test import APIClient
 
 from apps.core.manychat_service import ManyChatError
 from apps.core.models import UserProfile
-from apps.wahub import future_leads, lead_stage, live_test, queries
+from apps.wahub import analysis, future_leads, lead_stage, live_test, queries
 from apps.wahub.models import Contact, ContactEvent, LeadFollowUp, Message
 from apps.wahub.tests.base import BASE, PHONE, client_for, make_user
 from apps.wahub.tests.test_analysis import CARD, NO_LEAD, POST, claude
@@ -531,8 +531,9 @@ class NotesTests(ConversationCase):
         response = self.post(f'contacts/{contact.id}/notes/', {'text': '  אמא ביקשה שנחזור אחרי החגים  '})
         self.assertEqual(response.status_code, 201)
         note = response.data['note']
-        self.assertEqual(set(note), {'id', 'text', 'by_name', 'created_at'})
+        self.assertEqual(set(note), {'id', 'text', 'by_name', 'created_at', 'edited_at', 'edited_by_name'})
         self.assertEqual((note['text'], note['by_name']), ('אמא ביקשה שנחזור אחרי החגים', 'דנה מנהלת'))
+        self.assertEqual((note['edited_at'], note['edited_by_name']), (None, None))
         self.assertEqual(response.data['contact']['id'], contact.id)
         # No message, to anybody.
         self.assertEqual(Message.objects.filter(contact=contact).count(), messages)
@@ -567,6 +568,174 @@ class NotesTests(ConversationCase):
         self.assertEqual([row['text'] for row in notes], ['התקשרה למשרד'])
 
 
+class NoteChangeTests(ConversationCase):
+    """A note rewritten or deleted (the contract, ז.5): who and when in the journal, never the words."""
+
+    def note(self, contact, text='אמא ביקשה שנחזור אחרי החגים') -> dict:
+        return self.post(f'contacts/{contact.id}/notes/', {'text': text}).data['note']
+
+    def patch(self, contact, note_id, text, client=None):
+        return (client or self.client).patch(f'{BASE}/contacts/{contact.id}/notes/{note_id}/', {'text': text}, format='json')
+
+    def delete(self, contact, note_id, client=None):
+        return (client or self.client).delete(f'{BASE}/contacts/{contact.id}/notes/{note_id}/')
+
+    def standing(self, contact) -> list:
+        """The notes of the contact as they stand: (id, text, when it was rewritten)."""
+        return [(row['id'], row['text'], row['edited_at']) for row in self.get(f'contacts/{contact.id}/notes/').data['notes']]
+
+    def test_a_rewritten_note_stays_in_its_place_and_says_who_rewrote_it(self):
+        contact = self.talk()
+        note = self.note(contact)
+        messages = Message.objects.filter(contact=contact).count()
+        Contact.objects.filter(pk=contact.pk).update(needs_analysis=False)
+        self.clock.forward(minutes=10)
+        other = make_user('other-manager@future.test', first_name='מיכל', last_name='כהן')
+
+        response = self.patch(contact, note['id'], '  אמא ביקשה שנחזור אחרי סוכות  ', client_for(other))
+        self.assertEqual(response.status_code, 200)
+        edited = response.data['note']
+        self.assertEqual((edited['id'], edited['text']), (note['id'], 'אמא ביקשה שנחזור אחרי סוכות'))
+        # Who wrote it and when do not move: the note stays where it was in the conversation.
+        self.assertEqual(edited['by_name'], 'דנה מנהלת')
+        self.assertEqual(datetime.fromisoformat(edited['created_at']), datetime.fromisoformat(note['created_at']))
+        self.assertEqual((edited['edited_by_name'], datetime.fromisoformat(edited['edited_at'])), ('מיכל כהן', self.clock()))
+        self.assertEqual(response.data['contact']['id'], contact.id)
+
+        # Every place that shows the notes shows it as it now is.
+        for shown in (
+            self.get(f'contacts/{contact.id}/').data['notes'],
+            self.get(f'contacts/{contact.id}/notes/').data['notes'],
+            self.get(f'leads/{contact.id}/').data['details']['notes'],
+        ):
+            self.assertEqual([(row['text'], row['edited_by_name']) for row in shown], [('אמא ביקשה שנחזור אחרי סוכות', 'מיכל כהן')])
+        # The journal says a note was rewritten, by whom — and neither the old words nor the new.
+        change = ContactEvent.objects.get(contact=contact, kind='note_changed')
+        self.assertEqual((change.text, change.actor), ('פתק נערך', other))
+        self.assertFalse(ContactEvent.objects.filter(contact=contact, text__contains='החגים').exists())
+        events = self.get(f'contacts/{contact.id}/').data['events']
+        self.assertIn(('note_changed', 'שינוי בפתק', 'פתק נערך', 'מיכל כהן'), [
+            (event['kind'], event['kind_label'], event['text'], event['actor_name']) for event in events
+        ])
+        # What the office knows changed: the lead is read again. And no message, to anybody.
+        self.assertTrue(self.fresh(contact).needs_analysis)
+        self.assertEqual(Message.objects.filter(contact=contact).count(), messages)
+
+    def test_the_same_words_again_change_nothing(self):
+        contact = self.talk()
+        note = self.note(contact)
+        Contact.objects.filter(pk=contact.pk).update(needs_analysis=False)
+        response = self.patch(contact, note['id'], ' אמא ביקשה שנחזור אחרי החגים ')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((response.data['note']['edited_at'], response.data['note']['edited_by_name']), (None, None))
+        self.assertEqual(self.journal(contact, 'note_changed'), [])
+        self.assertFalse(self.fresh(contact).needs_analysis)
+
+    def test_an_empty_or_a_too_long_rewrite_is_refused_and_the_note_stands(self):
+        contact = self.talk()
+        note = self.note(contact)
+        for text in ('', '   ', None, 'א' * 501):
+            with self.subTest(text=(text or '')[:5]):
+                response = self.patch(contact, note['id'], text)
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.data['detail'])
+        self.assertEqual(self.standing(contact), [(note['id'], note['text'], None)])
+        self.assertEqual(self.journal(contact, 'note_changed'), [])
+
+    def test_a_deleted_note_is_gone_from_everywhere_and_the_journal_keeps_no_word_of_it(self):
+        contact = self.talk()
+        kept = self.note(contact, 'הילד בן 4')
+        gone = self.note(contact, 'האבא לא רוצה שנתקשר אליו')
+        Contact.objects.filter(pk=contact.pk).update(needs_analysis=False)
+        messages = Message.objects.filter(contact=contact).count()
+
+        response = self.delete(contact, gone['id'])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((response.data['deleted'], response.data['contact']['id']), (gone['id'], contact.id))
+        conversation = self.get(f'contacts/{contact.id}/').data
+        self.assertEqual([row['id'] for row in conversation['notes']], [kept['id']])
+        self.assertEqual([event['text'] for event in conversation['events'] if event['kind'] == 'note'], ['הילד בן 4'])
+        self.assertEqual([row['id'] for row in self.get(f'contacts/{contact.id}/notes/').data['notes']], [kept['id']])
+        self.assertEqual([row['id'] for row in self.get(f'leads/{contact.id}/').data['details']['notes']], [kept['id']])
+        # Deleted for good: no row holds the words, and the journal says only that a note was deleted, and by whom.
+        self.assertFalse(ContactEvent.objects.filter(text__contains='לא רוצה שנתקשר').exists())
+        change = ContactEvent.objects.get(contact=contact, kind='note_changed')
+        self.assertEqual((change.text, change.actor), ('פתק נמחק', self.manager))
+        # The summary reads the notes that are left, and is asked to read again.
+        self.assertEqual([line.text for line in analysis.office_notes(self.fresh(contact))], ['הילד בן 4'])
+        self.assertTrue(self.fresh(contact).needs_analysis)
+        self.assertEqual(Message.objects.filter(contact=contact).count(), messages)
+        # A second deletion finds nothing.
+        self.assertEqual(self.delete(contact, gone['id']).status_code, 404)
+        self.assertEqual(self.journal(contact, 'note_changed'), ['פתק נמחק'])
+
+    def test_the_bot_stops_going_by_a_note_that_was_deleted_and_goes_by_one_that_was_rewritten(self):
+        """The note is what "the bot carries on" schedules by: it must follow the note as it is now."""
+        contact = self.talk()
+        note = self.note(contact, 'דיברנו בטלפון: הילד בן שנתיים ו-9 חודשים, לחזור כשימלאו לו 3')
+        self.patch(contact, note['id'], 'דיברנו בטלפון: הילד בן שנתיים ו-10 חודשים, לחזור כשימלאו לו 3')
+        self.assertEqual([line.text for line in analysis.office_notes(self.fresh(contact))], [
+            'דיברנו בטלפון: הילד בן שנתיים ו-10 חודשים, לחזור כשימלאו לו 3',
+        ])
+        self.delete(contact, note['id'])
+        self.assertEqual(analysis.office_notes(self.fresh(contact)), [])
+        understood = self.hand_to_bot(contact).data['understood']
+        self.assertFalse(understood['ok'])                                    # as with no note at all
+
+    def test_a_rewritten_note_is_what_the_bot_schedules_by(self):
+        contact = self.talk()
+        note = self.note(contact, 'דיברנו בטלפון: הילד בן שנתיים ו-9 חודשים, לחזור כשימלאו לו 3')
+        self.patch(contact, note['id'], 'דיברנו בטלפון: הילד בן שנתיים ו-10 חודשים, לחזור כשימלאו לו 3')
+        understood = self.hand_to_bot(contact).data['understood']
+        self.assertEqual((understood['ok'], understood['come_back_on']), (True, '2026-12-12'))
+
+    def test_only_a_note_of_this_very_contact_is_rewritten_or_deleted(self):
+        contact = self.talk()
+        other = self.talk(phone='972505550188')
+        theirs = self.note(other, 'פתק של מישהו אחר')
+        created = ContactEvent.objects.filter(contact=contact).exclude(kind='note').first()
+        self.assertIsNotNone(created)
+        for note_id in (theirs['id'], created.id, 999999):
+            with self.subTest(note_id=note_id):
+                self.assertEqual(self.patch(contact, note_id, 'x').status_code, 404)
+                self.assertEqual(self.delete(contact, note_id).status_code, 404)
+        self.assertEqual(self.standing(other), [(theirs['id'], 'פתק של מישהו אחר', None)])
+        self.assertTrue(ContactEvent.objects.filter(pk=created.id).exists())
+        self.assertFalse(ContactEvent.objects.filter(kind='note_changed').exists())
+
+    def test_the_reason_of_a_future_lead_is_no_note(self):
+        contact = self.talk()
+        self.assertEqual(self.future(contact).status_code, 200)
+        self.assertEqual(self.get(f'contacts/{contact.id}/notes/').data['notes'], [])
+        marked = ContactEvent.objects.filter(contact=contact, kind='followup_changed').latest('id')
+        self.assertEqual(self.patch(contact, marked.id, 'סיבה אחרת').status_code, 404)
+        self.assertEqual(self.delete(contact, marked.id).status_code, 404)
+        self.assertEqual(self.fresh(contact).followup_note, 'הילד יהיה בן 3 בדצמבר')
+
+    def test_the_note_written_when_a_contact_is_added_by_hand_is_rewritten_the_same_way(self):
+        added = self.post('contacts/', {'phone': '0505550177', 'name': 'חדשה', 'note': 'התקשרה למשרד'}).data
+        contact = Contact.objects.get(pk=added['id'])
+        note = self.get(f'contacts/{contact.id}/').data['notes'][0]
+        self.assertEqual(self.patch(contact, note['id'], 'התקשרה למשרד ביום ראשון').data['note']['text'], 'התקשרה למשרד ביום ראשון')
+        self.assertEqual(self.delete(contact, note['id']).status_code, 200)
+        self.assertEqual(self.get(f'contacts/{contact.id}/').data['notes'], [])
+
+    def test_managers_only(self):
+        contact = self.talk()
+        note = self.note(contact)
+        others = {
+            'partner': (client_for(make_user('partner@notes.test', UserProfile.ROLE_PARTNER)), 403),
+            'worker': (client_for(make_user('worker@notes.test', UserProfile.ROLE_WORKER)), 403),
+            'nobody': (APIClient(), 401),
+        }
+        for who, (client, refused) in others.items():
+            with self.subTest(who=who):
+                self.assertEqual(self.patch(contact, note['id'], 'שונה', client).status_code, refused)
+                self.assertEqual(self.delete(contact, note['id'], client).status_code, refused)
+        self.assertEqual(self.standing(contact), [(note['id'], note['text'], None)])
+        self.assertEqual(self.journal(contact, 'note_changed'), [])
+
+
 # --- who may ---------------------------------------------------------------------------------------------
 
 class PermissionTests(ConversationCase):
@@ -582,6 +751,10 @@ class PermissionTests(ConversationCase):
             ('get', 'waiting-list/', None),
             ('post', 'waiting-list/1/handled/', {}),
             ('post', 'waiting-list/1/remove/', {}),
+            # The addition of the same day (ז): the lessons to choose from, and telling a customer of a free seat.
+            ('get', 'waiting-list/lessons/', None),
+            ('get', 'waiting-list/1/notify/', None),
+            ('post', 'waiting-list/1/notify/', {}),
         ]
         before = self.marks(contact)
         others = {
