@@ -13,6 +13,10 @@ Without an Anthropic key the stub answers: a rule-built reply from the same
 tools and phrasings, marked `model: "stub"`, so the screen works on a
 developer's machine and the owner can see the shape of things.
 
+No answer is kept with a sum of money the system did not return: the money
+guard (below, before `draft`) holds every answer to that in code, since a line
+of the instructions was not enough (the owner, 14.10.2026).
+
 Claude is reached over plain HTTPS with `requests`, as analysis.py does: the
 SDK is not a dependency of this deployment (requirements.txt), and one request
 shape does not justify one.
@@ -33,7 +37,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.wahub import analysis, inbound, knowledge, media, optout, shadow_tools, state, transcribe, unknowns
+from apps.wahub import analysis, grounding, inbound, knowledge, media, optout, shadow_tools, state, transcribe, unknowns
 from apps.wahub.analysis import ANTHROPIC_URL, ANTHROPIC_VERSION, P_CLASS, P_COLD, P_INFO, P_REG, P_TRIAL, Line
 from apps.wahub.models import (
     DIRECTION_IN,
@@ -88,6 +92,10 @@ HEAR_AGAIN_BATCH = 3
 HEAR_AGAIN_WITHIN = timedelta(days=3)
 # Written on a recording the transcription returned no words for.
 EMPTY_TRANSCRIPT = 'ההקלטה ריקה או לא ברורה'
+# The money guard (below, "the money guard"): with less than this left of an answer's time, Claude is not asked to
+# word it again — the answer with a sum nobody returned is replaced at once.
+MONEY_RETRY_SECONDS = 8
+MONEY_INVENTED, MONEY_AFFIRMED, MONEY_UNCHECKED = 'invented', 'affirmed', 'unchecked'
 
 REPLY_SCHEMA = {
     'type': 'object',
@@ -132,12 +140,16 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 עלות נאמרת על חוג מסוים שנבחר, וכששאלו עליה — לעולם לא "בסניף הזה הניסיון ללא עלות" ולא "בכל האפשרויות". \
 תאריך לשיעור ניסיון נאמר רק מתוך trial.dates של אותו חוג — אלה התאריכים שהאתר מציע עכשיו — ומצטטים את trial.dates_text; תאריך מלא (full_dates) או שלא פתוח לניסיון (not_offered) לא מוצע, לא מחשבים תאריך לבד, וכש-can_book=false אומרים בפשטות שאין כרגע תאריך פנוי לניסיון בחוג הזה.
 3. "כמה יעלה להירשם", "כמה משלמים עכשיו", "כמה יוצא החודש" — קראי ל-quote_registration ופרטי את החישוב בשתיים–שלוש שורות \
-(החלק היחסי של החודש, דמי רישום, קיזוז ניסיון, הנחות) ואת המחיר החודשי שאחריו. לא מחשבים לבד.
+(החלק היחסי של החודש, דמי רישום, קיזוז ניסיון, הנחות) ואת המחיר החודשי שאחריו. לא מחשבים לבד. \
+סכום כולל — "כמה יוצא", "לשנה", "לשני ילדים", "מחיר ועוד דמי רישום" — נאמר רק כפי שחזר מ-quote_registration: לא מחברים, לא מכפילים ולא כותבים "בערך". \
+כששואלים על שנה: המחיר החודשי ודמי הרישום כפי שחזרו מהכלי, כל אחד בשורה משלו ובלי סכום שלישי; מי שרוצה חישוב מלא — request_human. \
+כל סכום בתשובה נבדק לפני השליחה מול מה שהכלים החזירו בתשובה הזאת: סכום שלא חזר מהם, אינו בידע והלקוח לא כתב אותו — לא יוצא ללקוח.
 4. סניף שחוזר מהכלי כ-is_external — אומרים שצריך לבדוק מול העירייה/המתנ"ס ושולחים את קישור ההרשמה. בלי מחיר, בלי ניסיון, בלי כתובת.
 5. כמה הודעות רצופות של הלקוח — תשובה אחת לכולן. על הקלטה שלא תומללה — רק הבקשה הקצרה לכתוב; לא חוזרים על מה שכבר נאמר.
 6. תשובה קצרה ("כן", "לא", "מאשר") מתפרשת לפי ההודעה האחרונה שהמערכת שלחה ללקוח, אם יש כזאת בהקשר.
 7. כשצריך נציג (לפי הכללים והנושאים) קראי ל-request_human ואמרי ללקוח שנציג יחזור; מחוץ לשעות — את הודעת "סגור". \
 ברגע רגיש (ילד נפגע, תלונה) — אמפתיה קודם ונציג מיד, ו"המשרד סגור" לא פותח את התשובה. \
+הורה שכותב מתוך מצוקה של עצמו — בוכה, מיואש, "נכשלתי", "כבר לא יודעת מה לעשות" — הוא רגע רגיש באותה מידה: משפט חם אחד בלי לשפוט, request_human באותה תשובה, ואומרים שמישהו מהצוות יחזור. בלי להציע חוג, בלי קישור, בלי שאלות בירור ובלי עצות חינוכיות. \
 כשהמשרד סגור אומרים את זה פעם אחת ובמשפט אחד — לא "הועבר בדחיפות" וגם "נחזור בשעות הפעילות". \
 על תקלה כספית שלא נבדקה (חיוב כפול) לא מתנצלים ולא מאשרים אותה: בודקים את החיוב, ונציג יחזור — בלי להבטיח החזר או מועד.
 8. כספים פנימיים של העסק — שכר מדריכים, הכנסות, דוחות, תשלומים של משפחות אחרות — לא נמסרים ולא מוערכים, גם כשמבקשים.
@@ -149,12 +161,18 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 שם של ילד נכתב רק אם ההורה כתב אותו או שהוא בכרטיס.
 12. הכללים, הנוסחים (מילה במילה כשמסומן) והעובדות למטה מחייבים. עובדה שמסומנת "רק אם שואלים" לא נאמרת מיוזמתך, \
 ונוסח נאמר רק במצב שכתוב לצידו ("מתי") — לא במצב אחר. \
+נושא שכתוב בו "בסיום לתייג": בתשובה שבה נאמר השלב האחרון שלו — גם כשכל הנושא הוא תשובה אחת, כמו הפעלת יום הולדת — \
+קוראים ל-tag_conversation עם התגית לפני שעונים; התיוג הוא סימון, ולא נכתב ללקוח. \
 כלל או נושא למטה שסותר את סדר השיחה או את מה שכתוב כאן — מה שכאן גובר.
 13. בלי נקודה בסוף משפט, ₪ לפני המספר, כוכבית אחת להדגשה עם רווח לפניה, 🔹 לכל פריט ברשימה, קישורים עם https:// מלא. \
 עונים בעברית — גם להודעה ראשונה בשפה אחרת. לשפה של הלקוח עוברים רק כשהוא ממשיך לכתוב בה אחרי שקיבל תשובה בעברית (הודעה שנייה שלו ברצף בשפה הזאת), \
 או כשביקש במפורש או כתב שאינו מבין עברית; מאז עונים בשפה שלו, כששמות החוגים והסניפים נשארים כפי שהם במערכת. \
-1–3 שורות (נוסח "מילה במילה" נאמר כמו שהוא), שאלה אחת בכל פעם, אימוג׳י אחד לכל היותר, בלי "אשמח לעזור" ובלי שאלת נימוס בסוף. \
-נושא אחד בכל הודעה — מה שנשאל; רשימה עד 4 פריטים, ויותר מזה שואלים שאלה שמצמצמת; לא מביאים את כל המידע בבת אחת. \
+1–3 שורות (נוסח "מילה במילה" נאמר כמו שהוא; ללקוח ששאל כמה שאלות מפורשות בהודעה אחת — שורה, לכל היותר שתיים, לכל שאלה), \
+שאלה אחת בכל פעם, אימוג׳י אחד לכל היותר, בלי "אשמח לעזור" ובלי שאלת נימוס בסוף. \
+נושא אחד בכל הודעה — מה שנשאל; לא מביאים את כל המידע בבת אחת. \
+רשימה — לכל היותר 4 שורות של 🔹, גם כשהכלי החזיר יותר (חוגים, מועדים, תאריכים, סניפים): מחמישה ומעלה שואלים שאלה שמצמצמת, \
+או כותבים את השמות בשורה אחת עם פסיקים — שורה חמישית של 🔹 לא נכתבת. \
+לא חוזרים על פרט שכבר נאמר בתשובה הקודמת שלך (מחיר, דמי רישום, יום ושעה, קישור) — אלא אם הלקוח שאל עליו שוב. \
 הודעה שנוח לקרוא: כל עובדה בשורה משלה, והעיקר בה מודגש (שם החוג, יום ושעה, מחיר) — הדגשה אחת בשורה, לא הכול; קישור תמיד בשורה משלו אחרי 🔗; שורה ריקה בין התשובה לבין הצעד הבא.
 14. תפוסה — "כמה רשומים", "כמה מקומות נשארו", "יש מקום": עונים על השיעור שנשאל עליו (יום ושעה), במספרים של אותו שיעור מהכלי \
 (enrolled, capacity, seats_left, is_full), ומצטטים את seats_text שלו. לא מחברים ולא מחסרים לבד, ולא עונים על ימים שלא נשאלו.
@@ -168,7 +186,8 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 המערכת שולחת אחרי התשובה את התמונה עם כל התאריכים; תאריכי חופשה לא מפרטים בעצמך, גם לא מהימים המיוחדים שבידע. \
 found=false: הנוסח missing_info ו-request_human, ולא כותבים שנשלח לוח.
 17. מקרה לא רגיל (הודעה לא ברורה, כמה ילדים יחד, מיקוח, בקשה חריגה, כעס) — לפי הכללים שבידע; שתי שאלות בהודעה — עונים על שתיהן. \
-וכשאין כלל: לא ממציאים — שאלה קצרה אחת, או נציג. לא מחשבים סכום או תאריך שהמערכת לא החזירה, ולא מאשרים שעה, תאריך או מחיר רק כי הלקוח הציע אותם.
+וכשאין כלל: לא ממציאים — שאלה קצרה אחת, או נציג. לא מחשבים סכום או תאריך שהמערכת לא החזירה (סכום — רק מספר שחזר מכלי בתשובה הזאת, כפי שהוא: סעיף 3), \
+ולא מאשרים שעה, תאריך או מחיר רק כי הלקוח הציע אותם.
 
 הפלט הסופי: JSON בלבד לפי הסכמה — text (ההודעה ללקוח), reasoning (למה ככה, בעברית פשוטה, 2–4 שורות, עם [#id] של הרשומות ששימשו), knowledge_ids, \
 ו-unknown: ריק כמעט תמיד; רק כשלא ידעת לענות כי המידע לא חזר מהכלים ואינו בידע — מה הלקוח ביקש לדעת, בכמה מילים, בלי שם ובלי טלפון.
@@ -288,7 +307,8 @@ class Context:
     customer: dict | None
     places: list = field(default_factory=list)
     tool_ctx: ToolContext = None
-    # Lines for the reasoning that are about the input, not the answer: "אין תמלול: חסר מפתח", a picture Claude cannot read.
+    # Lines for the reasoning that are not the model's own: about the input ("אין תמלול: חסר מפתח", a picture Claude
+    # cannot read), and what the money guard did to the answer (a wording it sent back, an answer it replaced).
     notes: list = field(default_factory=list)
 
 
@@ -1015,70 +1035,107 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
         'anthropic-beta': FALLBACK_BETA,
         'content-type': 'application/json',
     }
-    served_model = model_name()
-    for _round in range(MAX_TOOL_ROUNDS + 1):
-        # A tool round took seconds: an answer the customer has already written past is not finished.
-        if _round and superseded is not None and superseded():
-            raise Superseded()
-        remaining = _timeout_seconds()
-        if deadline is not None:
-            remaining = min(remaining, deadline - time_module.monotonic())
-            if remaining < 3:
-                raise ShadowModelError('נגמר הזמן של הקריאה')
-        try:
-            response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
-            while response.status_code == 400 and len(marks) > 1:
-                # The mark for the cache was refused: the same request goes again with the next one, and from here on.
-                logger.warning('wahub shadow: Claude refused the system text marked %s (%s); sent again with %s',
-                               marks[0], _error_of(response), marks[1] or 'no mark')
-                marks = marks[1:]
-                body['system'] = _for_the_cache(steady, moving, marks[0])
+    served = {'model': model_name(), 'rounds': 0}
+
+    def ask() -> tuple:
+        """
+        Claude's next answer in this conversation, after as many rounds of
+        tools as it asks for: (the text, the turn as it came). Called once for
+        the answer — and once more when the money guard sends a wording back.
+        """
+        nonlocal marks
+        for _round in range(MAX_TOOL_ROUNDS + 1):
+            # A round took seconds: an answer the customer has already written past is not finished.
+            if served['rounds'] and superseded is not None and superseded():
+                raise Superseded()
+            served['rounds'] += 1
+            remaining = _timeout_seconds()
+            if deadline is not None:
+                remaining = min(remaining, deadline - time_module.monotonic())
+                if remaining < 3:
+                    raise ShadowModelError('נגמר הזמן של הקריאה')
+            try:
                 response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
-                if response.status_code == 200:
-                    # It was the mark, not the request: this process does not offer it again.
-                    _REFUSED_MARKS['count'] += 1
-        except requests.RequestException as exc:
-            raise ShadowModelError(f'Claude לא ענה ({type(exc).__name__})') from exc
-        if response.status_code != 200:
-            logger.warning('wahub shadow: Claude answered %s %s', response.status_code, _error_of(response))
-            raise ShadowModelError(f'Claude ענה {response.status_code}')
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ShadowModelError('תשובה לא קריאה מ-Claude') from exc
-        served_model = payload.get('model') or served_model
-        stop = payload.get('stop_reason')
-        content = payload.get('content') or []
-        usage = payload.get('usage') if isinstance(payload.get('usage'), dict) else {}
-        if usage.get('cache_read_input_tokens') or usage.get('cache_creation_input_tokens'):
-            logger.info(
-                'wahub shadow: round %s — %s tokens read from the cache, %s written to it, %s sent in full',
-                _round + 1, usage.get('cache_read_input_tokens') or 0, usage.get('cache_creation_input_tokens') or 0,
-                usage.get('input_tokens') or 0,
-            )
-        if stop == 'refusal':
-            raise ShadowModelError('Claude סירב לענות')
-        if stop == 'max_tokens':
-            raise ShadowModelError('התשובה נקטעה (max_tokens)')
-        tool_uses = [block for block in content if isinstance(block, dict) and block.get('type') == 'tool_use']
-        if stop == 'tool_use' and tool_uses:
-            # The whole assistant turn goes back as it came (thinking blocks included).
-            messages.append({'role': 'assistant', 'content': content})
-            results = []
-            for block in tool_uses:
-                arguments = block.get('input') if isinstance(block.get('input'), dict) else {}
-                result = run_tool(block.get('name', ''), arguments, tctx)
-                tools_used.append(shadow_tools.used(block.get('name', ''), arguments, result))
-                results.append({
-                    'type': 'tool_result', 'tool_use_id': block.get('id'),
-                    'content': json.dumps(result, ensure_ascii=False, default=str),
-                    **({'is_error': True} if 'error' in result else {}),
-                })
-            messages.append({'role': 'user', 'content': results})
-            continue
-        text = ''.join(block.get('text', '') for block in content if isinstance(block, dict) and block.get('type') == 'text')
-        return _draft_from_answer(text, ctx, tools_used, served_model)
-    raise ShadowModelError('יותר מדי סבבי כלים')
+                while response.status_code == 400 and len(marks) > 1:
+                    # The mark for the cache was refused: the same request goes again with the next one, and from here on.
+                    logger.warning('wahub shadow: Claude refused the system text marked %s (%s); sent again with %s',
+                                   marks[0], _error_of(response), marks[1] or 'no mark')
+                    marks = marks[1:]
+                    body['system'] = _for_the_cache(steady, moving, marks[0])
+                    response = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=(min(5, remaining), remaining))
+                    if response.status_code == 200:
+                        # It was the mark, not the request: this process does not offer it again.
+                        _REFUSED_MARKS['count'] += 1
+            except requests.RequestException as exc:
+                raise ShadowModelError(f'Claude לא ענה ({type(exc).__name__})') from exc
+            if response.status_code != 200:
+                logger.warning('wahub shadow: Claude answered %s %s', response.status_code, _error_of(response))
+                raise ShadowModelError(f'Claude ענה {response.status_code}')
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ShadowModelError('תשובה לא קריאה מ-Claude') from exc
+            served['model'] = payload.get('model') or served['model']
+            stop = payload.get('stop_reason')
+            content = payload.get('content') or []
+            usage = payload.get('usage') if isinstance(payload.get('usage'), dict) else {}
+            if usage.get('cache_read_input_tokens') or usage.get('cache_creation_input_tokens'):
+                logger.info(
+                    'wahub shadow: round %s — %s tokens read from the cache, %s written to it, %s sent in full',
+                    served['rounds'], usage.get('cache_read_input_tokens') or 0, usage.get('cache_creation_input_tokens') or 0,
+                    usage.get('input_tokens') or 0,
+                )
+            if stop == 'refusal':
+                raise ShadowModelError('Claude סירב לענות')
+            if stop == 'max_tokens':
+                raise ShadowModelError('התשובה נקטעה (max_tokens)')
+            tool_uses = [block for block in content if isinstance(block, dict) and block.get('type') == 'tool_use']
+            if stop == 'tool_use' and tool_uses:
+                # The whole assistant turn goes back as it came (thinking blocks included).
+                messages.append({'role': 'assistant', 'content': content})
+                results = []
+                for block in tool_uses:
+                    arguments = block.get('input') if isinstance(block.get('input'), dict) else {}
+                    result = run_tool(block.get('name', ''), arguments, tctx)
+                    tools_used.append(shadow_tools.used(block.get('name', ''), arguments, result))
+                    results.append({
+                        'type': 'tool_result', 'tool_use_id': block.get('id'),
+                        'content': json.dumps(result, ensure_ascii=False, default=str),
+                        **({'is_error': True} if 'error' in result else {}),
+                    })
+                messages.append({'role': 'user', 'content': results})
+                continue
+            return ''.join(block.get('text', '') for block in content if isinstance(block, dict) and block.get('type') == 'text'), content
+        raise ShadowModelError('יותר מדי סבבי כלים')
+
+    text, turn = ask()
+    answer = _draft_from_answer(text, ctx, tools_used, served['model'])
+    found = money_without_source(answer.text, ctx)
+    if found is None or found['kind'] == MONEY_UNCHECKED:
+        # Nothing to word again — or nothing Claude can be told: `draft` has the last word on what leaves.
+        return answer
+    # A sum nobody returned: one more wording, in the same conversation of tools, inside the same time.
+    if deadline is not None and deadline - time_module.monotonic() < MONEY_RETRY_SECONDS:
+        ctx.notes.append(f'שומר הסכומים: {found["said"]}. לא נשאר זמן לבקש מהמודל ניסוח נוסף')
+        return answer
+    logger.warning('wahub shadow: the money guard sent a wording back to Claude (%s)', found['reason'])
+    messages.append({'role': 'assistant', 'content': turn})
+    messages.append({'role': 'user', 'content': _money_correction(found)})
+    try:
+        text, turn = ask()
+        again = _draft_from_answer(text, ctx, tools_used, served['model'])
+    except Superseded:
+        raise
+    except ShadowModelError as exc:
+        ctx.notes.append(f'שומר הסכומים: {found["said"]}. ניסוח נוסף התבקש מהמודל ולא התקבל ({exc})')
+        return answer
+    except Exception as exc:
+        # A fault of ours on the second wording must not bring the first one back to life: it is still stopped in `draft`.
+        logger.exception('wahub shadow: the second wording the money guard asked for failed unexpectedly')
+        ctx.notes.append(f'שומר הסכומים: {found["said"]}. ניסוח נוסף התבקש מהמודל ונכשל ({type(exc).__name__})')
+        return answer
+    ctx.notes.append(f'שומר הסכומים: {found["said"]} (הניסוח הראשון: "{_one_line(answer.text)}"). המודל התבקש לנסח מחדש, וזה הניסוח השני')
+    return again
 
 
 def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) -> Draft:
@@ -1112,6 +1169,155 @@ def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) ->
     )
 
 
+# --- the money guard ----------------------------------------------------------------------------------------------
+#
+# The owner, 14.10.2026: in a run of 161 test conversations against the real bot it wrote ₪360 — a sum no tool had
+# returned and the knowledge does not hold (a price it added up or multiplied by itself). The rule against that was
+# in the instructions already (E7) and was not enough, and a real customer cannot be sent a price the bot worked out.
+# So it is held in code, on every answer, before the answer is kept or sent:
+#
+#   every sum in an answer is in what the tools returned in this run (the card of the writer among them), in the
+#   knowledge the bot may say, or in the customer's own words said back to him — read exactly as the self-checks
+#   read it (grounding.unsourced_amounts; evals/checks.py asks the same function).
+#
+#   a sum with no source → Claude is told which, once, inside the same conversation of tools and the same budget of
+#   time, and words the answer again (`_claude`). Still a sum with no source — or no time for another wording, or
+#   none came — and the answer is replaced by the "missing info" phrasing and the conversation is marked for a
+#   person, with the reason (`draft`, which is the last word for the stub's answers too). What was stopped is kept
+#   in the reasoning, where the owner reads it; nothing that would have followed that answer is sent.
+#
+#   the guard itself breaking is not "no sum without a source". An answer that reads as holding money at all is then
+#   replaced the same way: a sum nobody verified is not sent. An answer with no sign of money in it stands — there is
+#   nothing in it to verify, and a fault of the guard must not silence the bot.
+
+def _one_line(text: str, limit: int = 300) -> str:
+    text = ' '.join(str(text or '').split())
+    return text if len(text) <= limit else text[:limit].rstrip() + '…'
+
+
+def money_without_source(text: str, ctx: Context) -> dict | None:
+    """
+    None when every sum in `text` has a source. Otherwise what was found:
+    {kind, sums, said, reason} — `said` is the line for the reasoning, `reason`
+    the one kept on the conversation for the office. Never raises.
+    """
+    try:
+        card = [{'name': 'customer_card', 'input': {}, 'result': ctx.customer}] if ctx.customer else []
+        # What the customer himself wrote, in the conversation and in the messages being answered (a recording by its words).
+        said = [row.get('text') or '' for row in ctx.lines if row.get('who') == SENDER_CUSTOMER]
+        said += [target.transcript or target.text or '' for target in ctx.targets]
+        invented, affirmed = grounding.unsourced_amounts(
+            text, evidence=card + list(ctx.tool_ctx.calls), knowledge=grounding.knowledge_text(ctx.items, ctx.hours),
+            customer='\n'.join(part for part in said if part),
+        )
+    except Exception as exc:
+        logger.exception('wahub shadow: the money guard itself failed')
+        try:
+            money = grounding.mentions_money(text)
+        except Exception:
+            money = True
+        if not money:
+            return None
+        return {
+            'kind': MONEY_UNCHECKED, 'sums': '',
+            'said': f'הבדיקה של הסכומים נכשלה ({type(exc).__name__}), ובתשובה יש סכום שלא אומת',
+            'reason': f'שומר הסכומים נכשל ({type(exc).__name__}): בתשובה של הבוט היה סכום שלא אומת',
+        }
+    if invented:
+        sums = grounding.shown(invented)
+        return {
+            'kind': MONEY_INVENTED, 'sums': sums,
+            'said': f'בתשובה נכתב {sums} — סכום שלא חזר מהכלים בתשובה הזאת, לא כתוב בידע והלקוח לא כתב אותו',
+            'reason': f'הבוט ניסח סכום שלא חזר מהמערכת: {sums}',
+        }
+    if affirmed:
+        sums = grounding.shown(affirmed)
+        return {
+            'kind': MONEY_AFFIRMED, 'sums': sums,
+            'said': f'בתשובה אושר {sums} — סכום שרק הלקוח כתב, ולא חזר מהכלים ולא כתוב בידע',
+            'reason': f'הבוט אישר סכום שהלקוח כתב ושלא חזר מהמערכת: {sums}',
+        }
+    return None
+
+
+def _money_correction(found: dict) -> str:
+    """What Claude is told, once, about the wording the guard stopped. The customer never sees a word of it."""
+    if found['kind'] == MONEY_AFFIRMED:
+        what = (
+            f'בתשובה שניסחת אישרת את הסכום {found["sums"]} שהלקוח כתב. הוא לא חזר מאף כלי בתשובה הזאת ואינו כתוב בידע, '
+            'ולא מאשרים סכום רק כי הלקוח כתב אותו'
+        )
+    else:
+        what = (
+            f'הסכום {found["sums"]} שבתשובה שניסחת לא חזר מאף כלי בתשובה הזאת ואינו כתוב בידע '
+            '(חיבור, הכפלה, הערכה או סכום מהזיכרון אינם מקור)'
+        )
+    return (
+        f'בדיקת המערכת לפני השליחה: התשובה לא נשלחה. {what}.\n'
+        'נסחי את התשובה מחדש, באותה סכמה, רק עם סכומים שחזרו מהכלים — כל אחד כפי שחזר, ובנפרד. '
+        'אם הסכום אמור להיות נכון, קראי עכשיו לכלי שמחזיר אותו (course_card, quote_registration) ורק אז כתבי אותו. '
+        'לסכום כולל — quote_registration; וכשהמערכת לא מחזירה אותו: request_human והנוסח missing_info. '
+        'את הבדיקה הזאת לא מזכירים ללקוח.'
+    )
+
+
+def _office_instead(ctx: Context, stopped: Draft, found: dict) -> Draft:
+    """
+    What leaves in place of an answer the money guard stopped: the "missing
+    info" phrasing — the office is being asked, and will come back — with the
+    conversation marked for a person and the reason. The wording that was
+    stopped is kept in the reasoning. The marks of that wording that would have
+    acted after it left (a holidays board, a row on a waiting list) are dropped
+    with it: the customer was not sent the sentence that promised them.
+    """
+    tctx = ctx.tool_ctx
+    words = unknowns.missing_phrasing(ctx.items)
+    item = knowledge.phrasings_by_key(ctx.items).get(unknowns.MISSING_KEY)
+    if '{' in words or grounding.mentions_money(words):
+        # A phrasing somebody gave a variable or a sum to is not what this place may say on its own.
+        words = unknowns.DEFAULT_MISSING
+    elif item is not None:
+        tctx.used(item)
+    reason = found['reason'][:ShadowReply._meta.get_field('request_human_reason').max_length]
+    tctx.request_human_reason = reason
+    after = [name for name in dict.fromkeys(
+        line.get('name') for line in stopped.tools_used if isinstance(line, dict) and (line.get('send_flow') or line.get('name') == 'join_waiting_list')
+    )]
+    tools_used = [
+        {key: value for key, value in line.items() if key != 'send_flow'}
+        for line in stopped.tools_used if not (isinstance(line, dict) and line.get('name') == 'join_waiting_list')
+    ]
+    ctx.notes.append(
+        f'שומר הסכומים עצר את התשובה: {found["said"]}. ללקוח נכתב במקומה שבודקים מול המשרד, והשיחה סומנה לנציג. '
+        f'הניסוח שנעצר: "{_one_line(stopped.text)}"'
+        + (f'. מה שהיה יוצא אחריו לא ייצא ({", ".join(after)})' if after else '')
+    )
+    logger.warning('wahub shadow: the money guard stopped an answer (%s); the office is asked instead', found['reason'])
+    used = list(stopped.knowledge_used)
+    for item_id in tctx.knowledge_used:
+        if item_id not in used:
+            used.append(item_id)
+    return Draft(
+        text=polish(words), reasoning=stopped.reasoning, tools_used=tools_used, knowledge_used=used, model=stopped.model,
+        took_ms=stopped.took_ms, request_human=True, request_human_reason=reason, unknown=stopped.unknown,
+    )
+
+
+def keep_money_honest(result: Draft, ctx: Context) -> Draft:
+    """The last word on what leaves `draft`, whoever wrote it: an answer with a sum that has no source is replaced. Never raises."""
+    try:
+        found = money_without_source(result.text, ctx)
+        return result if found is None else _office_instead(ctx, result, found)
+    except Exception:
+        # The replacement itself broke: the bare phrasing and a mark for a person are still better than a sum nobody verified.
+        logger.exception('wahub shadow: the money guard could not replace an answer; the bare phrasing leaves instead')
+        reason = 'שומר הסכומים נכשל: התשובה של הבוט הוחלפה בנוסח "בודקת מול המשרד"'
+        return Draft(
+            text=unknowns.DEFAULT_MISSING, reasoning=getattr(result, 'reasoning', '') or '', model=getattr(result, 'model', SHADOW_MODEL_STUB),
+            request_human=True, request_human_reason=reason,
+        )
+
+
 # --- drafting, proposing, trying ----------------------------------------------------------------------------
 
 def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True, max_tokens: int | None = None,
@@ -1122,6 +1328,13 @@ def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True,
     now", the live test) a failure of Claude is raised as ShadowModelError
     instead: the owner is testing the new bot, and a rule-built line in its
     place would mislead.
+
+    Whoever wrote the answer, it leaves here with no sum of money that has no
+    source (the money guard, above): Claude is asked once to word such an
+    answer again, inside the same `deadline`, and what still holds such a sum
+    is replaced by the office's line and a mark for a person. Every path an
+    answer takes — the live answer, the shadow, "נסה שאלה", the self-checks,
+    the teaching screens — comes through here, so every one of them is held to it.
     """
     started = time_module.monotonic()
     result = None
@@ -1144,6 +1357,8 @@ def draft(ctx: Context, *, deadline: float | None = None, fallback: bool = True,
             result.reasoning = '• תקלה בקריאה ל-Claude; התשובה נבנתה מהכלים ומהנוסחים\n' + result.reasoning
     else:
         result = _stub(ctx)
+    # The money guard's last word, on Claude's answer and on the stub's alike: no sum without a source leaves here.
+    result = keep_money_honest(result, ctx)
     if ctx.notes:
         result.reasoning = '\n'.join(f'• {note}' for note in ctx.notes) + '\n' + result.reasoning
     result.took_ms = int((time_module.monotonic() - started) * 1000)

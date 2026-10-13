@@ -560,15 +560,20 @@ class ClaudeRunTests(EvalTestCase):
         self.assertIn('(הבוט בדק במערכת — find_courses: קודם שואלים תחום; חוגים לא הוחזרו (היפ הופ, קפוארה))', told)
 
     def test_a_bot_that_offers_before_it_asks_fails_and_is_told_why(self):
-        run, _claude = self.play(
+        # The sum it made up never reaches a check: the money guard (shadow.py) sends that wording back before it is
+        # kept. What the checks are left to catch is the rest of it — a day and an hour before the field was asked.
+        run, claude = self.play(
             'order_city_only', ('tool', 'find_courses', self.HERE), ('say', 'יש לנו קפוארה ביום שלישי ב-17:00, ₪260 לחודש'),
+            ('say', 'יש לנו קפוארה ביום שלישי ב-17:00'),
             ('json', {'verdicts': [{'number': 1, 'holds': False, 'why': 'הבוט הציע חוג עם יום ושעה במקום לשאול על התחום'}]}),
         )
         self.assertEqual(run.status, 'failed')
+        self.assertEqual(run.turns[0]['reply'], 'יש לנו קפוארה ביום שלישי ב-17:00')
+        self.assertIn('₪260', claude.requests[0]['messages'][-1]['content'])            # what Claude was told about its first wording
         failed = self.failed(run)
-        self.assertLessEqual({'order_kept', 'asks_field', 'offers_nothing', 'grounded_amounts', 'grounded_times', 'grounded_days', 'rubric_1_1'}, failed)
+        self.assertLessEqual({'order_kept', 'asks_field', 'offers_nothing', 'grounded_times', 'grounded_days', 'rubric_1_1'}, failed)
+        self.assertNotIn('grounded_amounts', failed)
         self.assertIn('קודם מבררים, אחר כך מציעים', self.explain(run, 'order_kept'))
-        self.assertIn('₪260', self.explain(run, 'grounded_amounts'))
         self.assertEqual(self.explain(run, 'rubric_1_1'), 'הבוט הציע חוג עם יום ושעה במקום לשאול על התחום')
 
     def test_a_bot_that_asks_for_everything_unasked(self):
@@ -589,23 +594,40 @@ class ClaudeRunTests(EvalTestCase):
         course.save(update_fields=['price'])
         run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', price))
         self.assertEqual((run.status, run.turns[0]['reply']), ('passed', 'המחיר *₪310* לחודש'))
-        # A bot that says yesterday's price fails on both counts: not what the system holds, and not what any tool returned.
-        run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', 'המחיר ₪250 לחודש'))
-        self.assertEqual(self.failed(run), {'grounded_amounts', 'says_amount:main.price_monthly'})
+        # A bot that says yesterday's price, and says it again when told that no tool returned it: the sum does not
+        # leave (the money guard, shadow.py) — the customer gets the office's line, and the run fails for the price it never said.
+        run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', 'המחיר ₪250 לחודש'), ('say', 'כאמור, ₪250 לחודש'))
+        self.assertEqual((run.turns[0]['reply'], run.turns[0]['request_human']), ('את זה אני בודקת מול המשרד, ונחזור אליכם עם תשובה', True))
+        self.assertEqual(run.turns[0]['request_human_reason'], 'הבוט ניסח סכום שלא חזר מהמערכת: ₪250')
+        self.assertEqual(self.failed(run), {'says_amount:main.price_monthly'})
         self.assertIn('₪310', self.explain(run, 'says_amount:main.price_monthly'))
+        # Told so, a bot that words it again with the price the tool did return passes.
+        run, _claude = self.play('money_price_of_a_class', ('tool', 'find_courses', ask), ('say', 'המחיר ₪250 לחודש'), ('say', 'המחיר ₪310 לחודש'))
+        self.assertEqual((run.status, run.turns[0]['reply']), ('passed', 'המחיר *₪310* לחודש'))
 
     def test_one_classs_price_in_the_answer_about_another(self):
         first = {**self.HERE, 'course_type': 'היפ הופ', 'age': 5}
         second = {**self.HERE, 'course_type': 'היפ הופ', 'grade': 'כיתה א'}
+        # The bot looked both classes up in the second answer and wrote the first one's price beside the second one's hour.
+        # Both sums were returned, so the money guard has nothing to say — and it is caught twice over: by what this script
+        # expects, and by the check that runs on every answer (₪250 beside Monday 17:00 is the price of another class).
         run, _claude = self.play(
             'money_two_classes_in_one_conversation',
             ('tool', 'find_courses', first), ('say', 'המחיר ₪250 לחודש'),
-            ('tool', 'find_courses', second), ('say', 'גם שם המחיר ₪250 לחודש, ביום שני 17:00–18:00'),
+            ('tool', 'find_courses', first), ('tool', 'find_courses', second), ('say', 'גם שם המחיר ₪250 לחודש, ביום שני 17:00–18:00'),
         )
-        # Caught twice over: by what this script expects, and by the check that runs on every answer — ₪250 beside Monday 17:00
-        # is the price of another class.
         self.assertEqual(self.failed(run), {'says_amount:second.price_monthly', 'not_amount_of_other:main.price_monthly', 'own_details'})
         self.assertIn('שייך לחוג אחר', self.explain(run, 'own_details'))
+        # Looked up alone, the second class returned ₪280 and nothing else: the first one's ₪250, carried over from the
+        # answer before, is a sum no tool returned in this answer — the guard sends it back, and the second wording passes.
+        run, claude = self.play(
+            'money_two_classes_in_one_conversation',
+            ('tool', 'find_courses', first), ('say', 'המחיר ₪250 לחודש'),
+            ('tool', 'find_courses', second), ('say', 'גם שם המחיר ₪250 לחודש, ביום שני 17:00–18:00'), ('say', 'לכיתה א המחיר ₪280 לחודש, ביום שני 17:00–18:00'),
+        )
+        self.assertEqual((run.status, self.failed(run)), ('passed', set()))
+        self.assertIn('₪250', claude.requests[-1]['messages'][-1]['content'])
+        self.assertIn('שומר הסכומים', run.turns[1]['reasoning'])
         run, _claude = self.play(
             'money_two_classes_in_one_conversation',
             ('tool', 'find_courses', first), ('say', 'המחיר ₪250 לחודש'),

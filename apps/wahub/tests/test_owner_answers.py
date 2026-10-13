@@ -795,6 +795,10 @@ class TheConversationsOfThatDayTests(EvalTestCase):
                 self.assertEqual((run.status, failures), ('passed', []), [turn['reply'] for turn in run.turns])
 
     def test_a_bot_that_answers_badly_fails_every_turn_that_expects_something(self):
+        # This test is of the checks: the worst answer there is, held against them as it was written. Since 14.10.2026
+        # an answer like it never gets this far — the money guard (shadow.py) stops its made-up ₪99 before it is kept,
+        # and the customer is sent the office's line (test_money_guard) — so here the guard stands aside.
+        self.enterContext(patch('apps.wahub.shadow.money_without_source', return_value=None))
         for scenario in self.ANSWERS:
             with self.subTest(scenario=scenario.id):
                 loud = self.play(scenario.id, [[say(LOUD)] for _turn in scenario.turns])

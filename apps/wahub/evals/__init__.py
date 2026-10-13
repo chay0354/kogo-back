@@ -30,7 +30,10 @@ one; a script the system has nothing for is skipped, and says what is missing.
     rules.py       the rules they cover (the table of the audit, by id)
     world.py       the words and the facts, read from the system
     fixtures.py    an invented catalogue, for a machine with no data
-    checks.py      the hard checks
-    judge.py       the rubric
+    checks.py      the hard checks (what a sum of money is and where one may come
+                   from is read in apps/wahub/grounding.py, which the bot's own
+                   guard reads too: shadow.py stops such an answer before it leaves)
+    judge.py       the rubric — the judge reads what the bot read: what the tools
+                   returned and the knowledge behind every answer
     runner.py      playing a conversation, keeping the run, the JSON of the contract
 """

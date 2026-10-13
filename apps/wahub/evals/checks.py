@@ -21,19 +21,39 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
 from typing import Callable
 from urllib.parse import unquote
+
+# What a sum of money is, where one may come from, and saying a customer's own value back to him as against
+# confirming it — read in one place, which the bot's own guard reads too (apps/wahub/grounding.py; shadow.py).
+from apps.wahub.grounding import (  # noqa: F401 — the names the checks below, and their tests, read from here
+    MONEY_KEYS,
+    _AFFIRMS,
+    _AMOUNT,
+    _BARE_NUMBER,
+    _DENIES,
+    _N,
+    _SHEKEL_IN_TEXT,
+    _STATEMENT_END,
+    _UNAVAILABLE,
+    _URL,
+    _leaves,
+    _number,
+    _numbers_written,
+    _only_the_customers,
+    _plain,
+    _shekels,
+    affirms,
+    amounts_in,
+    money_evidence,
+    statements,
+    unsourced_amounts,
+)
 
 DAYS = ('ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת')
 _DAY = '|'.join(DAYS)
 _UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
-_URL = re.compile(r'https?://\S+')
 _BARE_SITE = re.compile(r'(?<![/\w.])(?:www\.)?[a-z0-9-]+\.(?:co\.il|com|app)\b', re.I)
-_N = r'\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?'
-# "17:00, ₪260" holds one amount: the minutes of an hour beside a ₪ are not money.
-_AMOUNT = re.compile(rf'₪\s?({_N})|(?<![\d:.,])({_N})\s?(?:₪|ש"ח|ש״ח|שקלים|שקל)')
-_SHEKEL_IN_TEXT = re.compile(rf'₪\s?({_N})')
 _TIME = re.compile(r'(?<![\d:.])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])')
 _DATE = re.compile(r'(?<![\d.₪])(\d{1,2})\.(\d{2})(?:\.(\d{2,4}))?(?![\d.])')
 _PHONE = re.compile(r'(?<!\d)0\d{1,2}[-\s]?\d{3}[-\s]?\d{4}(?!\d)')
@@ -48,7 +68,6 @@ _RANGE_END = re.compile(r'\d{1,2}:\d{2}\s*(?:-|–|—|עד)\s*(\d{1,2}:\d{2})')
 NONE = r'אין לנו|אין אצלנו|אין כרגע|אין חוג|אין סניף|אין קבוצה|אין את התחום|אין כזה|לא קיים|לא מתאים לגיל|אי אפשר'
 
 
-MONEY_KEYS = {'price_monthly', 'registration_fee', 'price', 'amount', 'trial_price', 'price_before_discounts', 'price_as_second_class'}
 # What no tool may hand over (docs/WAHUB-CONTRACT-BOT-TOOLS.md): a key that names it. The network of a branch is
 # handed over since 12.10.2026 (the owner: "take the wifi code and the wifi name too"); the codes of its door and of
 # its speakers, and what the branch costs, are not.
@@ -261,27 +280,6 @@ def _norm(text) -> str:
     return re.sub(r'[\s\-–"״\'׳.,:;!?*()]', '', str(text or '').replace('תקוה', 'תקווה')).casefold()
 
 
-def _plain(reply: str) -> str:
-    """The answer without its links: a link's letters and digits are not the bot's words."""
-    return _URL.sub(' ', reply or '')
-
-
-def _number(text) -> Decimal | None:
-    try:
-        return Decimal(str(text).replace(',', '')).quantize(Decimal('0.01'))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def amounts_in(text: str) -> list:
-    found = []
-    for match in _AMOUNT.finditer(_plain(text)):
-        value = _number(match.group(1) or match.group(2))
-        if value is not None:
-            found.append(value)
-    return found
-
-
 def times_in(text: str) -> list:
     return [f'{int(hour):02d}:{minute}' for hour, minute in _TIME.findall(_plain(text))]
 
@@ -311,28 +309,12 @@ def links_in(text: str) -> list:
     return [unquote(url.rstrip('.,;)!?*"\'')) for url in _URL.findall(text or '')]
 
 
-def _shekels(value: Decimal) -> str:
-    text = f'{value}'
-    return '₪' + (text[:-3] if text.endswith('.00') else text)
-
-
 def _quote(text: str, limit: int = 160) -> str:
     text = ' '.join(str(text or '').split())
     return text if len(text) <= limit else text[:limit].rstrip() + '…'
 
 
 # --- reading what the tools returned ---------------------------------------------------------------------------
-
-def _leaves(value, key=''):
-    if isinstance(value, dict):
-        for name, inner in value.items():
-            yield from _leaves(inner, str(name))
-    elif isinstance(value, (list, tuple)):
-        for inner in value:
-            yield from _leaves(inner, key)
-    else:
-        yield key, value
-
 
 def _keys(value):
     if isinstance(value, dict):
@@ -347,20 +329,6 @@ def _keys(value):
 def _dump(calls: list) -> str:
     """Everything the tools returned, as text, without ids: a random id may hold any digits."""
     return _UUID.sub('', json.dumps([call.get('result') for call in calls], ensure_ascii=False, default=str))
-
-
-def money_evidence(calls: list, knowledge_text: str = '') -> set:
-    found = set()
-    for call in calls:
-        for key, value in _leaves(call.get('result')):
-            if key in MONEY_KEYS and value not in (None, '') and not isinstance(value, bool):
-                number = _number(str(value).lstrip('-'))
-                if number is not None:
-                    found.add(number)
-            if isinstance(value, str):
-                found.update(number for number in (_number(text) for text in _SHEKEL_IN_TEXT.findall(value)) if number is not None)
-    found.update(number for number in (_number(text) for text in _SHEKEL_IN_TEXT.findall(knowledge_text)) if number is not None)
-    return found
 
 
 def day_evidence(calls: list, office_days=()) -> set:
@@ -415,11 +383,19 @@ def lessons_evidence(calls: list) -> list:
 
 
 def _gated(moment: Moment) -> dict | None:
-    """The question `find_courses` said to ask in this turn, when no later call of the turn returned a class."""
+    """
+    The question `find_courses` said to ask in this turn, when no call of the turn returned a class.
+
+    A class found by one search of the turn is found: a second search of the same turn that came back with
+    "ask first" takes nothing from it (the full run of 14.10.2026 — a right answer about seats, read from the
+    first search, failed here because the bot had searched once more).
+    """
     need = None
     for call in moment.calls:
         result = call.get('result') if isinstance(call.get('result'), dict) else {}
         if call.get('name') == 'find_courses':
+            if result.get('courses'):
+                return None
             need = result if result.get('need') else None
         elif call.get('name') in ('course_card', 'quote_registration') and (result.get('found') or result.get('can_quote')):
             need = None
@@ -454,13 +430,6 @@ def _details_given(m: Moment) -> list:
 # proposed it. So a value only the customer wrote passes where it is said back, and fails where it is affirmed.
 
 _BARE_HOUR = re.compile(r'(?:ב-?|בשעה |לשעה |עד |מ-?)(\d{1,2})(?![\d:.])')
-_BARE_NUMBER = re.compile(rf'(?<![\d:.])({_N})(?![\d:])')
-_STATEMENT_END = re.compile(r'(?<=[.!?])\s+|\n')
-_AFFIRMS = re.compile(
-    r'(?<![א-ת])(?:כן|נכון|בדיוק|אפשר|ניתן|פנוי|פנויה|מוזמנים|מוזמנות|נתראה|מתאים|מתקיים|יתקיים|יש שיעור|יש מקום|בואו|תגיעו|קבענו|מחכים לכם'
-    r'|המחיר|עולה|העלות|לחודש|תשלמו|משלמים)(?![א-ת])'
-)
-_DENIES = re.compile(r'(?<![א-ת])(?:לא|אין|אי אפשר|איננו|אינו|אינה|בלי)(?![א-ת])')
 
 
 def _hours_written(text: str) -> set:
@@ -474,37 +443,8 @@ def _hours_written(text: str) -> set:
     return found
 
 
-def _numbers_written(text: str) -> set:
-    """Every number in a customer's words, as a sum of money would compare to it: he seldom writes the ₪."""
-    return {value for value in (_number(found) for found in _BARE_NUMBER.findall(_plain(text))) if value is not None}
-
-
 def _days_written(text: str) -> set:
     return set(_ONE_DAY.findall(_plain(text)))
-
-
-def statements(reply: str) -> list:
-    """An answer cut into what it says one thing at a time: its lines, and the sentences of a line."""
-    return [part.strip() for part in _STATEMENT_END.split(reply or '') if part.strip()]
-
-
-def affirms(statement: str) -> bool:
-    """The statement says that something is so — it is neither a denial of it nor a question about it."""
-    return bool(_AFFIRMS.search(statement)) and not _DENIES.search(statement) and not _UNAVAILABLE.search(statement) and '?' not in statement
-
-
-def _only_the_customers(reply: str, read, known: set, written: set) -> tuple:
-    """(invented, affirmed): values of the answer no evidence holds — the ones nobody wrote, and the customer's own that the answer confirms."""
-    invented, affirmed = [], []
-    for statement in statements(reply):
-        for value in read(statement):
-            if value in known:
-                continue
-            if value not in written:
-                invented.append(value)
-            elif affirms(statement):
-                affirmed.append(value)
-    return list(dict.fromkeys(invented)), list(dict.fromkeys(affirmed))
 
 
 CONFIRMED = 'מה שהלקוח הציע לא מאשרים רק כי הוא הציע אותו'
@@ -513,8 +453,8 @@ CONFIRMED = 'מה שהלקוח הציע לא מאשרים רק כי הוא הצ�
 # --- the general checks ---------------------------------------------------------------------------------------------
 
 def _grounded_amounts(m: Moment) -> str:
-    known = money_evidence(m.evidence, m.knowledge_text)
-    invented, affirmed = _only_the_customers(m.reply, amounts_in, known, _numbers_written(m.customer_all))
+    # The same question the bot's own guard asks before an answer leaves (shadow.py), on the same reading.
+    invented, affirmed = unsourced_amounts(m.reply, evidence=m.evidence, knowledge=m.knowledge_text, customer=m.customer_all)
     if invented:
         shown = ', '.join(_shekels(value) for value in invented)
         return f'הבוט כתב סכום שלא הגיע מהמערכת: {shown}. סכום נאמר רק כפי שהמערכת החזירה אותו בשיחה הזאת'
@@ -637,6 +577,11 @@ def _order_kept(m: Moment) -> str:
     choice = [str(name) for name in (asked.get('course_types') or asked.get('between') or [])]
     named = sum(1 for name in choice if _norm(name) in _norm(m.reply))
     if not asks_it(NEED_ASKS.get(need, 'city'), m) and named < 2:
+        if m.request_human:
+            # Handed to a person in this very answer — somebody at the door with nobody there, an angry customer: the
+            # rule "דחוף עכשיו — נציג מיד" is one line and no questions, and it comes before the order of a search
+            # (the full run of 13.10.2026: an answer that did exactly that failed here for not asking the child's age).
+            return ''
         return f'המערכת אמרה שקודם צריך לשאול {what[1]}, והבוט לא שאל את זה'
     return ''
 
@@ -760,14 +705,44 @@ OWED = 'לשפה של הלקוח עוברים כשהוא ממשיך לכתוב �
 _FOREIGN_WORD = re.compile(r'[A-Za-z]{2,}|[А-Яа-яЁё]{2,}|[\u0600-\u06FF]{2,}')
 
 
-def _in_language(reply: str, language: str) -> str:
-    """Why an answer is not in `language` (a key of LANGUAGES): it holds none of its letters, or a whole line of Hebrew."""
+# The keys under which a tool returns a name the system holds — a city, a branch, a field, a class, an instructor.
+_NAME_KEYS = frozenset({
+    'name', 'city', 'cities', 'branch', 'course', 'course_type', 'course_types', 'between', 'field', 'instructor', 'instructor_name',
+})
+
+
+def system_names(m: 'Moment') -> list:
+    """
+    The names the system holds, longest first: everything in the catalogue, and
+    every name a tool returned in this conversation. In an answer in another
+    language they stay as they are (the rule itself says so), so a line that
+    only lists them — the cities there is a branch in — is not a sentence of Hebrew.
+    """
+    names = set()
+    if m.catalog is not None:
+        for group in ('courses', 'fields', 'branches', 'cities', 'instructors'):
+            names.update(str(name) for name in getattr(m.catalog, group, None) or ())
+    for call in m.evidence:
+        names.update(value for key, value in _leaves(call.get('result')) if key in _NAME_KEYS and isinstance(value, str))
+    return sorted({name.strip() for name in names if len(name.strip()) >= 2}, key=len, reverse=True)
+
+
+def _in_language(reply: str, language: str, names=()) -> str:
+    """
+    Why an answer is not in `language` (a key of LANGUAGES): it holds none of
+    its letters, or a whole line of Hebrew. `names` — the names the system
+    holds (`system_names`): what is left of a line without them is what is
+    read for a sentence.
+    """
     pattern, label = LANGUAGES[language]
     if len(pattern.findall(reply)) < 6:
         return f'הלקוח כותב {label}, והבוט ענה בעברית: "{_quote(reply)}". {OWED}'
     for line in reply.split('\n'):
         # The names of a class and of a branch stay as the system has them; a line of five Hebrew words and nothing else is a sentence.
-        if len(re.findall(r'[א-ת]{2,}', line)) >= 5 and not pattern.search(line):
+        rest = line.replace('תקוה', 'תקווה')
+        for name in names:
+            rest = rest.replace(name.replace('תקוה', 'תקווה'), ' ')
+        if len(re.findall(r'[א-ת]{2,}', rest)) >= 5 and not pattern.search(line):
             return f'הלקוח כותב {label}, ובתשובה יש משפט שלם בעברית: "{_quote(line)}". {OWED}'
     return ''
 
@@ -798,7 +773,7 @@ def _hebrew_only(m: Moment) -> str:
         text = text.replace(literal, ' ')
     language = owed_language(m)
     if language:
-        return _in_language(text, language)
+        return _in_language(text, language, system_names(m))
     return _in_hebrew(text, customers_language(m))
 
 
@@ -807,14 +782,38 @@ def _word_for_word(m: Moment) -> bool:
     return any(key in WORD_FOR_WORD for key in m.allow)
 
 
+# What makes a clause of a customer's message a question of its own: it ends with a question mark, or it asks
+# ("רציתי לדעת באיזה יום ושעה זה, כמה זה עולה לחודש, אם יש שיעור ניסיון, ומה צריך להביא" is four, with no mark at all).
+_CLAUSE = re.compile(r'([^?!.,;:\n]+)([?!.,;:\n]*)')
+_ASKING = re.compile(
+    r'(?<![א-ת])ו?(?:באיזה|באיזו|באילו|איזה|איזו|אילו|כמה(?! שאלות)|מתי|עד מתי|איפה|היכן|איך|האם|למה|מי |מה |אם יש|אם אפשר|אם צריך)'
+)
+MAX_LINES_FOR_QUESTIONS = 12
+
+
+def questions_asked(messages) -> int:
+    """How many questions the customer put outright in these messages: clauses that end with "?", or that ask."""
+    count = 0
+    for text in messages:
+        for words, end in _CLAUSE.findall(str(text or '')):
+            if words.strip() and ('?' in end or _ASKING.search(words + ' ')):
+                count += 1
+    return count
+
+
 def _short(m: Moment) -> str:
     lines = [line for line in m.reply.split('\n') if line.strip()]
     prose = [line for line in lines if not line.lstrip().startswith('🔹')]
-    limit = 9 if _word_for_word(m) else 4
-    if len(prose) > limit or len(lines) > 9 or len(_plain(m.reply)) > 700:
+    limit, most = (9 if _word_for_word(m) else 4), 9
+    # Two questions in a message are both answered (X5), a line or two each: the 1–3 lines are for one question.
+    asked = questions_asked(m.customer)
+    if asked >= 2:
+        limit = max(limit, min(2 * asked, MAX_LINES_FOR_QUESTIONS))
+        most = max(most, limit)
+    if len(prose) > limit or len(lines) > most or len(_plain(m.reply)) > 700:
+        rule = f'הלקוח שאל {asked} שאלות, ומותר עד שורה-שתיים לכל שאלה ({limit} שורות)' if asked >= 2 else 'הכלל הוא 1–3 שורות'
         return (
-            f'התשובה ארוכה מדי: {len(lines)} שורות ({len(prose)} מהן לא פריטים של רשימה), {len(_plain(m.reply))} תווים. '
-            'הכלל הוא 1–3 שורות'
+            f'התשובה ארוכה מדי: {len(lines)} שורות ({len(prose)} מהן לא פריטים של רשימה), {len(_plain(m.reply))} תווים. {rule}'
         )
     return ''
 
@@ -833,7 +832,9 @@ def _list_of_four(m: Moment) -> str:
     if _word_for_word(m) or any((call.get('input') or {}).get('show_all') is True for call in m.calls):
         return ''                     # a line said word for word, or a customer who asked to see everything
     items = [line for line in m.reply.split('\n') if line.lstrip().startswith(_BULLET)]
-    if len(items) > 4:
+    # Four things asked in one message are answered a fact to a line (X5): those lines are answers, not a list of
+    # choices to narrow — a class held on two days is already one line more than the questions.
+    if len(items) > max(4, min(questions_asked(m.customer) + 2, 7)):
         return f'רשימה של {len(items)} פריטים בתשובה אחת. עד 4 — ויותר מזה שואלים שאלה שמצמצמת, או כותבים את השמות בשורה אחת'
     return ''
 
@@ -851,8 +852,23 @@ def _one_subject(m: Moment) -> str:
     return ''
 
 
+def questions_put(reply: str) -> int:
+    """
+    How many questions an answer puts. The options said straight after a question, on its own line —
+    "כמה שיעורים הפסיד? אחד, או כמה ברצף?" — spell out the same one, and are not a second.
+    """
+    count = 0
+    for line in _plain(reply).split('\n'):
+        for index, part in enumerate(line.split('?')[:-1]):
+            words = part.split()
+            if index and 'או' in words and len(words) <= 8:
+                continue
+            count += 1
+    return count
+
+
 def _one_question(m: Moment) -> str:
-    count = _plain(m.reply).count('?')
+    count = questions_put(m.reply)
     return f'הבוט שאל {count} שאלות בתשובה אחת. שואלים שאלה אחת בכל פעם: "{_quote(m.reply)}"' if count > 1 else ''
 
 
@@ -895,8 +911,16 @@ def _no_internal_money(m: Moment) -> str:
 _TO_A_MAN = re.compile(r'(?<![א-ת])(?:תוכל|תרצה|תגיד|תכתוב|תשלח|תבדוק|תבחר|תספר|אתה|מעוניין|מוזמן)(?![א-ת])')
 _TO_A_WOMAN = re.compile(r'(?<![א-ת])(?:תוכלי|תרצי|תגידי|תכתבי|תשלחי|תבדקי|תבחרי|תספרי|מעוניינת|מוזמנת)(?![א-ת])')
 # What tells who is writing: how she speaks of herself, or who she says she is.
-_WRITES_AS_A_WOMAN = re.compile(r'(?<![א-ת])(?:מעוניינת|מחפשת|שואלת|מתעניינת|רציתי לשאול כאמא|אמא של|אני אמא|הסבתא|סבתא של|אני סבתא)(?![א-ת])')
-_WRITES_AS_A_MAN = re.compile(r'(?<![א-ת])(?:מעוניין|מחפש|שואל|מתעניין|אבא של|אני אבא|הסבא|סבא של|אני סבא)(?![א-ת])')
+# "אני נרשם עכשיו" says it as much as "מעוניין" does (the full run of 14.10.2026); the verb is read only after
+# "אני", because "הוא צריך" is said of the child.
+_WRITES_AS_A_WOMAN = re.compile(
+    r'(?<![א-ת])(?:מעוניינת|מחפשת|שואלת|מתעניינת|רציתי לשאול כאמא|אמא של|אני אמא|הסבתא|סבתא של|אני סבתא'
+    r'|אני (?:כבר |לא |עדיין |גם )*(?:נרשמת|צריכה|יכולה|מעדיפה|חושבת|מבינה|יודעת|מגיעה|מתלבטת|שוקלת|יושבת|מרגישה|רושמת))(?![א-ת])'
+)
+_WRITES_AS_A_MAN = re.compile(
+    r'(?<![א-ת])(?:מעוניין|מחפש|שואל|מתעניין|אבא של|אני אבא|הסבא|סבא של|אני סבא'
+    r'|אני (?:כבר |לא |עדיין |גם )*(?:נרשם|צריך|יכול|מעדיף|חושב|מבין|יודע|מגיע|מתלבט|שוקל|יושב|מרגיש|רושם))(?![א-ת])'
+)
 
 
 def _neutral_address(m: Moment) -> str:
@@ -1253,12 +1277,7 @@ def run(checks, moment: Moment, *, turn: int) -> list:
 # it skips (`trial.not_offered`) — apps/wahub/trial_offer.py. `grounded_dates` above is content with any date a tool
 # returned; these hold an answer to the dates that can really be booked.
 
-# A date said to be taken or closed is the truth about it, not an offer of it.
-# ("ב-31.12 אין כרגע שיעור ניסיון פתוח" says it as much as "אין שיעור" does: a word between the two is not an offer.)
-_UNAVAILABLE = re.compile(
-    r'מלא|אין מקום|לא נשאר|תפוס|לא מתקיים|לא יתקיים|בוטל|מבוטל|לא פתוח|סגור|אי אפשר|לא ניתן|לא אפשרי|לא זמין|חופש|כבר התחיל'
-    r'|אין (?:כרגע |עדיין |שם |אצלנו |לנו |בו )*(?:שיעור|ניסיון|תאריך|מועד)'
-)
+# A date said to be taken or closed is the truth about it, not an offer of it (`_UNAVAILABLE`, grounding.py).
 _NOT = re.compile(r'לא|אין|אי אפשר')
 
 
@@ -1669,7 +1688,7 @@ def answers_in(language: str) -> Check:
             if not re.search(r'[א-ת]{2,}', text):
                 return f'ציפינו לתשובה בעברית. הבוט ענה: "{_quote(m.reply)}"'
             return _in_hebrew(text, customers_language(m))
-        return _in_language(text, language)
+        return _in_language(text, language, system_names(m))
 
     if language == 'hebrew':
         return Check('answers_in:hebrew', 'הבוט עונה בעברית (הלקוח עוד לא המשיך בשפה שלו ולא ביקש)', test)
