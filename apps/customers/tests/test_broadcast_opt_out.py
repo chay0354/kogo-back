@@ -105,3 +105,37 @@ class BroadcastOptOutTest(_Studio):
             broadcast_to_children([self.noa, self.ido, self.tom], automation_type='kind', automation_id='subscription',
                                   include_extra_phones=True)
         self.assertEqual(read.call_count, 1)
+
+
+class FromTheMessageToTheBroadcastTest(_Studio):
+    """The whole chain, as it runs: ManyChat's copy of a parent's "הסר" comes in, and the next broadcast skips her."""
+
+    def test_a_parent_who_wrote_remove_on_whatsapp_is_skipped_by_the_next_broadcast(self):
+        from rest_framework.test import APIClient
+
+        cache.clear()
+        key = self.client.post('/api/v1/wahub/settings/inbound-key/').data['key']
+        # ManyChat's own body, as its webhook writes it: the parent's WhatsApp number, and what she typed.
+        body = {'id': '555001', 'whatsapp_phone': '+972501111111', 'first_name': 'Dana', 'last_input_text': 'הסר'}
+        with patch('requests.sessions.Session.request', side_effect=AssertionError('nothing may leave the process')):
+            taken = APIClient().post('/api/v1/wahub/inbound/manychat/', body, format='json', HTTP_X_WAHUB_KEY=key)
+        self.assertEqual((taken.status_code, taken.data), (200, {'ok': True, 'stored': True}))
+        self.assertTrue(whatsapp_optout.is_blocked('050-111-1111'))
+
+        ids = [str(self.noa.id), str(self.tom.id)]
+        preview = self.client.post(BROADCAST_URL, {'child_ids': ids, 'automation_type': 'kind', 'automation_id': 'subscription'}, format='json')
+        self.assertEqual((preview.data['preview_count'], preview.data['opted_out']), (1, 1))
+        with CONFIGURED, patch('apps.customers.broadcast.ManyChatService.notify_registration', return_value=SENT) as send:
+            sent = self.client.post(
+                BROADCAST_URL, {'child_ids': ids, 'automation_type': 'kind', 'automation_id': 'subscription', 'dry_run': False}, format='json',
+            )
+        self.assertEqual([call.kwargs['phone'] for call in send.call_args_list], ['0502222222'])
+        self.assertEqual((sent.data['sent'], sent.data['opted_out']), (1, 1))
+
+        # The office gives her back ("ביקשה לחזור לתפוצה"): the next broadcast reaches her again.
+        from apps.wahub.models import Contact
+
+        contact = Contact.objects.get(phone='972501111111')
+        self.assertEqual(self.client.post(f'/api/v1/wahub/contacts/{contact.id}/opt-in/').status_code, 200)
+        again = self.client.post(BROADCAST_URL, {'child_ids': ids, 'automation_type': 'kind', 'automation_id': 'subscription'}, format='json')
+        self.assertEqual((again.data['preview_count'], again.data['opted_out']), (2, 0))

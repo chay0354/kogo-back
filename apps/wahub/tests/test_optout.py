@@ -27,7 +27,9 @@ REQUESTS = (
     'הסר', 'הסר.', 'הסר!!', 'הסירו', 'הסרה', 'להסיר', 'תסירו', 'הסר בבקשה', 'תודה, הסר', 'הסירו אותי', 'הסר 🙏', 'הֲסֵר',
     'STOP', 'Stop', 'unsubscribe', 'remove me',
     'הסירו אותי מרשימת התפוצה', 'להסיר אותי מהרשימה בבקשה', 'אפשר להסיר אותי מהרשימה?', 'תסירו אותי מהתפוצה',
-    'נא להסיר אותי מרשימת הדיוור', 'הסרה מהרשימה', 'מבקשת הסרה',
+    'נא להסיר אותי מרשימת הדיוור', 'הסרה מהרשימה', 'מבקשת הסרה', 'מבקש להסיר', 'הסר אותי', 'הסר מתפוצה', 'אנא הסירו',
+    'אני מבקש שתסירו אותי מרשימת התפוצה', 'אבקש להסיר אותי מרשימת התפוצה שלכם', 'תורידו אותי', 'תמחקו את המספר שלי',
+    'תסירו אותי בבקשה מרשימת התפוצה', 'תפסיקו לשלוח', 'אל תשלחו לי', 'אל־תשלחו לי יותר', 'REMOVE',
     'תפסיקו לשלוח לי הודעות', 'שלום, תפסיקו לשלוח לי הודעות בבקשה, זה מטריד', 'די עם ההודעות',
     'אל תשלחו לי יותר', 'לא לשלוח לי יותר הודעות', 'לא מעוניין לקבל הודעות', 'לא מעוניינת. הסר',
     'stop sending me messages', 'please remove me from the list', "don't message me anymore",
@@ -35,7 +37,10 @@ REQUESTS = (
 NOT_REQUESTS = (
     # A cancellation of a class, or a word about something else: the bot's and the office's, as before.
     'אפשר להסיר את הילד מהחוג?', 'הסר את הבן שלי מהשיעור של יום שלישי', 'אני רוצה להסיר את המנוי', 'תסירו את החיוב הכפול',
-    'הסרתי את האפליקציה', 'מה זה הסר?', 'לא להסיר', 'אל תסירו אותי',
+    'הסרתי את האפליקציה', 'מה זה הסר?', 'לא להסיר', 'אל תסירו אותי', 'אפשר להוריד אותי מהחוג של יום שלישי?',
+    'רוצה להסיר את הבן מהחוג', 'להוריד', 'תפסיקו', 'די', 'לא מעוניין', 'לא רלוונטי',
+    # An answer to "shall we send you the link?" is not a request to be taken off anything.
+    'לא לשלוח',
     # About one kind of message, not about all of them.
     'אל תשלחו לי את הקבלה למייל הזה', 'תפסיקו לשלוח לי את החשבוניות בדואר', 'לא לשלוח לי תזכורת',
     'אם לא תפסיקו לשלוח לי חיובים אני אפנה לבנק',
@@ -257,6 +262,20 @@ class LeadTests(EngineCase):
         self.clock.forward(minutes=30)
         with patch(REQUEST, return_value=OK):
             self.assertEqual(lead_followups.run()['followups_sent'], 1)
+
+    @override_settings(**SENDING_ON)
+    def test_the_way_out_itself_refuses_a_follow_up_to_somebody_who_asked(self):
+        """Said once more at the door every follow-up of the bot leaves through, whoever calls it."""
+        contact = self.link_lead(opted_out={'at': self.clock().isoformat(), 'source': 'message', 'text': 'הסר'})
+        with patch(REQUEST, return_value=OK) as request:
+            as_text = sending.send_lead_followup(contact, 'היי, רציתי לבדוק אם הצלחתם להירשם')
+            as_template = sending.send_lead_followup_flow(contact, 'content_x', 'היי, רציתי לבדוק אם הצלחתם להירשם')
+        request.assert_not_called()
+        for message in (as_text, as_template):
+            self.assertEqual((message.status, message.error), ('failed', 'הלקוח ביקש הסר — הודעה שהבוט יוזם לא נשלחת אליו.'))
+        # A failed line is not an answer: the conversation's last message and its clock did not move.
+        self.assertEqual(self.fresh(contact).last_message_sender, 'bot')
+        self.assertEqual(self.fresh(contact).last_message_at, contact.last_message_at)
 
     def test_the_one_message_to_many_dormant_leads_skips_whoever_asked(self):
         asked = self.staged(self.lead(40 * DAY, is_demo=True, source='demo', opted_out={'at': self.clock().isoformat(), 'source': 'message'}))
