@@ -66,7 +66,7 @@ class WindowClosed(Exception):
 
 
 SENDING_OFF = 'השליחה ללקוחות כבויה. מפעילים אותה בהגדרות המערכת (WAHUB_SENDING_ENABLED) כשמוכנים.'
-DEMO_CONTACT = 'איש קשר דמו — לא שולחים אליו הודעות, גם כשהשליחה דלוקה.'
+DEMO_CONTACT = 'איש קשר דמו — לא שולחים אליו הודעות, גם כשהשליחה דולקת.'
 # "הסר" (optout.py): a message the bot starts by itself never leaves for somebody who asked not to get any.
 OPTED_OUT = 'הלקוח ביקש הסר — הודעה שהבוט יוזם לא נשלחת אליו.'
 
