@@ -601,10 +601,30 @@ class TheAnswersInTheKnowledgeTests(WahubTestCase):
             item.title: item
             for item in KnowledgeItem.objects.filter(source_note__contains=self.SAID).exclude(title=waiting)
         }
+        ceremony_title = 'טקס סוף שנה — חגורה, תעודה ומתנה קטנה'
         self.assertEqual(set(new), {
             'חגים וחופשות — שולחים את לוח החופשות של הסניף', 'אין מנהל סניף — הכול דרך המשרד', 'קייטנה בקיץ — לפי סניף, אצל המדריך',
+            ceremony_title,                                          # the same day, at noon
         })
+        ceremony = new.pop(ceremony_title)
         manager, holidays, camp = (new[title] for title in sorted(new))
+        # The ceremony at the end of the year: one fact, said only when asked, ready to be said as it is — short, the
+        # sum in bold, no full stop — and with no date in it, because none is set.
+        self.assertEqual((ceremony.kind, ceremony.when_to_say, ceremony.scope_level, ceremony.is_active), ('fact', 'if_asked', 'business', True))
+        self.assertIn('בעל המערכת 13.10.2026 (צהריים)', ceremony.source_note)
+        self.assertEqual(ceremony.body.splitlines(), [
+            'בסוף השנה יש טקס 🎉 העלות היא *₪60*, עבור חגורה, תעודה ומתנה קטנה',
+            'את התאריך וכל הפרטים, מתי ואיך, נעדכן בהמשך השנה',
+        ])
+        self.assertFalse(ceremony.body.endswith('.'))
+        self.assertEqual((checks.amounts_in(ceremony.body), checks.dates_in(ceremony.body)), ([60], []))
+        for asked in ('כמה עולה חגורה', 'מתי מקבלים חגורה', 'יש תעודה', 'טקס החגורות', 'טקס סוף שנה'):
+            self.assertIn(asked, ceremony.data['question'])
+        # …and the rule about selling sends a question about a belt there, not to the shop. No sum is written in it.
+        selling = KnowledgeItem.objects.get(title='לא להציע רכישה מיוזמתך')
+        for words in ('"טקס סוף שנה"', 'לא מפנים לחנות ולא למדריך', 'תאריך לא אומרים'):
+            self.assertIn(words, selling.body)
+        self.assertNotIn('₪', selling.body)
         self.assertEqual((holidays.kind, manager.kind, camp.kind, camp.when_to_say, camp.scope_level), ('behavior_rule', 'behavior_rule', 'fact', 'if_asked', 'business'))
         for words in ('holiday_dates', 'לא מפרטים תאריכי חופשה בעצמנו', 'missing_info', 'כשלא ידוע באיזה סניף — שואלים קודם'):
             self.assertIn(words, holidays.body)
@@ -683,7 +703,9 @@ class TheAnswersInTheKnowledgeTests(WahubTestCase):
         self.assertGreaterEqual(len(answers), 15)
         used = {rule for scenario in scenarios.SCENARIOS for rule in scenario.rules}
         self.assertLessEqual({'N1', 'N2', 'N3', 'N4', 'N5', 'X1', 'X6', 'E18', 'D14c', 'E14'}, used)
-        self.assertEqual({rule for rule in rules.RULES if rule.startswith('N')}, {'N1', 'N2', 'N3', 'N4', 'N5'})
+        self.assertEqual({rule for rule in rules.RULES if rule.startswith('N')}, {'N1', 'N2', 'N3', 'N4', 'N5', 'N6'})
+        self.assertEqual(scenarios.BY_ID['ceremony_belt_cost_and_date'].rules[0], 'N6')          # the same day, at noon
+        self.assertIn('N6', scenarios.BY_ID['ground_selling_a_belt'].rules)
         self.assertEqual(dict(scenarios.GROUPS)['answers'], scenarios.GROUP_TITLES['answers'])
         self.assertEqual(scenarios.BY_ID['holiday_board_of_the_branch'].group, 'answers')
         self.assertIn('answers', {group['id'] for group in runner.listing()['groups']})
@@ -718,6 +740,10 @@ def good_answers(built: dict) -> dict:
         'camp_which_branch': [[say('באיזה סניף מדובר?')]],
         'camp_in_a_branch_that_has_none': [[say(f'ב{words["no_camp_place"]} אין כרגע קייטנה. אם תהיה, המדריך של הסניף יעדכן')]],
         'parents_watch_the_lesson': [[say('השיעור הוא הרגע של הילדים, בלי הורים — ככה קל להם להתרכז\nבהתחלה, אם הוא ממש צריך, המדריך מחליט')]],
+        'ceremony_belt_cost_and_date': [
+            [say('בסוף השנה יש טקס 🎉 העלות היא *₪60*, עבור חגורה, תעודה ומתנה קטנה\nאת התאריך וכל הפרטים, מתי ואיך, נעדכן בהמשך השנה')],
+            [say('התאריך עוד לא נקבע 🙂 נודיע לכולם כשיהיה')],
+        ],
         'holiday_board_of_the_branch': [[board(words['holiday_place']), say(lambda found: found['say'])]],
         'holiday_board_of_another_branch': [[board(words['holiday_other_place']), say(lambda found: found['say'])]],
         'holiday_which_branch': [[board(), say(lambda found: found['ask'])]],

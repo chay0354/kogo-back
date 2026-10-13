@@ -647,8 +647,10 @@ def _show_all_only_when_pressed(m: Moment) -> str:
 
 
 def _fresh_details(m: Moment) -> str:
-    # The hours of the office are the knowledge's, not a class's.
+    # The hours of the office are the knowledge's, not a class's — and so is a sum the knowledge itself states (the
+    # ceremony at the end of the year, the owner's own word): neither is a detail of a class to be looked up.
     office = set(times_in(m.knowledge_text))
+    office |= {_shekels(number) for number in money_evidence([], m.knowledge_text)}
     said = [value for value in _details_given(m) if value not in office]
     if said and not any(call.get('name') in CLASS_TOOLS for call in m.calls):
         return f'הבוט נתן פרטים של חוג ({", ".join(dict.fromkeys(said))}) בלי לבדוק אותם במערכת בתשובה הזאת'

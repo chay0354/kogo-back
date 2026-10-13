@@ -1,4 +1,5 @@
 """The import of the old bot's texts: what it files, what it refuses, and that twice is once."""
+import re
 from datetime import date
 
 from apps.wahub import knowledge, knowledge_import, knowledge_seed
@@ -6,6 +7,7 @@ from apps.wahub.models import KnowledgeItem, QuickReply, Tag
 from apps.wahub.tests.base import WahubTestCase
 
 TODAY = date(2026, 10, 10)
+CEREMONY = 'טקס סוף שנה — חגורה, תעודה ומתנה קטנה'
 PRICES = ('260', '275', '235', '335', '₪30', '₪120', '₪60', '₪100', '₪80', '₪130', '₪50', '₪180')
 
 
@@ -29,9 +31,13 @@ class ImportTests(WahubTestCase):
 
     def test_no_price_or_discount_is_written_as_text(self):
         knowledge_import.run(today=TODAY)
-        for item in KnowledgeItem.objects.filter(kind__in=['fact', 'phrasing', 'topic', 'behavior_rule']):
+        # One sum is the owner's own word and nowhere in Kogo (13.10.2026, noon): the ceremony at the end of the year.
+        ceremony = KnowledgeItem.objects.get(kind='fact', title=CEREMONY)
+        self.assertEqual(re.findall(r'₪\s?\d+|\d+\s?(?:₪|ש"ח|שקל)', ceremony.body), ['₪60'])
+        for item in KnowledgeItem.objects.filter(kind__in=['fact', 'phrasing', 'topic', 'behavior_rule']).exclude(pk=ceremony.pk):
             for price in PRICES:
                 self.assertNotIn(price, item.body, f'{item.kind} "{item.title}" carries a price: {price}')
+            self.assertNotIn('₪', item.body, f'{item.kind} "{item.title}" carries a sum')
         self.assertFalse(KnowledgeItem.objects.filter(title__icontains='הנחת אחים', kind='fact').exists())
         self.assertFalse(KnowledgeItem.objects.filter(body__icontains='פייטו').exists())
         self.assertFalse(KnowledgeItem.objects.filter(body__icontains='רישום מוקדם').exists())

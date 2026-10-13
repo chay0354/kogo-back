@@ -280,3 +280,8 @@ RULES.update({
 })
 NO_SCRIPT['D5'] = 'הוחלף ב-N5 (בעל המערכת 13.10.2026): על חופשות הבוט שולח את לוח החופשות של הסניף ולא מפרט תאריכים; התרחישים הם של N5'
 GENERAL_COVERS['board_really_sent'] = ('N5',)
+
+# --- the owner, 13.10.2026 at noon: the ceremony at the end of the year ---
+# The one sum the knowledge itself holds (it is his word, and Kogo has no field for it). A question about a belt is
+# answered by it — and no longer by the shop, the instructor or the office (D10, as the belt was read until now).
+RULES['N6'] = 'טקס סוף שנה: חגורה, תעודה ומתנה קטנה, ₪60 (מהידע — הסכום של בעל המערכת); התאריך יעודכן בהמשך השנה ולא ממציאים אותו; על חגורה לא מפנים לחנות'
