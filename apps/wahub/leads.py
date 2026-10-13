@@ -62,6 +62,7 @@ from apps.wahub.models import (
     OUTCOME_CHOICES,
     OUTCOME_TRIAL_ONLY,
     OUTCOME_TRIAL_UPCOMING,
+    WAITING_FREED,
     Contact,
     ContactEvent,
     LeadFollowUp,
@@ -300,6 +301,9 @@ def no_step_because(contact: Contact, stage: str) -> str:
 def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None) -> dict:
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     said = _said(contact)
+    waits = waiting_list.contact_block(contact)
+    # A seat came free: that is the line of the lead now, above whatever the conversation was summed up as.
+    seat_free = waits is not None and waits['status'] == WAITING_FREED and stage == LEAD_WAITING_LIST
     return {
         # The contact's id under both names: `contact_id` is the contract's, `id` is what every other
         # list of the section calls it (and what the weekly audit follows into the lead itself).
@@ -313,14 +317,14 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         'stage_label': STAGE_LABELS.get(stage, ''),
         'owner': contact.lead_owner,
         # One sentence of "why is this a lead": the summary's when it wrote one, else the rules' own.
-        'summary': (said.get('summary') or '').strip() or contact.lead_reason,
+        'summary': contact.lead_reason if seat_free else ((said.get('summary') or '').strip() or contact.lead_reason),
         'chips': chips(contact),
         'since': _iso(contact.lead_stage_since),
         'next': next_move(contact, follow),
         'last_message_at': _iso(contact.last_message_at),
         # The lesson the lead waits for a seat in, and the future lead a person set — the very blocks the
         # conversations carry (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1); null when there is none.
-        'waiting_list': waiting_list.contact_block(contact),
+        'waiting_list': waits,
         'future': serializers.future_payload(contact, today=timezone.localtime(now or timezone.now()).date()),
     }
 

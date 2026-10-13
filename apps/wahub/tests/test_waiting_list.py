@@ -358,6 +358,9 @@ class CheckTests(WaitingListCase):
     def test_full_then_a_seat_comes_free_the_office_is_told_and_marks_it_handled(self):
         """The whole road: full → a seat free → the lead waits for the office → handled. Nothing is sent to anybody."""
         messages = Message.objects.count()
+        # What the conversation was summed up as is the line of the lead — until a seat comes free.
+        Contact.objects.filter(pk=self.lead.pk).update(lead_ai={'intent': 'class', 'summary': 'אמא לילד בן 5, שאלה על קפוארה'})
+        self.assertEqual(self.get(f'leads/{self.lead.id}/').data['summary'], 'אמא לילד בן 5, שאלה על קפוארה')
         self.free_a_seat()
         with patch('apps.core.office_alerts.raise_office_alert', side_effect=AssertionError('the office was alerted on WhatsApp')):
             counts = waiting_list.check()
