@@ -358,13 +358,16 @@ class TemplatesApiTests(AutomationCase):
 
 class AutomationCardTests(AutomationCase):
     def test_before_anything_is_set_up_the_card_says_what_is_missing(self):
+        settings_store.WahubSetting.objects.filter(key=settings_store.BOT_FOLLOWUPS).delete()     # as it is before he turns them on
         card = self.card()
         self.assertEqual(set(card), {'ready', 'lines', 'today', 'upcoming', 'banner'})
-        self.assertEqual([line['key'] for line in card['lines']], ['classify', 'schedule', 'sending', 'templates'])
+        self.assertEqual([line['key'] for line in card['lines']], ['classify', 'schedule', 'sending', 'followups', 'templates'])
         self.assertTrue(all(set(line) == {'key', 'ok', 'title', 'detail', 'how'} for line in card['lines']))
         self.assertEqual([line['title'] for line in card['lines']],
-                         ['זיהוי וסיווג הלידים', 'תזמון החזרות', 'שליחה ללקוחות', 'תבניות וואטסאפ'])
-        classify, schedule, sent, templates = card['lines']
+                         ['זיהוי וסיווג הלידים', 'תזמון החזרות', 'שליחה ללקוחות', 'חזרות אוטומטיות', 'תבניות וואטסאפ'])
+        classify, schedule, sent, follow_ups, templates = card['lines']
+        self.assertEqual((follow_ups['ok'], follow_ups['detail']), (False, 'כבויות — הבוט מתכנן חזרות ולא שולח אותן'))
+        self.assertEqual(follow_ups['how'], 'מדליקים במתג שבשורה הזאת. רק חזרות שמועדן אחרי ההדלקה יוצאות — מה שחיכה עד אז מדולג')
         self.assertEqual((classify['ok'], classify['detail'], classify['how']), (True, 'אין לידים פתוחים', ''))
         self.assertEqual((schedule['ok'], schedule['detail'], schedule['how']), (True, 'אין כרגע חזרות מתוכננות', ''))
         self.assertEqual((sent['ok'], sent['detail'], sent['how']),
@@ -386,7 +389,7 @@ class AutomationCardTests(AutomationCase):
         self.assertIs(card['ready'], True)
         self.assertTrue(all(line['ok'] and line['how'] == '' for line in card['lines']))
         self.assertEqual(self.line('templates')['detail'], '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 1 מתוך 13')
-        self.assertEqual(self.line('sending')['detail'], 'דלוקה — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
+        self.assertEqual(self.line('sending')['detail'], 'דולקת — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
         # One of the five taken off: not ready any more.
         settings_store.set_lead_template('trial_feedback_1', '', user=self.manager)
         self.assertIs(self.card()['ready'], False)
@@ -404,7 +407,7 @@ class AutomationCardTests(AutomationCase):
         self.assertEqual(self.line('sending')['detail'], 'כבויה — שום הודעה לא יוצאת ללקוחות (חוץ ממספר הבדיקה שלך)')
         with override_settings(WAHUB_SENDING_ENABLED=True, MANYCHAT_KEY=''):
             no_key = self.line('sending')
-            self.assertEqual((no_key['ok'], no_key['detail']), (False, 'דלוקה, אבל השרת לא מחובר ל-ManyChat — שום הודעה לא יוצאת'))
+            self.assertEqual((no_key['ok'], no_key['detail']), (False, 'דולקת, אבל השרת לא מחובר ל-ManyChat — שום הודעה לא יוצאת'))
             self.assertIn('MANYCHAT_KEY', no_key['how'])
         with override_settings(**SENDING_ON):
             self.assertTrue(self.line('sending')['ok'])

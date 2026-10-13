@@ -238,17 +238,30 @@ def _deliver(contact: Contact, user, *, text: str, message_type: str, call,
     return _keep_outbound(contact, user, text, message_type, status, error, sender=sender, new_bot=new_bot)
 
 
+def new_bot_answers(contact: Contact) -> bool:
+    """
+    Is this a contact the NEW bot may write to: a live-test contact, or — once
+    the owner has chosen the mode "all" and sending is on — any contact but a
+    demo (bot_mode.answered_live). The last look before a send; live_test.py
+    asks the same question before it computes anything.
+    """
+    from apps.wahub import bot_mode
+
+    return bot_mode.answered_live(contact)[0]
+
+
 def send_new_bot_reply(contact: Contact, text: str) -> Message:
     """
-    The NEW bot's answer, sent for real to a LIVE-TEST contact through ManyChat
-    (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב): the same path as the office's free
-    text, kept with sender "bot" and `new_bot=True` and the status the send got
-    (sent, or failed with the reason). Refuses every other contact — a demo
-    never gets anything, and a real customer is answered by the old bot until
-    the owner says otherwise.
+    The NEW bot's answer, sent for real through ManyChat to a contact it
+    answers (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב; docs/WAHUB-CONTRACT-GO-LIVE.md):
+    the same path as the office's free text, kept with sender "bot" and
+    `new_bot=True` and the status the send got (sent, or failed with the
+    reason). Refuses every other contact — a demo never gets anything, and a
+    real customer is answered by the old bot until the owner says otherwise
+    (`new_bot_answers`).
     """
-    if contact.is_demo or not contact.live_test:
-        raise ValueError('the new bot sends only to a live-test contact')
+    if not new_bot_answers(contact):
+        raise ValueError('the new bot sends only to a contact it answers')
     text = (text or '').strip()[:MAX_TEXT_CHARS]
     if not can_free_text(contact):
         return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_FAILED, WINDOW_CLOSED_DETAIL, sender=SENDER_BOT, new_bot=True)
@@ -262,15 +275,15 @@ def send_new_bot_reply(contact: Contact, text: str) -> Message:
 def send_new_bot_flow(contact: Contact, flow_ns: str, name: str) -> Message:
     """
     An automation the NEW bot's answer sends after its text — the holidays
-    board of a branch (holiday_flows.py) — to a LIVE-TEST contact, through
+    board of a branch (holiday_flows.py) — to a contact it answers, through
     `send_flow`: the same way out as every template, with the same doors (a
     demo contact gets nothing, the switch or the contact's own live test
     decides, a developer's machine only records). Refuses every other contact,
     as `send_new_bot_reply` does. Kept as the bot's line, `new_bot=True`, with
     the status the send got; `name` is what the conversation shows.
     """
-    if contact.is_demo or not contact.live_test:
-        raise ValueError('the new bot sends only to a live-test contact')
+    if not new_bot_answers(contact):
+        raise ValueError('the new bot sends only to a contact it answers')
     return send_flow(contact, flow_ns, (name or flow_ns).strip()[:MAX_TEXT_CHARS], None, sender=SENDER_BOT, new_bot=True)
 
 

@@ -226,8 +226,10 @@ class ListTests(WahubTestCase):
             set(data),
             {'inbound_configured', 'inbound_key_set_at', 'bot_replies_seen', 'ai_configured', 'send_configured',
              'sending_enabled', 'simulate_send', 'last_inbound_at', 'contacts_total', 'messages_last_24h', 'inbound_url',
-             'shadow_configured', 'shadow_model', 'live_test_contacts', 'transcribe', 'holiday_flows'},
+             'shadow_configured', 'shadow_model', 'live_test_contacts', 'transcribe', 'holiday_flows', 'bot'},
         )
+        # Whom the new bot answers: nobody chose anything, so only the test numbers — and there is none (test_go_live).
+        self.assertEqual((data['bot']['mode'], data['bot']['live'], data['bot']['followups']['on']), ('test', False, False))
         self.assertEqual(data['live_test_contacts'], 0)
         self.assertEqual(data['contacts_total'], 9)
         self.assertEqual(data['messages_last_24h'], 1)

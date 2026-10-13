@@ -38,6 +38,17 @@ flips from the screen, and a marker the cron moves, are neither.
                             {"kogo_Holidays": {"flow", "name"}, …}, "twice": […]}.
                             The same kind of cache; read and written by
                             holiday_flows.py only.
+    bot_mode                whom the NEW bot answers for real (bot_mode.py):
+                            {"mode": "test" | "all", "chosen_at", "by", "by_name",
+                            "live_since", "stopped"}. Nothing kept reads as "test" —
+                            only the contacts of the live test, as before.
+    bot_followups           the owner's own switch for the bot's follow-ups to leads:
+                            {"on": bool, "at", "by", "by_name", "since"}. Nothing kept
+                            reads as off.
+    bot_health              what the live answers came to: today's numbers and the
+                            last outcomes the emergency brake reads (bot_mode.py).
+    bot_mode_log            who changed the two switches and when, and when the
+                            brake stopped the bot — the last entries, newest first.
 """
 from __future__ import annotations
 
@@ -53,6 +64,10 @@ LEAD_FOLLOWUP_TEMPLATES = 'lead_followup_templates'
 LEAD_TEMPLATES_FOUND = 'lead_followup_templates_found'
 LEAD_DORMANT_ON = 'lead_dormant_on'
 HOLIDAY_FLOWS_FOUND = 'holiday_flows_found'
+BOT_MODE = 'bot_mode'
+BOT_FOLLOWUPS = 'bot_followups'
+BOT_HEALTH = 'bot_health'
+BOT_MODE_LOG = 'bot_mode_log'
 
 
 def row(key: str) -> WahubSetting | None:
@@ -72,6 +87,35 @@ def put(key: str, value, user=None) -> WahubSetting:
         key=key, defaults={'value': value, 'updated_by': user if getattr(user, 'is_authenticated', False) else None},
     )
     return saved
+
+
+def change(key: str, mutate, *, default=None, user=None):
+    """
+    Read one setting, change it and write it back as one step: the row is held
+    while `mutate(value)` runs, so two calls changing it in the same moment
+    lose nothing of each other's. `mutate` is given the kept value (`default`
+    when nobody has set one) and returns the new one — or None to leave the
+    row as it is. Returns what is kept afterwards.
+    """
+    actor = user if getattr(user, 'is_authenticated', False) else None
+    with transaction.atomic():
+        try:
+            with transaction.atomic():
+                kept, _made = WahubSetting.objects.select_for_update().get_or_create(key=key, defaults={'value': default})
+        except IntegrityError:
+            # Somebody made the row in this very moment: it is there now.
+            kept = WahubSetting.objects.select_for_update().get(key=key)
+        before = default if kept.value is None else kept.value
+        after = mutate(before)
+        if after is None:
+            return before
+        kept.value = after
+        fields = ['value', 'updated_at']
+        if actor is not None:
+            kept.updated_by = actor
+            fields.append('updated_by')
+        kept.save(update_fields=fields)
+        return after
 
 
 def review_auto_apply() -> bool:

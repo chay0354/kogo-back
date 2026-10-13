@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import SimpleRouter
 
-from apps.wahub import views, views_bot, views_leads
+from apps.wahub import views, views_bot, views_leads, views_mode
 
 router = SimpleRouter()
 router.register(r'contacts', views.ContactViewSet, basename='wahub-contact')
@@ -19,6 +19,10 @@ urlpatterns = [
     path('status/', views.StatusView.as_view(), name='wahub-status'),
     path('settings/inbound-key/', views.InboundKeyView.as_view(), name='wahub-inbound-key'),
     path('settings/review/', views_bot.ReviewSettingsView.as_view(), name='wahub-settings-review'),
+    # Whom the NEW bot answers for real — the test numbers or everybody — and whether its follow-ups to leads may
+    # leave (docs/WAHUB-CONTRACT-GO-LIVE.md, ג.1). Both are off until a manager turns them on.
+    path('settings/bot-mode/', views_mode.BotModeView.as_view(), name='wahub-settings-bot-mode'),
+    path('settings/followups/', views_mode.BotFollowupsView.as_view(), name='wahub-settings-followups'),
     path('inbound/manychat/', views.ManyChatInboundView.as_view(), name='wahub-inbound-manychat'),
     path('cron/tick/', views.cron_tick, name='wahub-cron-tick'),
     path('review/notes/', views_bot.ReviewNotesView.as_view(), name='wahub-review-notes'),

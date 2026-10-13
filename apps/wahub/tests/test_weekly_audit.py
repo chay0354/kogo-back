@@ -104,6 +104,11 @@ class WeeklyAuditTests(WahubTestCase):
                 # writes there (a fix, say, undo, the switch itself) answers POST or PATCH only.
                 'api/v1/wahub/refine/': 200,
                 'api/v1/wahub/settings/review/': 200,
+                # whom the new bot answers and whether its follow-ups may leave: reading the two switches changes
+                # nothing (the moment a switch became live is set by the cron and the inbound door, never by a look).
+                # Changing one answers POST only.
+                'api/v1/wahub/settings/bot-mode/': 200,
+                'api/v1/wahub/settings/followups/': 200,
                 # the lead stages: the board is one aggregate, read only
                 'api/v1/wahub/leads/board/': 200,
                 # "בדיקות הבוט": the list of scripts with their last results, read only. Playing one — which asks

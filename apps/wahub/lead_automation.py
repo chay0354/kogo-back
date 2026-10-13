@@ -3,15 +3,18 @@
 leaving by themselves (docs/WAHUB-CONTRACT-LEADS-V2.md, י).
 
 The engine (lead_followups.py) already plans every follow-up and acts on it
-when its moment comes. Two things keep a message from really leaving: the
-owner's switch (sending.sending_enabled), and — for everything due more than
-24 hours after the customer's last message — an approved WhatsApp template
-connected to that follow-up. This module is the settings card that shows where
-that stands and lets him connect the templates:
+when its moment comes. Three things keep a message from really leaving: the
+owner's switch (sending.sending_enabled), his own switch for the follow-ups
+(bot_mode.py: off until he turns it on, and then only what falls due after
+that moment leaves), and — for everything due more than 24 hours after the
+customer's last message — an approved WhatsApp template connected to that
+follow-up. This module is the settings card that shows where that stands and
+lets him connect the templates:
 
-    status()          GET leads/automation/ — four lines (is the lead understood,
+    status()          GET leads/automation/ — five lines (is the lead understood,
                       is its follow-up planned, may messages leave, are the
-                      templates connected), today's numbers, the next follow-ups.
+                      follow-ups turned on, are the templates connected),
+                      today's numbers, the next follow-ups.
     templates()       GET leads/templates/ — every text the bot comes back with:
                       when it is sent, in which stage the owner needs it, and
                       the ManyChat automation connected to it.
@@ -39,7 +42,7 @@ from django.db.models import Count, F, Max, Q
 from django.utils import timezone
 
 from apps.wahub import (
-    lead_ai, lead_followup_seed, lead_followups, lead_stage, lead_templates, leads, sending, settings_store,
+    bot_mode, lead_ai, lead_followup_seed, lead_followups, lead_stage, lead_templates, leads, sending, settings_store,
 )
 from apps.wahub.lead_templates import STAGE_ONE
 from apps.wahub.models import (
@@ -65,8 +68,9 @@ logger = logging.getLogger(__name__)
 
 UPCOMING = 15
 # A contact whose stage has waited this long to be worked out: the cron is not getting to it. The
-# cron rests for seven hours every night (vercel.json), and every open lead is looked at again
-# after midnight, a few hundred a call — so anything shorter would call every morning a fault.
+# cron runs round the clock now (vercel.json; until 14.10.2026 it rested for seven hours a night, which
+# is where the nine hours came from). The threshold stays: every open lead is looked at again after
+# midnight, a few hundred a call, and a fault line on the owner's card must mean hours, not a slow night.
 STALE_AFTER = timedelta(hours=9)
 # A follow-up whose moment passed this long ago and that nobody acted on. Follow-ups are due inside
 # the office hours only, when the cron runs every five minutes.
@@ -76,8 +80,13 @@ DUE_ROWS_READ = 500
 BLOCKED_SENDING = 'sending'
 BLOCKED_MANYCHAT = 'manychat'
 BLOCKED_TEMPLATE = 'template'
+# The owner's own switch for the follow-ups (bot_mode.py): off, or turned on after this one fell due.
+BLOCKED_FOLLOWUPS = 'followups'
+BLOCKED_BEFORE = 'before'
 BLOCKED_WORDS = {
     BLOCKED_SENDING: 'השליחה כבויה',
+    BLOCKED_FOLLOWUPS: bot_mode.FOLLOWUPS_OFF_NOTE,
+    BLOCKED_BEFORE: 'תדולג — הגיע זמנה לפני שהחזרות הודלקו',
     BLOCKED_MANYCHAT: 'השרת לא מחובר ל-ManyChat',
     BLOCKED_TEMPLATE: 'חסרה תבנית',
 }
@@ -301,12 +310,23 @@ def connect(template_key: str, target, user, *, target_name: str = '') -> dict:
 
 # --- what stops a follow-up ------------------------------------------------------------------------------
 
-def _blocked(row: LeadFollowUp, contact: Contact, at, mapped: set, reachable: bool) -> str:
-    """What keeps this follow-up from leaving at `at`: the switch, ManyChat, a template — or '' when nothing does."""
+def _blocked(row: LeadFollowUp, contact: Contact, at, mapped: set, reachable: bool, switch: dict) -> str:
+    """
+    What keeps this follow-up from leaving at `at`: the switch, the follow-ups'
+    own switch (`switch`, bot_mode.followups_state — read once for the whole
+    answer), ManyChat, a template — or '' when nothing does. In the order the
+    engine asks (lead_followups._act).
+    """
     if contact.is_demo:
         return ''
     if not sending.sending_enabled(contact):
         return BLOCKED_SENDING
+    if not contact.live_test:
+        # The owner's own number is not asked: its follow-ups leave as they did before the switch existed.
+        if not switch['on'] or switch['since'] is None:
+            return BLOCKED_FOLLOWUPS
+        if row.due_at < switch['since']:
+            return BLOCKED_BEFORE
     if not reachable:
         return BLOCKED_MANYCHAT
     if not sending.can_free_text(contact, at) and row.template_key not in mapped:
@@ -314,10 +334,10 @@ def _blocked(row: LeadFollowUp, contact: Contact, at, mapped: set, reachable: bo
     return ''
 
 
-def _ahead(row: LeadFollowUp, now, mapped: set, labels: dict, reachable: bool) -> dict:
+def _ahead(row: LeadFollowUp, now, mapped: set, labels: dict, reachable: bool, switch: dict) -> dict:
     contact = row.contact
     at = max(row.due_at, now)
-    blocked = _blocked(row, contact, at, mapped, reachable)
+    blocked = _blocked(row, contact, at, mapped, reachable, switch)
     due = row.status == NUDGE_DUE
     return {
         'id': row.id,
@@ -340,7 +360,7 @@ def _ahead(row: LeadFollowUp, now, mapped: set, labels: dict, reachable: bool) -
     }
 
 
-def _banner(now, mapped: set, reachable: bool) -> dict | None:
+def _banner(now, mapped: set, reachable: bool, switch: dict) -> dict | None:
     """
     The one quiet line at the head of "הבוט מטפל": how many messages would be
     leaving right now, and what stops them. None when nothing is waiting.
@@ -351,8 +371,9 @@ def _banner(now, mapped: set, reachable: bool) -> dict | None:
         .order_by('due_at', 'id')[:DUE_ROWS_READ]
     )
     for row in waiting:
-        blocked = _blocked(row, row.contact, now, mapped, reachable)
-        if blocked:
+        blocked = _blocked(row, row.contact, now, mapped, reachable, switch)
+        # One that will be let go is not one that "would be leaving now".
+        if blocked and blocked != BLOCKED_BEFORE:
             reasons[blocked] = reasons.get(blocked, 0) + 1
     if not reasons:
         return None
@@ -440,10 +461,33 @@ def _sending_line(reachable: bool) -> dict:
         return _line('sending', title, False, detail, 'מדליקים בהגדרות המערכת (WAHUB_SENDING_ENABLED)')
     if not reachable:
         return _line(
-            'sending', title, False, 'דלוקה, אבל השרת לא מחובר ל-ManyChat — שום הודעה לא יוצאת',
+            'sending', title, False, 'דולקת, אבל השרת לא מחובר ל-ManyChat — שום הודעה לא יוצאת',
             'מגדירים את המפתח של ManyChat בהגדרות המערכת (MANYCHAT_KEY)',
         )
-    return _line('sending', title, True, 'דלוקה — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
+    return _line('sending', title, True, 'דולקת — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
+
+
+def _switch() -> dict:
+    """The follow-ups' own switch, read once for a whole answer: {on, since (a moment, or None while they may not leave), text}."""
+    kept = bot_mode.followups_state()
+    since = bot_mode._moment(kept['since'])
+    if kept['on'] and since is None and bot_mode.sending_on():
+        # Turned on while sending was off, and sending is on now: the moment is set by the next cron call —
+        # whatever is due before this minute will be let go then.
+        since = timezone.now()
+    return {'on': kept['on'], 'since': since, 'text': kept['text']}
+
+
+def _followups_line(switch: dict) -> dict:
+    """Has the owner turned the follow-ups on? Off until he does — also once sending is on."""
+    title = 'חזרות אוטומטיות'
+    if not switch['on']:
+        return _line(
+            'followups', title, False, switch['text'],
+            'מדליקים במתג שבשורה הזאת. רק חזרות שמועדן אחרי ההדלקה יוצאות — מה שחיכה עד אז מדולג',
+        )
+    # On, and waiting only for sending: what is missing is the line above this one, not this.
+    return _line('followups', title, True, switch['text'])
 
 
 def _templates_line(rows: list[dict]) -> dict:
@@ -471,6 +515,7 @@ def status(now=None) -> dict:
     mapped = {row['template_key'] for row in rows if row['mapped']}
     labels = {row['template_key']: row['kind_label'] for row in rows}
     reachable = sending.manychat_reachable()
+    switch = _switch()
     midnight = lead_stage._midnight(timezone.localtime(now).date())
     real = Q(contact__is_demo=False)
     counted = LeadFollowUp.objects.aggregate(
@@ -482,7 +527,9 @@ def status(now=None) -> dict:
         demo=Count('id', filter=Q(contact__is_demo=True, status__in=NUDGE_OPEN_STATUSES)),
         late=Count('id', filter=Q(status__in=NUDGE_OPEN_STATUSES, claimed_at__isnull=True, next_look_at__lte=now - LATE_AFTER)),
     )
-    lines = [_classify_line(now), _schedule_line(counted), _sending_line(reachable), _templates_line(rows)]
+    lines = [
+        _classify_line(now), _schedule_line(counted), _sending_line(reachable), _followups_line(switch), _templates_line(rows),
+    ]
     ahead = (
         LeadFollowUp.objects.filter(status__in=NUDGE_OPEN_STATUSES).select_related('contact')
         .order_by('due_at', 'id')[:UPCOMING]
@@ -491,6 +538,6 @@ def status(now=None) -> dict:
         'ready': all(line['ok'] for line in lines),
         'lines': lines,
         'today': {name: counted[name] for name in ('planned', 'due', 'sent', 'skipped', 'failed')},
-        'upcoming': [_ahead(row, now, mapped, labels, reachable) for row in ahead],
-        'banner': _banner(now, mapped, reachable),
+        'upcoming': [_ahead(row, now, mapped, labels, reachable, switch) for row in ahead],
+        'banner': _banner(now, mapped, reachable, switch),
     }
