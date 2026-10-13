@@ -187,8 +187,9 @@ TOOLS = [
             'נמסרים רק כששואלים עליהם, בשתי שורות קצרות, ונכתבים אות באות כפי שהם (גם כשהם באותיות לועזיות; לא מתעתקים ולא מתקנים). '
             'wifi ריק (null), או סיסמה ריקה = לא רשום במערכת: אומרים שבודקים מול המשרד ומסמנים לנציג, ולא מנחשים. '
             'קוד כניסה, קוד לדלת וכל קוד אחר אינם בכלי ואינם נמסרים. שדה ריק = אין את המידע; לא להמציא. '
-            'manager_name — שם מנהל הסניף: נאמר כששואלים מי המנהל או מבקשים לדבר איתו. טלפון שלו אינו בכלי ואינו נמסר, '
-            'ולבקשה לדבר איתו לא עונים במספר טלפון: הקשר איתו דרך המשרד — request_human עם מה שהלקוח ביקש.'
+            'phone — הטלפון של המשרד, שהוא הטלפון של כל הסניפים: נמסר כששואלים על טלפון של סניף. '
+            'לסניף אין מנהל ואין בכלי שם של מנהל: מי ששואל מי מנהל את הסניף או מבקש לדבר עם מנהל — הכול דרך המשרד, '
+            'request_human עם מה שהלקוח ביקש; שם לא ממציאים.'
         ),
         'input_schema': {
             'type': 'object',
@@ -380,10 +381,26 @@ def _course_type_matches(course, wanted: str, ctx: ToolContext) -> bool:
     return any(word and (word in text or text in word) for word in words)
 
 
-def _branch_payload(branch) -> dict:
+def office_phone(ctx=None) -> str:
+    """
+    The one phone of every branch: the office's (the owner, 13.10.2026: "טלפון של כל
+    הסניפים — המשרד"). Read from the office's own line in the knowledge when the
+    conversation has it, so that a number changed on the screen is the number said.
+    """
+    from apps.wahub.knowledge_seed import OFFICE_PHONE
+    from apps.wahub.models import KIND_CONTACT
+
+    for item in getattr(ctx, 'items', None) or ():
+        data = getattr(item, 'data', None) or {}
+        if getattr(item, 'kind', '') == KIND_CONTACT and data.get('name') == 'המשרד' and str(data.get('phone') or '').strip():
+            return str(data['phone']).strip()
+    return OFFICE_PHONE
+
+
+def _branch_payload(branch, ctx=None) -> dict:
     missing = []
     if not branch.is_external:
-        for name, value in (('address', branch.address), ('phone', branch.phone), ('directions', branch.arrival_directions)):
+        for name, value in (('address', branch.address), ('directions', branch.arrival_directions)):
             if not (value or '').strip():
                 missing.append(name)
     return {
@@ -394,8 +411,8 @@ def _branch_payload(branch) -> dict:
         'external_link': branch.external_link or '',
         'address': branch.address or '',
         'directions': branch.arrival_directions or '',
-        'phone': branch.phone or '',
-        'manager_name': branch.manager_name or '',
+        # The office's, whichever the branch: the number on a branch's own card is not said, and a branch has no manager.
+        'phone': office_phone(ctx),
         'missing': missing,
         'note': EXTERNAL_NOTE if branch.is_external else '',
     }
@@ -568,7 +585,7 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
     result_courses = [course_tools.course_payload(course, seats) for course in shown]
 
     result = {
-        'branches': [_branch_payload(row) for row in branches],
+        'branches': [_branch_payload(row, ctx) for row in branches],
         'need': '',
         'courses': result_courses,
         'more_courses': [course_tools.brief_course(course) for course in rest],
@@ -607,7 +624,7 @@ def branch_info(ctx: ToolContext, *, branch: str = '') -> dict:
     office_phone = _office_phone(ctx)
     branches = []
     for row in rows:
-        payload = {**_branch_payload(row), **course_tools.branch_extras(row)}
+        payload = {**_branch_payload(row, ctx), **course_tools.branch_extras(row)}
         if not row.is_external:
             # Only here, and only of a branch of ours: a password does not travel with every search for a class.
             payload['wifi'] = branch_wifi(row)
