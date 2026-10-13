@@ -145,6 +145,11 @@ WATCHED = 200
 LATE_PER_RUN = 8
 LATE_SECONDS = 12.0
 LATE_NOTE = 'נענתה באיחור (רשת הביטחון)'
+# A business's automatic reply gets no answer (shadow.propose); said once, so the office sees why and the cron's
+# look does not come back to it.
+AUTOMATIC_LINE = 'לא נענתה: מענה אוטומטי של עסק, לא שאלה של לקוח'
+# Somebody else wrote to the customer while the answer was being computed: the new bot keeps its own.
+ANSWERED_MEANWHILE = 'תשובה חיה לא נשלחה: מישהו אחר ענה ללקוח בינתיים (המשרד, או הבוט הישן שעדיין מחובר ב-ManyChat)'
 UNEXPECTED = 'תקלה לא צפויה'
 DAILY_LIMIT_TEXT = 'הגבלה: 30 תשובות חיות ביום — הבוט החדש לא עונה יותר היום'
 HOURLY_LIMIT_TEXT = f'הגבלה: {HOURLY_LIMIT} תשובות בשעה — הבוט החדש הפסיק לענות לו, כנראה מענה אוטומטי שמתכתב איתו'
@@ -165,6 +170,7 @@ OUTCOME_HUMAN = 'human_handles'
 OUTCOME_DAILY_LIMIT = 'daily_limit'
 OUTCOME_HOURLY_LIMIT = 'hourly_limit'
 OUTCOME_TOO_OLD = 'too_old'
+OUTCOME_ANSWERED = 'answered_by_another'
 OUTCOME_MODEL_ERROR = 'model_error'
 
 
@@ -826,6 +832,9 @@ def _answer(contact: Contact, held: dict, *, late: bool = False) -> dict:
             return _no_answer(contact, str(exc), _last_received(contact, since) or started, started)
         break
     if proposal is None:
+        if _waiting(contact, since):
+            # There was something to answer and the shadow answered none of it: a machine wrote, not a person.
+            state.log_event(contact.pk, EVENT_LIVE_TEST, AUTOMATIC_LINE)
         return {'outcome': OUTCOME_NOTHING}
     received = _covered_until(proposal) or started
     if not proposal.text:
@@ -837,6 +846,13 @@ def _answer(contact: Contact, held: dict, *, late: bool = False) -> dict:
         return {'outcome': OUTCOME_NOT_LIVE_TEST, 'shadow_id': proposal.id}
     if contact.handled_by == HANDLED_HUMAN:
         return {'outcome': OUTCOME_HUMAN, 'shadow_id': proposal.id}
+    if _answered_by_another(contact.pk, proposal.after_message_id):
+        # The office wrote from the screen — or the old bot is still connected in ManyChat and its answer was
+        # copied here first. A second answer on top of that one is the fault to avoid; the journal says why
+        # nothing left, and the status screen counts the old bot's answers (bot_mode.status).
+        state.log_event(contact.pk, EVENT_LIVE_TEST, ANSWERED_MEANWHILE)
+        logger.warning('wahub live test: contact %s was answered by somebody else meanwhile; the new bot sent nothing', contact.pk)
+        return {'outcome': OUTCOME_ANSWERED, 'shadow_id': proposal.id}
 
     message = sending.send_new_bot_reply(contact, proposal.text)
     sent = timezone.now()
@@ -904,6 +920,15 @@ def _send_flows(contact: Contact, proposal) -> list:
             _needs_human(contact.pk, _why(contact, f'{FLOW_FAILED_REASON}: {flow["name"]} — {error}'))
         outcomes.append({'name': flow['name'], 'sent': sent, 'message_id': message_id, 'error': error})
     return outcomes
+
+
+def _answered_by_another(contact_id: int, after_message_id) -> bool:
+    """Did anybody but the new bot write to the customer, and get through, since the last message this answer covers?"""
+    if not after_message_id:
+        return False
+    return Message.objects.filter(
+        contact_id=contact_id, direction=DIRECTION_OUT, new_bot=False, status__in=DELIVERED_STATUSES, id__gt=after_message_id,
+    ).exists()
 
 
 def _last_received(contact: Contact, since=None):

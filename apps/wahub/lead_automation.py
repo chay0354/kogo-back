@@ -461,10 +461,10 @@ def _sending_line(reachable: bool) -> dict:
         return _line('sending', title, False, detail, 'מדליקים בהגדרות המערכת (WAHUB_SENDING_ENABLED)')
     if not reachable:
         return _line(
-            'sending', title, False, 'דלוקה, אבל השרת לא מחובר ל-ManyChat — שום הודעה לא יוצאת',
+            'sending', title, False, 'דולקת, אבל השרת לא מחובר ל-ManyChat — שום הודעה לא יוצאת',
             'מגדירים את המפתח של ManyChat בהגדרות המערכת (MANYCHAT_KEY)',
         )
-    return _line('sending', title, True, 'דלוקה — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
+    return _line('sending', title, True, 'דולקת — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
 
 
 def _switch() -> dict:
@@ -484,7 +484,7 @@ def _followups_line(switch: dict) -> dict:
     if not switch['on']:
         return _line(
             'followups', title, False, switch['text'],
-            'מדליקים בהגדרות, ליד "למי הבוט החדש עונה". רק חזרות שמועדן אחרי ההדלקה יוצאות — מה שחיכה עד אז מדולג',
+            'מדליקים במתג שבשורה הזאת. רק חזרות שמועדן אחרי ההדלקה יוצאות — מה שחיכה עד אז מדולג',
         )
     # On, and waiting only for sending: what is missing is the line above this one, not this.
     return _line('followups', title, True, switch['text'])

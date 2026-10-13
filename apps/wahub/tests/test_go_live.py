@@ -10,6 +10,7 @@ ManyChat and Claude are mocks; `self.network` fails any test that reaches for
 the real ones. Every phone here is invented.
 """
 import os
+import uuid
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
@@ -22,11 +23,15 @@ from rest_framework.test import APIClient
 
 from apps.core.manychat_service import ManyChatError
 from apps.wahub import bot_mode, cron, knowledge_import, lead_automation, lead_followups, live_test, sending, settings_store, shadow
-from apps.wahub.models import Contact, ContactEvent, KnowledgeItem, LeadFollowUp, Message, ShadowReply, WahubSetting
+from apps.wahub.models import (
+    Contact, ContactEvent, KnowledgeItem, LeadFollowUp, Message, ShadowReply, WahubSetting, WaitingListEntry,
+)
 from apps.wahub.tests.base import BASE, WahubTestCase, client_for, make_user
 from apps.wahub.tests.test_lead_followups import LINK_FIRST, SENDING_ON, EngineCase, at, follow_ups_on
 from apps.wahub.tests.test_leads_v2 import HOUR
-from apps.wahub.tests.test_live_test import CLAUDE, KICK_POST, OK, REQUEST, SLEEP, sends, the_stub_in_claudes_place
+from apps.wahub.tests.test_live_test import (
+    CLAUDE, KICK_POST, OK, REQUEST, SLEEP, asked_to_do, sends, the_stub_in_claudes_place,
+)
 from apps.wahub.tests.test_shadow import catalogue
 
 INBOUND_URL = f'{BASE}/inbound/manychat/'
@@ -137,7 +142,8 @@ class ModeApiTests(GoLiveCase):
         state = self.get('settings/bot-mode/').data
         self.assertEqual((state['mode'], state['live'], state['live_since'], state['stopped']), ('test', False, None, None))
         self.assertEqual((state['chosen_at'], state['chosen_by'], state['warning'], state['log']), (None, '', '', []))
-        self.assertEqual(state['text'], 'מצב בדיקה: הבוט החדש עונה רק למספרי הבדיקה (אין כרגע מספר בדיקה)')
+        self.assertEqual(state['old_bot_replies'], 0)
+        self.assertEqual(state['text'], 'בדיקה בלבד: הבוט החדש עונה רק למספרי הבדיקה (אין כרגע מספר בדיקה)')
         self.assertTrue(state['sending_enabled'])
         self.assertEqual(state['today'], {'sent': 0, 'failed': 0, 'late': 0, 'needs_human': 0, 'fallback': 0, 'unanswered': 0, 'not_started': 0})
         self.assertEqual(state['followups'], {
@@ -191,7 +197,7 @@ class ModeApiTests(GoLiveCase):
         since = bot_mode.live_since()
         self.assertTrue(before <= since <= timezone.now())
         self.assertEqual(state['live_since'], since.isoformat())
-        self.assertTrue(state['text'].startswith('הבוט החדש עונה לכל הלקוחות, להודעות שהגיעו מ-'), state['text'])
+        self.assertTrue(state['text'].startswith('הבוט החדש עונה לכולם — להודעות שהגיעו מ-'), state['text'])
         self.ping.assert_called_once_with(OWN_REPLY)                     # the server reached its own reply door first
         self.assertEqual([(row['what'], row['to']) for row in state['log']], [('live', 'all'), ('mode', 'all')])
         self.assertEqual(state['log'][1]['by'], 'דנה מנהלת')
@@ -205,7 +211,11 @@ class ModeApiTests(GoLiveCase):
         state = self.go_all()
         self.assertEqual((state['mode'], state['live'], state['live_since'], state['sending_enabled']), ('all', False, None, False))
         self.assertEqual(state['warning'], bot_mode.ALL_BUT_NOT_SENDING)
-        self.assertIn('השליחה כבויה', state['warning'])
+        self.assertTrue(state['warning'].startswith('נבחר "הבוט החדש עונה לכולם", אבל השליחה כבויה — שום דבר לא יוצא.'), state['warning'])
+        self.assertEqual(state['text'], 'נבחר "הבוט החדש עונה לכולם", אבל הוא עוד לא עונה לאף לקוח')
+        # In the owner's words, never the values of the API.
+        for sentence in (state['text'], state['warning']):
+            self.assertNotRegex(sentence, r'\ball\b|\btest\b|מצב')
         self.assertEqual([row['what'] for row in state['log']], ['mode'])
         # Nobody is answered, nothing is computed, and the shadow answers everybody as before.
         self.writes('יש חוג קפוארה?')
@@ -271,7 +281,7 @@ class ModeApiTests(GoLiveCase):
         self.kick.assert_called_once()
         state = self.mode(mode='test').data                              # no confirmation asked
         self.assertEqual((state['mode'], state['live'], state['live_since']), ('test', False, None))
-        self.assertEqual(state['log'][0]['text'], 'המצב שונה ל"בדיקה": הבוט החדש עונה רק למספרי הבדיקה')
+        self.assertEqual(state['log'][0]['text'], 'נבחר "בדיקה בלבד": הבוט החדש עונה רק למספרי הבדיקה')
         with patch(REQUEST) as request:
             self.assertEqual(self.reply(self.customer().id).data['outcome'], 'not_live_test')
         request.assert_not_called()
@@ -384,6 +394,80 @@ class OnlyNewMessagesTests(GoLiveCase):
             self.assertEqual(self.reply(self.customer(3).id).data['outcome'], 'human_handles')
         request.assert_not_called()
         self.assertFalse(Contact.objects.filter(phone=phone(2)).exists())
+
+
+# --- never a second answer on top of somebody else's ------------------------------------------------------------
+
+class SomebodyElseAnsweredTests(GoLiveCase):
+    def setUp(self):
+        super().setUp()
+        knowledge_import.run()
+        catalogue()
+        self.go_all()
+
+    def while_claude_thinks(self, happens):
+        """Claude's answer comes back only after `happens()` did."""
+        real = shadow.answer_now
+
+        def slow(contact, **options):
+            proposal = real(contact, **options)
+            happens()
+            return proposal
+
+        return patch(ANSWER_NOW, side_effect=slow)
+
+    def test_the_old_bot_still_connected_in_manychat_answered_first_and_the_new_one_keeps_quiet(self):
+        self.writes('יש חוג קפוארה?')
+        contact = self.customer()
+
+        def the_old_bot_answers():
+            self.assertEqual(self.writes('כן, יש קפוארה בימי שלישי', event='bot_reply').data['stored'], True)
+
+        with self.while_claude_thinks(the_old_bot_answers), patch(REQUEST) as request, self.assertLogs('apps.wahub.live_test', level='WARNING'):
+            response = self.reply(contact.id)
+        self.assertEqual(response.data['outcome'], 'answered_by_another')
+        request.assert_not_called()                                      # the customer got one answer, not two
+        self.assertEqual(Message.objects.filter(contact=contact, new_bot=True).count(), 0)
+        self.assertEqual(self.journal(contact.id)[-1], live_test.ANSWERED_MEANWHILE)
+        # The status screen says the old bot is still there, and how many of its answers were seen.
+        state = self.bot()
+        self.assertEqual(state['old_bot_replies'], 1)
+        self.assertEqual(state['warning'], bot_mode.OLD_BOT_STILL_ANSWERS.format(n=1))
+        self.assertIn('לנתק את צעד ה-POST לספק', state['warning'])
+        # Nothing to say on the contact, nothing to start again, and no failure for the brake.
+        self.live_for(120)
+        self.aged(contact.id, 3)
+        self.kick.reset_mock()
+        self.assertEqual(live_test.answer_late(OWN_REPLY)['live_late_started'], 0)
+        self.assertEqual(live_test.flag_unanswered(), 0)
+        self.assertFalse(self.customer().needs_human)
+        self.assertEqual(self.bot()['today']['failed'], 0)
+
+    def test_the_office_wrote_from_the_screen_while_the_answer_was_computed(self):
+        self.writes('יש חוג קפוארה?')
+        contact = self.customer()
+
+        def the_office_answers():
+            self.assertEqual(self.post(f'contacts/{contact.id}/send/', {'text': 'עונה לך מהמשרד'}).data['message']['status'], 'sent')
+
+        with self.while_claude_thinks(the_office_answers), patch(REQUEST, return_value=OK) as request, self.assertLogs('apps.wahub.live_test', level='WARNING'):
+            response = self.reply(contact.id)
+        self.assertEqual(response.data['outcome'], 'answered_by_another')
+        self.assertEqual(sends(request), [(5001, 'עונה לך מהמשרד')])
+        self.assertEqual(self.bot()['old_bot_replies'], 0)                # the office is not the old bot
+        # His next message is the new bot's again.
+        self.writes('תודה, ומה המחיר?')
+        with patch(REQUEST, return_value=OK) as request:
+            self.assertEqual(self.reply(contact.id).data['outcome'], 'sent')
+        self.assertEqual(len(sends(request)), 1)
+
+    def test_old_bot_answers_from_before_the_mode_was_live_are_not_counted(self):
+        self.mode(mode='test')
+        self.writes('שאלה', index=2)
+        self.writes('תשובת הבוט הישן', index=2, event='bot_reply')
+        self.go_all()
+        state = self.bot()
+        self.assertEqual((state['old_bot_replies'], state['warning']), (0, ''))
 
 
 # --- a message is not lost, and nobody is answered twice --------------------------------------------------------
@@ -510,6 +594,25 @@ class SafetyNetTests(GoLiveCase):
                 self.assertEqual(live_test.flag_unanswered(), 0)
             post.assert_not_called()
         self.assertEqual(Contact.objects.filter(needs_human=True).count(), 0)
+
+    def test_a_business_that_answers_by_machine_gets_no_answer_and_the_journal_says_why_once(self):
+        with patch(KICK_POST, side_effect=requests.ReadTimeout('')):
+            self.writes('תודה שפניתם אלינו, זוהי הודעה אוטומטית ונחזור אליכם בהקדם')
+        contact = self.customer()
+        with patch(REQUEST) as request:
+            self.assertEqual(self.reply(contact.id).data['outcome'], 'nothing')
+        request.assert_not_called()
+        self.assertEqual(self.journal(contact.id), [live_test.AUTOMATIC_LINE])
+        self.assertFalse(self.customer().needs_human)
+        self.live_for(120)
+        for minutes in (3, 16):
+            self.aged(contact.id, minutes)
+            ContactEvent.objects.filter(contact=contact).update(created_at=timezone.now() - timedelta(minutes=minutes - 1))
+            with patch(KICK_POST) as post:
+                self.assertEqual(live_test.answer_late(OWN_REPLY)['live_late_started'], 0)
+                self.assertEqual(live_test.flag_unanswered(), 0)
+            post.assert_not_called()
+        self.assertEqual(self.bot()['today'], {'sent': 0, 'failed': 0, 'late': 0, 'needs_human': 0, 'fallback': 0, 'unanswered': 0, 'not_started': 0})
 
     def test_a_call_starts_eight_at_the_most_whoever_waited_longest_first(self):
         ids = self.waiting(12, minutes=10) + self.waiting(3, minutes=4, start=200)
@@ -969,7 +1072,7 @@ class FollowUpsSwitchTests(EngineCase):
         self.assertEqual(self.followups(on='yes', confirm='on').data['code'], 'bad_value')
         state = self.followups(on=True, confirm='on').data['followups']
         self.assertEqual((state['on'], state['since'], state['by']), (True, self.clock().isoformat(), 'דנה מנהלת'))
-        self.assertTrue(state['text'].startswith('דלוקות — יוצאות רק חזרות שמועדן אחרי 14.10 11:00'), state['text'])
+        self.assertTrue(state['text'].startswith('דולקות — יוצאות רק חזרות שמועדן אחרי 14.10 11:00'), state['text'])
         self.assertEqual(self.get('settings/bot-mode/').data['log'][1]['text'], 'חזרות הבוט ללידים הודלקו')
         with patch(REQUEST) as request:
             counts = lead_followups.run()                                # the very next cron call: they were not left for half an hour
@@ -997,7 +1100,7 @@ class FollowUpsSwitchTests(EngineCase):
         contact = self.link_lead()
         state = self.followups(on=True, confirm='on').data['followups']
         self.assertEqual((state['on'], state['since']), (True, None))
-        self.assertEqual(state['text'], 'דלוקות, אבל השליחה כבויה — שום חזרה לא יוצאת')
+        self.assertEqual(state['text'], 'דולקות, אבל השליחה כבויה — שום חזרה לא יוצאת')
         self.clock.moment = at(2026, 10, 13)
         self.assertEqual(lead_followups.run()['followups_due'], 1)
         self.assertEqual(self.notes(contact), [(1, 'due', 'השליחה ללקוחות כבויה')])
@@ -1068,6 +1171,24 @@ class FollowUpsSwitchTests(EngineCase):
         self.assertEqual(self.open_row(contact).next_look_at, at(2026, 10, 18))
 
     @override_settings(**SENDING_ON)
+    def test_a_whole_cron_call_in_the_middle_of_the_night_sends_nothing(self):
+        follow_ups_on()
+        contact = self.link_lead()
+        freed = self.link_lead()
+        WaitingListEntry.objects.create(
+            contact=freed, lesson_id=uuid.uuid4(), course_name='קפוארה', status='freed', freed_at=self.clock(),
+        )
+        self.clock.moment = at(2026, 10, 13, 2, 0)                       # the follow-up fell due yesterday; it is 02:00
+        LeadFollowUp.objects.filter(contact=contact).update(due_at=self.clock() - HOUR, next_look_at=self.clock() - HOUR)
+        with patch(REQUEST, return_value={'status': 'success', 'data': []}) as request:
+            ticked = cron.tick(budget_seconds=5, reply_url=OWN_REPLY)
+        self.assertEqual(asked_to_do(request), [])                       # ManyChat was asked nothing but which automations it has
+        self.assertEqual((ticked['followups_sent'], ticked['live_late_started']), (0, 0))
+        self.assertEqual(Message.objects.filter(direction='out').count(), 0)
+        self.assertEqual(self.open_row(contact).next_look_at, at(2026, 10, 13))      # waits for the office to open
+        self.assertIsNone(WaitingListEntry.objects.get().notified_at)                # telling a customer of a seat is a person's press
+
+    @override_settings(**SENDING_ON)
     def test_the_card_says_the_switch_is_what_is_missing_and_what_it_holds_back(self):
         self.link_lead()
         self.clock.moment = at(2026, 10, 13)
@@ -1078,6 +1199,7 @@ class FollowUpsSwitchTests(EngineCase):
         card = self.get('leads/automation/').data
         line = next(line for line in card['lines'] if line['key'] == 'followups')
         self.assertEqual((line['ok'], line['title'], line['detail']), (False, 'חזרות אוטומטיות', 'כבויות — הבוט מתכנן חזרות ולא שולח אותן'))
+        self.assertTrue(line['how'].startswith('מדליקים במתג שבשורה הזאת.'), line['how'])
         self.assertIs(card['ready'], False)
         [row] = card['upcoming']
         self.assertEqual((row['state'], row['blocked'], row['note']), ('due', 'followups', 'החזרות האוטומטיות כבויות'))
@@ -1125,13 +1247,13 @@ class StatusTests(GoLiveCase):
     def test_the_sentence_says_where_the_mode_stands(self):
         self.writes('היי', index=1)
         Contact.objects.filter(pk=self.customer().id).update(live_test=True)
-        self.assertEqual(self.bot()['text'], 'מצב בדיקה: הבוט החדש עונה רק למספרי הבדיקה (מספר בדיקה אחד)')
+        self.assertEqual(self.bot()['text'], 'בדיקה בלבד: הבוט החדש עונה רק למספרי הבדיקה (מספר בדיקה אחד)')
         self.assertEqual(self.bot()['test_contacts'], 1)
         self.go_all()
-        self.assertTrue(self.bot()['text'].startswith('הבוט החדש עונה לכל הלקוחות'))
+        self.assertTrue(self.bot()['text'].startswith('הבוט החדש עונה לכולם — להודעות שהגיעו מ-'))
         with override_settings(WAHUB_SENDING_ENABLED=False):
             state = self.bot()
-            self.assertEqual((state['text'], state['warning']), ('נבחר "כולם", והבוט החדש עוד לא עונה לאף לקוח', bot_mode.ALL_BUT_NOT_SENDING))
+            self.assertEqual((state['text'], state['warning']), ('נבחר "הבוט החדש עונה לכולם", אבל הוא עוד לא עונה לאף לקוח', bot_mode.ALL_BUT_NOT_SENDING))
 
     def test_a_fault_in_the_counting_never_reaches_the_answer(self):
         self.go_all()

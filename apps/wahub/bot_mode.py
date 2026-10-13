@@ -86,11 +86,18 @@ FOLLOWUPS_BEFORE = 'before'
 FOLLOWUPS_OFF_NOTE = 'החזרות האוטומטיות כבויות'
 FOLLOWUPS_BEFORE_NOTE = 'דולג — הגיע זמנו לפני שהחזרות הודלקו'
 
+OLD_BOT_STILL_ANSWERS = (
+    'הבוט הישן עדיין עונה ב-ManyChat ({n} תשובות שלו מאז המעבר) — לקוחות עלולים לקבל שתי תשובות. '
+    'צריך לנתק את צעד ה-POST לספק באוטומציה "כללי: תשובה דיפולטית"'
+)
+# The two values in the owner's own words: this is how the screen names them, and every sentence here says the same.
+ALL_WORDS = 'הבוט החדש עונה לכולם'
+TEST_WORDS = 'בדיקה בלבד'
 ALL_BUT_NOT_SENDING = (
-    'המצב "כולם" נבחר, אבל השליחה כבויה — שום דבר לא יוצא. '
+    f'נבחר "{ALL_WORDS}", אבל השליחה כבויה — שום דבר לא יוצא. '
     'הבוט החדש יתחיל לענות רק להודעות שיגיעו אחרי שהשליחה תודלק'
 )
-NOT_READY = 'אי אפשר לעבור ל"כולם" עכשיו — השרת לא יכול לענות ללקוחות'
+NOT_READY = 'הבוט החדש עוד לא יכול לענות לכולם — השרת לא מוכן לענות ללקוחות'
 
 
 class Refused(Exception):
@@ -284,7 +291,7 @@ def set_mode(wanted, user, *, confirm=None, self_call=None) -> bool:
         return False
     if wanted == MODE_ALL:
         if confirm != CONFIRM_ALL:
-            raise Refused('מעבר ל"כולם" דורש אישור מפורש (confirm: "all").', 'confirm_required')
+            raise Refused('כדי שהבוט החדש יענה לכולם נדרש אישור מפורש (confirm: "all").', 'confirm_required')
         problems = readiness(self_call)
         if problems:
             raise Refused(NOT_READY, 'not_ready', 409, problems)
@@ -299,10 +306,10 @@ def set_mode(wanted, user, *, confirm=None, self_call=None) -> bool:
     if wanted == MODE_ALL:
         # Yesterday's failures are not this beginning's: the brake counts from here.
         _forget_recent()
-        _log('mode', MODE_ALL, 'המצב שונה ל"כולם": הבוט החדש עונה לכל מי שכותב', user, now)
+        _log('mode', MODE_ALL, f'נבחר "{ALL_WORDS}": כל מי שכותב נענה על ידי הבוט החדש', user, now)
         live_since(arm=True)
     else:
-        _log('mode', MODE_TEST, 'המצב שונה ל"בדיקה": הבוט החדש עונה רק למספרי הבדיקה', user, now)
+        _log('mode', MODE_TEST, f'נבחר "{TEST_WORDS}": הבוט החדש עונה רק למספרי הבדיקה', user, now)
     return True
 
 
@@ -547,7 +554,7 @@ def _alert_office(reason: str, now) -> None:
             why='רצף כשלים בתשובות ללקוחות',
             action=(
                 'מהרגע הזה אף אחד לא עונה ללקוחות אוטומטית. לבדוק ב"וואטסאפ ולידים" ← הגדרות מה נכשל, '
-                'ואז לבחור שוב "כולם" — או לחבר חזרה את הבוט הישן ב-ManyChat.'
+                f'ואז לבחור שוב "{ALL_WORDS}" — או לחבר חזרה את הבוט הישן ב-ManyChat.'
             ),
             link=f'{frontend}/wahub' if frontend else '',
             details={'reason': reason},
@@ -563,14 +570,14 @@ def _mode_text(kept: dict, live, sending: bool, testing: int) -> tuple:
     stopped = kept.get('stopped') if isinstance(kept.get('stopped'), dict) else None
     if kept.get('mode') == MODE_ALL:
         if live is not None:
-            return f'הבוט החדש עונה לכל הלקוחות, להודעות שהגיעו מ-{_clock(live)}', ''
+            return f'{ALL_WORDS} — להודעות שהגיעו מ-{_clock(live)}', ''
         if not sending:
-            return 'נבחר "כולם", והבוט החדש עוד לא עונה לאף לקוח', ALL_BUT_NOT_SENDING
-        return 'נבחר "כולם" — הבוט החדש יתחיל לענות עם ההודעה הבאה שתגיע', ''
+            return f'נבחר "{ALL_WORDS}", אבל הוא עוד לא עונה לאף לקוח', ALL_BUT_NOT_SENDING
+        return f'נבחר "{ALL_WORDS}" — הוא יתחיל לענות עם ההודעה הבאה שתגיע', ''
     numbers = 'אין כרגע מספר בדיקה' if not testing else 'מספר בדיקה אחד' if testing == 1 else f'{testing} מספרי בדיקה'
-    text = f'מצב בדיקה: הבוט החדש עונה רק למספרי הבדיקה ({numbers})'
+    text = f'{TEST_WORDS}: הבוט החדש עונה רק למספרי הבדיקה ({numbers})'
     if stopped:
-        return text, 'הבוט החדש עצר את עצמו — מאז אף לקוח לא נענה אוטומטית, עד שבוחרים שוב "כולם"'
+        return text, f'הבוט החדש עצר את עצמו — מאז אף לקוח לא נענה אוטומטית, עד שבוחרים שוב "{ALL_WORDS}"'
     return text, ''
 
 
@@ -578,10 +585,10 @@ def _followups_text(kept: dict, since, sending: bool) -> str:
     if kept.get('on') is not True:
         return 'כבויות — הבוט מתכנן חזרות ולא שולח אותן'
     if since is not None:
-        return f'דלוקות — יוצאות רק חזרות שמועדן אחרי {_clock(since)}'
+        return f'דולקות — יוצאות רק חזרות שמועדן אחרי {_clock(since)}'
     if not sending:
-        return 'דלוקות, אבל השליחה כבויה — שום חזרה לא יוצאת'
-    return 'דלוקות — יתחילו לצאת בדקות הקרובות, רק מה שמועדו מעכשיו'
+        return 'דולקות, אבל השליחה כבויה — שום חזרה לא יוצאת'
+    return 'דולקות — יתחילו לצאת בדקות הקרובות, רק מה שמועדו מעכשיו'
 
 
 def followups_state() -> dict:
@@ -625,7 +632,9 @@ def status(*, with_log: bool = False) -> dict:
     and the follow-ups' switch. Reads only — a screen that looks never moves
     `live_since`.
     """
-    from apps.wahub.models import NUDGE_DUE, Contact, LeadFollowUp
+    from apps.wahub.models import (
+        DIRECTION_OUT, MESSAGE_SOURCE_MANYCHAT, NUDGE_DUE, SENDER_BOT, Contact, LeadFollowUp, Message,
+    )
 
     kept = _dict(settings_store.BOT_MODE)
     sending = sending_on()
@@ -633,6 +642,16 @@ def status(*, with_log: bool = False) -> dict:
     live = _moment(kept.get('since')) if chosen == MODE_ALL and sending else None
     testing = Contact.objects.filter(live_test=True, is_demo=False).count()
     text, warning = _mode_text(kept, live, sending, testing)
+    # The old bot's answers that ManyChat copied here since the new one began to answer everybody: it should
+    # have been disconnected by then, and every one of these is a customer who may have got two answers.
+    old_bot = 0
+    if live is not None:
+        old_bot = Message.objects.filter(
+            direction=DIRECTION_OUT, sender=SENDER_BOT, source=MESSAGE_SOURCE_MANYCHAT, new_bot=False,
+            sent_at__gte=live, contact__is_demo=False,
+        ).count()
+        if old_bot:
+            warning = OLD_BOT_STILL_ANSWERS.format(n=old_bot)
     stopped = kept.get('stopped') if isinstance(kept.get('stopped'), dict) else None
     health = _health(settings_store.get(settings_store.BOT_HEALTH, {}))
     answer = {
@@ -649,6 +668,7 @@ def status(*, with_log: bool = False) -> dict:
             'text': f'הבוט החדש עצר את עצמו: {stopped.get("reason") or ""}',
         } if stopped else None,
         'test_contacts': testing,
+        'old_bot_replies': old_bot,
         'today': {name: health['counts'][name] for name in COUNTS},
         'last_failure': health['last_failure'],
         'followups': {
