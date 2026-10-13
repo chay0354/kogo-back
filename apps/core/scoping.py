@@ -412,6 +412,40 @@ def resolve_viewable_user(request, as_user_id):
     raise PermissionDenied('אין הרשאה לצפות במשתמש הזה')
 
 
+# What a read asks for when it wants the caller and every colleague linked to
+# them at once — the instructor's "סיכום כולל" (owner, 13.10.2026).
+ALL_VIEWABLE = 'all'
+
+
+def resolve_viewable_subjects(request, as_user_id):
+    """
+    Whose data a read request runs over: one account, or — for ALL_VIEWABLE —
+    the caller and every account linked to them.
+
+    Each linked account comes with the branch its own link is limited to, the
+    way resolve_viewable_user hands it out one at a time. Nothing is granted
+    here that the caller could not already open by switching account by
+    account; this only lets them be added up.
+    """
+    from apps.core.models import LinkedUserAccess
+
+    if str(as_user_id or '') != ALL_VIEWABLE:
+        return [resolve_viewable_user(request, as_user_id)]
+    subjects = [ViewableSubject(request.user)]
+    links = (
+        LinkedUserAccess.objects
+        .filter(owner=request.user)
+        .select_related('linked')
+        .order_by('linked__first_name', 'linked__last_name')
+    )
+    for link in links:
+        # A link back to the caller would count their own lessons twice.
+        if link.linked_id == request.user.id:
+            continue
+        subjects.append(ViewableSubject(link.linked, link.branch_id))
+    return subjects
+
+
 def integration_credential(name):
     """
     A credential, taken from the environment when it is set there and otherwise

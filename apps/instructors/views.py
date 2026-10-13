@@ -1230,9 +1230,11 @@ class MyDashboardView(APIView):
     def get(self, request):
         from apps.core.models import UserProfile
         from apps.core.scoping import (
+            ALL_VIEWABLE,
             instructor_for_user,
             instructor_login_q,
-            resolve_viewable_user,
+            resolve_viewable_subjects,
+            user_login_idents,
         )
         from apps.enrollments.enrollment_counts import ACTIVE_STUDENT_CHILD_STATUSES, paying_enrollments
         from apps.enrollments.models import LessonAttendance
@@ -1240,7 +1242,12 @@ class MyDashboardView(APIView):
         # A head instructor may hold links to colleagues' accounts. The id is
         # re-checked server-side; an unlinked id raises rather than falling back
         # to the caller's own data, which would silently show the wrong numbers.
-        subject = resolve_viewable_user(request, request.query_params.get('as_user'))
+        # `as_user=all` is the caller and every linked colleague added up
+        # ("סיכום כולל", owner 13.10.2026) — each within its own link's branch.
+        asked_for = request.query_params.get('as_user')
+        subjects = resolve_viewable_subjects(request, asked_for)
+        overall = str(asked_for or '') == ALL_VIEWABLE
+        subject = subjects[0]
 
         today = date.today()
         date_from = parse_date(request.query_params.get('date_from') or '') or (
@@ -1253,8 +1260,10 @@ class MyDashboardView(APIView):
         # The branch limit is applied before the role is read, so a link tied to
         # one branch stays tied to it however the rest of this narrows down.
         lessons = Lesson.objects.select_related(
-            'course', 'course__branch', 'course__course_type'
-        ).filter(subject.branch_q(), course__is_active=True)
+            'course', 'course__branch', 'course__course_type', 'instructor'
+        ).filter(course__is_active=True)
+        if not overall:
+            lessons = lessons.filter(subject.branch_q())
 
         # Whose numbers these are is the subject's question; whether they may
         # be read without narrowing is the caller's. An unnarrowed screen is a
@@ -1263,20 +1272,33 @@ class MyDashboardView(APIView):
         # teaches nothing, so there is no identity to narrow by — hand the whole
         # business to whoever holds the link.
         caller_role = getattr(getattr(request.user, 'profile', None), 'role', None)
-        instructor = instructor_for_user(subject.user)
-        if instructor is not None:
-            lessons = lessons.filter(instructor_login_q(subject.user))
-        elif caller_role != UserProfile.ROLE_MANAGER:
-            return Response(self._empty_payload(request, subject.user))
+        if overall:
+            # Everyone the caller may open, each inside their own link's branch.
+            # A manager who teaches nothing and holds no link to a teacher gets
+            # the same unnarrowed answer the screen already gives them.
+            teaching = [s for s in subjects if instructor_for_user(s.user) is not None]
+            if teaching:
+                reach = Q()
+                for viewable in teaching:
+                    reach |= viewable.lesson_q()
+                lessons = lessons.filter(reach)
+            elif caller_role != UserProfile.ROLE_MANAGER:
+                return Response(self._empty_payload(request, subject.user, overall=True))
+        else:
+            instructor = instructor_for_user(subject.user)
+            if instructor is not None:
+                lessons = lessons.filter(instructor_login_q(subject.user))
+            elif caller_role != UserProfile.ROLE_MANAGER:
+                return Response(self._empty_payload(request, subject.user))
 
         branch_id = request.query_params.get('branch_id')
         if branch_id and branch_id != 'all':
             lessons = lessons.filter(course__branch_id=branch_id)
 
-        lessons = list(lessons)
+        lessons = list(lessons.distinct()) if overall else list(lessons)
         lesson_ids = [lesson.id for lesson in lessons]
         if not lesson_ids:
-            return Response(self._empty_payload(request, subject.user))
+            return Response(self._empty_payload(request, subject.user, overall=overall))
 
         # The system's one definition of a paying student (paying_enrollments):
         # an active row that is not a trial, on a child who is not in the trial
@@ -1361,6 +1383,8 @@ class MyDashboardView(APIView):
                 'lesson_id': str(lesson.id),
                 'course_name': lesson.course.name if lesson.course_id else '',
                 'branch_name': lesson.course.branch.name if lesson.course_id and lesson.course.branch_id else '',
+                # Whose group it is — the overall summary lists several teachers' groups together.
+                'instructor_name': lesson.instructor.full_name if lesson.instructor_id else '',
                 'day_of_week': lesson.day_of_week,
                 'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
                 'active_students': count,
@@ -1421,6 +1445,7 @@ class MyDashboardView(APIView):
                 unmarked.append({
                     'lesson_id': str(lesson.id),
                     'date': occ.isoformat(),
+                    'instructor_name': lesson.instructor.full_name if lesson.instructor_id else '',
                     'course_name': lesson.course.name if lesson.course_id else '',
                     'branch_name': lesson.course.branch.name if lesson.course_id and lesson.course.branch_id else '',
                     'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
@@ -1433,6 +1458,38 @@ class MyDashboardView(APIView):
             if lesson.course_id and lesson.course.branch_id:
                 branch_names[str(lesson.course.branch_id)] = lesson.course.branch.name
 
+        # --- the overall summary: one line per teacher ---
+        # Each teacher's own students, groups and registers still owed. A child
+        # two teachers both teach is one student in the total above and one in
+        # each of their lines, so the lines may add up to more than the total.
+        teachers = []
+        if overall:
+            unmarked_by_lesson = {}
+            for row in unmarked:
+                unmarked_by_lesson[row['lesson_id']] = unmarked_by_lesson.get(row['lesson_id'], 0) + 1
+            for viewable in subjects:
+                person = instructor_for_user(viewable.user)
+                if person is None:
+                    continue
+                # Matched the way the lessons were reached (by login), so a
+                # lesson counted in the total always lands on somebody's line.
+                logins = {ident.lower() for ident in user_login_idents(viewable.user)}
+                theirs = [
+                    lesson for lesson in lessons
+                    if lesson.instructor_id
+                    and (lesson.instructor.email or '').strip().lower() in logins
+                    and (not viewable.branch_id or (lesson.course_id and lesson.course.branch_id == viewable.branch_id))
+                ]
+                their_students = {key for lesson in theirs for key in current_students.get(lesson.id, ())}
+                teachers.append({
+                    'id': str(viewable.user.id),
+                    'name': self._subject(request, viewable.user)['name'],
+                    'is_self': viewable.user.id == request.user.id,
+                    'active_students': len(their_students),
+                    'groups': len(theirs),
+                    'unmarked': sum(unmarked_by_lesson.get(str(lesson.id), 0) for lesson in theirs),
+                })
+
         return Response({
             'branches': [{'id': bid, 'name': name} for bid, name in sorted(branch_names.items(), key=lambda kv: kv[1])],
             'monthly_trend': monthly_trend,
@@ -1443,10 +1500,11 @@ class MyDashboardView(APIView):
             'low_group_threshold': self.LOW_GROUP_THRESHOLD,
             'date_from': date_from.isoformat(),
             'date_to': date_to.isoformat(),
-            'subject': self._subject(request, subject.user),
+            'subject': self._subject(request, subject.user, overall=overall),
+            'teachers': teachers,
         })
 
-    def _empty_payload(self, request, subject):
+    def _empty_payload(self, request, subject, overall=False):
         """Same keys as a populated answer, so the client never special-cases."""
         return {
             'branches': [],
@@ -1456,15 +1514,19 @@ class MyDashboardView(APIView):
             'unmarked_total': 0,
             'total_active_students': 0,
             'low_group_threshold': self.LOW_GROUP_THRESHOLD,
-            'subject': self._subject(request, subject),
+            'subject': self._subject(request, subject, overall=overall),
+            'teachers': [],
         }
 
     @staticmethod
-    def _subject(request, subject):
+    def _subject(request, subject, overall=False):
+        if overall:
+            return {'id': 'all', 'name': 'סיכום כולל', 'is_self': False, 'is_all': True}
         return {
             'id': str(subject.id),
             'name': f"{subject.first_name} {subject.last_name}".strip() or subject.username,
             'is_self': subject.id == request.user.id,
+            'is_all': False,
         }
 
     @staticmethod
@@ -1662,13 +1724,18 @@ class MyTrialsView(APIView):
     def get(self, request):
         from apps.core.models import UserProfile
         from apps.core.scoping import (
+            ALL_VIEWABLE,
             instructor_for_user,
             instructor_login_q,
-            resolve_viewable_user,
+            resolve_viewable_subjects,
         )
         from apps.instructors.trials import OUTCOME_LABELS, trials_for_lessons
 
-        subject = resolve_viewable_user(request, request.query_params.get('as_user'))
+        # `as_user=all`: the caller's trials and every linked colleague's, together.
+        asked_for = request.query_params.get('as_user')
+        subjects = resolve_viewable_subjects(request, asked_for)
+        overall = str(asked_for or '') == ALL_VIEWABLE
+        subject = subjects[0]
 
         today = date.today()
         # A year back: "כל הילדים שהיו בניסיון ולא נרשמו" (owner, 13.10.2026) —
@@ -1693,16 +1760,27 @@ class MyTrialsView(APIView):
             'date_to': date_to.isoformat(),
         }
 
-        lessons = Lesson.objects.filter(subject.branch_q(), course__is_active=True)
+        lessons = Lesson.objects.filter(course__is_active=True)
 
         caller_role = getattr(getattr(request.user, 'profile', None), 'role', None)
-        instructor = instructor_for_user(subject.user)
-        if instructor is not None:
-            lessons = lessons.filter(instructor_login_q(subject.user))
-        elif caller_role != UserProfile.ROLE_MANAGER:
-            # No instructor identity and no manager standing: nothing to show,
-            # rather than everything.
-            return Response(empty)
+        if overall:
+            teaching = [s for s in subjects if instructor_for_user(s.user) is not None]
+            if teaching:
+                reach = Q()
+                for viewable in teaching:
+                    reach |= viewable.lesson_q()
+                lessons = lessons.filter(reach).distinct()
+            elif caller_role != UserProfile.ROLE_MANAGER:
+                return Response(empty)
+        else:
+            lessons = lessons.filter(subject.branch_q())
+            instructor = instructor_for_user(subject.user)
+            if instructor is not None:
+                lessons = lessons.filter(instructor_login_q(subject.user))
+            elif caller_role != UserProfile.ROLE_MANAGER:
+                # No instructor identity and no manager standing: nothing to show,
+                # rather than everything.
+                return Response(empty)
 
         branch_id = request.query_params.get('branch_id')
         if branch_id and branch_id != 'all':
