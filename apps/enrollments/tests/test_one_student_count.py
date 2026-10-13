@@ -75,9 +75,9 @@ class OneStudentCountTests(HeadcountTestBase):
         row = self.calendar_row()
         self.assertEqual(row['active_student_count'], 5)
         self.assertEqual(row['trial_student_count'], 1)
-        # Left without the place being closed, and an old trial with no date.
-        self.assertEqual(row['other_student_count'], 2)
-        self.assertEqual(row['student_count'], 8)
+        # The child who left and the old trial with no date are not on the register at all.
+        self.assertEqual(row['other_student_count'], 0)
+        self.assertEqual(row['student_count'], 6)
 
     def test_the_register_carries_the_same_split_row_by_row(self):
         row = self.calendar_row()
@@ -87,12 +87,33 @@ class OneStudentCountTests(HeadcountTestBase):
         self.assertEqual(kinds[ON_REGISTER_OTHER], row['other_student_count'])
         self.assertEqual(sum(kinds.values()), row['student_count'])
 
-    def test_nobody_is_taken_off_the_register(self):
+    def test_a_child_who_left_and_an_old_trial_are_not_on_the_register(self):
+        # Owner, 13.10.2026: "חייב לתקן את זה שלא יופיע, רק מי שפעיל או עם החרגה
+        # ספציפית… ילד שהיה בשיעור ניסיון אמור להיות רק בשיעור הספציפי הזה."
         names = {entry['child_name'].split(' כהן')[0] for entry in self.register()}
         self.assertIn('לא שילם עדיין', names)
-        self.assertIn('עזב ולא נסגר', names)
-        self.assertIn('ניסיון ישן בלי תאריך', names)
+        self.assertIn('כרטיס נכשל', names)
+        self.assertIn('ניסיון היום', names)
+        self.assertNotIn('עזב ולא נסגר', names)
+        self.assertNotIn('ניסיון ישן בלי תאריך', names)
         self.assertNotIn('ניסיון בשבוע הבא', names)
+
+    def test_the_office_is_handed_the_places_nobody_closed(self):
+        res = self.client.get(
+            f'/api/v1/scheduling/lessons/{self.lesson.id}/', {'date': self.wednesday.isoformat()},
+        )
+        stale = {entry['child_name'].split(' כהן')[0]: entry['child_status'] for entry in res.data['stale_places']}
+        self.assertEqual(stale, {'עזב ולא נסגר': 'inactive', 'ניסיון ישן בלי תאריך': 'trial_completed'})
+
+    def test_a_walk_in_the_instructor_added_is_still_on_the_register(self):
+        res = self.client.post(
+            f'/api/v1/scheduling/lessons/{self.lesson.id}/add-walkin/',
+            {'date': self.wednesday.isoformat(), 'first_name': 'מזדמן', 'last_name': 'חדש', 'phone': ''},
+            format='json',
+        )
+        self.assertIn(res.status_code, (200, 201), res.data)
+        names = {entry['child_name'] for entry in self.register()}
+        self.assertTrue(any(name.startswith('מזדמן') for name in names), names)
 
     def test_the_instructor_reads_the_very_numbers_the_office_reads(self):
         teacher = User.objects.create_user(username='t@counts.test', email='t@counts.test', password='pw-for-tests')

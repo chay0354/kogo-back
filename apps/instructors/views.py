@@ -1651,7 +1651,7 @@ class MyTrialsView(APIView):
     What it adds is the only thing that was missing: all of them at once, with
     what became of each, and the number to ring.
 
-    The default window looks back ninety days and forward far enough to catch
+    The default window looks back a year and forward far enough to catch
     everything already booked: a trial that has not happened yet is the row an
     instructor most wants to see, and it is the one a backward-looking range
     would hide.
@@ -1671,8 +1671,11 @@ class MyTrialsView(APIView):
         subject = resolve_viewable_user(request, request.query_params.get('as_user'))
 
         today = date.today()
+        # A year back: "כל הילדים שהיו בניסיון ולא נרשמו" (owner, 13.10.2026) —
+        # ninety days dropped a child from the list while the parent could
+        # still be rung.
         date_from = parse_date(request.query_params.get('date_from') or '') or (
-            today - timedelta(days=90)
+            today - timedelta(days=365)
         )
         date_to = parse_date(request.query_params.get('date_to') or '') or (
             today + timedelta(days=60)
@@ -1684,6 +1687,7 @@ class MyTrialsView(APIView):
             'counts': {key: 0 for key in OUTCOME_LABELS},
             'total': 0,
             'trials': [],
+            'not_registered': 0,
             'labels': OUTCOME_LABELS,
             'date_from': date_from.isoformat(),
             'date_to': date_to.isoformat(),
