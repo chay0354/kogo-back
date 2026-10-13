@@ -319,6 +319,13 @@ class RefineViewSet(_ManagerViewSet):
     needs_approval, …}), nothing in them is applied until approve/, and the
     example and the check that take the bot seconds to make are asked for apart
     (preview/, check/).
+
+    And the "דיוק" of a conversation works with it (docs/WAHUB-CONTRACT-FUTURE-LEADS.md,
+    ח.4): the same request as a "דיוק" on messages or on a shadow reply, with
+    `mode: "teach"`, opens a "ללמד" thread from that conversation — everything
+    above holds for it, it says where it came from (`origin`, `context`), and it
+    is in the list of what was taught (`?mode=teach`, and `&contact=` for one
+    conversation's). Without `mode` a "דיוק" is what it was.
     """
     queryset = RefineThread.objects.select_related('contact', 'created_by', 'proposal')
 
@@ -326,9 +333,16 @@ class RefineViewSet(_ManagerViewSet):
         mode = (request.query_params.get('mode') or '').strip()
         if mode == refine.MODE_TEACH:
             # "מה לימדת עד היום": a line a thread, newest first, a page at a time.
+            threads = refine.teach_threads()
+            # What was taught out of one conversation (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.4.2).
+            raw = (request.query_params.get('contact') or '').strip()
+            if raw:
+                if not raw.isdigit():
+                    return _error('contact לא תקין.')
+                threads = threads.filter(contact_id=int(raw))
             paginator = TeachPagination()
             try:
-                page = paginator.paginate_queryset(refine.teach_threads(), request, view=self)
+                page = paginator.paginate_queryset(threads, request, view=self)
             except NotFound:
                 return _error('אין עמוד כזה.', http=status.HTTP_404_NOT_FOUND)
             return paginator.get_paginated_response(refine.teach_list_payload(page))
@@ -351,6 +365,13 @@ class RefineViewSet(_ManagerViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         raw_proposal = data.get('proposal', data.get('proposal_id'))
         raw_contact = data.get('contact', data.get('contact_id'))
+        # `mode: "teach"` with a conversation: the picked messages open a thread of "ללמד את הבוט" — the same
+        # flow, the same shape, the same list — instead of a "דיוק" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.4).
+        mode = str(data.get('mode') or '').strip()
+        if mode and mode != refine.MODE_TEACH:
+            return _error('mode לא תקין.')
+        if mode and raw_proposal not in (None, ''):
+            return _error('דיוק על הצעה נפתח בלי mode.')
         try:
             if raw_proposal in (None, '') and raw_contact in (None, '') and not data.get('message_ids') and not data.get('shadow_ids'):
                 # "ללמד את הבוט": the owner's words and nothing else — no conversation, no messages, no proposal.
@@ -365,7 +386,10 @@ class RefineViewSet(_ManagerViewSet):
                 contact = Contact.objects.filter(pk=raw_contact).first() if str(raw_contact or '').isdigit() else None
                 if contact is None:
                     return _error('איש הקשר לא נמצא.')
-                thread = refine.start(contact, data.get('message_ids'), data.get('text'), request.user, shadow_ids=data.get('shadow_ids'))
+                thread = refine.start(
+                    contact, data.get('message_ids'), data.get('text'), request.user, shadow_ids=data.get('shadow_ids'),
+                    teach=mode == refine.MODE_TEACH,
+                )
         except refine.RefineError as exc:
             return _error(str(exc))
         return Response(refine.thread_payload(thread), status=status.HTTP_201_CREATED)
