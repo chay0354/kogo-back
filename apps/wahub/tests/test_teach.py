@@ -949,7 +949,11 @@ class ListTests(TeachTestCase):
             missing = self.get('refine/', mode='teach', page=9)
             self.assertEqual((missing.status_code, missing.data['detail']), (404, 'אין עמוד כזה.'))
         rows = {row['thread']: row for row in first.data['results'] + second['results']}
-        self.assertEqual(set(rows[applied]), {'thread', 'at', 'by', 'understood', 'text', 'state', 'state_label', 'needs_answer', 'changes_count'})
+        self.assertEqual(set(rows[applied]), {
+            'thread', 'at', 'by', 'origin', 'understood', 'text', 'state', 'state_label', 'needs_answer', 'changes_count',
+        })
+        # Written from his head: nowhere to say it came from.
+        self.assertEqual(rows[applied]['origin'], {'kind': 'free', 'label': '', 'contact_id': None, 'contact_name': None, 'link': None})
         self.assertEqual(
             {name: (row['state'], row['state_label'], row['changes_count'], row['needs_answer']) for name, row in (
                 ('applied', rows[applied]), ('undone', rows[undone]), ('waiting', rows[waiting]), ('asked', rows[asked]), ('nothing', rows[nothing]),

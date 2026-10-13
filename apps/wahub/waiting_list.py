@@ -39,12 +39,14 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import datetime
 
 from django.db import IntegrityError, transaction
-from django.db.models import Case, Count, F, IntegerField, Q, Value, When
+from django.db.models import Case, CharField, Count, F, IntegerField, Q, Value, When
+from django.db.models.functions import Cast
 from django.utils import timezone
 
-from apps.wahub import state
+from apps.wahub import search, state
 from apps.wahub.models import (
     EVENT_WAITING_LIST,
     WAITING_ACTIVE_STATUSES,
@@ -79,6 +81,14 @@ ROW_RELATED = ('contact', 'added_by', 'closed_by', 'notified_by')
 STATUS_LABELS = dict(WAITING_STATUS_CHOICES)
 TOLD_LABELS = dict(WAITING_TOLD_CHOICES)
 ON_THE_LIST = 'ברשימת המתנה'
+# The heading the leads of the waiting list stand under (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.3) — the owner,
+# 13.10.2026: "'מחכים לך' is too general a title… write 'מחכים שיתפנה מקום', and let it stay so."
+LIST_TITLE = 'מחכים שיתפנה מקום'
+# Where a row stands, as that list says it: waiting; a seat came free; the customer was told; the customer answered.
+STATE_WAITING, STATE_FREED, STATE_TOLD, STATE_ANSWERED = 'waiting', 'freed', 'told', 'answered'
+STATE_LABELS = {STATE_WAITING: 'ממתין', STATE_FREED: 'התפנה מקום', STATE_TOLD: 'הודענו ללקוח', STATE_ANSWERED: 'הלקוח ענה'}
+# The two that ask the office for something now.
+NEEDS_OFFICE = (STATE_FREED, STATE_ANSWERED)
 DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
 
 # Why a row was not written.
@@ -216,7 +226,54 @@ def title_of(entry: WaitingListEntry) -> str:
     return f'{ON_THE_LIST}: {block["label"]}'
 
 
-def payload(entry: WaitingListEntry, *, position: int | None = None) -> dict:
+def state_of(status, told_at, wrote_at) -> str:
+    """waiting / freed / told / answered — `told_at` is when the customer was told of the seat that is free now."""
+    if status != WAITING_FREED:
+        return STATE_WAITING
+    if told_at is None:
+        return STATE_FREED
+    return STATE_ANSWERED if wrote_at is not None and wrote_at > told_at else STATE_TOLD
+
+
+def state_block(where: str) -> dict:
+    return {'state': where, 'state_label': STATE_LABELS[where], 'needs_office': where in NEEDS_OFFICE}
+
+
+def _moment(value):
+    """A moment kept as text in the contact's copy; None for anything else."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _first_names(entries) -> dict:
+    """{child id: first name} for the children behind the rows' contacts. One query; none when nobody is known."""
+    from apps.customers.models import Child
+
+    ids = {str(child_id) for entry in entries for child_id in (entry.contact.kogo_child_ids or [])}
+    if not ids:
+        return {}
+    return {str(child_id): name for child_id, name in Child.objects.filter(id__in=ids).values_list('id', 'first_name')}
+
+
+def child_meant(entry: WaitingListEntry, names: dict):
+    """
+    The child of the family a row is about: the one whose first name stands in
+    what was written about the child ("נועם, בן 5"). None when no name is
+    there — the caller then opens the first child the matching gave.
+    """
+    written = f' {search.fold(entry.child)} '
+    for child_id in entry.contact.kogo_child_ids or []:
+        name = search.fold(names.get(str(child_id)))
+        if len(name) >= 2 and f' {name} ' in written.replace(',', ' '):
+            return str(child_id)
+    return None
+
+
+def payload(entry: WaitingListEntry, *, position: int | None = None, names: dict | None = None) -> dict:
     """One row of the list, as docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ד.4 has it. `entry.contact` is read."""
     contact = entry.contact
     return {
@@ -244,6 +301,8 @@ def payload(entry: WaitingListEntry, *, position: int | None = None) -> dict:
         'notified_how': entry.notified_how,
         'notified_how_label': TOLD_LABELS.get(entry.notified_how, ''),
         'customer_replied_at': _iso(replied_after(entry, contact)),
+        # The customer's card: the family, and the child the row is about (the same contract, ח.2).
+        'customer': search.customer_block(contact, child_id=child_meant(entry, names or {})),
     }
 
 
@@ -267,7 +326,8 @@ def _positions(lesson_ids) -> dict:
 def payloads(entries) -> list:
     entries = list(entries)
     places = _positions({entry.lesson_id for entry in entries if entry.status in WAITING_ACTIVE_STATUSES})
-    return [payload(entry, position=places.get(entry.id)) for entry in entries]
+    names = _first_names(entries)
+    return [payload(entry, position=places.get(entry.id), names=names) for entry in entries]
 
 
 # --- the copy on the contact ------------------------------------------------------------------------
@@ -336,6 +396,11 @@ def contact_block(contact: Contact) -> dict | None:
     return {
         'status': kept['status'],
         'status_label': STATUS_LABELS[WAITING_FREED] if freed else ON_THE_LIST,
+        # Where the row stands on "מחכים שיתפנה מקום", and whether it asks the office for something now (ח.3.1).
+        **state_block(state_of(kept['status'], _moment(kept.get('notified_at')), contact.last_inbound_at)),
+        # The place in the lesson's queue and its length: filled where the leads are listed (leads.py), not here.
+        'position': None,
+        'queue': None,
         'entry_id': kept.get('entry_id'),
         'lesson_id': kept.get('lesson_id'),
         'label': label,
@@ -657,10 +722,14 @@ def counts() -> dict:
     )
 
 
-def listed(params, *, now=None) -> dict:
+def listed(params, *, now=None, found=None) -> dict:
     """
-    GET waiting-list/?status=&lesson= — whose seat came free first, then whoever
-    has waited longest; and the same rows grouped by lesson, with its seats now.
+    GET waiting-list/?status=&lesson=&search= — whose seat came free first, then
+    whoever has waited longest; and the same rows grouped by lesson, with its
+    seats now. A search (search.py; `found` when the caller built it) looks in
+    the contact — and the family behind it — and in the row itself: the class,
+    the branch, the day, the hour, what was written of the child. With one,
+    every row says what it was found by, and `found` is how many there are.
     """
     wanted = (params.get('status') or 'active').strip()
     if wanted not in FILTERS:
@@ -670,11 +739,60 @@ def listed(params, *, now=None) -> dict:
     if lesson:
         lesson_id = _lesson_uuid(lesson)
         rows = rows.filter(lesson_id=lesson_id) if lesson_id is not None else rows.none()
+    if found is None:
+        found = search.Search(params.get('search') or params.get('q'))
+    if found:
+        rows = rows.alias(
+            _course=search.folded('course_name'), _branch=search.folded('branch_name'), _child=search.folded('child'),
+            _start=Cast('start_time', CharField()),
+        )
+        for index, token in enumerate(found.tokens):
+            rows = rows.filter(Q(contact_id__in=found.contacts_with(index)) | _row_q(token))
     rows = rows.annotate(
         _first=Case(When(status=WAITING_FREED, then=Value(0)), default=Value(1), output_field=IntegerField()),
     ).order_by('_first', 'id')
-    results = payloads(rows[:LIST_LIMIT])
-    return {'counts': counts(), 'lessons': lessons_of(results, now=now), 'results': results}
+    entries = list(rows[:LIST_LIMIT])
+    results = payloads(entries)
+    answer = {'counts': counts(), 'lessons': lessons_of(results, now=now), 'results': results}
+    if found:
+        why = found.found_by([entry.contact for entry in entries])
+        for entry, row in zip(entries, results):
+            said = why.get(entry.contact_id)
+            if said is not None and said['kind'] == 'text' and any(_row_hit(token, entry) for token in found.tokens):
+                said = {'kind': 'lesson', 'label': search.LABELS['lesson'], 'value': row['lesson']['label']}
+            row['found_by'] = said
+        answer['found'] = len(results)
+    return answer
+
+
+_DAY_WORDS = {search.fold(name): index for index, name in enumerate(DAY_NAMES)}
+_ANY_DAY = search.fold('יום')
+
+
+def _row_q(token) -> Q:
+    """Where a word is found in the row itself: the class, the branch, the day, the hour, what was written of the child."""
+    if not isinstance(token, search.Word):
+        return Q(pk__in=[])
+    word = token.folded
+    cond = Q(_course__contains=word) | Q(_branch__contains=word) | Q(_child__contains=word) | Q(_start__startswith=token.raw)
+    if word in _DAY_WORDS:
+        cond |= Q(day_of_week=_DAY_WORDS[word])
+    if word == _ANY_DAY:
+        cond |= Q(day_of_week__isnull=False)
+    return cond
+
+
+def _row_hit(token, entry: WaitingListEntry) -> bool:
+    """The same, for a row in hand."""
+    if not isinstance(token, search.Word):
+        return False
+    word = token.folded
+    return bool(
+        any(word in search.fold(text) for text in (entry.course_name, entry.branch_name, entry.child))
+        or _clock(entry.start_time).startswith(token.raw)
+        or _DAY_WORDS.get(word, -1) == entry.day_of_week
+        or (word == _ANY_DAY and entry.day_of_week is not None)
+    )
 
 
 def _active_by_lesson(lesson_ids) -> dict:

@@ -34,7 +34,7 @@ from apps.core.permissions import IsManager
 from apps.customers.models import Family
 from apps.wahub import (
     analysis, cron, demo, future_leads, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending,
-    shadow, state, transcribe, waiting_list, waiting_notify,
+    shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
 )
 from apps.wahub.models import (
     EVENT_CREATED,
@@ -55,6 +55,7 @@ from apps.wahub.models import (
     WaitingListEntry,
 )
 from apps.wahub.phones import normalize_phone
+from apps.wahub.search import Search
 from apps.wahub.serializers import (
     FOLLOWUP_LABELS,
     QuickReplySerializer,
@@ -62,6 +63,7 @@ from apps.wahub.serializers import (
     contact_payload,
     event_payload,
     for_customer_payload,
+    found_elsewhere,
     message_payload,
     sorted_tags,
     unregistered_lead_payload,
@@ -138,10 +140,24 @@ class ContactViewSet(viewsets.GenericViewSet):
     # --- lists and counts ---
 
     def list(self, request):
-        page = self.paginate_queryset(queries.contact_list(request.query_params))
+        """
+        The list of a screen. With `search` (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.1) every row says what it
+        was found by, and the first page carries `customers`: the families the search finds that have no
+        conversation here. The screen sends `box=all` with a search, so that it crosses the boxes.
+        """
+        found = Search(request.query_params.get('search'))
+        page = self.paginate_queryset(queries.contact_list(request.query_params, found=found))
         now = timezone.now()
         today = timezone.localtime(now).date()
-        return self.get_paginated_response([contact_payload(contact, now=now, today=today) for contact in page])
+        if not found:
+            return self.get_paginated_response([contact_payload(contact, now=now, today=today) for contact in page])
+        why = found.found_by(page)
+        response = self.get_paginated_response([
+            contact_payload(contact, now=now, today=today, found_by=why.get(contact.pk)) for contact in page
+        ])
+        if self.paginator.page.number == 1:
+            response.data['customers'], response.data['customers_more'] = found.customers()
+        return response
 
     def create(self, request):
         phone = normalize_phone(request.data.get('phone'))
@@ -225,6 +241,9 @@ class ContactViewSet(viewsets.GenericViewSet):
         payload['kogo']['children'] = matching.children_of(contact)
         # What a person wrote about the customer while talking to them — shown inside the conversation and on the card.
         payload['notes'] = future_leads.notes(contact)
+        # For somebody on a waiting list: what they wanted and where, and what can be offered instead now
+        # (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.3.2). None — and nothing read — for everybody else.
+        payload['waiting_summary'] = waiting_summary.of(contact)
         return Response(payload)
 
     def partial_update(self, request, pk=None):
@@ -1061,10 +1080,18 @@ class WaitingListView(APIView):
     permission_classes = [IsAuthenticated, IsManager]
 
     def get(self, request):
+        found = Search(request.query_params.get('search') or request.query_params.get('q'))
         try:
-            return Response(waiting_list.listed(request.query_params))
+            answer = waiting_list.listed(request.query_params, found=found)
         except waiting_list.WaitingListError as exc:
             return _error(exc.detail, code=exc.code)
+        if found:
+            # So that a number the system knows never reads "not found": who has it in the conversations
+            # without being on this list, and the customers with no conversation at all (the same contract, ח.1.4).
+            on_the_list = {row['contact_id'] for row in answer['results']}
+            answer['contacts'] = found_elsewhere(found, Contact.objects.exclude(id__in=on_the_list))
+            answer['customers'], answer['customers_more'] = found.customers()
+        return Response(answer)
 
 
 class WaitingListLessonsView(APIView):

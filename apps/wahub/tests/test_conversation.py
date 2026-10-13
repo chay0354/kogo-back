@@ -86,9 +86,13 @@ class ConversationDetailTests(WahubTestCase):
             set(data['chat']),
             {'unread_count', 'waiting_since', 'handled_by', 'handled_by_label', 'needs_human',
              'needs_human_reason', 'needs_human_at', 'can_free_text', 'window_closes_at',
-             'open', 'open_reason', 'open_label'},
+             'open', 'open_reason', 'open_label', 'box', 'box_label'},
         )
         self.assertEqual((data['chat']['open'], data['future'], data['waiting_list'], data['notes']), (False, None, None, []))
+        # The box it is shown under when a search crosses the boxes; no card behind somebody the system does not
+        # know; nothing waited for.
+        self.assertEqual((data['chat']['box'], data['chat']['box_label']), ('waiting', 'ממתין למענה'))
+        self.assertEqual((data['customer'], data['waiting_summary']), (None, None))
         self.assertEqual(data['chat']['handled_by_label'], 'הבוט עונה')
         self.assertEqual(
             set(data['known']),

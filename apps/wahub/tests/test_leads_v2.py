@@ -1022,7 +1022,7 @@ class KeepingTests(LeadsCase):
         self.assertEqual((payload['stage'], payload['group'], payload['stage_label'], payload['owner']), ('', '', '', ''))
         self.assertIn('← לא ליד לחוגים', ContactEvent.objects.filter(kind='lead_stage_changed').latest('id').text)
         # In none of the lists, on neither screen.
-        self.assertEqual(self.get('leads/', owner='bot').data['counts'], {'office': 0, 'bot': 0, 'closed': 0})
+        self.assertEqual(self.get('leads/', owner='bot').data['counts'], {'office': 0, 'bot': 0, 'closed': 0, 'waiting': 0, 'waiting_act': 0})
         self.assertEqual(sum(group['total'] for group in self.get('leads/board/').data['groups']), 0)
 
     def test_nothing_a_person_marked_is_written_by_the_stages(self):
@@ -1056,7 +1056,7 @@ class LeadsApiTests(LeadsCase):
 
         office = self.rows(owner='office')
         self.assertEqual(set(office), {'counts', 'stages', 'results', 'next_cursor'})
-        self.assertEqual(office['counts'], {'office': 1, 'bot': 2, 'closed': 1})
+        self.assertEqual(office['counts'], {'office': 1, 'bot': 2, 'closed': 1, 'waiting': 0, 'waiting_act': 0})
         self.assertEqual([row['contact_id'] for row in office['results']], [waiting.id])
         self.assertEqual(office['stages'], [{'key': 'needs_reply', 'label': 'שאל ולא קיבל מענה', 'count': 1}])
         self.assertIsNone(office['next_cursor'])
@@ -1077,9 +1077,10 @@ class LeadsApiTests(LeadsCase):
         row = self.rows(owner='bot')['results'][0]
         self.assertEqual(set(row), {
             'id', 'contact_id', 'name', 'phone', 'phone_display', 'is_demo', 'stage', 'stage_label', 'owner', 'summary',
-            'chips', 'since', 'next', 'last_message_at', 'waiting_list', 'future',
+            'chips', 'since', 'next', 'last_message_at', 'waiting_list', 'future', 'list', 'list_label', 'customer',
         })
-        self.assertEqual((row['waiting_list'], row['future']), (None, None))
+        self.assertEqual((row['waiting_list'], row['future'], row['customer']), (None, None, None))
+        self.assertEqual((row['list'], row['list_label']), ('bot', 'הבוט מטפל'))
         self.assertEqual((row['id'], row['contact_id'], row['name'], row['phone'], row['is_demo']), (contact.id, contact.id, 'ליד 1', contact.phone, False))
         self.assertEqual((row['stage'], row['stage_label'], row['owner']), ('link_sent', 'קיבל קישור ועוד לא נרשם', 'bot'))
         self.assertEqual(row['summary'], 'אמא לילד בן 5 בראש העין, שאלה על קפוארה, קיבלה קישור ולא נרשמה')
@@ -1163,7 +1164,7 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual(ids(q='אקרובטיקה'), {silent.id})                 # the summary's sentence is searched too
         self.assertEqual(ids(q=link.phone[-7:]), {link.id})
         # The numbers on the tabs are of every lead, whatever the filter.
-        self.assertEqual(self.rows(owner='bot', q='נועה')['counts'], {'office': 0, 'bot': 3, 'closed': 0})
+        self.assertEqual(self.rows(owner='bot', q='נועה')['counts'], {'office': 0, 'bot': 3, 'closed': 0, 'waiting': 0, 'waiting_act': 0})
 
         first = self.rows(owner='bot', limit=2)
         self.assertEqual((len(first['results']), first['next_cursor']), (2, '2'))
@@ -1199,9 +1200,9 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual(set(details), {
             'reason', 'intent', 'intent_label', 'blocker', 'blocker_text', 'child', 'come_back_on', 'come_back_why',
             'link_sent_at', 'trial', 'followups', 'timeline', 'in_system', 'closed', 'taken', 'sending_enabled',
-            'notes', 'waiting_list_entries',
+            'notes', 'waiting_list_entries', 'waiting_summary',
         })
-        self.assertEqual((details['notes'], details['waiting_list_entries']), ([], []))
+        self.assertEqual((details['notes'], details['waiting_list_entries'], details['waiting_summary']), ([], [], None))
         self.assertEqual(details['reason'], 'ניסיון ב-11.10, הגיע · נועה לוי · קפוארה גילאי 5–7. לא נרשם אחרי הניסיון.')
         self.assertEqual(details['trial'], {
             'course': 'קפוארה גילאי 5–7', 'branch': 'ראש העין', 'date': held.isoformat(), 'instructor': 'יואב שדה',
@@ -1245,7 +1246,7 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual((skipped.status, skipped.outcome_note), ('skipped', 'הליד נסגר: נמחק'))
         event = ContactEvent.objects.filter(contact=contact, kind='lead_action').latest('id')
         self.assertEqual((event.text, event.actor), ('הליד נמחק מהרשימה: ספק, לא הורה', self.manager))
-        self.assertEqual(self.rows(owner='closed')['counts'], {'office': 0, 'bot': 0, 'closed': 1})
+        self.assertEqual(self.rows(owner='closed')['counts'], {'office': 0, 'bot': 0, 'closed': 1, 'waiting': 0, 'waiting_act': 0})
 
         again = self.post(f'leads/{contact.id}/reopen/')
         self.assertEqual((again.data['stage'], again.data['owner'], again.data['details']['closed']), ('link_sent', 'bot', None))
@@ -1314,7 +1315,7 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual(taken.data['next'], {'who': 'office', 'what': 'להתקשר ולעזור להשלים את ההרשמה', 'when': None, 'state': 'none', 'note': ''})
         self.assertEqual(taken.data['details']['taken']['by_name'], 'דנה מנהלת')
         self.assertEqual(LeadFollowUp.objects.get(contact=contact).outcome_note, 'עבר לטיפול המשרד')
-        self.assertEqual(self.rows(owner='office')['counts'], {'office': 1, 'bot': 0, 'closed': 0})
+        self.assertEqual(self.rows(owner='office')['counts'], {'office': 1, 'bot': 0, 'closed': 0, 'waiting': 0, 'waiting_act': 0})
 
         back = self.post(f'leads/{contact.id}/owner/', {'owner': 'bot'})
         self.assertEqual((back.data['owner'], back.data['next']['who'], back.data['details']['taken']), ('bot', 'bot', None))
