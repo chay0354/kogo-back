@@ -594,6 +594,8 @@ WAHUB_SHADOW_TIMEOUT_SECONDS = config('WAHUB_SHADOW_TIMEOUT_SECONDS', default=40
 # The bot's system text (the task and the knowledge) is marked for Anthropic's prompt cache: cheaper and faster
 # from the second call within five minutes. 0 sends it as plain text.
 WAHUB_SHADOW_PROMPT_CACHE = config('WAHUB_SHADOW_PROMPT_CACHE', default=True, cast=bool)
+# How long Anthropic keeps the cached text: '1h', or '5m' for the short keep.
+WAHUB_SHADOW_PROMPT_CACHE_TTL = config('WAHUB_SHADOW_PROMPT_CACHE_TTL', default='1h')
 # A recording a demo contact "sent" is transcribed for the shadow bot with
 # OpenAI (apps/wahub/transcribe.py); Claude never gets the audio. Without a key
 # the bot answers by its "הודעה קולית" rule and says why. May also be stored
