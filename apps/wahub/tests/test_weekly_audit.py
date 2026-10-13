@@ -3,8 +3,12 @@ The weekly audit (apps/core/system_audit.py) clicks through every read route as
 a manager. The wahub routes have their day; the ones that send a message or run
 the cron are never clicked, and clicking the rest changes nothing.
 """
+import uuid
+
+from django.utils import timezone
+
 from apps.core.system_audit import all_routes, sweep_slice
-from apps.wahub.models import Contact, ContactEvent, Message, Tag
+from apps.wahub.models import Contact, ContactEvent, Message, Tag, WaitingListEntry
 from apps.wahub.tests.base import WahubTestCase
 
 
@@ -37,16 +41,26 @@ class WeeklyAuditTests(WahubTestCase):
             # The ✓ and the clock of a conversation, and the waiting list: what a person does (POST only).
             'api/v1/wahub/contacts/{pk}/close/', 'api/v1/wahub/contacts/{pk}/hand-to-bot/', 'api/v1/wahub/contacts/{pk}/future/',
             'api/v1/wahub/contacts/{pk}/waiting-list/', 'api/v1/wahub/waiting-list/{pk}/handled/', 'api/v1/wahub/waiting-list/{pk}/remove/',
+            # A note is rewritten by PATCH and deleted by DELETE.
+            'api/v1/wahub/contacts/{pk}/notes/{note_id}/',
         ):
             self.assertFalse(by_template[template].callable_get, template)
+        # Telling a customer that a seat came free answers GET too — what the press WOULD do, which reads only (the
+        # sweep below opens it); the message itself leaves by POST alone.
+        self.assertTrue(by_template['api/v1/wahub/waiting-list/{pk}/notify/'].callable_get)
 
     def test_the_sweep_reads_every_screen_and_leaves_everything_as_it_was(self):
         self.incoming('אפשר שיעור ניסיון בקפוארה?', name='רותם')
         self.incoming('נציג בבקשה')
         contact = self.contact()
         contact.tags.add(Tag.objects.create(name='חם'))
+        # A row of a waiting list whose seat came free: the sweep opens "what would telling the customer do".
+        waiting = WaitingListEntry.objects.create(
+            contact=contact, lesson_id=uuid.uuid4(), course_name='קפוארה', status='freed', freed_at=timezone.now(),
+        )
         before = (
             Contact.objects.values().get(), Message.objects.count(), ContactEvent.objects.count(),
+            WaitingListEntry.objects.values().get(),
         )
 
         result = sweep_slice('messages', 0, budget_seconds=120)
@@ -105,6 +119,10 @@ class WeeklyAuditTests(WahubTestCase):
                 # to a row of a list, answers POST only.
                 f'api/v1/wahub/contacts/{contact.id}/notes/': 200,
                 'api/v1/wahub/waiting-list/': 200,
+                # the lessons a person chooses from, and what telling a customer of a free seat would do now — both
+                # read only. The telling itself answers POST only, so the sweep never sends it.
+                'api/v1/wahub/waiting-list/lessons/': 200,
+                f'api/v1/wahub/waiting-list/{waiting.id}/notify/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])
@@ -116,6 +134,10 @@ class WeeklyAuditTests(WahubTestCase):
         } & set(called))
 
         self.assertEqual(
-            (Contact.objects.values().get(), Message.objects.count(), ContactEvent.objects.count()), before,
+            (
+                Contact.objects.values().get(), Message.objects.count(), ContactEvent.objects.count(),
+                WaitingListEntry.objects.values().get(),
+            ),
+            before,
         )
         self.network.assert_not_called()

@@ -711,20 +711,20 @@ def lessons_of(results: list, *, now=None) -> list:
     there = {lesson_id: pair for lesson_id, pair in _courses_with(wanted).items() if _runs(*pair)}
     seats = Seats(list({course.id: course for _lesson, course in there.values()}.values()), now=now) if there else None
     active = _active_by_lesson(wanted)
-    listed_ = []
+    by_lesson = []
     for lesson_id, group in zip(wanted, groups.values()):
         pair = there.get(lesson_id)
         waiting = active.get(lesson_id, {})
         # In queue order: the oldest first, whatever order the rows came in.
         group['entry_ids'].sort()
-        listed_.append({
+        by_lesson.append({
             **group,
             'exists': pair is not None,
             **seats_block(seats.cap(*pair) if pair is not None else None),
             'waiting': waiting.get(WAITING_WAITING, 0),
             'freed': waiting.get(WAITING_FREED, 0),
         })
-    return listed_
+    return by_lesson
 
 
 def _contact_id(raw) -> int | None:
@@ -761,7 +761,7 @@ def lessons_to_choose(params, *, now=None) -> dict:
         Course.objects.filter(is_active=True, branch__is_active=True, branch__is_external=False)
     ))
     branches = {}
-    rows = []
+    found = []
     for course in courses:
         place = course.branch
         city = place.city.name if place.city_id else ''
@@ -775,11 +775,11 @@ def lessons_to_choose(params, *, now=None) -> dict:
             searched = ' '.join((course.name or '', place.name or '', city, day, f'יום {day}', start)).casefold()
             if any(word not in searched for word in words):
                 continue
-            rows.append((place.name or '', course.name or '', lesson.day_of_week, start, lesson, course))
-    rows.sort(key=lambda row: row[:4])
+            found.append((lesson, course))
+    found.sort(key=lambda pair: (pair[1].branch.name or '', pair[1].name or '', pair[0].day_of_week, _clock(pair[0].start_time)))
 
-    seats = Seats(list({row[5].id: row[5] for row in rows}.values()), now=now) if rows else None
-    lesson_ids = [row[4].id for row in rows]
+    seats = Seats(list({course.id: course for _lesson, course in found}.values()), now=now) if found else None
+    lesson_ids = [lesson.id for lesson, _course in found]
     active = _active_by_lesson(lesson_ids)
     on_list = set(
         WaitingListEntry.objects.filter(
@@ -787,11 +787,11 @@ def lessons_to_choose(params, *, now=None) -> dict:
         ).values_list('lesson_id', flat=True)
     ) if contact_id is not None else set()
     results = []
-    for _place, _name, _day, start, lesson, course in rows:
+    for lesson, course in found:
         block = seats_block(seats.cap(lesson, course))
         if only_full and not block['is_full']:
             continue
-        day = _day_name(lesson.day_of_week)
+        day, start = _day_name(lesson.day_of_week), _clock(lesson.start_time)
         waiting = active.get(lesson.id, {})
         results.append({
             'id': str(lesson.id),
