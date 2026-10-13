@@ -19,7 +19,15 @@ What it holds is what the scripts need the system to hold (world.py):
                  The capoeira group of grades ג–ד is also where a trial cannot
                  always be booked: its nearest Sunday is full, and its nearest
                  Wednesday is closed for a holiday.
+                 How full the lessons are differs on purpose: nine children pay
+                 for the young capoeira group (five seats left), six for the
+                 Wednesday of grades ג–ד and nobody for its Sunday, a capoeira
+                 group of grades ה–ו is full (three of three), and the hip hop
+                 groups are still empty. The branch's card holds a network name
+                 and a password — invented, with an asterisk in it, the kind of
+                 password a style rule would spoil.
     פתח תקווה    two branches of ours — a city where the branch is asked first.
+                 Neither card holds a network.
     רמת גן       an external branch, run by the municipality.
 """
 from __future__ import annotations
@@ -54,6 +62,20 @@ def _trial_dates_that_cannot_be_taken(course, branch) -> None:
     TrialBlockedDate.objects.create(date=iter_upcoming_lesson_occurrences(wednesday, count=1, now=at)[0], reason='חופשה לדוגמה')
 
 
+WIFI_NAME, WIFI_CODE = 'Studio-Demo-5G', 'Dance*2026'
+
+
+def _children_who_pay(lesson, branch, count: int, tag: str) -> None:
+    """`count` invented children registered to the lesson and paying — the ones the form counts as taking a seat."""
+    from apps.core.tests.test_fixtures import TestDataFactory
+    from apps.enrollments.models import LessonEnrollment
+
+    for number in range(1, count + 1):
+        family = TestDataFactory.create_family(name=f'משפחת בדויה {tag}{number}', branch=branch, phone=f'050-111{tag}{number:03d}')
+        child = TestDataFactory.create_child(family=family, first_name=f'ילד בדוי {tag}{number}', last_name='בדוי', status='active')
+        LessonEnrollment.objects.create(child=child, lesson=lesson, status='active')
+
+
 def build() -> dict:
     """Creates the catalogue and, when the bot has no knowledge yet, files the knowledge. Returns the main rows."""
     from apps.core.tests.test_fixtures import TestDataFactory
@@ -67,7 +89,7 @@ def build() -> dict:
 
     stage = TestDataFactory.create_branch(
         name='סטודיו הדגמה ראש העין', city=TestDataFactory.create_city('ראש העין'), address='רחוב הדוגמה 8, ראש העין',
-        phone='03-5550000', arrival_directions='חניה מאחורי הבניין, קומה 2',
+        phone='03-5550000', arrival_directions='חניה מאחורי הבניין, קומה 2', wifi_name=WIFI_NAME, wifi_code=WIFI_CODE,
     )
     capoeira = TestDataFactory.create_course_type('קפוארה')
     capoeira.description = 'אומנות לחימה ברזילאית עם מוזיקה'
@@ -96,6 +118,14 @@ def build() -> dict:
     )
     young_hip_hop = course('היפ הופ גיל 4.5-6', hip_hop, 2, 2, '250.00', lessons=[(4, time(16, 30), time(17, 15))], instructor=noa)
     older_hip_hop = course('היפ הופ כיתות א-ב', hip_hop, 3, 4, '280.00', lessons=[(1, time(17, 0), time(18, 0))], instructor=noa)
+    # A group that is full: its one lesson takes three, and three pay.
+    full_capoeira = course('קפוארה כיתות ה-ו', capoeira, 7, 8, '275.00', lessons=[(1, time(18, 0), time(19, 0))], instructor=uri)
+    full_lesson = full_capoeira.lessons.get()
+    full_lesson.capacity = 3
+    full_lesson.save(update_fields=['capacity'])
+    _children_who_pay(full_lesson, stage, 3, '1')
+    _children_who_pay(young_capoeira.lessons.get(), stage, 9, '2')
+    _children_who_pay(older_capoeira.lessons.get(day_of_week=3), stage, 6, '3')
 
     petah_tikva = TestDataFactory.create_city('פתח תקווה')
     for name, start in (('מינץ - הדגמה', time(16, 0)), ('אם המושבות - הדגמה', time(17, 30))):
@@ -112,5 +142,5 @@ def build() -> dict:
     _trial_dates_that_cannot_be_taken(older_capoeira, stage)
     return {
         'stage': stage, 'external': external, 'young_capoeira': young_capoeira, 'older_capoeira': older_capoeira,
-        'young_hip_hop': young_hip_hop, 'older_hip_hop': older_hip_hop,
+        'young_hip_hop': young_hip_hop, 'older_hip_hop': older_hip_hop, 'full_capoeira': full_capoeira,
     }

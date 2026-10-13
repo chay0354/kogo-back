@@ -18,6 +18,10 @@ invoice, no card. Every function here only reads.
 comparison goes through that scale, and a class is described by its group in
 words ("גיל 4.5-6", "כיתות ג–ד") with the years beside it.
 
+How full a lesson is — how many are registered, out of how many, how many
+seats are left — is the form's too (`_lesson_widget_capacity`), said per lesson:
+each day and hour of a class carries its own numbers and its own ready sentence.
+
 The dates a trial lesson can be booked on are the form's, exactly: the ones a
 parent would find in its date picker now and could book (apps/wahub/trial_offer.py).
 A date that is full is said to be full, a date the form skips is not offered,
@@ -170,6 +174,28 @@ def with_lessons(queryset):
 
 # --- one lesson, one class -----------------------------------------------------------------------------
 
+def seats_text(day: str, start: str, cap: dict) -> str:
+    """
+    How full one lesson is, as a customer is told it — ready, so that the bot
+    neither adds nor subtracts (the owner, 12.10.2026: "and that it knows how
+    full a lesson is, when asked how many are registered to a specific one").
+    The numbers are the form's own (`_lesson_widget_capacity`): the children
+    who pay — a booked trial is not one of them — against the tightest of the
+    lesson's, the group's and the room's limit.
+    """
+    where = f'ביום {day} ב-{start}' if day else f'ב-{start}'
+    enrolled, capacity, left = cap['enrolled_count'], cap['capacity'], cap['available_spots']
+    if capacity is None:
+        registered = f'רשומים {enrolled}' if enrolled else 'עדיין אין רשומים'
+        return f'{where} {registered}; במערכת לא רשומה מגבלת מקומות לשיעור הזה'
+    if not enrolled:
+        return f'{where} עדיין אין רשומים, ויש {capacity} מקומות'
+    registered = f'רשום {enrolled}' if enrolled == 1 else f'רשומים {enrolled}'
+    if cap['is_full']:
+        return f'{where} {registered} מתוך {capacity} מקומות, השיעור מלא'
+    return f'{where} {registered} מתוך {capacity} מקומות, ' + ('נשאר מקום אחד' if left == 1 else f'נשארו {left}')
+
+
 def lesson_payload(lesson, course, seats: Seats, *, offer=None, detail: bool = False) -> dict:
     """A weekly lesson: when, with whom, how full, and — with the class's `offer` — the dates a trial can be booked on."""
     cap = seats.cap(lesson, course)
@@ -185,6 +211,8 @@ def lesson_payload(lesson, course, seats: Seats, *, offer=None, detail: bool = F
         'enrolled': cap['enrolled_count'],
         'seats_left': cap['available_spots'],
         'is_full': cap['is_full'],
+        # The same four, as the sentence to quote for this day and hour — and for no other.
+        'seats_text': seats_text(DAY_NAMES[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else '', str(lesson.start_time)[:5], cap),
         'trial_open': seats.trial_open(lesson),
         'trial_is_full': cap['trial_is_full'],
         'trial_seats_left': cap['trial_spots_left'],

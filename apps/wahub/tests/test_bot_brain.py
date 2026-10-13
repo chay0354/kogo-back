@@ -117,7 +117,7 @@ class OrderOfTheConversationTests(WahubTestCase):
 
     def test_show_all_is_the_whole_branch_for_who_asked_to_see_it(self):
         result = self.find(city=HERE, show_all=True)
-        self.assertEqual((result['need'], result['courses_total']), ('', 4))
+        self.assertEqual((result['need'], result['courses_total']), ('', 5))
         self.assertTrue(result['trial_summary']['mixed'])
         self.assertIn('שונה מחוג לחוג', result['trial_summary']['text'])
         # A string, or anything but a real True, is not a request to see everything.

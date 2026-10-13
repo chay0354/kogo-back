@@ -49,8 +49,10 @@ NONE = r'אין לנו|אין אצלנו|אין כרגע|אין חוג|אין ס
 
 
 MONEY_KEYS = {'price_monthly', 'registration_fee', 'price', 'amount', 'trial_price', 'price_before_discounts', 'price_as_second_class'}
-# What no tool may hand over (docs/WAHUB-CONTRACT-BOT-TOOLS.md): a key that names it.
-FORBIDDEN_KEYS = ('salary', 'bonus', 'payment', 'invoice', 'card', 'token', 'iban', 'wifi')
+# What no tool may hand over (docs/WAHUB-CONTRACT-BOT-TOOLS.md): a key that names it. The network of a branch is
+# handed over since 12.10.2026 (the owner: "take the wifi code and the wifi name too"); the codes of its door and of
+# its speakers, and what the branch costs, are not.
+FORBIDDEN_KEYS = ('salary', 'bonus', 'payment', 'invoice', 'card', 'token', 'iban', 'branch_codes', 'bluetooth', 'cleaning', 'monthly_cost')
 CLASS_TOOLS = ('find_courses', 'course_card', 'quote_registration', 'instructor_info', 'branch_info')
 # Activities a bot might name from its own head; one of them in an answer has to have come from somewhere.
 ACTIVITY_WORDS = (
@@ -64,7 +66,9 @@ SITUATIONAL = {
     # The whole line, with the word that opens it: "באיזו עיר אתם מחפשים חוג" alone is a question anybody may be asked.
     'campaign_yes': (r'מעולה,?\s+באיזו עיר אתם מחפשים חוג', 'הנוסח של תשובה לפנייה יזומה'),
     'campaign_decline': (r'שיהיה שנה טובה', 'הנוסח של סירוב לפנייה יזומה'),
-    'waiting_for_agent': (r'עומס חריג|הפנייה שלך אצל הצוות', 'הנוסח של "ממתינים לנציג"'),
+    # "הפנייה שלך אצל הצוות" is also how a handoff itself is said, and is nobody's mistake there (the full run of
+    # 12.10.2026); the line that angers customers, and stays out of place wherever it is said, is the load.
+    'waiting_for_agent': (r'עומס חריג', 'המשפט "עומס חריג"'),
     'trial_reminder_yes': (r'נתראה בשיעור', 'אישור הגעה לשיעור ניסיון'),
     'trial_reminder_no': (r'נשמח לתאם מועד חלופי', 'אישור ביטול הגעה לשיעור ניסיון'),
     'birthday_party_gilad': (r'מנהל האירועים הפרטיים', 'ההפניה לגלעד בנושא ימי הולדת'),
@@ -101,6 +105,9 @@ _DONE = re.compile(
 _INTERNAL = re.compile(
     r'לא הצלחתי לעבד|נתקלתי בבעיה|בעיה טכנית|תקלה טכנית|השיחה נסגרה|הבוט (שלנו )?חזר|\[[^\]\n]{3,}\]|שלח(?:י|ו)? ["\'״]?נציג["\'״]?|כבוט|אני בוט'
 )
+# The bot speaking of itself is the system's text — unless the customer asked who is answering: then the honest word is the answer.
+_SAYS_IT_IS_A_BOT = re.compile(r'כבוט|אני בוט')
+_ASKED_WHO_ANSWERS = re.compile(r'בוט|רובוט|בן אדם|בנאדם|אדם אמיתי|מישהו אמיתי|אנושי|מחשב|אוטומטי')
 # The end of a line, as `shadow.polish` enforces it: the vendor's own word-for-word phrasings carry periods inside a line.
 _SENTENCE_PERIOD = re.compile(r'[א-ת)"״\']\.\s*$', re.M)
 # Faces, hearts, hands. Not the marks a phrasing or a list is built with (🔹 📞 🔗 ➡ 👇).
@@ -115,6 +122,24 @@ ASKS = {
     'course': (r'איזה חוג|באיזה חוג|לאיזה חוג|תחום|איזה שיעור|באיזו עיר|סניף', 'באיזה חוג מדובר'),
 }
 NEED_ASKS = {'city': 'city', 'branch': 'branch', 'course_type': 'field', 'age': 'age', 'grade': 'age'}
+# The same questions as they read in an answer that is not in Hebrew: a customer who writes in another language is
+# answered in it (the extreme questions of 12.10.2026 — a parent who wrote "I dont speak Hebrew" was answered in Hebrew).
+ASKS_ELSEWHERE = {
+    'city': r'city|town|branch|area|where|location|город|филиал|район|где|مدينة|فرع|أين|منطقة',
+    'branch': r'branch|location|which one|филиал|فرع',
+    'field': r'activity|activities|field|type|kind|which class|interested|занят|направлен|вид|نشاط|نوع',
+    'age': r'how old|age|grade|year|сколько лет|возраст|класс|عمر|كم سنة|الصف',
+    'course': r'which class|activity|city|branch|какой|занят|город|نشاط|مدينة',
+}
+# The scripts a customer may write in, by their letters; Hebrew is the one everything else here is written for.
+LANGUAGES = {
+    'latin': (re.compile(r'[A-Za-z]'), 'באנגלית (באותיות לטיניות)'),
+    'cyrillic': (re.compile(r'[А-Яа-яЁё]'), 'ברוסית'),
+    'arabic': (re.compile(r'[\u0600-\u06FF]'), 'בערבית'),
+}
+_ANY_LETTER = re.compile(r'[א-תA-Za-zА-Яа-яЁё\u0600-\u06FF]')
+# The line WhatsApp writes for whoever clicks an ad, sometimes in English: it says nothing of the language its sender reads.
+_AD_LINE = re.compile(r'hello!?\s*can i get more info(?:rmation)? on this\??', re.I)
 
 
 @dataclass
@@ -135,10 +160,45 @@ class Moment:
     office_days: tuple = ()                             # the weekdays the office is open on
     catalog: object = None
     allow: tuple = ()                                   # the situational phrasings this turn may use
+    given: dict = field(default_factory=dict)           # the writer's card, as the context handed it to the model with the question
 
     @property
     def all_calls(self) -> list:
         return list(self.earlier_calls) + list(self.calls)
+
+    @property
+    def evidence(self) -> list:
+        """
+        Everything the system told the bot in this conversation: what its tools
+        returned, and the card of the writer it was handed before any tool — the
+        hour of a registered child's lesson, written there, came from the system
+        as much as one a tool returned.
+        """
+        card = [{'name': 'customer_card', 'input': {}, 'result': self.given}] if self.given else []
+        return card + self.all_calls
+
+
+def language_of(text: str) -> str:
+    """The script most of a text's letters are in — 'latin', 'cyrillic', 'arabic' — or '' for Hebrew, and for too little to tell by."""
+    plain = _AD_LINE.sub(' ', _URL.sub(' ', text or ''))
+    hebrew = len(re.findall(r'[א-ת]', plain))
+    name, most = max(((name, len(pattern.findall(plain))) for name, (pattern, _label) in LANGUAGES.items()), key=lambda pair: pair[1])
+    return name if most >= 6 and most > hebrew * 2 else ''
+
+
+def customers_language(m: 'Moment') -> str:
+    """The language the customer writes in now: by this turn's words when there are enough of them, else by the conversation's."""
+    now = ' '.join(m.customer)
+    if len(_ANY_LETTER.findall(_AD_LINE.sub(' ', _URL.sub(' ', now)))) >= 12:
+        return language_of(now)
+    return language_of(m.customer_now or now)
+
+
+def asks_it(what: str, m: 'Moment') -> bool:
+    """The answer asks this — in Hebrew, or in the customer's own language when he writes in another."""
+    if re.search(ASKS[what][0], m.reply):
+        return True
+    return bool(customers_language(m)) and re.search(ASKS_ELSEWHERE[what], m.reply, re.I) is not None
 
 
 @dataclass(frozen=True)
@@ -324,46 +384,130 @@ def _class_details(reply: str) -> list:
     return times_in(reply) + [_shekels(value) for value in amounts_in(reply)]
 
 
+def _details_given(m: Moment) -> list:
+    """
+    The details of a class the bot itself gave in this answer. An hour or a sum
+    the customer wrote in the conversation ("אמור להיות עכשיו שיעור ב-17:30"),
+    said back to him, is not one; nor is the hour of his own registered child's
+    lesson, which the card he was answered from holds.
+    """
+    own = _hours_written(m.customer_all) | {_shekels(value) for value in _numbers_written(m.customer_all)}
+    own |= set(times_in(_dump([{'result': m.given}]))) if m.given else set()
+    return [detail for detail in _class_details(m.reply) if detail not in own]
+
+
+# --- the customer's own words -------------------------------------------------------------------------------------
+#
+# An hour, a day, a sum or a date the customer wrote is not something the bot made up when it says it back to him
+# ("אמור להיות שיעור ב-17:30 — בודקים", "ב-31.12 אין שיעור ניסיון"). It is one, when the bot CONFIRMS it and no
+# tool returned it ("כן, אפשר ב-31.12", "נכון, ₪150 לחודש"): what the customer proposed is not true because he
+# proposed it. So a value only the customer wrote passes where it is said back, and fails where it is affirmed.
+
+_BARE_HOUR = re.compile(r'(?:ב-?|בשעה |לשעה |עד |מ-?)(\d{1,2})(?![\d:.])')
+_BARE_NUMBER = re.compile(rf'(?<![\d:.])({_N})(?![\d:])')
+_STATEMENT_END = re.compile(r'(?<=[.!?])\s+|\n')
+_AFFIRMS = re.compile(
+    r'(?<![א-ת])(?:כן|נכון|בדיוק|אפשר|ניתן|פנוי|פנויה|מוזמנים|מוזמנות|נתראה|מתאים|מתקיים|יתקיים|יש שיעור|יש מקום|בואו|תגיעו|קבענו|מחכים לכם'
+    r'|המחיר|עולה|העלות|לחודש|תשלמו|משלמים)(?![א-ת])'
+)
+_DENIES = re.compile(r'(?<![א-ת])(?:לא|אין|אי אפשר|איננו|אינו|אינה|בלי)(?![א-ת])')
+
+
+def _hours_written(text: str) -> set:
+    """The hours in a customer's words: "17:30", and "ב-17" or "בשעה 5" as the hour they stand for."""
+    found = set(times_in(text))
+    for hour in _BARE_HOUR.findall(_plain(text)):
+        if 0 <= int(hour) <= 23:
+            found.add(f'{int(hour):02d}:00')
+            if 1 <= int(hour) <= 11:
+                found.add(f'{int(hour) + 12:02d}:00')          # "בחמש" of an afternoon class
+    return found
+
+
+def _numbers_written(text: str) -> set:
+    """Every number in a customer's words, as a sum of money would compare to it: he seldom writes the ₪."""
+    return {value for value in (_number(found) for found in _BARE_NUMBER.findall(_plain(text))) if value is not None}
+
+
+def _days_written(text: str) -> set:
+    return set(_ONE_DAY.findall(_plain(text)))
+
+
+def statements(reply: str) -> list:
+    """An answer cut into what it says one thing at a time: its lines, and the sentences of a line."""
+    return [part.strip() for part in _STATEMENT_END.split(reply or '') if part.strip()]
+
+
+def affirms(statement: str) -> bool:
+    """The statement says that something is so — it is neither a denial of it nor a question about it."""
+    return bool(_AFFIRMS.search(statement)) and not _DENIES.search(statement) and not _UNAVAILABLE.search(statement) and '?' not in statement
+
+
+def _only_the_customers(reply: str, read, known: set, written: set) -> tuple:
+    """(invented, affirmed): values of the answer no evidence holds — the ones nobody wrote, and the customer's own that the answer confirms."""
+    invented, affirmed = [], []
+    for statement in statements(reply):
+        for value in read(statement):
+            if value in known:
+                continue
+            if value not in written:
+                invented.append(value)
+            elif affirms(statement):
+                affirmed.append(value)
+    return list(dict.fromkeys(invented)), list(dict.fromkeys(affirmed))
+
+
+CONFIRMED = 'מה שהלקוח הציע לא מאשרים רק כי הוא הציע אותו'
+
+
 # --- the general checks ---------------------------------------------------------------------------------------------
 
 def _grounded_amounts(m: Moment) -> str:
-    known = money_evidence(m.all_calls, m.knowledge_text)
-    strange = [value for value in amounts_in(m.reply) if value not in known]
-    if not strange:
-        return ''
-    shown = ', '.join(_shekels(value) for value in dict.fromkeys(strange))
-    return f'הבוט כתב סכום שלא הגיע מהמערכת: {shown}. סכום נאמר רק כפי שהמערכת החזירה אותו בשיחה הזאת'
+    known = money_evidence(m.evidence, m.knowledge_text)
+    invented, affirmed = _only_the_customers(m.reply, amounts_in, known, _numbers_written(m.customer_all))
+    if invented:
+        shown = ', '.join(_shekels(value) for value in invented)
+        return f'הבוט כתב סכום שלא הגיע מהמערכת: {shown}. סכום נאמר רק כפי שהמערכת החזירה אותו בשיחה הזאת'
+    if affirmed:
+        return f'הבוט אישר סכום שהלקוח כתב ושלא הגיע מהמערכת: {", ".join(_shekels(value) for value in affirmed)}. {CONFIRMED}'
+    return ''
 
 
 def _grounded_times(m: Moment) -> str:
-    known = set(times_in(_dump(m.all_calls))) | set(times_in(m.knowledge_text))
-    strange = [value for value in times_in(m.reply) if value not in known]
-    if not strange:
-        return ''
-    return f'הבוט כתב שעה שלא הגיעה מהמערכת: {", ".join(dict.fromkeys(strange))}'
+    known = set(times_in(_dump(m.evidence))) | set(times_in(m.knowledge_text))
+    invented, affirmed = _only_the_customers(m.reply, times_in, known, _hours_written(m.customer_all))
+    if invented:
+        return f'הבוט כתב שעה שלא הגיעה מהמערכת: {", ".join(invented)}'
+    if affirmed:
+        return f'הבוט אישר שעה שהלקוח כתב ושלא הגיעה מהמערכת: {", ".join(affirmed)}. {CONFIRMED}'
+    return ''
 
 
 def _grounded_days(m: Moment) -> str:
     # The days the office is open ground a day only in an answer about the office: a lesson's day comes from the tools.
-    known = day_evidence(m.all_calls, m.office_days if re.search(r'משרד|שעות הפעילות', m.reply) else ())
-    strange = [value for value in days_in(m.reply) if value not in known]
-    if not strange:
-        return ''
-    return f'הבוט כתב יום בשבוע שלא הגיע מהמערכת: {", ".join("יום " + day for day in dict.fromkeys(strange))}'
+    known = day_evidence(m.evidence, m.office_days if re.search(r'משרד|שעות הפעילות', m.reply) else ())
+    invented, affirmed = _only_the_customers(m.reply, days_in, known, _days_written(m.customer_all))
+    if invented:
+        return f'הבוט כתב יום בשבוע שלא הגיע מהמערכת: {", ".join("יום " + day for day in invented)}'
+    if affirmed:
+        return f'הבוט אישר יום שהלקוח כתב ושלא הגיע מהמערכת: {", ".join("יום " + day for day in affirmed)}. {CONFIRMED}'
+    return ''
 
 
 def _grounded_dates(m: Moment) -> str:
-    known = set(dates_in(_dump(m.all_calls))) | set(dates_in(m.knowledge_text))
-    strange = [value for value in dates_in(m.reply) if value not in known]
-    if not strange:
-        return ''
-    return f'הבוט כתב תאריך שלא הגיע מהמערכת או מהידע: {", ".join(f"{day:02d}.{month:02d}" for day, month in dict.fromkeys(strange))}'
+    known = set(dates_in(_dump(m.evidence))) | set(dates_in(m.knowledge_text))
+    invented, affirmed = _only_the_customers(m.reply, dates_in, known, set(dates_in(m.customer_all)))
+    if invented:
+        return f'הבוט כתב תאריך שלא הגיע מהמערכת או מהידע: {", ".join(_date_text(value) for value in invented)}'
+    if affirmed:
+        return f'הבוט אישר תאריך שהלקוח כתב ושלא הגיע מהמערכת: {", ".join(_date_text(value) for value in affirmed)}. {CONFIRMED}'
+    return ''
 
 
 def _grounded_names(m: Moment) -> str:
     catalog = m.catalog
     reply = _norm(_plain(m.reply))
-    from_tools = _norm(_dump(m.all_calls))
+    from_tools = _norm(_dump(m.evidence))
     allowed = from_tools + _norm(m.knowledge_text) + _norm(m.customer_all)
     problems = []
     if catalog is not None:
@@ -387,13 +531,13 @@ def _grounded_names(m: Moment) -> str:
 
 
 def _grounded_phones(m: Moment) -> str:
-    known = ' '.join((re.sub(r'\D', '', _dump(m.all_calls)), re.sub(r'[-\s]', '', m.knowledge_text), re.sub(r'[-\s]', '', m.customer_all)))
+    known = ' '.join((re.sub(r'\D', '', _dump(m.evidence)), re.sub(r'[-\s]', '', m.knowledge_text), re.sub(r'[-\s]', '', m.customer_all)))
     strange = [phone for phone in phones_in(m.reply) if phone not in known]
     return f'הבוט כתב מספר טלפון שלא הגיע מהמערכת או מהידע: {", ".join(strange)}' if strange else ''
 
 
 def _grounded_links(m: Moment) -> str:
-    known = unquote(_dump(m.all_calls) + ' ' + m.knowledge_text)
+    known = unquote(_dump(m.evidence) + ' ' + m.knowledge_text)
     strange = [url for url in links_in(m.reply) if url.rstrip('/') not in known]
     return f'הבוט שלח קישור שלא מופיע במערכת או בידע: {", ".join(strange)}' if strange else ''
 
@@ -434,7 +578,7 @@ def _order_kept(m: Moment) -> str:
         return ''
     need = asked.get('need')
     what = ASKS[NEED_ASKS.get(need, 'city')]
-    said = _class_details(m.reply)
+    said = _details_given(m)
     if said:
         return (
             f'המערכת אמרה שקודם צריך לשאול {what[1]}, והבוט כבר נתן פרטים של חוג ({", ".join(dict.fromkeys(said))}). '
@@ -442,14 +586,15 @@ def _order_kept(m: Moment) -> str:
         )
     choice = [str(name) for name in (asked.get('course_types') or asked.get('between') or [])]
     named = sum(1 for name in choice if _norm(name) in _norm(m.reply))
-    if not re.search(what[0], m.reply) and named < 2:
+    if not asks_it(NEED_ASKS.get(need, 'city'), m) and named < 2:
         return f'המערכת אמרה שקודם צריך לשאול {what[1]}, והבוט לא שאל את זה'
     return ''
 
 
 def _show_all_only_when_pressed(m: Moment) -> str:
     wanted = any(call.get('name') == 'find_courses' and (call.get('input') or {}).get('show_all') is True for call in m.calls)
-    if wanted and not _PRESSED.search(m.customer_now):
+    # Whether a customer pressed is read from Hebrew words; what one who writes in another language asked for is the rubric's to judge.
+    if wanted and not customers_language(m) and not _PRESSED.search(m.customer_now):
         return 'הבוט ביקש מהמערכת את כל החוגים, בלי שהלקוח ביקש לראות הכול. קודם מבררים עיר, תחום וגיל'
     return ''
 
@@ -457,7 +602,7 @@ def _show_all_only_when_pressed(m: Moment) -> str:
 def _fresh_details(m: Moment) -> str:
     # The hours of the office are the knowledge's, not a class's.
     office = set(times_in(m.knowledge_text))
-    said = [value for value in _class_details(m.reply) if value not in office]
+    said = [value for value in _details_given(m) if value not in office]
     if said and not any(call.get('name') in CLASS_TOOLS for call in m.calls):
         return f'הבוט נתן פרטים של חוג ({", ".join(dict.fromkeys(said))}) בלי לבדוק אותם במערכת בתשובה הזאת'
     return ''
@@ -541,9 +686,52 @@ def _form(m: Moment) -> str:
     return f'בעיית עיצוב בתשובה: {", ".join(problems)}' if problems else ''
 
 
+def letter_for_letter(calls: list) -> list:
+    """What the tools returned that is written to the customer exactly as it is: a network's name and its password (shadow_tools.letter_for_letter)."""
+    found = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            wifi = value.get('wifi')
+            if isinstance(wifi, dict):
+                found.extend(str(wifi.get(key) or '') for key in ('name', 'code'))
+            for inner in value.values():
+                walk(inner)
+        elif isinstance(value, (list, tuple)):
+            for inner in value:
+                walk(inner)
+
+    for call in calls:
+        walk(call.get('result'))
+    return sorted({value for value in found if value.strip()}, key=len, reverse=True)
+
+
+def _in_language(reply: str, language: str) -> str:
+    """Why an answer is not in `language` (a key of LANGUAGES): it holds none of its letters, or a whole line of Hebrew."""
+    pattern, label = LANGUAGES[language]
+    if len(pattern.findall(reply)) < 6:
+        return f'הלקוח כותב {label}, והבוט ענה בעברית: "{_quote(reply)}". עונים בשפה שבה הלקוח כותב'
+    for line in reply.split('\n'):
+        # The names of a class and of a branch stay as the system has them; a line of five Hebrew words and nothing else is a sentence.
+        if len(re.findall(r'[א-ת]{2,}', line)) >= 5 and not pattern.search(line):
+            return f'הלקוח כותב {label}, ובתשובה יש משפט שלם בעברית: "{_quote(line)}". עונים בשפה שבה הלקוח כותב'
+    return ''
+
+
 def _hebrew_only(m: Moment) -> str:
-    found = _LATIN.findall(_plain(m.reply))
-    return f'הבוט כתב באותיות לועזיות: {", ".join(dict.fromkeys(found))}. עונים בעברית בלבד' if found else ''
+    """
+    The customer's language: Hebrew — and then no Latin letters, the vendor's
+    rule — to whoever writes Hebrew; the customer's own to whoever writes in
+    another. A network's name and its password are nobody's language.
+    """
+    text = _plain(m.reply)
+    for literal in letter_for_letter(m.all_calls):
+        text = text.replace(literal, ' ')
+    language = customers_language(m)
+    if language:
+        return _in_language(text, language)
+    found = _LATIN.findall(text)
+    return f'הבוט כתב באותיות לועזיות: {", ".join(dict.fromkeys(found))}. ללקוח שכותב בעברית עונים בעברית בלבד' if found else ''
 
 
 def _word_for_word(m: Moment) -> bool:
@@ -583,7 +771,7 @@ def _list_of_four(m: Moment) -> str:
 
 
 def _one_subject(m: Moment) -> str:
-    if _word_for_word(m):
+    if _word_for_word(m) or customers_language(m):      # what was asked is read from Hebrew words
         return ''
     said = [(name, asked) for name, shows, asked in _SUBJECTS if shows.search(m.reply)]
     unasked = [name for name, asked in said if not asked.search(m.customer_now)]
@@ -615,7 +803,10 @@ def _nothing_claimed_done(m: Moment) -> str:
 
 
 def _no_internal_text(m: Moment) -> str:
-    found = _INTERNAL.search(_plain(m.reply))
+    text = _plain(m.reply)
+    if _ASKED_WHO_ANSWERS.search(' '.join(m.customer)):
+        text = _SAYS_IT_IS_A_BOT.sub(' ', text)
+    found = _INTERNAL.search(text)
     return f'הבוט כתב ללקוח טקסט פנימי של המערכת: "{_quote(found.group(0))}"' if found else ''
 
 
@@ -675,7 +866,7 @@ GENERAL = (
     Check('phrasing_in_place', 'נוסח נאמר רק במצב שהוא מיועד לו', _phrasing_in_place),
     Check('no_repeat', 'לא חוזרים על מה שכבר נכתב', _no_repeat),
     Check('form', 'עיצוב: בלי נקודה בסוף, ₪ לפני המספר, כוכבית אחת, קישור מלא', _form),
-    Check('hebrew_only', 'עברית בלבד', _hebrew_only),
+    Check('hebrew_only', 'עונים בשפה שבה הלקוח כותב; בעברית — בלי אותיות לועזיות', _hebrew_only),
     Check('short', 'תשובה קצרה', _short),
     Check('one_question', 'שאלה אחת בכל פעם', _one_question),
     Check('list_of_four', 'רשימה — עד 4 פריטים', _list_of_four),
@@ -710,7 +901,7 @@ def asks(what: str) -> Check:
     pattern, label = ASKS[what]
 
     def test(m: Moment) -> str:
-        if re.search(pattern, m.reply):
+        if asks_it(what, m):
             return ''
         if what == 'field':
             fields = ((m.world.get('facts') or {}).get('stage') or {}).get('fields') or []
@@ -723,7 +914,7 @@ def asks(what: str) -> Check:
 
 def offers_nothing() -> Check:
     def test(m: Moment) -> str:
-        said = _class_details(m.reply)
+        said = _details_given(m)
         if said:
             return f'ציפינו שהבוט לא יציע חוג בשלב הזה. הוא כבר כתב: {", ".join(dict.fromkeys(said))}'
         catalog = m.catalog
@@ -995,8 +1186,10 @@ def run(checks, moment: Moment, *, turn: int) -> list:
 # returned; these hold an answer to the dates that can really be booked.
 
 # A date said to be taken or closed is the truth about it, not an offer of it.
+# ("ב-31.12 אין כרגע שיעור ניסיון פתוח" says it as much as "אין שיעור" does: a word between the two is not an offer.)
 _UNAVAILABLE = re.compile(
-    r'מלא|אין מקום|לא נשאר|תפוס|לא מתקיים|לא יתקיים|בוטל|מבוטל|לא פתוח|סגור|אי אפשר|לא ניתן|לא אפשרי|אין שיעור|אין ניסיון|לא זמין|חופש|כבר התחיל'
+    r'מלא|אין מקום|לא נשאר|תפוס|לא מתקיים|לא יתקיים|בוטל|מבוטל|לא פתוח|סגור|אי אפשר|לא ניתן|לא אפשרי|לא זמין|חופש|כבר התחיל'
+    r'|אין (?:כרגע |עדיין |שם |אצלנו |לנו |בו )*(?:שיעור|ניסיון|תאריך|מועד)'
 )
 _NOT = re.compile(r'לא|אין|אי אפשר')
 
@@ -1034,14 +1227,28 @@ def trial_dates_evidence(calls: list) -> tuple:
     return open_, closed - open_
 
 
+# What makes a statement an invitation to come: a date beside one of these, affirmed, is a date offered.
+_COMING = re.compile(r'ניסיון|נסיון|להגיע|לבוא|תגיעו|בואו|נתראה|מוזמנ|להירשם|נרשמים')
+
+
 def _open_trial_dates(m: Moment) -> str:
-    _open, closed = trial_dates_evidence(m.all_calls)
+    open_, closed = trial_dates_evidence(m.all_calls)
     for line in m.reply.split('\n'):
         offered = [value for value in dates_in(line) if value in closed]
         if offered and not _UNAVAILABLE.search(line):
             return (
                 f'הבוט הציע את התאריך {", ".join(_date_text(value) for value in dict.fromkeys(offered))} — באתר התאריך הזה מלא או לא פתוח לשיעור ניסיון. '
                 'מציעים רק תאריך שהמערכת החזירה כפנוי'
+            )
+    # A date the customer named may be said back to him ("ב-31.12 אין שיעור ניסיון") — it may not be offered:
+    # the site does not offer it because he asked for it.
+    named = set(dates_in(m.customer_all))
+    for statement in statements(m.reply):
+        offered = [value for value in dates_in(statement) if value in named and value not in open_]
+        if offered and _COMING.search(statement) and affirms(statement):
+            return (
+                f'הבוט הציע את התאריך {", ".join(_date_text(value) for value in dict.fromkeys(offered))} שהלקוח כתב — '
+                'האתר לא מציע אותו לשיעור ניסיון. מציעים רק תאריך שהמערכת החזירה כפנוי'
             )
     return ''
 
@@ -1133,3 +1340,391 @@ GENERAL = GENERAL + (
     Check('open_trial_dates', 'תאריך מלא או סגור לא מוצע לשיעור ניסיון', _open_trial_dates),
 )
 GENERAL_IDS = tuple(check.id for check in GENERAL)
+
+
+# --- how full a lesson is (the owner, 12.10.2026: "…and that it knows how full a lesson is, when asked how many are registered") ---
+#
+# The tools hand every lesson its own four — registered, the limit, the seats left, full or not — from the function
+# the registration form shows them with (`_lesson_widget_capacity`, held against the form in test_seats.py). A count
+# in an answer is one of them, of the lesson that was asked about, and not a number the bot worked out.
+
+SEAT_KEYS = ('enrolled', 'capacity', 'seats_left', 'trial_seats_left')
+_SEAT_NOUN = r'(?:ילדים|ילדות|תלמידים|תלמידות|משתתפים|משתתפות|רשומים|רשומות|נרשמים|מקומות|מקום)'
+_NOT_LESSONS = r'(?!\s+(?:מתוך\s+\d+\s+)?ה?שיעורים)'       # "3 מתוך 4 השיעורים של החודש" counts lessons, not children
+_SEAT_COUNT = re.compile(
+    rf'(?<![\d:.,₪])(\d{{1,3}})(?![\d:.,])\s+{_SEAT_NOUN}'
+    rf'|(?:רשומים|רשומות|רשום|נרשמו|נשארו|נותרו|נשאר|מתוך)\s+(?:כרגע\s+|עוד\s+|רק\s+|עדיין\s+)?(?<![\d:.,₪])(\d{{1,3}})(?![\d:.,]){_NOT_LESSONS}'
+)
+# Small counts are often written as words: "ילד אחד", "שני ילדים", "שלושה מקומות".
+_COUNT_WORDS = {
+    1: r'אחד|אחת', 2: r'שני|שתי|שניים|שתיים', 3: r'שלושה|שלוש', 4: r'ארבעה|ארבע', 5: r'חמישה|חמש', 6: r'שישה|שש',
+    7: r'שבעה|שבע', 8: r'שמונה', 9: r'תשעה|תשע', 10: r'עשרה|עשר',
+}
+_NONE_YET = re.compile(r'אין (?:עדיין |כרגע |עוד |שם )*רשומים|עדיין (?:אין|לא נרשמ)|אף (?:אחד|ילד|ילדה)|לא נרשמ|(?<![א-ת])ריקה?(?![א-ת])|הראשונים|הראשונות')
+_IS_FULL = re.compile(r'(?<![א-ת])(?:מלא|מלאה|מלאים)(?![א-ת])|אין (?:יותר |עוד |כבר )?מקום|לא נשאר|אין מקומות')
+_ABOUT_SEATS = re.compile(r'רשומ|נרשמ|מקומ|מקום|ילדים|ילדות|נשאר|נותר|מתוך|משתתפ|תלמיד|פנוי')
+
+
+def seat_counts_in(text: str) -> list:
+    """The numbers an answer states of children or of seats: "9 ילדים", "נשארו 5", "מתוך 14"."""
+    return [int(first or second) for first, second in _SEAT_COUNT.findall(_plain(text))]
+
+
+def _says_count(reply: str, number: int) -> bool:
+    """
+    The answer states this count: in digits, standing by itself in a statement
+    about children or seats ("רשומים 9", and not the 9 of "בן 9" in another
+    sentence), or as a word beside what it counts ("שני ילדים", "מקום אחד").
+    """
+    digits = re.compile(rf'(?<![\d:.,₪]){number}(?![\d:.,]|\s?(?:₪|ש"ח|שקל))')
+    for statement in statements(_plain(reply)):
+        if digits.search(statement) and _ABOUT_SEATS.search(statement):
+            return True
+    words = _COUNT_WORDS.get(number)
+    return bool(words and re.search(
+        rf'(?<![א-ת])(?:{words})\s+{_SEAT_NOUN}|(?:ילד|ילדה|מקום|רשום|רשומה|משתתף|{_SEAT_NOUN})\s+(?:{words})(?![א-ת])', _plain(reply),
+    ))
+
+
+def seats_evidence(calls: list) -> list:
+    """Every lesson the tools returned with its seats: [{course, day, start, enrolled, capacity, seats_left, is_full, …}] — the latest answer about a lesson last."""
+    rows = []
+
+    def of_course(course) -> None:
+        if not isinstance(course, dict):
+            return
+        for lesson in course.get('lessons') or []:
+            if isinstance(lesson, dict) and 'enrolled' in lesson:
+                rows.append({
+                    'course': course.get('name') or lesson.get('course') or '', 'day': lesson.get('day') or '',
+                    'start': str(lesson.get('start') or '')[:5], **{key: lesson.get(key) for key in SEAT_KEYS + ('is_full',)},
+                })
+
+    for call in calls:
+        result = call.get('result') if isinstance(call.get('result'), dict) else {}
+        for course in result.get('courses') or []:
+            of_course(course)
+        of_course(result.get('course'))
+    return rows
+
+
+def _grounded_seats(m: Moment) -> str:
+    said = seat_counts_in(m.reply)
+    if not said:
+        return ''
+    # Of any lesson and of any date the tools returned: whose count it is, the checks of a script that asks about one lesson say.
+    known = {
+        value for call in m.evidence for key, value in _leaves(call.get('result'))
+        if key in SEAT_KEYS and isinstance(value, int) and not isinstance(value, bool)
+    }
+    # A number the customer wrote himself ("יש לי 3 ילדים", "יש לי שניים") is his.
+    known |= {int(value) for value in _numbers_written(m.customer_all) if value == value.to_integral_value()}
+    known |= {number for number, words in _COUNT_WORDS.items() if re.search(rf'(?<![א-ת])(?:{words})(?![א-ת])', m.customer_all)}
+    strange = [number for number in dict.fromkeys(said) if number not in known]
+    if strange:
+        return (
+            f'הבוט כתב מספר של ילדים או של מקומות שלא הגיע מהמערכת: {", ".join(str(number) for number in strange)}. '
+            'כמה רשומים וכמה מקומות נשארו נאמרים רק כפי שהמערכת החזירה לאותו שיעור'
+        )
+    return ''
+
+
+def _asked_lesson(m: Moment, path: str) -> tuple:
+    """(the facts of the class at `path`, the rows the tools returned for the day and hour the script asks about)."""
+    entry = _fact(m.world, path) or {}
+    day, start = entry.get('seat_day') or '', entry.get('seat_start') or ''
+    names = {_norm(course.get('name')) for course in (entry.get('same_question') or [entry])}
+    rows = [
+        row for row in seats_evidence(m.all_calls)
+        if 'enrolled' in row and _norm(row['course']) in names and row['day'] == day and (not start or row['start'] == start)
+    ]
+    return entry, rows
+
+
+SEAT_LABELS = {'enrolled': 'כמה רשומים', 'seats_left': 'כמה מקומות נשארו', 'capacity': 'כמה מקומות יש'}
+
+
+def says_seats(path: str, *whats: str) -> Check:
+    """
+    The answer states the count the tool returned for the lesson that was asked
+    about — the class at `path`, on its `seat_day` — and not another lesson's.
+    With several `whats`, one of them is enough ("קטנה או גדולה?" is answered
+    by how many are registered, or by how many the group takes).
+    """
+    label = ' או '.join(SEAT_LABELS[what] for what in whats)
+
+    def test(m: Moment) -> str:
+        entry, rows = _asked_lesson(m, path)
+        where = f'יום {entry.get("seat_day", "")} {entry.get("seat_start", "")}'.strip()
+        if not rows:
+            return f'ציפינו שהבוט יבדוק במערכת את השיעור של {where} לפני שהוא עונה. הכלים לא החזירו את השיעור הזה בשיחה'
+        row = rows[-1]
+        wanted = []
+        for what in whats:
+            value = row.get(what)
+            if value is None:
+                continue                                    # no limit is set: there is no such number to say
+            wanted.append(f'{SEAT_LABELS[what]}: {value}')
+            if what == 'enrolled' and value == 0 and _NONE_YET.search(m.reply):
+                return ''
+            if what == 'seats_left' and value == 0 and _IS_FULL.search(m.reply):
+                return ''
+            if _says_count(m.reply, int(value)):
+                return ''
+        if not wanted:
+            return ''
+        return f'לפי המערכת, בשיעור של {where} — {", ".join(wanted)}. הבוט ענה: "{_quote(m.reply)}"'
+
+    return Check(f'says_seats:{path}:{"+".join(whats)}', f'הבוט אומר {label} בשיעור שנשאל עליו, כפי שהמערכת החזירה', test)
+
+
+def says_whether_full(path: str) -> Check:
+    """The answer says of the lesson asked about what the tool returned: full, or that there is room — never the other."""
+    def test(m: Moment) -> str:
+        entry, rows = _asked_lesson(m, path)
+        where = f'יום {entry.get("seat_day", "")} {entry.get("seat_start", "")}'.strip()
+        if not rows:
+            return f'ציפינו שהבוט יבדוק במערכת את השיעור של {where} לפני שהוא עונה. הכלים לא החזירו את השיעור הזה בשיחה'
+        row = rows[-1]
+        says_full = any(_IS_FULL.search(statement) and not re.search(r'(?<![א-ת])לא מלא', statement) for statement in statements(m.reply))
+        if row.get('is_full') and not says_full:
+            return f'לפי המערכת השיעור של {where} מלא, והבוט לא אמר זאת: "{_quote(m.reply)}"'
+        if not row.get('is_full') and says_full:
+            return f'לפי המערכת בשיעור של {where} יש מקום, והבוט כתב שהוא מלא: "{_quote(m.reply)}"'
+        return ''
+
+    return Check(f'says_whether_full:{path}', 'הבוט אומר אם השיעור שנשאל עליו מלא, כפי שהמערכת החזירה', test)
+
+
+def only_the_day_asked(path: str) -> Check:
+    """Asked about one day of a class that has several, the answer names no other day of it."""
+    def test(m: Moment) -> str:
+        entry = _fact(m.world, path) or {}
+        asked = entry.get('seat_day') or ''
+        others = {lesson['day'] for course in (entry.get('same_question') or [entry]) for lesson in course.get('lessons') or []} - {asked, ''}
+        named = [day for day in days_in(m.reply) if day in others]
+        if named:
+            return f'הלקוח שאל על יום {asked} בלבד, והבוט ענה גם על {", ".join("יום " + day for day in dict.fromkeys(named))}. עונים על היום שנשאל'
+        return ''
+
+    return Check(f'only_the_day_asked:{path}', 'הבוט עונה על היום שנשאל, ולא על שאר ימי החוג', test)
+
+
+# --- word for word, and never ---------------------------------------------------------------------------------------
+
+def says_exactly(path: str, label: str) -> Check:
+    """The text at `path` of the facts is in the answer letter for letter — a password is not "about right"."""
+    def test(m: Moment) -> str:
+        wanted = str(_fact(m.world, path) or '')
+        if not wanted.strip():
+            return f'במערכת לא רשום {label}, ולכן אי אפשר לבדוק את התשובה'
+        return '' if wanted in m.reply else f'ציפינו ל{label} בדיוק כפי שרשום במערכת. הבוט ענה: "{_quote(m.reply)}"'
+
+    return Check(f'says_exactly:{path}', f'הבוט כותב את {label} בדיוק כפי שרשום במערכת', test)
+
+
+def never_says(path: str, label: str) -> Check:
+    """The text at `path` of the facts is not in the answer — what the script asked for is not this, and must not be answered with it."""
+    def test(m: Moment) -> str:
+        unwanted = str(_fact(m.world, path) or '')
+        return f'הבוט מסר את {label}, ולא זה מה שנשאל' if unwanted.strip() and unwanted in m.reply else ''
+
+    return Check(f'never_says:{path}', f'הבוט לא מוסר את {label}', test)
+
+
+def no_codes() -> Check:
+    """No run of digits or of Latin letters that could be a code: the tools hold none to give."""
+    def test(m: Moment) -> str:
+        text = _plain(m.reply)
+        for literal in letter_for_letter(m.all_calls):
+            text = text.replace(literal, ' ')
+        found = re.findall(r'(?<![\d:.₪])\d{3,}(?![\d:.])|[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{2,}', text)
+        found = [value for value in found if value not in re.sub(r'[-\s]', '', m.knowledge_text) and value not in re.sub(r'[-\s]', '', m.customer_all)]
+        return f'הבוט כתב משהו שנראה כמו קוד: {", ".join(dict.fromkeys(found))}. קוד כניסה לא נמסר' if found else ''
+
+    return Check('no_codes', 'הבוט לא מוסר שום קוד', test)
+
+
+def called_any(tools: tuple, label: str) -> Check:
+    def test(m: Moment) -> str:
+        return '' if any(call.get('name') in tools for call in m.calls) else f'ציפינו שהבוט {label} לפני שהוא עונה. הוא לא עשה את זה'
+
+    return Check(f'called_any:{"+".join(tools)}', f'הבוט {label}', test)
+
+
+def called_about(tool: str, arguments, path: str, label: str) -> Check:
+    """One of this turn's calls to `tool` was given, in one of `arguments`, the word at `path` of the facts — the city the customer corrected to, not the first one."""
+    arguments = (arguments,) if isinstance(arguments, str) else tuple(arguments)
+
+    def test(m: Moment) -> str:
+        wanted = _norm(_fact(m.world, path))
+        for call in m.calls:
+            for argument in arguments:
+                given = _norm((call.get('input') or {}).get(argument))
+                if call.get('name') == tool and wanted and len(given) >= 3 and (wanted in given or given in wanted):
+                    return ''
+        return f'ציפינו שהבוט {label}. הוא לא עשה את זה'
+
+    return Check(f'called_about:{tool}:{"+".join(arguments)}:{path}', f'הבוט {label}', test)
+
+
+def calls_for_each(tool: str, arguments: tuple, minimum: int, label: str) -> Check:
+    """The tool was asked at least `minimum` times in this turn, each with its own values of `arguments` — each child by his own age, not both by one."""
+    def test(m: Moment) -> str:
+        asked = set()
+        for call in m.calls:
+            values = tuple(str((call.get('input') or {}).get(name) or '') for name in arguments)
+            if call.get('name') == tool and any(values):
+                asked.add(values)
+        return '' if len(asked) >= minimum else f'ציפינו שהבוט {label}. הוא בדק {len(asked)} בלבד'
+
+    return Check(f'calls_for_each:{tool}:{"+".join(arguments)}:{minimum}', f'הבוט {label}', test)
+
+
+GENERAL = GENERAL + (
+    Check('grounded_seats', 'כל מספר של רשומים או של מקומות הגיע מהמערכת', _grounded_seats),
+)
+GENERAL_IDS = tuple(check.id for check in GENERAL)
+
+
+def answers_in(language: str) -> Check:
+    """The answer is in the language the script's customer writes in — its letters are there, and no whole sentence of Hebrew."""
+    label = LANGUAGES[language][1]
+
+    def test(m: Moment) -> str:
+        text = _plain(m.reply)
+        for literal in letter_for_letter(m.all_calls):
+            text = text.replace(literal, ' ')
+        return _in_language(text, language)
+
+    return Check(f'answers_in:{language}', f'הבוט עונה {label}, כמו הלקוח', test)
+
+
+def before_any_question(pattern: str, label: str) -> Check:
+    """What `pattern` reads is said before the answer asks anything: the question that was put is answered first, and only then the next one is asked."""
+    def test(m: Moment) -> str:
+        head = m.reply.split('?')[0]
+        return '' if re.search(pattern, head) else f'ציפינו ש{label} לפני שהוא שואל שאלה משלו. הבוט ענה: "{_quote(m.reply)}"'
+
+    return Check(f'before_any_question:{label}', label, test)
+
+
+def says_fewest(path: str) -> Check:
+    """Asked which lesson of the class at `path` has the fewest children, the answer names that lesson's day, with its count — both as the tools returned them."""
+    def test(m: Moment) -> str:
+        entry = _fact(m.world, path) or {}
+        names = {_norm(course.get('name')) for course in (entry.get('same_question') or [entry])}
+        latest = {}
+        for row in seats_evidence(m.all_calls):
+            if 'enrolled' in row and _norm(row['course']) in names and row['day']:
+                latest[(row['course'], row['day'], row['start'])] = row
+        rows = [row for row in latest.values() if isinstance(row.get('enrolled'), int)]
+        if not rows:
+            return 'ציפינו שהבוט יבדוק במערכת כמה רשומים בכל שיעור של החוג לפני שהוא עונה. הכלים לא החזירו את השיעורים בשיחה'
+        least = min(row['enrolled'] for row in rows)
+        for row in rows:
+            if row['enrolled'] != least or row['day'] not in days_in(m.reply) + _ONE_DAY.findall(m.reply):
+                continue
+            if (least == 0 and _NONE_YET.search(m.reply)) or _says_count(m.reply, least):
+                return ''
+        where = ' / '.join(dict.fromkeys(f'יום {row["day"]} {row["start"]}' for row in rows if row['enrolled'] == least))
+        return f'לפי המערכת הכי פחות רשומים ({least}) יש ב{where}. הבוט ענה: "{_quote(m.reply)}"'
+
+    return Check(f'says_fewest:{path}', 'הבוט אומר באיזה שיעור יש הכי פחות ילדים, עם המספר שהמערכת החזירה', test)
+
+
+def only_amounts_of(path: str, *keys: str) -> Check:
+    """Every sum in the answer is one of these sums of the class at `path` — nothing multiplied, added up or estimated."""
+    def test(m: Moment) -> str:
+        allowed = {value for value in (_number(_fact(m.world, f'{path}.{key}')) for key in keys) if value is not None}
+        strange = [value for value in amounts_in(m.reply) if value not in allowed]
+        if strange:
+            return (
+                f'הבוט כתב סכום שהמערכת לא החזירה כמחיר או כדמי רישום של החוג: {", ".join(_shekels(value) for value in dict.fromkeys(strange))}. '
+                'לא מכפילים, לא מחברים ולא מעריכים'
+            )
+        return ''
+
+    return Check(f'only_amounts_of:{path}', 'כל סכום בתשובה הוא סכום של החוג כפי שהוא במערכת — בלי חישוב', test)
+
+
+def office_unless_returned(topic: str, label: str, guess: str = '') -> Check:
+    """
+    A detail of a branch the system may or may not hold (a lift, where parents
+    wait): when no tool returned a word of it, the answer does not assert it
+    either way (`guess` reads such an assertion) — it says the office is being
+    asked, and the conversation is marked for a person. When a tool did return
+    it, the answer is the bot's to give.
+    """
+    def test(m: Moment) -> str:
+        if re.search(topic, _dump(m.all_calls)):
+            return ''
+        found = re.search(guess, m.reply) if guess else None
+        if found:
+            return f'במערכת לא רשום דבר על {label}, והבוט ענה מעצמו: "{_quote(found.group(0))}"'
+        if not m.request_human:
+            return f'במערכת לא רשום דבר על {label}, וציפינו שהבוט יסמן לנציג שיבדוק. הוא לא סימן'
+        if not _MISSING_INFO.search(m.reply):
+            return f'במערכת לא רשום דבר על {label}, וציפינו שהבוט יאמר שהוא בודק מול המשרד. הוא ענה: "{_quote(m.reply)}"'
+        return ''
+
+    return Check(f'office_unless_returned:{label}', f'על {label} — רק מה שרשום במערכת; אחרת בודקים מול המשרד', test)
+
+
+def tomorrow_as_the_system_has_it(path: str) -> Check:
+    """When no trial can be booked tomorrow for the class at `path`, the answer does not say that one can."""
+    def test(m: Moment) -> str:
+        facts = _fact(m.world, f'{path}.trial_dates') or {}
+        line = _said_without_no(m.reply, 'מחר')
+        if not facts.get('tomorrow_open') and line:
+            return f'לפי המערכת אי אפשר להירשם לשיעור ניסיון מחר בחוג הזה, והבוט כתב: "{_quote(line)}"'
+        return ''
+
+    return Check(f'tomorrow_as_the_system_has_it:{path}', '"מחר" נאמר רק כשהאתר מציע שיעור ניסיון מחר', test)
+
+
+def each_day_its_own_seats(path: str) -> Check:
+    """
+    Asked how full a class of several days is, with no day named: the answer
+    asks which day — or gives each day its own count, on its own line. A count
+    written beside a day is that day's, as the tools returned it.
+    """
+    def test(m: Moment) -> str:
+        entry = _fact(m.world, path) or {}
+        names = {_norm(course.get('name')) for course in (entry.get('same_question') or [entry])}
+        by_day: dict = {}
+        for row in seats_evidence(m.all_calls):
+            if 'enrolled' in row and _norm(row['course']) in names and row['day']:
+                by_day.setdefault(row['day'], set()).update(row[key] for key in SEAT_KEYS if isinstance(row.get(key), int))
+        told = set()
+        for statement in statements(m.reply):
+            days = [day for day in dict.fromkeys(days_in(statement)) if day in by_day]
+            counts = seat_counts_in(statement)
+            if not days or not counts:
+                continue
+            told.update(days)
+            allowed = set().union(*(by_day[day] for day in days))
+            wrong = [number for number in counts if number not in allowed]
+            if wrong:
+                return (
+                    f'הבוט כתב "{_quote(statement)}" — המספר {", ".join(str(number) for number in wrong)} אינו של יום {days[0]}. '
+                    'לכל יום המספר שלו, כפי שהמערכת החזירה'
+                )
+        if re.search(r'איזה יום|באיזה יום|על איזה יום|איזה מהימים|איזה מועד|לאיזה יום', m.reply) or len(told) >= 2:
+            return ''
+        return f'לחוג הזה יש כמה ימים, וציפינו שהבוט ישאל על איזה יום מדובר, או ייתן לכל יום את המספר שלו. הוא ענה: "{_quote(m.reply)}"'
+
+    return Check(f'each_day_its_own_seats:{path}', 'בחוג עם כמה ימים: הבוט שואל על איזה יום, או נותן לכל יום את המספר שלו', test)
+
+
+def no_lesson_today_on(path: str, day: str) -> Check:
+    """The script is played on `day`: unless a class at `path` meets on it, the answer does not say that there is a lesson today."""
+    def test(m: Moment) -> str:
+        entry = _fact(m.world, path) or {}
+        days = {lesson['day'] for course in (entry.get('same_question') or [entry]) for lesson in course.get('lessons') or []}
+        line = _said_without_no(m.reply, 'היום')
+        if day not in days and line and affirms(line):
+            return f'היום יום {day}, ולחוג הזה אין שיעור ביום {day}. הבוט כתב: "{_quote(line)}"'
+        return ''
+
+    return Check(f'no_lesson_today_on:{path}:{day}', f'הבוט לא אומר שיש היום שיעור כשהחוג לא מתקיים ביום {day}', test)

@@ -243,6 +243,8 @@ def _play(run: BotEvalRun, scenario, index: int, catalog, deadline: float | None
         previous_reply=run.turns[index - 1]['reply'] if index else '',
         request_human=result.request_human, tags=list(ctx.tool_ctx.tags), world=run.world,
         knowledge_text=_knowledge_text(ctx.items, ctx.hours), office_days=_office_days(), catalog=catalog, allow=turn.allow,
+        # What the model was told about the writer before any tool: evidence as much as a tool's answer is.
+        given=ctx.customer or {},
     )
     verdicts = checks.run(checks.GENERAL + tuple(turn.expect), moment, turn=index + 1)
     return {
