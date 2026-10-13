@@ -20,6 +20,9 @@ from apps.enrollments.duplicate_students import collapse_duplicate_people
 from apps.enrollments.enrollment_counts import (
     counts_toward_capacity,
     paying_enrollment_q,
+    register_kind,
+    ON_REGISTER_STUDENT,
+    ON_REGISTER_TRIAL,
 )
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
@@ -268,6 +271,8 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'child_id': str(e.child.id),
                 'child_name': e.child.full_name,
                 'child_status': e.child.status,
+                # student / trial / other — the rule every count of this register uses.
+                'register_kind': register_kind(e, occ_date),
                 'child_phone': child_contact_phone(e.child),
                 'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
                 'is_trial': is_trial,
@@ -367,11 +372,19 @@ class LessonViewSet(viewsets.ModelViewSet):
             for enr in LessonEnrollment.objects.filter(
                 lesson_id__in=lesson_ids,
                 status='active',
-            ).select_related('child').only(
-                'lesson', 'child', 'status', 'trial_lesson_date', 'ghost_visible_until',
+            ).select_related('child', 'child__family').only(
+                'lesson', 'child', 'status', 'trial_lesson_date', 'ghost_visible_until', 'created_at',
                 'child__status', 'child__created_at',
+                # What tells two cards of one child apart from two children (person_match).
+                'child__first_name', 'child__last_name', 'child__phone_number',
+                'child__family', 'child__family__phone',
             ):
                 enrollments_by_lesson[enr.lesson_id].append(enr)
+            # One person, one row — the way the register itself folds them. Counting
+            # the rows as they are showed a child registered under two cards twice
+            # on the calendar and once on the register it opens.
+            for lesson_id, rows in enrollments_by_lesson.items():
+                enrollments_by_lesson[lesson_id] = collapse_duplicate_people(rows)
 
             marked_map = defaultdict(set)
             for rec in LessonAttendance.objects.filter(
@@ -402,8 +415,13 @@ class LessonViewSet(viewsets.ModelViewSet):
             def occurrence_counts(lesson_id, occurrence_date, marked):
                 """
                 enrollment_count, student_count, active_student_count,
-                trial_student_count, external_student_count and whether the
-                register is finished, in one pass over the roster.
+                trial_student_count, external_student_count, other_student_count
+                and whether the register is finished, in one pass over the roster.
+
+                active_student_count is the number of students — register_kind's
+                'student', plus the municipality's children — and it is the one
+                figure the calendar, the instructor's day and the lesson window
+                all show. student_count is everyone on the register that day.
 
                 marked is None when the occurrence cannot be complete (cancelled,
                 or no date at all), otherwise the children already marked on it.
@@ -415,6 +433,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                 roster = 0
                 actives = 0
                 trials = 0
+                others = 0
                 complete = marked is not None
                 for enr in enrollments_by_lesson.get(lesson_id, ()):
                     if counts_toward_capacity(enr, occurrence_date=occurrence_date):
@@ -424,10 +443,13 @@ class LessonViewSet(viewsets.ModelViewSet):
                     roster += 1
                     # By the row, like the register's own tag: a student of
                     # another course on a trial here is a trial here.
-                    if enr.trial_lesson_date == occurrence_date:
+                    kind = register_kind(enr, occurrence_date)
+                    if kind == ON_REGISTER_TRIAL:
                         trials += 1
-                    else:
+                    elif kind == ON_REGISTER_STUDENT:
                         actives += 1
+                    else:
+                        others += 1
                     if complete and enr.child_id not in marked:
                         complete = False
 
@@ -442,7 +464,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                     if complete and student.id not in ext_marked:
                         complete = False
 
-                return capacity, roster, actives, trials, externals, complete and roster > 0
+                return capacity, roster, actives, trials, externals, others, complete and roster > 0
 
             expanded = []
             for lesson in lessons_list:
@@ -459,6 +481,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                         data['active_student_count'],
                         data['trial_student_count'],
                         data['external_student_count'],
+                        data['other_student_count'],
                         data['attendance_complete'],
                     ) = occurrence_counts(lesson.id, occ, marked)
                     expanded.append(data)
@@ -485,6 +508,7 @@ class LessonViewSet(viewsets.ModelViewSet):
                         data['active_student_count'],
                         data['trial_student_count'],
                         data['external_student_count'],
+                        data['other_student_count'],
                         attendance_done,
                     ) = occurrence_counts(lesson.id, occ, marked)
                     if c:

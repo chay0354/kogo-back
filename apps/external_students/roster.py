@@ -63,6 +63,8 @@ def external_roster_rows(students: Iterable[ExternalStudent]) -> list[dict]:
             'child_id': None,
             'child_name': s.full_name,
             'child_status': EXTERNAL_STUDENT_STATUS,
+            # A municipality child is a student of the lesson (enrollment_counts.register_kind).
+            'register_kind': 'student',
             'child_phone': (s.phone or '').strip(),
             'trial_lesson_date': None,
             'is_trial': False,
