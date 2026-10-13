@@ -226,6 +226,19 @@ class LessonViewSet(viewsets.ModelViewSet):
 
             enrollments = enrollments + visible_ghost_enrollments(lesson, occ_date, enrollments)
 
+        # A child who cancelled still comes to the end of the month they paid
+        # for (enrollments/leaving.py); their place is closed, so the query
+        # above does not hold them.
+        leaving_ids = set()
+        if occ_date:
+            from apps.enrollments.leaving import leaving_enrollments, leaving_on
+
+            on_the_register = {e.child_id for e in enrollments}
+            for row in leaving_on(leaving_enrollments([lesson.id], occ_date, occ_date).get(lesson.id), occ_date):
+                if row.child_id not in on_the_register:
+                    enrollments.append(row)
+                    leaving_ids.add(row.id)
+
         # Both roster fields the serializer builds are replaced further down with
         # the per-occurrence versions. Handing it the rows already read keeps it
         # from re-reading every attendance row this lesson has ever had — on a
@@ -272,7 +285,9 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'child_name': e.child.full_name,
                 'child_status': e.child.status,
                 # student / trial / other — the rule every count of this register uses.
-                'register_kind': register_kind(e, occ_date),
+                'register_kind': register_kind(e, occ_date, leaving=e.id in leaving_ids),
+                # Cancelled, and here until the month they paid for is over.
+                'leaving': e.id in leaving_ids,
                 'child_phone': child_contact_phone(e.child),
                 'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
                 'is_trial': is_trial,
@@ -386,6 +401,12 @@ class LessonViewSet(viewsets.ModelViewSet):
             for lesson_id, rows in enrollments_by_lesson.items():
                 enrollments_by_lesson[lesson_id] = collapse_duplicate_people(rows)
 
+            # Children who cancelled and still come to the end of the month they
+            # paid for — on the register, so in the count (enrollments/leaving.py).
+            from apps.enrollments.leaving import leaving_enrollments, leaving_on
+
+            leaving_by_lesson = leaving_enrollments(lesson_ids, start, end)
+
             marked_map = defaultdict(set)
             for rec in LessonAttendance.objects.filter(
                 lesson_id__in=lesson_ids,
@@ -418,10 +439,12 @@ class LessonViewSet(viewsets.ModelViewSet):
                 trial_student_count, external_student_count, other_student_count
                 and whether the register is finished, in one pass over the roster.
 
-                active_student_count is the number of students — register_kind's
-                'student', plus the municipality's children — and it is the one
-                figure the calendar, the instructor's day and the lesson window
-                all show. student_count is everyone on the register that day.
+                active_student_count is the number registered — register_kind's
+                'student' (a regular place; פעיל, בעיה באשראי or בתהליך רישום;
+                and whoever cancelled but still comes this month), plus the
+                municipality's children. It is the one figure the calendar, the
+                instructor's day and the lesson window all show. student_count
+                is everyone on the register that day.
 
                 marked is None when the occurrence cannot be complete (cancelled,
                 or no date at all), otherwise the children already marked on it.
@@ -450,6 +473,15 @@ class LessonViewSet(viewsets.ModelViewSet):
                         actives += 1
                     else:
                         others += 1
+                    if complete and enr.child_id not in marked:
+                        complete = False
+
+                seen = {enr.child_id for enr in enrollments_by_lesson.get(lesson_id, ())}
+                for enr in leaving_on(leaving_by_lesson.get(lesson_id), occurrence_date):
+                    if enr.child_id in seen:
+                        continue
+                    roster += 1
+                    actives += 1
                     if complete and enr.child_id not in marked:
                         complete = False
 
