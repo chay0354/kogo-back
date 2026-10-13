@@ -358,8 +358,8 @@ def all_counts(params) -> dict:
 # Somebody who asked and did not register: nobody has the phone, somebody who
 # never paid, a family that is there with nothing running (in_system: an old
 # customer asking again is a lead), and a contact the matching has not reached
-# yet ('' — the cron sleeps at night, and a lead who wrote at 23:00 is still a
-# lead at 8:00). Only a paying child, from before or after the message, takes
+# yet ('' — it takes the cron a few minutes, and a lead who has just written is
+# a lead meanwhile). Only a paying child, from before or after the message, takes
 # a person off the list — "מי שנרשם הוא לא ליד".
 LEAD_OUTCOMES = (
     OUTCOME_NOT_FOUND, OUTCOME_PENDING, OUTCOME_SIGNUP_DECLINED, OUTCOME_TRIAL_ONLY, OUTCOME_TRIAL_UPCOMING,

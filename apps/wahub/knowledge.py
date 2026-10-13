@@ -631,6 +631,10 @@ def _parse_time(value) -> time | None:
     return time(int(hours), int(minutes))
 
 
+# What a closed office says when nobody filed a message for the day: our own words, not the owner's.
+DEFAULT_CLOSED_MESSAGE = 'המשרד סגור כרגע'
+
+
 def office_hours_now(now=None) -> dict:
     """
     GET knowledge/office-hours/now/ — by Israel's clock. A special day of the
@@ -672,7 +676,7 @@ def office_hours_now(now=None) -> dict:
         if not is_open:
             closed_message = (
                 ((special.data or {}).get('message') if special is not None else '')
-                or today_row['message'] or default_message or 'המשרד סגור כרגע'
+                or today_row['message'] or default_message or DEFAULT_CLOSED_MESSAGE
             )
     return {
         'now': now.isoformat(),

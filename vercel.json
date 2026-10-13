@@ -42,7 +42,7 @@
     },
     {
       "path": "/api/v1/wahub/cron/tick/",
-      "schedule": "*/5 4-20 * * *"
+      "schedule": "*/5 * * * *"
     }
   ]
 }
