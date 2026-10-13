@@ -293,6 +293,18 @@ class SharperChecksTests(SimpleTestCase):
         self.assertNotIn('list_of_four', self.failed(facts, customer=[four], customer_all=four, customer_now=four))
         self.assertIn('5 פריטים', self.failed(facts)['list_of_four'])
 
+    def test_a_link_on_its_own_line_is_not_a_line_of_talk(self):
+        two = 'אפשר להגיע השבוע לשיעור ניסיון? ומה העלות החודשית?'
+        said = dict(customer=[two], customer_all=two, customer_now=two)
+        talk = ['כן, אפשר להגיע ביום רביעי *21.10* בשעה 16:00', 'העלות החודשית היא *₪270*', 'ביום ראשון השיעור ב-16:00', 'נרשמים מראש כאן:']
+        link = '🔗 https://cogomelo.co.il/הרשמה-לחוגים-שיעור-ניסיון/'
+        self.assertNotIn('short', self.failed('\n'.join(talk + [link]), **said))
+        self.assertIn('short', self.failed('\n'.join(talk + ['ויש גם יום רביעי ב-16:00', link]), **said))
+
+    def test_yes_to_this_or_that_chooses_neither(self):
+        for words in ('לא בוחרים במקומו', 'נותנים בקצרה את שניהם'):
+            self.assertIn(words, shadow.SYSTEM_TASK)
+
     def test_a_parent_in_distress_is_a_sensitive_moment(self):
         for words in ('מתוך מצוקה של עצמו', 'request_human באותה תשובה', 'בלי להציע חוג'):
             self.assertIn(words, shadow.SYSTEM_TASK)

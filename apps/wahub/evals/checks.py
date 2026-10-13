@@ -803,7 +803,9 @@ def questions_asked(messages) -> int:
 
 def _short(m: Moment) -> str:
     lines = [line for line in m.reply.split('\n') if line.strip()]
-    prose = [line for line in lines if not line.lstrip().startswith('🔹')]
+    # A link stands on a line of its own, after 🔗 (the owner's rule of form): that line is the link, not one more
+    # line of talk (the run of 14.10.2026 — two questions answered in four lines and a link, failed as five).
+    prose = [line for line in lines if not line.lstrip().startswith(('🔹', '🔗'))]
     limit, most = (9 if _word_for_word(m) else 4), 9
     # Two questions in a message are both answered (X5), a line or two each: the 1–3 lines are for one question.
     asked = questions_asked(m.customer)
