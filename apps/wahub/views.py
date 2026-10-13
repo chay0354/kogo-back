@@ -598,6 +598,7 @@ class StatusView(APIView):
 
     def get(self, request):
         from apps.core.scoping import integration_credential
+        from apps.wahub import holiday_flows
 
         now = timezone.now()
         stored = _stored_inbound_key()
@@ -620,6 +621,8 @@ class StatusView(APIView):
             'simulate_send': sending.simulate_send(),
             # The contacts the NEW bot answers for real while the switch is off (docs/WAHUB-CONTRACT-LIVE-TEST.md).
             'live_test_contacts': Contact.objects.filter(live_test=True).count(),
+            # The holidays boards the bot sends (holiday_flows.py): which of their automations ManyChat has, by name.
+            'holiday_flows': holiday_flows.status(now),
             'last_inbound_at': contacts['last_inbound'],
             'contacts_total': contacts['total'],
             'messages_last_24h': Message.objects.filter(sent_at__gte=now - timedelta(hours=24)).count(),

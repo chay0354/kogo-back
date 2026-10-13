@@ -29,6 +29,14 @@ What it holds is what the scripts need the system to hold (world.py):
     פתח תקווה    two branches of ours — a city where the branch is asked first.
                  Neither card holds a network.
     רמת גן       an external branch, run by the municipality.
+    יהוד         a branch of ours with no class yet — there for its holidays board.
+
+The holidays boards (holiday_flows.py): ManyChat is "heard" to have two of the
+four automations — the main one, which the two branches of פתח תקווה are on,
+and יהוד's, under a name spelled the way a person might ("Kogo-Holidays-Yahud").
+The branch in ראש העין is on nobody's list, as a new branch would be, and so is
+the municipal one. The card of the branch in ראש העין names its manager — an
+invented name.
 """
 from __future__ import annotations
 
@@ -63,6 +71,12 @@ def _trial_dates_that_cannot_be_taken(course, branch) -> None:
 
 
 WIFI_NAME, WIFI_CODE = 'Studio-Demo-5G', 'Dance*2026'
+MANAGER_NAME = 'גלית בדויה'
+# What ManyChat is "heard" to have, as lead_templates.manychat_flows hands it over: [{id, name}].
+HOLIDAY_FLOWS = (
+    {'id': 'content-demo-holidays', 'name': 'kogo_Holidays'},
+    {'id': 'content-demo-holidays-yahud', 'name': 'Kogo-Holidays-Yahud'},
+)
 
 
 def _children_who_pay(lesson, branch, count: int, tag: str) -> None:
@@ -80,7 +94,7 @@ def build() -> dict:
     """Creates the catalogue and, when the bot has no knowledge yet, files the knowledge. Returns the main rows."""
     from apps.core.tests.test_fixtures import TestDataFactory
     from apps.enrollments.models import TrialRegistrationPolicy
-    from apps.wahub import knowledge_import
+    from apps.wahub import holiday_flows, knowledge_import
     from apps.wahub.models import KnowledgeItem
 
     TrialRegistrationPolicy.current()           # made on first use; here, so that the tools find it
@@ -90,6 +104,7 @@ def build() -> dict:
     stage = TestDataFactory.create_branch(
         name='סטודיו הדגמה ראש העין', city=TestDataFactory.create_city('ראש העין'), address='רחוב הדוגמה 8, ראש העין',
         phone='03-5550000', arrival_directions='חניה מאחורי הבניין, קומה 2', wifi_name=WIFI_NAME, wifi_code=WIFI_CODE,
+        manager_name=MANAGER_NAME,
     )
     capoeira = TestDataFactory.create_course_type('קפוארה')
     capoeira.description = 'אומנות לחימה ברזילאית עם מוזיקה'
@@ -139,6 +154,8 @@ def build() -> dict:
         name='רמת גן - הדגמה', city=TestDataFactory.create_city('רמת גן'), is_external=True,
         external_link='https://ramat-gan.example/signup',
     )
+    TestDataFactory.create_branch(name='יהוד - הדגמה', city=TestDataFactory.create_city('יהוד'), address='רחוב הדוגמה 3, יהוד', phone='03-5550002')
+    holiday_flows.remember(list(HOLIDAY_FLOWS))
     _trial_dates_that_cannot_be_taken(older_capoeira, stage)
     return {
         'stage': stage, 'external': external, 'young_capoeira': young_capoeira, 'older_capoeira': older_capoeira,

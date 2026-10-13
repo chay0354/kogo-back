@@ -18,6 +18,7 @@ Read only. Nothing here writes.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time, timedelta
 
 from django.utils import timezone
@@ -188,9 +189,13 @@ def _clocks(now) -> dict:
     }
 
 
+# "🔹 מינץ — שוקיו, 050-0000000": a line of the fact about the summer camps.
+_CAMP_LINE = re.compile(r'🔹\s*([^—\n]+?)\s*—\s*([^,\n]+),\s*(0\d[\d-]{7,10})')
+
+
 def _knowledge_words(words: dict, facts: dict, missing: dict, today: date) -> None:
     from apps.wahub import knowledge
-    from apps.wahub.models import KIND_CONTACT, KIND_LINK, KIND_PHRASING
+    from apps.wahub.models import KIND_CONTACT, KIND_FACT, KIND_LINK, KIND_PHRASING
 
     items = knowledge.relevant_items(today=today)
     links = {item.key: (item.data or {}).get('url') or '' for item in items if item.kind == KIND_LINK and item.key}
@@ -203,6 +208,21 @@ def _knowledge_words(words: dict, facts: dict, missing: dict, today: date) -> No
     for key in ('registration', 'cancellation_form'):
         if not links.get(key):
             missing[f'link_{key}'] = f'בידע הבוט אין קישור "{key}"'
+    # The summer camps (the owner, 13.10.2026): a line a branch in the fact — the branch, who runs the camp, the number to
+    # call. Read from the knowledge as it stands now, so that nothing of it is written in a script.
+    camp = next((item for item in items if item.kind == KIND_FACT and 'קייטנה' in (item.title or '')), None)
+    rows = [
+        {'branch': branch.strip(), 'who': who.strip(), 'phone': phone.strip()}
+        for branch, who, phone in _CAMP_LINE.findall(camp.body if camp else '')
+    ]
+    facts['camp'] = {'rows': rows}
+    plain = [row for row in rows if '(' not in row['branch']]
+    if plain and len(rows) > 1:
+        asked = plain[0]
+        facts['camp'].update(asked=asked, other=next(row for row in rows if row is not asked))
+        words['camp_place'] = asked['branch']
+    else:
+        missing['camp_place'] = missing['no_camp_place'] = 'בידע הבוט אין עובדה על קייטנה בקיץ עם שורה לכל סניף'
 
 
 def build(now=None) -> dict:
@@ -565,6 +585,61 @@ def build(now=None) -> dict:
         facts['short_city'] = {'city': short[0], 'word': short[1], 'several': len(per_city[short[0]]) > 1}
     else:
         missing['short_city'] = 'אין לנו סניף בעיר שנוהגים לקצר את שמה'
+
+    # --- the owner's answers of 13.10.2026 --------------------------------------------------------------------
+    def as_a_parent_says(branch) -> str:
+        """The city, when the branch is the only one the system has there; its own name otherwise."""
+        alone = branch.city_id and sum(1 for row in branches if row.city_id == branch.city_id) == 1
+        return branch.city.name if alone else branch.name
+
+    # The holidays board of a branch (holiday_flows.py), as the bot's own tool answers for the word a parent would
+    # write: a branch on the main board, one on a board of its own, and one that has no board to send.
+    from apps.wahub import holiday_flows
+
+    holiday: dict = {}
+    # A branch of ours before a municipal one: of a branch the municipality runs the bot says "check with them".
+    for row in sorted(branches, key=lambda branch: branch.is_external):
+        place = as_a_parent_says(row)
+        answer = shadow_tools.holiday_dates(tool_ctx, branch=place)
+        if answer.get('need') or not answer.get('branches'):
+            continue
+        entry = {'place': place, 'branch': row.name, 'flow': answer.get('flow_name') or ''}
+        if answer.get('found'):
+            holiday.setdefault('main' if entry['flow'] == holiday_flows.BOARDS[0].flow else 'other', entry)
+        else:
+            holiday.setdefault('none', {**entry, 'flow': ''})
+    stage_board = shadow_tools.holiday_dates(tool_ctx, branch=stage.name)
+    holiday['stage'] = {'branch': stage.name, 'flow': stage_board.get('flow_name') if stage_board.get('found') else ''}
+    facts['holiday'] = holiday
+    for key, word, reason in (
+        ('main', 'holiday_place', f'אין סניף שלוח החופשות שלו ({holiday_flows.BOARDS[0].flow}) נמצא ב-ManyChat'),
+        ('other', 'holiday_other_place', 'אין סניף עם לוח חופשות משלו (יהוד, אור יהודה, מרכז זמיר) שנמצא ב-ManyChat'),
+        ('none', 'holiday_none_place', 'לכל הסניפים יש לוח חופשות מחובר — אין סניף לשאול עליו בלי'),
+    ):
+        if key in holiday:
+            words[word] = holiday[key]['place']
+        else:
+            missing[word] = reason
+
+    # A place the fact about the summer camps has no line for: "nowhere else, for now".
+    if 'camp_place' in words:
+        named_in_the_fact = [part.strip() for row in facts['camp']['rows'] for part in re.split(r'[()]', row['branch']) if part.strip()]
+        elsewhere = next((
+            row for row in branches
+            if not any(part in f'{row.name} {row.city.name if row.city_id else ""}' for part in named_in_the_fact)
+        ), None)
+        if elsewhere is not None:
+            words['no_camp_place'] = as_a_parent_says(elsewhere)
+        else:
+            missing['no_camp_place'] = 'לכל הסניפים יש שורה בעובדה על הקייטנה — אין סניף לשאול עליו בלי'
+
+    # A branch of ours whose card names its manager.
+    managed = next((row for row in with_courses if (row.manager_name or '').strip()), None)
+    if managed is not None:
+        words['manager_place'] = named(managed)
+        facts['manager'] = {'branch': managed.name, 'name': managed.manager_name.strip()}
+    else:
+        missing['manager_place'] = 'לאף סניף שלנו לא רשום במערכת שם של מנהל הסניף'
 
     facts['cities'] = sorted({row.city.name for row in branches if row.city_id})
     return {'words': words, 'facts': facts, 'missing': missing, 'clocks': clocks}

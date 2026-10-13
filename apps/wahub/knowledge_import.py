@@ -30,8 +30,9 @@ from apps.wahub.models import (
     Tag,
 )
 
-# What a revision may rewrite: the words. Never the scope, the dates or whether the record is on.
-REVISED_COLUMNS = ('body', 'example_good', 'example_bad', 'when_to_say')
+# What a revision may rewrite: the words — the title among them, for a record whose rewrite gave it a new one
+# (knowledge_seed.R, `filed_as`). Never the scope, the dates or whether the record is on.
+REVISED_COLUMNS = ('title', 'body', 'example_good', 'example_bad', 'when_to_say')
 
 # kogo-system/docs/bot-knowledge — beside the main checkout (kogo-back/) or two levels up from a worktree (worktrees/<name>/).
 DOCS_DIR_CANDIDATES = tuple(

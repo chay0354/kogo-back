@@ -13,6 +13,12 @@ demo conversation uses (shadow.answer_now) and sends it through ManyChat
 sender "bot", `new_bot=True` and the status the send got; the timings are
 written in the contact's journal so the delay can be measured.
 
+An answer may be followed by an automation — the holidays board of a branch
+(holiday_flows.py): what the answer's own tool call named (shadow.flows_to_send)
+leaves through ManyChat right after the text (sending.send_new_bot_flow), once,
+and only after a text that did leave. One that does not leave is said as a text
+that did not: in the journal, with the reason, and "needs a person".
+
 One answer for a burst: people write three short messages seven seconds apart.
 The computation starts early (SETTLE seconds of quiet) so a single message is
 not kept waiting, but nothing leaves before he has been quiet for QUIET
@@ -86,6 +92,7 @@ DEFAULT_MAX_TOKENS = 4000
 
 MODEL_FAILED_REASON = 'הבוט החדש לא ענה (בדיקה חיה)'
 SEND_FAILED_REASON = 'השליחה ללקוח נכשלה (בדיקה חיה)'
+FLOW_FAILED_REASON = 'האוטומציה שאחרי התשובה לא נשלחה (בדיקה חיה)'
 NO_KEY = 'אין בשרת מפתח Anthropic — אין בוט חדש שיענה'
 # How the journal line of an answer that went out begins (the cron's look tells it from a line about a failure).
 SENT_LINE = 'תשובה חיה נשלחה'
@@ -521,6 +528,9 @@ def _answer(contact: Contact, held: dict) -> dict:
     if proposal.request_human:
         _needs_human(contact.pk, proposal.request_human_reason or 'הבוט החדש ביקש נציג')
 
+    # What the answer said follows it (the holidays board): only after a text that left.
+    flows = _send_flows(contact, proposal) if delivered else []
+
     text = (
         f'{SENT_LINE if delivered else "תשובה חיה נכשלה"}: התקבלה {_clock(received)} → חישוב {_clock(started)} (+{_secs(received, started)}) → '
         f'{"נשלחה" if delivered else "ניסיון שליחה"} {_clock(sent)} (+{_secs(started, sent)}, מהם Claude {proposal.took_ms / 1000:.1f} שנ\') · '
@@ -530,6 +540,9 @@ def _answer(contact: Contact, held: dict) -> dict:
         text += f' · חושב מחדש {restarts} פעמים (הגיעו עוד הודעות לפני השליחה)'
     if message.error:
         text += f' — {message.error}'
+    for flow in flows:
+        # In the same line: it opens with SENT_LINE, and the cron's look reads a line that does not as a failure of the answer.
+        text += f' · אחריה נשלחה האוטומציה {flow["name"]}' if flow['sent'] else f' · האוטומציה {flow["name"]} לא נשלחה — {flow["error"]}'
     state.log_event(contact.pk, EVENT_LIVE_TEST, text)
     logger.info('wahub live test: contact %s — %s', contact.pk, text)
     return {
@@ -538,7 +551,31 @@ def _answer(contact: Contact, held: dict) -> dict:
         'shadow_id': proposal.id,
         'seconds': round((sent - received).total_seconds(), 1),
         'restarts': restarts,
+        **({'flows': flows} if flows else {}),
     }
+
+
+def _send_flows(contact: Contact, proposal) -> list:
+    """
+    The automations the answer sends after its text (shadow.flows_to_send),
+    each once, through the same doors as every send. Returns what happened to
+    each: [{name, sent, message_id, error}]. One that did not leave marks the
+    contact "needs a person" — the customer was told a board is on its way.
+    Never raises: the text has left already, and its line must still be written.
+    """
+    outcomes = []
+    for flow in shadow.flows_to_send(proposal):
+        shown = f'{flow["label"] or "אוטומציה"} ({flow["name"]})'
+        try:
+            message = sending.send_new_bot_flow(contact, flow['ns'], shown)
+            sent, error, message_id = message.status in DELIVERED_STATUSES, message.error, message.id
+        except Exception:
+            logger.exception('wahub live test: the automation %s for contact %s failed unexpectedly', flow['name'], contact.pk)
+            sent, error, message_id = False, UNEXPECTED, None
+        if not sent:
+            _needs_human(contact.pk, f'{FLOW_FAILED_REASON}: {flow["name"]} — {error}')
+        outcomes.append({'name': flow['name'], 'sent': sent, 'message_id': message_id, 'error': error})
+    return outcomes
 
 
 def _last_received(contact: Contact):

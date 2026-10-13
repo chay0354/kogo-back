@@ -257,6 +257,21 @@ def send_new_bot_reply(contact: Contact, text: str) -> Message:
     )
 
 
+def send_new_bot_flow(contact: Contact, flow_ns: str, name: str) -> Message:
+    """
+    An automation the NEW bot's answer sends after its text — the holidays
+    board of a branch (holiday_flows.py) — to a LIVE-TEST contact, through
+    `send_flow`: the same way out as every template, with the same doors (a
+    demo contact gets nothing, the switch or the contact's own live test
+    decides, a developer's machine only records). Refuses every other contact,
+    as `send_new_bot_reply` does. Kept as the bot's line, `new_bot=True`, with
+    the status the send got; `name` is what the conversation shows.
+    """
+    if contact.is_demo or not contact.live_test:
+        raise ValueError('the new bot sends only to a live-test contact')
+    return send_flow(contact, flow_ns, (name or flow_ns).strip()[:MAX_TEXT_CHARS], None, sender=SENDER_BOT, new_bot=True)
+
+
 def send_lead_followup(contact: Contact, text: str) -> Message:
     """
     The bot coming back to a lead by itself (lead_followups.py), as free text —

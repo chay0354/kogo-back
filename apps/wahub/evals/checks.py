@@ -161,6 +161,7 @@ class Moment:
     catalog: object = None
     allow: tuple = ()                                   # the situational phrasings this turn may use
     given: dict = field(default_factory=dict)           # the writer's card, as the context handed it to the model with the question
+    customer_before: list = field(default_factory=list)  # the customer's earlier turns in the conversation on the table, one text a turn
 
     @property
     def all_calls(self) -> list:
@@ -194,11 +195,57 @@ def customers_language(m: 'Moment') -> str:
     return language_of(m.customer_now or now)
 
 
+# The customer asks for his own language, or writes that he does not read Hebrew (the owner, 13.10.2026): then the
+# answer is his language's from the first one. A language named in the request is that language; "I don't speak
+# Hebrew" asks for the language it is written in.
+_IN_HEBREW_ASKS = r'(?:אפשר|תענ[וי]|לענות|תכתב[וי]|לכתוב|לדבר|תדבר[וי]|לעבור)[^\n]{0,15}'
+_ASKS_FOR_A_LANGUAGE = (
+    ('latin', re.compile(rf'english,? please|(?:answer|reply|write|speak|talk)[^\n]{{0,12}}english|{_IN_HEBREW_ASKS}אנגלית|אנגלית בבקשה', re.I)),
+    ('cyrillic', re.compile(rf'по[- ]русски|на русском|{_IN_HEBREW_ASKS}רוסית|רוסית בבקשה', re.I)),
+    ('arabic', re.compile(rf'بالعربي|باللغة العربية|{_IN_HEBREW_ASKS}ערבית|ערבית בבקשה')),
+)
+_NO_HEBREW = re.compile(
+    r"(?:don'?t|do not|can'?t|cannot|not) (?:speak|read|understand|know)(?: any)? hebrew|no hebrew"
+    r'|не (?:говорю|понимаю|читаю)[^\n]{0,15}иврит|لا (?:أتكلم|اتكلم|أفهم|افهم|أقرأ|اقرا)[^\n]{0,10}العبرية'
+    r'|לא (?:מדבר|מדברת|מבין|מבינה|קורא|קוראת|יודע|יודעת) עברית', re.I,
+)
+
+
+def asked_language(text: str) -> str:
+    """The language the customer asked to be answered in — 'latin', 'cyrillic', 'arabic' — or '' when he asked for none."""
+    plain = _AD_LINE.sub(' ', text or '')
+    for name, pattern in _ASKS_FOR_A_LANGUAGE:
+        if pattern.search(plain):
+            return name
+    return language_of(plain) if _NO_HEBREW.search(plain) else ''
+
+
+def owed_language(m: 'Moment') -> str:
+    """
+    The language an answer is owed in when it is not Hebrew (the owner,
+    13.10.2026): Hebrew is the default — also for whoever opens in another
+    language. The customer's own is owed once he asked for it, or wrote that he
+    does not read Hebrew; and once he goes on in it after an answer — this is
+    his second turn in a row in that language. Two messages of one burst are
+    one turn: nobody has answered him in Hebrew between them.
+    """
+    asked = asked_language(m.customer_now or ' '.join(m.customer))
+    if asked:
+        return asked
+    writes = customers_language(m)
+    now = _AD_LINE.sub(' ', _URL.sub(' ', ' '.join(m.customer)))
+    if writes and re.search(r'[א-ת]{2,}', now) and not LANGUAGES[writes][0].search(now):
+        return ''                     # a short line of Hebrew, after his own language: he is back to Hebrew
+    if writes and m.customer_before and language_of(m.customer_before[-1]) == writes:
+        return writes
+    return ''
+
+
 def asks_it(what: str, m: 'Moment') -> bool:
     """The answer asks this — in Hebrew, or in the customer's own language when he writes in another."""
     if re.search(ASKS[what][0], m.reply):
         return True
-    return bool(customers_language(m)) and re.search(ASKS_ELSEWHERE[what], m.reply, re.I) is not None
+    return bool(customers_language(m) or owed_language(m)) and re.search(ASKS_ELSEWHERE[what], m.reply, re.I) is not None
 
 
 @dataclass(frozen=True)
@@ -706,32 +753,50 @@ def letter_for_letter(calls: list) -> list:
     return sorted({value for value in found if value.strip()}, key=len, reverse=True)
 
 
+OWED = 'לשפה של הלקוח עוברים כשהוא ממשיך לכתוב בה אחרי תשובה בעברית, או כשביקש — ומאז עונים בה'
+_FOREIGN_WORD = re.compile(r'[A-Za-z]{2,}|[А-Яа-яЁё]{2,}|[\u0600-\u06FF]{2,}')
+
+
 def _in_language(reply: str, language: str) -> str:
     """Why an answer is not in `language` (a key of LANGUAGES): it holds none of its letters, or a whole line of Hebrew."""
     pattern, label = LANGUAGES[language]
     if len(pattern.findall(reply)) < 6:
-        return f'הלקוח כותב {label}, והבוט ענה בעברית: "{_quote(reply)}". עונים בשפה שבה הלקוח כותב'
+        return f'הלקוח כותב {label}, והבוט ענה בעברית: "{_quote(reply)}". {OWED}'
     for line in reply.split('\n'):
         # The names of a class and of a branch stay as the system has them; a line of five Hebrew words and nothing else is a sentence.
         if len(re.findall(r'[א-ת]{2,}', line)) >= 5 and not pattern.search(line):
-            return f'הלקוח כותב {label}, ובתשובה יש משפט שלם בעברית: "{_quote(line)}". עונים בשפה שבה הלקוח כותב'
+            return f'הלקוח כותב {label}, ובתשובה יש משפט שלם בעברית: "{_quote(line)}". {OWED}'
     return ''
+
+
+def _in_hebrew(reply: str, writes: str = '') -> str:
+    """Why an answer is not in Hebrew: a word in other letters. `writes` — the language the customer wrote in, when it was not Hebrew."""
+    found = _FOREIGN_WORD.findall(reply)
+    if not found:
+        return ''
+    words = ', '.join(dict.fromkeys(found))
+    if writes:
+        return (
+            f'הלקוח כתב {LANGUAGES[writes][1]} בפעם הראשונה ולא ביקש לעבור לשפה שלו, והבוט כתב באותיות לועזיות: {words}. '
+            'ברירת המחדל עברית: התשובה הראשונה בעברית, קצרה ופשוטה'
+        )
+    return f'הבוט כתב באותיות לועזיות: {words}. ללקוח שכותב בעברית עונים בעברית בלבד'
 
 
 def _hebrew_only(m: Moment) -> str:
     """
-    The customer's language: Hebrew — and then no Latin letters, the vendor's
-    rule — to whoever writes Hebrew; the customer's own to whoever writes in
-    another. A network's name and its password are nobody's language.
+    Hebrew — and then no letters of another language, the vendor's rule — to
+    whoever writes Hebrew, and to whoever opens in another language (the
+    owner, 13.10.2026); the customer's own once it is owed (`owed_language`).
+    A network's name and its password are nobody's language.
     """
     text = _plain(m.reply)
     for literal in letter_for_letter(m.all_calls):
         text = text.replace(literal, ' ')
-    language = customers_language(m)
+    language = owed_language(m)
     if language:
         return _in_language(text, language)
-    found = _LATIN.findall(text)
-    return f'הבוט כתב באותיות לועזיות: {", ".join(dict.fromkeys(found))}. ללקוח שכותב בעברית עונים בעברית בלבד' if found else ''
+    return _in_hebrew(text, customers_language(m))
 
 
 def _word_for_word(m: Moment) -> bool:
@@ -866,7 +931,7 @@ GENERAL = (
     Check('phrasing_in_place', 'נוסח נאמר רק במצב שהוא מיועד לו', _phrasing_in_place),
     Check('no_repeat', 'לא חוזרים על מה שכבר נכתב', _no_repeat),
     Check('form', 'עיצוב: בלי נקודה בסוף, ₪ לפני המספר, כוכבית אחת, קישור מלא', _form),
-    Check('hebrew_only', 'עונים בשפה שבה הלקוח כותב; בעברית — בלי אותיות לועזיות', _hebrew_only),
+    Check('hebrew_only', 'עונים בעברית, בלי אותיות לועזיות; בשפת הלקוח — רק כשהוא ממשיך בה או ביקש', _hebrew_only),
     Check('short', 'תשובה קצרה', _short),
     Check('one_question', 'שאלה אחת בכל פעם', _one_question),
     Check('list_of_four', 'רשימה — עד 4 פריטים', _list_of_four),
@@ -1588,16 +1653,24 @@ GENERAL_IDS = tuple(check.id for check in GENERAL)
 
 
 def answers_in(language: str) -> Check:
-    """The answer is in the language the script's customer writes in — its letters are there, and no whole sentence of Hebrew."""
-    label = LANGUAGES[language][1]
-
+    """
+    The answer is in this language — 'latin', 'cyrillic', 'arabic': its letters
+    are there, and no whole sentence of Hebrew; 'hebrew': Hebrew, with no word
+    in other letters (the first answer to whoever opens in another language).
+    """
     def test(m: Moment) -> str:
         text = _plain(m.reply)
         for literal in letter_for_letter(m.all_calls):
             text = text.replace(literal, ' ')
+        if language == 'hebrew':
+            if not re.search(r'[א-ת]{2,}', text):
+                return f'ציפינו לתשובה בעברית. הבוט ענה: "{_quote(m.reply)}"'
+            return _in_hebrew(text, customers_language(m))
         return _in_language(text, language)
 
-    return Check(f'answers_in:{language}', f'הבוט עונה {label}, כמו הלקוח', test)
+    if language == 'hebrew':
+        return Check('answers_in:hebrew', 'הבוט עונה בעברית (הלקוח עוד לא המשיך בשפה שלו ולא ביקש)', test)
+    return Check(f'answers_in:{language}', f'הבוט עונה {LANGUAGES[language][1]}, בשפה של הלקוח', test)
 
 
 def before_any_question(pattern: str, label: str) -> Check:
@@ -1728,3 +1801,150 @@ def no_lesson_today_on(path: str, day: str) -> Check:
         return ''
 
     return Check(f'no_lesson_today_on:{path}:{day}', f'הבוט לא אומר שיש היום שיעור כשהחוג לא מתקיים ביום {day}', test)
+
+
+# --- the owner's answers of 13.10.2026: the holidays board of a branch, and what is said beside it ------------------
+#
+# "Lessons in Hanukkah and on holidays, or anything to do with it — send the automation…" The bot asks its tool which
+# board belongs to the branch (`holiday_dates`); when there is one, the tool's answer carries `send_flow`, and the
+# automation leaves after the text wherever the answer itself really leaves. These hold the answer to that: the right
+# board for the branch asked about, no promise of a board that is not sent, and no dates spelled out by the bot.
+
+_SAYS_A_BOARD_IS_SENT = re.compile(
+    r'(?:שולח(?:ת|ים)?|שלחתי|שלחנו|נשלח|מצרפ(?:ת|ים)?|מצורף|מצ"ב|הנה)[^\n]{0,40}לוח (?:ה)?חופשות'
+    r'|לוח (?:ה)?חופשות[^\n]{0,40}(?:נשלח|מצורף|בדרך אליכם|בהודעה הבאה)'
+)
+
+
+def boards_sent(calls: list) -> list:
+    """The automations these tool calls said are sent after the answer: [{name, ns, label}] — what shadow.flows_to_send reads."""
+    found = []
+    for call in calls:
+        result = call.get('result') if isinstance(call.get('result'), dict) else {}
+        flow = result.get('send_flow')
+        if call.get('name') == 'holiday_dates' and result.get('found') and isinstance(flow, dict) and flow.get('ns'):
+            found.append(flow)
+    return found
+
+
+# What a question about a holiday or a vacation reads like, in Hebrew. The summer is in it too: whoever asks about
+# "החופש הגדול" and gets the board was not sent something nobody asked about.
+_ABOUT_HOLIDAYS = re.compile(r'חנוכה|פסח|פורים|סוכות|ראש השנה|כיפור|שבועות|שמחת תורה|עצמאות|ל"ג בעומר|חול המועד|(?<![א-ת])[בהלמו]?ה?חג(?:ים)?(?![א-ת])|חופש')
+
+
+def _board_really_sent(m: Moment) -> str:
+    """
+    Both ways: an answer that says the board is on its way has one behind it,
+    and a board leaves only for a customer who asked about holidays — the
+    tool's "found" is a picture in the customer's WhatsApp, not a look-up.
+    """
+    sent = boards_sent(m.calls)
+    said = _SAYS_A_BOARD_IS_SENT.search(m.reply)
+    if said and not sent:
+        return (
+            f'הבוט כתב שלוח החופשות נשלח ("{_quote(said.group(0))}"), אבל בתשובה הזאת לא נשלחת שום אוטומציה: '
+            'הכלי של החגים לא נקרא, או שלא מצא לוח לסניף. בלי לוח — בודקים מול המשרד'
+        )
+    # Whether he asked is read from Hebrew words; what a customer who writes in another language asked is the rubric's to judge.
+    if sent and not customers_language(m) and not _ABOUT_HOLIDAYS.search(m.customer_now or ' '.join(m.customer)):
+        names = ', '.join(dict.fromkeys(str(flow.get('name') or '') for flow in sent))
+        return f'אחרי התשובה נשלח לוח החופשות ({names}), בלי שהלקוח שאל על חגים או על חופשות. הלוח נשלח רק למי ששאל'
+    return ''
+
+
+GENERAL = GENERAL + (
+    Check('board_really_sent', 'לוח החופשות: נשלח כשנאמר שנשלח, ורק למי ששאל על חגים', _board_really_sent),
+)
+GENERAL_IDS = tuple(check.id for check in GENERAL)
+
+
+def sends_board(path: str) -> Check:
+    """The answer is followed by the holidays board named at `path` of the facts — that automation, and no other."""
+    def test(m: Moment) -> str:
+        wanted = str(_fact(m.world, path) or '')
+        if not wanted:
+            return 'במערכת אין לוח חופשות מחובר לסניף הזה, ולכן אי אפשר לבדוק את התשובה'
+        sent = [flow.get('name') for flow in boards_sent(m.calls)]
+        if sent == [wanted] or (sent and set(sent) == {wanted}):
+            return ''
+        if not sent:
+            return f'ציפינו שאחרי התשובה יישלח לוח החופשות של הסניף ({wanted}). לא נשלחת שום אוטומציה. הבוט ענה: "{_quote(m.reply)}"'
+        return f'ציפינו ללוח החופשות של הסניף ({wanted}). הבוט ביקש לשלוח: {", ".join(dict.fromkeys(sent))}'
+
+    return Check(f'sends_board:{path}', 'אחרי התשובה נשלח לוח החופשות של הסניף שנשאל עליו', test)
+
+
+def no_board() -> Check:
+    """Nothing is sent after this answer: the branch is not known yet, or it has no board."""
+    def test(m: Moment) -> str:
+        sent = [flow.get('name') for flow in boards_sent(m.calls)]
+        return f'ציפינו שלא יישלח לוח חופשות בשלב הזה. הבוט ביקש לשלוח: {", ".join(dict.fromkeys(sent))}' if sent else ''
+
+    return Check('no_board', 'לא נשלח לוח חופשות', test)
+
+
+def board_as_the_system_has_it(path: str) -> Check:
+    """
+    For the branch at `path` of the facts — a registered child's, which nobody
+    has to ask about: when it has a board that ManyChat holds, that board is
+    sent; when it has none, nothing is sent and the conversation is marked for
+    a person.
+    """
+    def test(m: Moment) -> str:
+        entry = _fact(m.world, path) or {}
+        wanted = str(entry.get('flow') or '')
+        sent = [flow.get('name') for flow in boards_sent(m.calls)]
+        if wanted:
+            return '' if set(sent) == {wanted} else (
+                f'לסניף {entry.get("branch", "")} יש לוח חופשות ({wanted}), וציפינו שיישלח אחרי התשובה. '
+                f'{"נשלח: " + ", ".join(sent) if sent else "לא נשלחת שום אוטומציה"}'
+            )
+        if sent:
+            return f'לסניף {entry.get("branch", "")} אין לוח חופשות מחובר, והבוט ביקש לשלוח: {", ".join(sent)}'
+        return '' if m.request_human else f'לסניף {entry.get("branch", "")} אין לוח חופשות מחובר, וציפינו שהבוט יסמן לנציג. הוא לא סימן'
+
+    return Check(f'board_as_the_system_has_it:{path}', 'לסניף של הילד הרשום: הלוח שלו נשלח; כשאין לוח — נציג', test)
+
+
+def no_dates() -> Check:
+    """The answer spells out no date: the dates of a vacation are on the board, not in the bot's own words."""
+    def test(m: Moment) -> str:
+        said = [_date_text(value) for value in dates_in(m.reply)]
+        return f'ציפינו שהבוט לא יפרט תאריכים בעצמו — הם בלוח החופשות. הוא כתב: {", ".join(dict.fromkeys(said))}' if said else ''
+
+    return Check('no_dates', 'הבוט לא מפרט תאריכים בעצמו', test)
+
+
+def no_dates_but(allowed: str) -> Check:
+    """No date in the answer but the ones `allowed` reads — the end of the season, said to whoever asks about the summer."""
+    def test(m: Moment) -> str:
+        said = [text for text in (_date_text(value) for value in dates_in(m.reply)) if not re.search(allowed, text)]
+        return f'הבוט כתב תאריך שלא נשאל עליו ואינו בידע לשאלה הזאת: {", ".join(dict.fromkeys(said))}' if said else ''
+
+    return Check(f'no_dates_but:{allowed}', 'הבוט לא ממציא תאריכים', test)
+
+
+def no_phones(but: str = '') -> Check:
+    """No phone number in the answer — but the one at `but` of the facts (the office's), when one is named."""
+    def test(m: Moment) -> str:
+        allowed = re.sub(r'\D', '', str(_fact(m.world, but) or '')) if but else ''
+        said = [phone for phone in phones_in(m.reply) if phone != allowed]
+        return f'ציפינו שלא יימסר מספר טלפון בתשובה הזאת. הבוט כתב: {", ".join(dict.fromkeys(said))}' if said else ''
+
+    return Check(f'no_phones:{but}' if but else 'no_phones', 'הבוט לא מוסר מספר טלפון', test)
+
+
+def says_phone(path: str, label: str) -> Check:
+    """The phone at `path` of the facts is in the answer — and it is the only phone there."""
+    def test(m: Moment) -> str:
+        wanted = re.sub(r'\D', '', str(_fact(m.world, path) or ''))
+        if not wanted:
+            return f'בידע הבוט לא כתוב {label}, ולכן אי אפשר לבדוק את התשובה'
+        said = phones_in(m.reply)
+        if wanted not in said:
+            return f'ציפינו ל{label} כפי שכתוב בידע. הבוט ענה: "{_quote(m.reply)}"'
+        others = [phone for phone in dict.fromkeys(said) if phone != wanted]
+        return f'ציפינו רק ל{label}. הבוט מסר גם: {", ".join(others)}' if others else ''
+
+    return Check(f'says_phone:{path}', f'הבוט מוסר את {label} — ורק אותו', test)
+

@@ -22,7 +22,10 @@ The slice of background work one cron call does (every five minutes):
      twenty seconds after the last one of a burst (apps/wahub/shadow.py);
   4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py);
   5. a look at the live test: a message of a live-test contact that nobody
-     answered is marked on the contact (apps/wahub/live_test.py).
+     answered is marked on the contact (apps/wahub/live_test.py);
+  6. the holidays boards: which of their automations ManyChat has, by name —
+     asked once in ten minutes and kept, because the bot's tool only reads what
+     is kept (apps/wahub/holiday_flows.py). A read of ManyChat's list; nothing is sent.
 
 Nothing in 1b, 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
 a few fields on the contact, the shadow keeps proposals, the reviewer keeps
@@ -41,7 +44,7 @@ from django.conf import settings
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.wahub import analysis, lead_followups, lead_stage, live_test, matching, reviewer, shadow
+from apps.wahub import analysis, holiday_flows, lead_followups, lead_stage, live_test, matching, reviewer, shadow
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,8 @@ SHADOW_BATCH = 10
 LEAD_BACKFILL_PER_TICK = 3
 LEAD_BACKFILL_WITHIN = timedelta(days=90)
 QUIET_BEFORE_ANALYSIS = timedelta(minutes=5)
+# ManyChat is asked for its automations only with this much of the call still left (the asking waits up to eight seconds).
+HOLIDAY_FLOWS_FLOOR = 9
 RECHECK_AFTER = timedelta(hours=12)
 BATCH = 50
 
@@ -224,6 +229,13 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         counts['live_test_unanswered'] = live_test.flag_unanswered()
     except Exception:
         logger.exception('wahub cron: the look at the live test failed')
+
+    # 6. the holidays boards: what ManyChat has under their names (a read, kept for the bot's tool; asked when stale)
+    if left() > HOLIDAY_FLOWS_FLOOR:
+        try:
+            counts['holiday_flows_found'] = len(holiday_flows.found())
+        except Exception:
+            logger.exception('wahub cron: the holidays boards were not looked up in ManyChat')
 
     now = timezone.now()
     counts['pending_analysis'] = _to_analyze(now).count()

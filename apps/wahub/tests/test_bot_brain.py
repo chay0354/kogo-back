@@ -59,7 +59,7 @@ class OrderOfTheConversationTests(WahubTestCase):
     def test_nothing_known_asks_the_city_and_names_where_we_are(self):
         result = self.find()
         self.assertEqual((result['need'], result['ask'], result['courses']), ('city', 'באיזו עיר או סניף מדובר?', []))
-        self.assertEqual(result['cities'], ['פתח תקווה', 'ראש העין', 'רמת גן'])
+        self.assertEqual(result['cities'], ['יהוד', 'פתח תקווה', 'ראש העין', 'רמת גן'])
         self.assertEqual(summarize_result('find_courses', result), 'קודם שואלים עיר או סניף; חוגים לא הוחזרו')
         nowhere = self.find(city='נתניה')
         self.assertEqual((nowhere['need'], nowhere['hint'], nowhere['cities']), ('', 'אין לנו סניף בנתניה.', result['cities']))
