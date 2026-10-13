@@ -193,6 +193,10 @@ def seats_text(day: str, start: str, cap: dict) -> str:
     if not enrolled:
         return f'{where} עדיין אין רשומים, ויש {capacity} מקומות'
     registered = f'רשום {enrolled}' if enrolled == 1 else f'רשומים {enrolled}'
+    if enrolled > capacity:
+        # More children than the limit says (the office let them in, or lowered the limit since): a customer is not
+        # told "8 out of 4" — only that the lesson is full (production, 13.10.2026).
+        return f'{where} השיעור מלא'
     if cap['is_full']:
         return f'{where} {registered} מתוך {capacity} מקומות, השיעור מלא'
     return f'{where} {registered} מתוך {capacity} מקומות, ' + ('נשאר מקום אחד' if left == 1 else f'נשארו {left}')
