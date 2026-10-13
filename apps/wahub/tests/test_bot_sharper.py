@@ -593,6 +593,15 @@ class TheNewConversationsTests(EvalTestCase):
                 failures = [(row['turn'], row['id'], row['explain']) for row in run.checks if row['status'] == 'failed']
                 self.assertEqual((run.status, failures), ('passed', []), [turn['reply'] for turn in run.turns])
 
+    # Turns whose only expectation is about "tomorrow": on the day before the class meets, any answer passes it.
+    DAY_BOUND = {('edge_tomorrow', 2)}
+
+    def tomorrow_is_open(self, scenario) -> bool:
+        said = self.play(scenario.id, [[say('כן, מחר אפשר לבוא לנסות')] for _turn in scenario.turns])
+        return not any(
+            row['id'].startswith('tomorrow_as_the_system_has_it') and row['status'] == 'failed' for row in said.checks
+        )
+
     def test_a_bot_that_answers_badly_fails_every_turn_that_expects_something(self):
         for scenario in NEW + (scenarios.BY_ID['ground_wifi'], scenarios.BY_ID['limit_english']):
             with self.subTest(scenario=scenario.id):
@@ -603,7 +612,11 @@ class TheNewConversationsTests(EvalTestCase):
                 caught_loud, caught_quiet = self.specific(scenario, loud), self.specific(scenario, quiet)
                 for number, turn in enumerate(scenario.turns, 1):
                     if turn.expect:
-                        self.assertTrue(caught_loud[number] | caught_quiet[number], f'turn {number}: no check of its own catches a bad answer')
+                        caught = caught_loud[number] | caught_quiet[number]
+                        if not caught and (scenario.id, number) in self.DAY_BOUND and self.tomorrow_is_open(scenario):
+                            # On the eve of the class's own day "tomorrow" is a date the form offers: there is nothing to catch.
+                            continue
+                        self.assertTrue(caught, f'turn {number}: no check of its own catches a bad answer')
 
     # ---- the seven of the full run, as conversations ----
 
