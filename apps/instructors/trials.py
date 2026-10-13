@@ -81,6 +81,10 @@ def _paying_lesson_ids(child_ids) -> set:
     return pairs
 
 
+# The trials that did not end in a registration — the list an instructor rings.
+NOT_REGISTERED_OUTCOMES = ('attended', 'no_show', 'unmarked')
+
+
 def _outcome_for(row, paying, today: date) -> str:
     held = row.trial_held_on or row.trial_lesson_date
     if held and held > today:
@@ -103,7 +107,7 @@ def trials_for_lessons(lesson_ids, date_from: date, date_to: date, today: date |
     """
     today = today or date.today()
     if not lesson_ids:
-        return {'counts': {k: 0 for k in OUTCOME_LABELS}, 'total': 0, 'trials': []}
+        return {'counts': {k: 0 for k in OUTCOME_LABELS}, 'total': 0, 'trials': [], 'not_registered': 0}
 
     rows = list(
         LessonEnrollment.objects
@@ -113,6 +117,14 @@ def trials_for_lessons(lesson_ids, date_from: date, date_to: date, today: date |
             # Rows written before trial_held_on existed and never touched since.
             | Q(trial_held_on__isnull=True, trial_lesson_date__gte=date_from,
                 trial_lesson_date__lte=date_to)
+            # A trial sign-up from before trials carried a date at all: the
+            # child is still on a trial status and the row has no date. It used
+            # to sit on the weekly register for good; it is off it now (owner,
+            # 13.10.2026: a trial child belongs to that one lesson, and whoever
+            # tried and did not register belongs here), so this is where the
+            # instructor still finds the child.
+            | Q(trial_held_on__isnull=True, trial_lesson_date__isnull=True,
+                status='active', child__status__in=('trial_signed', 'trial_completed'))
         )
         .select_related('child', 'child__family', 'lesson', 'lesson__course')
         .order_by('-trial_held_on', '-trial_lesson_date')
@@ -141,4 +153,10 @@ def trials_for_lessons(lesson_ids, date_from: date, date_to: date, today: date |
             'child_status': row.child.status,
         })
 
-    return {'counts': counts, 'total': len(trials), 'trials': trials}
+    return {
+        'counts': counts,
+        'total': len(trials),
+        'trials': trials,
+        # "כל הילדים שהיו בניסיון ולא נרשמו" — came, did not come, or nobody marked it.
+        'not_registered': sum(counts[key] for key in NOT_REGISTERED_OUTCOMES),
+    }

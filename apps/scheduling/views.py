@@ -23,6 +23,7 @@ from apps.enrollments.enrollment_counts import (
     register_kind,
     ON_REGISTER_STUDENT,
     ON_REGISTER_TRIAL,
+    REGISTERED_CHILD_STATUSES,
 )
 from apps.enrollments.models import LessonEnrollment, LessonAttendance
 from apps.external_students.models import ExternalStudent, ExternalStudentAttendance
@@ -52,11 +53,23 @@ logger = logging.getLogger(__name__)
 
 
 def enrollment_visible_on_date(enrollment, occ_date):
-    """Same roster rules as lesson detail / attendance list."""
+    """
+    Same roster rules as lesson detail / attendance list.
+
+    Owner, 13.10.2026: a child who left must not appear on the instructor's
+    register ("רק מי שפעיל או עם החרגה ספציפית"), and a child who was in a
+    trial lesson belongs to that one lesson only. So a trial row shows on its
+    own date and nowhere else, and a regular place shows while the child is
+    registered (REGISTERED_CHILD_STATUSES). A place nobody closed for a child
+    who is לא פעיל, and an old trial sign-up with no date on it, are not shown;
+    `stale_places` hands them to the office instead. The exceptions are their
+    own rows: a walk-in the instructor added, a child who cancelled and still
+    comes this month (enrollments/leaving.py), the municipality's children.
+    """
     if enrollment.trial_lesson_date:
         if not occ_date or enrollment.trial_lesson_date != occ_date:
             return False
-    elif enrollment.child.status == 'trial_signed':
+    elif enrollment.child.status not in REGISTERED_CHILD_STATUSES and enrollment.child.status != 'ghost':
         return False
 
     if enrollment.child.status == 'ghost' and occ_date:
@@ -70,6 +83,22 @@ def enrollment_visible_on_date(enrollment, occ_date):
         if days_since_creation > 30:
             return False
     return True
+
+
+def stale_places(enrollments):
+    """
+    The live regular places the register does not show: the child is not
+    registered any more (לא פעיל), or only ever came for a trial and the row
+    carries no date. They are rows for the office to close — until someone
+    does, each still holds a seat in the lesson.
+    """
+    return [
+        e for e in enrollments
+        if e.status == 'active'
+        and not e.trial_lesson_date
+        and e.child.status not in REGISTERED_CHILD_STATUSES
+        and e.child.status != 'ghost'
+    ]
 
 
 def child_contact_phone(child):
@@ -226,6 +255,19 @@ class LessonViewSet(viewsets.ModelViewSet):
 
             enrollments = enrollments + visible_ghost_enrollments(lesson, occ_date, enrollments)
 
+        # A child who cancelled still comes to the end of the month they paid
+        # for (enrollments/leaving.py); their place is closed, so the query
+        # above does not hold them.
+        leaving_ids = set()
+        if occ_date:
+            from apps.enrollments.leaving import leaving_enrollments, leaving_on
+
+            on_the_register = {e.child_id for e in enrollments}
+            for row in leaving_on(leaving_enrollments([lesson.id], occ_date, occ_date).get(lesson.id), occ_date):
+                if row.child_id not in on_the_register:
+                    enrollments.append(row)
+                    leaving_ids.add(row.id)
+
         # Both roster fields the serializer builds are replaced further down with
         # the per-occurrence versions. Handing it the rows already read keeps it
         # from re-reading every attendance row this lesson has ever had — on a
@@ -272,7 +314,9 @@ class LessonViewSet(viewsets.ModelViewSet):
                 'child_name': e.child.full_name,
                 'child_status': e.child.status,
                 # student / trial / other — the rule every count of this register uses.
-                'register_kind': register_kind(e, occ_date),
+                'register_kind': register_kind(e, occ_date, leaving=e.id in leaving_ids),
+                # Cancelled, and here until the month they paid for is over.
+                'leaving': e.id in leaving_ids,
                 'child_phone': child_contact_phone(e.child),
                 'trial_lesson_date': e.trial_lesson_date.isoformat() if e.trial_lesson_date else None,
                 'is_trial': is_trial,
@@ -289,6 +333,17 @@ class LessonViewSet(viewsets.ModelViewSet):
         external_students = visible_external_students(lesson, occ_date)
 
         data['enrollments'] = visible_enrollments + external_roster_rows(external_students)
+        # Places still open for children who are not registered — not on the
+        # register, and listed here so the office can close them.
+        data['stale_places'] = [
+            {
+                'id': str(e.id),
+                'child_id': str(e.child.id),
+                'child_name': e.child.full_name,
+                'child_status': e.child.status,
+            }
+            for e in stale_places(enrollments)
+        ]
         data['attendance'] = (
             AttendanceSerializer(attendance_records, many=True).data
             + external_attendance_rows(external_students, occ_date)
@@ -386,6 +441,12 @@ class LessonViewSet(viewsets.ModelViewSet):
             for lesson_id, rows in enrollments_by_lesson.items():
                 enrollments_by_lesson[lesson_id] = collapse_duplicate_people(rows)
 
+            # Children who cancelled and still come to the end of the month they
+            # paid for — on the register, so in the count (enrollments/leaving.py).
+            from apps.enrollments.leaving import leaving_enrollments, leaving_on
+
+            leaving_by_lesson = leaving_enrollments(lesson_ids, start, end)
+
             marked_map = defaultdict(set)
             for rec in LessonAttendance.objects.filter(
                 lesson_id__in=lesson_ids,
@@ -418,10 +479,12 @@ class LessonViewSet(viewsets.ModelViewSet):
                 trial_student_count, external_student_count, other_student_count
                 and whether the register is finished, in one pass over the roster.
 
-                active_student_count is the number of students — register_kind's
-                'student', plus the municipality's children — and it is the one
-                figure the calendar, the instructor's day and the lesson window
-                all show. student_count is everyone on the register that day.
+                active_student_count is the number registered — register_kind's
+                'student' (a regular place; פעיל, בעיה באשראי or בתהליך רישום;
+                and whoever cancelled but still comes this month), plus the
+                municipality's children. It is the one figure the calendar, the
+                instructor's day and the lesson window all show. student_count
+                is everyone on the register that day.
 
                 marked is None when the occurrence cannot be complete (cancelled,
                 or no date at all), otherwise the children already marked on it.
@@ -450,6 +513,15 @@ class LessonViewSet(viewsets.ModelViewSet):
                         actives += 1
                     else:
                         others += 1
+                    if complete and enr.child_id not in marked:
+                        complete = False
+
+                seen = {enr.child_id for enr in enrollments_by_lesson.get(lesson_id, ())}
+                for enr in leaving_on(leaving_by_lesson.get(lesson_id), occurrence_date):
+                    if enr.child_id in seen:
+                        continue
+                    roster += 1
+                    actives += 1
                     if complete and enr.child_id not in marked:
                         complete = False
 

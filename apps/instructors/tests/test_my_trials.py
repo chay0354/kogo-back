@@ -225,3 +225,44 @@ class ScopeTests(MyTrialsTestBase):
     def test_it_needs_a_login(self):
         self.client.credentials()
         self.assertEqual(self.get().status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class EveryoneWhoTriedAndDidNotRegisterTests(MyTrialsTestBase):
+    """
+    Owner, 13.10.2026: "כל הילדים שהיו בניסיון ולא נרשמו שיהיו בדשבורד של המדריך."
+
+    The same day a trial child came off the weekly register (they belong to the
+    one lesson they tried), so this list is where an instructor still finds them.
+    """
+
+    def test_the_count_of_those_who_did_not_register(self):
+        self.trial(self.today - timedelta(days=7), outcome='attended', child=self.child(first='הגיע'))
+        self.trial(self.today - timedelta(days=8), outcome='no_show', child=self.child(first='לא הגיע'))
+        self.trial(self.today - timedelta(days=9), outcome='unmarked', child=self.child(first='לא סומן'))
+        self.trial(self.today + timedelta(days=3), status='active', child=self.child(first='עוד לפניו'))
+        res = self.get()
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['total'], 4)
+        self.assertEqual(res.data['not_registered'], 3)
+
+    def test_a_trial_from_half_a_year_ago_is_still_on_the_list(self):
+        # Ninety days used to be the edge.
+        self.trial(self.today - timedelta(days=180), outcome='attended')
+        res = self.get()
+        self.assertEqual(res.data['total'], 1)
+        self.assertEqual(res.data['not_registered'], 1)
+
+    def test_an_old_trial_sign_up_with_no_date_is_on_the_list(self):
+        child = self.child(first='ישן', child_status='trial_completed')
+        LessonEnrollment.objects.create(lesson=self.lesson, child=child, status='active')
+        res = self.get()
+        self.assertEqual(res.data['total'], 1)
+        row = res.data['trials'][0]
+        self.assertIsNone(row['trial_date'])
+        self.assertEqual(row['outcome'], 'unmarked')
+        self.assertEqual(res.data['not_registered'], 1)
+
+    def test_a_regular_student_with_no_trial_is_not_on_the_list(self):
+        student = self.child(first='תלמיד', child_status='active')
+        LessonEnrollment.objects.create(lesson=self.lesson, child=student, status='active')
+        self.assertEqual(self.get().data['total'], 0)

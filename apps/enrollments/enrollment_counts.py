@@ -79,30 +79,43 @@ def is_active_student(child) -> bool:
     return getattr(child, 'status', None) in ACTIVE_STUDENT_CHILD_STATUSES
 
 
+# Who is registered to a lesson, as the instructor's register reads it (owner,
+# 13.10.2026): "כשאני אומר רשומים, אני מתכוון גם לכאלה שהתשלום שלהם לא עבר, וכל
+# מיני כאלה. מבחינתנו הם עדיין אמורים להיות רשומים." So: a regular place, and
+# the child is פעיל, בעיה באשראי or בתהליך רישום. A child who left (לא פעיל) and a
+# child who only ever came for a trial are not.
+#
+# This is wider than ACTIVE_STUDENT_CHILD_STATUSES on purpose. That one answers
+# "who pays" — salary tiers, revenue, the dashboards. This one answers "who is
+# expected in the room".
+REGISTERED_CHILD_STATUSES = ('active', 'payment_problem', 'pending')
+
+
 # What a row on a lesson's register is, on one date. Every screen that says "how
-# many students" reads this, so the office's calendar, the instructor's day and
-# the lesson window cannot each count their own way (owner, 13.10.2026: "כמות
+# many" reads this, so the office's calendar, the instructor's day and the
+# lesson window cannot each count their own way (owner, 13.10.2026: "כמות
 # התלמידים שמופיעים ביומן של ה-admin לא תואמים למשתמשים של המורים").
 ON_REGISTER_STUDENT = 'student'
 ON_REGISTER_TRIAL = 'trial'
 ON_REGISTER_OTHER = 'other'
 
 
-def register_kind(enrollment, occurrence_date: Optional[date]) -> str:
+def register_kind(enrollment, occurrence_date: Optional[date], *, leaving: bool = False) -> str:
     """
-    * ``student`` — a regular place, and the child is פעיל or בעיית תשלום. The
-      owner's own definition of a student (24.9.2026), the one pay, the
-      catalogue and the dashboards already count by.
+    * ``student`` — registered: a regular place, and the child is one of
+      REGISTERED_CHILD_STATUSES. Also a child who cancelled and still comes to
+      the end of the month they paid for (`leaving`, see enrollments/leaving.py).
     * ``trial`` — the row is a trial booked for this date.
-    * ``other`` — on the register for another reason: a sign-up nobody has paid
-      for yet, a child who left and whose place was never closed, an old trial
-      with no date, a walk-in. They stay on the register — the instructor may
-      well see them in the room — but they are not counted as students, and
-      each one is a row for the office to look at.
+    * ``other`` — on the register for another reason: a child who left and whose
+      place was never closed, an old trial with no date, a walk-in. They stay on
+      the register — the instructor may well see them in the room — but they are
+      not counted as registered, and each one is a row for the office to look at.
     """
     if occurrence_date is not None and enrollment.trial_lesson_date == occurrence_date:
         return ON_REGISTER_TRIAL
-    if not enrollment.trial_lesson_date and is_active_student(getattr(enrollment, 'child', None)):
+    if enrollment.trial_lesson_date:
+        return ON_REGISTER_OTHER
+    if leaving or getattr(getattr(enrollment, 'child', None), 'status', None) in REGISTERED_CHILD_STATUSES:
         return ON_REGISTER_STUDENT
     return ON_REGISTER_OTHER
 
