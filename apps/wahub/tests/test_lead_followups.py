@@ -33,6 +33,11 @@ def at(year, month, day, hour=10, minute=30):
     return timezone.make_aware(datetime(year, month, day, hour, minute), ZONE)
 
 
+def follow_ups_on(since='2026-01-01T00:00:00+00:00'):
+    """The follow-ups' switch as it stands once the owner turned it on at `since` with sending on."""
+    settings_store.put(settings_store.BOT_FOLLOWUPS, {'on': True, 'at': since, 'since': since, 'by': None, 'by_name': ''})
+
+
 class EngineCase(LeadsCase):
     def setUp(self):
         super().setUp()
@@ -41,6 +46,10 @@ class EngineCase(LeadsCase):
         recheck = patch.object(lead_followups.matching, 'recheck_contact', return_value=False)
         self.recheck = recheck.start()
         self.addCleanup(recheck.stop)
+        # The owner's own switch for the follow-ups (bot_mode.py) is on here, and has been for long: these tests are
+        # about the engine behind it. The switch itself — off until he turns it on, and what it lets go — is
+        # tests/test_go_live.py.
+        follow_ups_on()
 
     def link_lead(self, wrote=HOUR, **fields) -> Contact:
         """Somebody who got a registration link and did not register: the bot reminds them."""

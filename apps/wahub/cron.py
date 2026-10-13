@@ -26,6 +26,11 @@ The slice of background work one cron call does (every five minutes):
   4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py);
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py);
+  5b. the safety net of the live answers: a message of a contact the new bot
+     answers that is a few minutes old and that no call has answered is
+     answered now, by the very call the door makes (live_test.answer_late) —
+     the one step besides 2c that may lead to a message, and under the same
+     claim as every live answer, so nobody is answered twice;
   6. the holidays boards: which of their automations ManyChat has, by name —
      asked once in ten minutes and kept, because the bot's tool only reads what
      is kept (apps/wahub/holiday_flows.py). A read of ManyChat's list; nothing is sent.
@@ -108,7 +113,7 @@ def _to_match(now):
     return Contact.objects.filter(Q(kogo_checked_at__isnull=True) | Q(kogo_checked_at__lte=now - RECHECK_AFTER))
 
 
-def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
+def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict:
     started = time.monotonic()
 
     def left() -> float:
@@ -245,6 +250,12 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         counts['live_test_unanswered'] = live_test.flag_unanswered()
     except Exception:
         logger.exception('wahub cron: the look at the live test failed')
+
+    # 5b. the safety net: a young message whose answer never started is started again (the same call, the same claim)
+    try:
+        counts.update(live_test.answer_late(reply_url))
+    except Exception:
+        logger.exception('wahub cron: the late live answers were not started')
 
     # 6. the holidays boards: what ManyChat has under their names (a read, kept for the bot's tool; asked when stale)
     if left() > HOLIDAY_FLOWS_FLOOR:

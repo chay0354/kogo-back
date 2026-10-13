@@ -1147,11 +1147,20 @@ def pending(now=None):
     has settled. A live-test contact is not among them: the NEW bot answers it
     for real within seconds (live_test.py), and a shadow answer written by the
     cron in between would count its message as answered while nothing was sent.
+    For the same reason, while the new bot answers everybody (bot_mode.py) the
+    shadow keeps only whom it does not answer: a demo contact, and a
+    conversation a person holds.
     """
+    from apps.wahub import bot_mode
+    from apps.wahub.models import HANDLED_HUMAN
+
     now = now or timezone.now()
-    return Contact.objects.filter(needs_shadow=True, live_test=False).filter(
+    rows = Contact.objects.filter(needs_shadow=True, live_test=False).filter(
         Q(last_inbound_at__lte=now - MERGE_WINDOW) | Q(last_inbound_at__isnull=True)
     )
+    if bot_mode.live_since() is not None:
+        rows = rows.filter(Q(is_demo=True) | Q(handled_by=HANDLED_HUMAN))
+    return rows
 
 
 def unanswered_messages(contact: Contact) -> list[Message]:
@@ -1308,7 +1317,8 @@ def _target_of(row: Message, notes: list, *, deadline: float | None) -> Target:
 
 
 def propose(contact: Contact, *, now=None, deadline: float | None = None, fallback: bool = True,
-            max_tokens: int | None = None, effort: str | None = None, superseded=None, before_keep=None) -> ShadowReply | None:
+            max_tokens: int | None = None, effort: str | None = None, superseded=None, before_keep=None,
+            not_before=None) -> ShadowReply | None:
     """
     The new bot's answer to what the customer wrote since the last one, kept as
     a ShadowReply. None when there is nothing to answer. Never sends anything.
@@ -1322,9 +1332,16 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
     between Claude's tool rounds and once more before the answer is kept, and a
     True raises Superseded with nothing kept. `before_keep(id)` — called when the
     draft is ready, just before that last look; it may wait.
+
+    `not_before` — the moment the new bot began to answer everybody
+    (bot_mode.live_since): a message that reached Kogo before it is not one of
+    those answered, alone or as part of a burst. It stays in the conversation
+    Claude reads.
     """
     now = now or timezone.now()
     messages = unanswered_messages(contact)
+    if not_before is not None:
+        messages = [row for row in messages if row.created_at >= not_before]
     if not messages:
         state.touch(contact.pk, needs_shadow=False)
         contact.needs_shadow = False
@@ -1372,17 +1389,17 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
 
 
 def answer_now(contact: Contact, *, deadline: float, max_tokens: int | None = None,
-               effort: str | None = None, superseded=None, before_keep=None) -> ShadowReply | None:
+               effort: str | None = None, superseded=None, before_keep=None, not_before=None) -> ShadowReply | None:
     """
     The one computation behind "the new bot answers NOW": the demo conversation's
     reply (docs/WAHUB-CONTRACT-REAL-DEMO.md, ב) and the live test from the owner's
     phone (docs/WAHUB-CONTRACT-LIVE-TEST.md, ב) — `propose` on the unanswered
     burst, with no fall to the stub: a failure of Claude is a ShadowModelError
-    and nothing is kept. `superseded` and `before_keep`: see `propose`.
+    and nothing is kept. `superseded`, `before_keep` and `not_before`: see `propose`.
     """
     return propose(
         contact, now=timezone.now(), deadline=deadline, fallback=False, max_tokens=max_tokens, effort=effort,
-        superseded=superseded, before_keep=before_keep,
+        superseded=superseded, before_keep=before_keep, not_before=not_before,
     )
 
 

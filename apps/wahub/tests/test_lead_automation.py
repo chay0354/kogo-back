@@ -358,13 +358,16 @@ class TemplatesApiTests(AutomationCase):
 
 class AutomationCardTests(AutomationCase):
     def test_before_anything_is_set_up_the_card_says_what_is_missing(self):
+        settings_store.WahubSetting.objects.filter(key=settings_store.BOT_FOLLOWUPS).delete()     # as it is before he turns them on
         card = self.card()
         self.assertEqual(set(card), {'ready', 'lines', 'today', 'upcoming', 'banner'})
-        self.assertEqual([line['key'] for line in card['lines']], ['classify', 'schedule', 'sending', 'templates'])
+        self.assertEqual([line['key'] for line in card['lines']], ['classify', 'schedule', 'sending', 'followups', 'templates'])
         self.assertTrue(all(set(line) == {'key', 'ok', 'title', 'detail', 'how'} for line in card['lines']))
         self.assertEqual([line['title'] for line in card['lines']],
-                         ['זיהוי וסיווג הלידים', 'תזמון החזרות', 'שליחה ללקוחות', 'תבניות וואטסאפ'])
-        classify, schedule, sent, templates = card['lines']
+                         ['זיהוי וסיווג הלידים', 'תזמון החזרות', 'שליחה ללקוחות', 'חזרות אוטומטיות', 'תבניות וואטסאפ'])
+        classify, schedule, sent, follow_ups, templates = card['lines']
+        self.assertEqual((follow_ups['ok'], follow_ups['detail']), (False, 'כבויות — הבוט מתכנן חזרות ולא שולח אותן'))
+        self.assertIn('רק חזרות שמועדן אחרי ההדלקה יוצאות', follow_ups['how'])
         self.assertEqual((classify['ok'], classify['detail'], classify['how']), (True, 'אין לידים פתוחים', ''))
         self.assertEqual((schedule['ok'], schedule['detail'], schedule['how']), (True, 'אין כרגע חזרות מתוכננות', ''))
         self.assertEqual((sent['ok'], sent['detail'], sent['how']),

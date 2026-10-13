@@ -728,7 +728,7 @@ class StatusView(APIView):
 
     def get(self, request):
         from apps.core.scoping import integration_credential
-        from apps.wahub import holiday_flows
+        from apps.wahub import bot_mode, holiday_flows
 
         now = timezone.now()
         stored = _stored_inbound_key()
@@ -751,6 +751,9 @@ class StatusView(APIView):
             'simulate_send': sending.simulate_send(),
             # The contacts the NEW bot answers for real while the switch is off (docs/WAHUB-CONTRACT-LIVE-TEST.md).
             'live_test_contacts': Contact.objects.filter(live_test=True).count(),
+            # Whom the new bot answers for real — the test numbers or everybody — since when, what stopped it, and
+            # what today's answers came to (docs/WAHUB-CONTRACT-GO-LIVE.md, ג.2).
+            'bot': bot_mode.status(),
             # The holidays boards the bot sends (holiday_flows.py): which of their automations ManyChat has, by name.
             'holiday_flows': holiday_flows.status(now),
             'last_inbound_at': contacts['last_inbound'],
@@ -812,15 +815,19 @@ class ManyChatInboundView(APIView):
             data = request.data
         except (ParseError, UnsupportedMediaType):
             return Response({'ok': True, 'stored': False})
+        # Before the message is kept: the moment the new bot began to answer everybody is set the first time
+        # the mode "all" and sending are both seen on (bot_mode.live_since), so this very message is one it answers.
+        live_since = _live_since_at_the_door()
         try:
             result = inbound.handle_payload(data, request.query_params.get('event') or '')
         except Exception:
             # ManyChat would only send it again; the fault is ours to read in the log.
             logger.exception('wahub inbound: could not store an event')
             return Response({'ok': True, 'stored': False})
-        if result.live_test:
-            # At once, before anything else: the owner is waiting on his phone for the NEW
-            # bot's answer (docs/WAHUB-CONTRACT-LIVE-TEST.md). The call does not wait and never raises.
+        if result.live_test or _answered_by_the_mode(result, live_since):
+            # At once, before anything else: somebody is waiting on a phone for the NEW bot's answer — the
+            # owner under the live test (docs/WAHUB-CONTRACT-LIVE-TEST.md), or any customer once the mode is
+            # "all" (docs/WAHUB-CONTRACT-GO-LIVE.md). The call does not wait and never raises.
             try:
                 live_test.kick(result.contact_id, _own_url(request, live_test.REPLY_PATH))
             except Exception:
@@ -830,6 +837,40 @@ class ManyChatInboundView(APIView):
             # reads what the customer said within seconds. Not waited for; the cron does it anyway.
             _start_media(result.contact_id, _own_url(request, MEDIA_PREPARE_PATH))
         return Response({'ok': True, 'stored': result.stored})
+
+
+def _live_since_at_the_door():
+    """bot_mode.live_since, set if this is the first message that finds the mode live. Never raises: the message is kept anyway."""
+    from apps.wahub import bot_mode
+
+    try:
+        return bot_mode.live_since(arm=True)
+    except Exception:
+        logger.exception('wahub inbound: the mode of the new bot could not be read')
+        return None
+
+
+def _answered_by_the_mode(result, live_since) -> bool:
+    """
+    Is this a customer's message the new bot answers because the owner chose
+    "all": the mode is live, the message was kept just now, and its contact is
+    neither a demo nor in a person's hands. The reply looks at all of it again
+    (live_test.reply); this only spares the calls that would answer nothing.
+    """
+    if live_since is None or not result.stored or not result.message_id:
+        return False
+    from apps.wahub.models import DIRECTION_IN, HANDLED_HUMAN
+
+    try:
+        row = (
+            Message.objects.filter(pk=result.message_id, direction=DIRECTION_IN)
+            .values_list('contact__is_demo', 'contact__handled_by').first()
+        )
+    except Exception:
+        # Not started from here: the cron's safety net starts it within minutes.
+        logger.exception('wahub inbound: message %s could not be looked at for the live answer', result.message_id)
+        return False
+    return row is not None and not row[0] and row[1] != HANDLED_HUMAN
 
 
 MEDIA_PREPARE_PATH = 'media/prepare/'
@@ -890,18 +931,24 @@ def cron_tick(request):
 
     if not _cron_request_authorized(request):
         return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
-    return Response({'ok': True, **cron.tick()})
+    # The address of the live answer: the cron starts again the answers that never started (live_test.answer_late).
+    return Response({'ok': True, **cron.tick(reply_url=_own_url(request, live_test.REPLY_PATH))})
 
 
 class LiveTestReplyView(APIView):
     """
-    POST live-test/reply/ {contact} — the NEW bot answers a live-test contact's
-    unanswered messages NOW and sends the answer through ManyChat
+    POST live-test/reply/ {contact} — the NEW bot answers the unanswered
+    messages of a contact it answers (a live-test contact, or anybody once the
+    mode is "all") NOW and sends the answer through ManyChat
     (apps/wahub/live_test.py). Called by this server on itself from the inbound
-    door; auth is the cron token. Always 200 with `outcome` (sent, failed, busy,
-    nothing, daily_limit, human_handles, model_error, not_live_test); 404 for a
+    door — and, with `late: true`, from the cron's safety net; auth is the cron
+    token. Always 200 with `outcome` (sent, failed, busy, nothing, daily_limit,
+    hourly_limit, too_old, human_handles, model_error, not_live_test); 404 for a
     contact that does not exist. A second call while one is answering is "busy":
     the first one answers what arrived meanwhile.
+
+    {ping: true} answers {ok, pong} and does nothing else: the check, before
+    the mode may become "all", that this server reaches this very door.
     """
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -911,10 +958,13 @@ class LiveTestReplyView(APIView):
 
         if not _cron_request_authorized(request):
             return Response({'error': 'unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
-        raw = request.data.get('contact') if isinstance(request.data, dict) else None
+        data = request.data if isinstance(request.data, dict) else {}
+        if data.get('ping') is True:
+            return Response({'ok': True, 'pong': True})
+        raw = data.get('contact')
         if isinstance(raw, bool) or not str(raw or '').strip().isdigit():
             return _error('נדרש contact (מזהה איש הקשר).')
-        result = live_test.reply(int(raw))
+        result = live_test.reply(int(raw), late=data.get('late') is True)
         if result['outcome'] == live_test.OUTCOME_NOT_FOUND:
             return _error('איש הקשר לא נמצא.', http=status.HTTP_404_NOT_FOUND)
         return Response({'ok': True, **result})

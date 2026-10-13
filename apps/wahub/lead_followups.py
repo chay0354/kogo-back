@@ -10,14 +10,17 @@ moment comes, acts on it (`run`, a slice of the five-minute cron):
               Friday, a Saturday or a special day: a moment outside them moves
               to the next opening.
     due       the moment came and the message did not leave: the owner's switch
-              is off for this contact, the server has no ManyChat to send
-              through, or WhatsApp's 24 hours have passed and no approved
+              is off for this contact, his switch for the follow-ups
+              themselves is off (bot_mode.py), the server has no ManyChat to
+              send through, or WhatsApp's 24 hours have passed and no approved
               template is connected to this follow-up. "The bot would have
               sent this now." It is tried again for DUE_HOLD, then let go.
     sent      it went out — or, for a demo contact, was written into the demo
               conversation as the new bot's line: nothing ever leaves for a demo.
     skipped   the customer wrote meanwhile, registered, was closed, a person
-              took the lead — or the moment passed with nothing sent.
+              took the lead — or the moment passed with nothing sent, or it
+              came before the follow-ups were turned on: turning them on, or
+              turning sending on, never releases what was waiting.
     failed    ManyChat refused, or a send was cut in the middle. Never repeated:
               nobody knows whether the customer got it.
 
@@ -667,6 +670,18 @@ def _act(row: LeadFollowUp, now, *, calendar=None) -> str:
         return NUDGE_SENT
     if not sending.sending_enabled(contact):
         return _hold(contact, row, SENDING_OFF, now)
+    # The owner's own switch for the follow-ups (bot_mode.py): while it is off this waits like any message that
+    # may not leave; once it is on, what fell due before it came on is let go — never sent late, and never all at once.
+    from apps.wahub import bot_mode
+
+    refused = bot_mode.followup_refusal(contact, row.due_at)
+    if refused == bot_mode.FOLLOWUPS_OFF:
+        return _hold(contact, row, bot_mode.FOLLOWUPS_OFF_NOTE, now)
+    if refused:
+        _close(row, NUDGE_SKIPPED, bot_mode.FOLLOWUPS_BEFORE_NOTE, now)
+        _log(contact, row, bot_mode.FOLLOWUPS_BEFORE_NOTE)
+        _after_step(contact, row, now, note=bot_mode.FOLLOWUPS_BEFORE_NOTE)
+        return NUDGE_SKIPPED
     if not sending.manychat_reachable():
         # A certain "not sent": it waits like any message that may not leave, and costs the round no step.
         return _hold(contact, row, NO_MANYCHAT, now)
