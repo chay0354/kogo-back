@@ -337,7 +337,7 @@ class WordsTests(LeadStageTestCase):
 
     def test_every_stage_has_a_group_a_label_a_hint_and_a_next_step(self):
         keys = [stage for stage, _label in LEAD_STAGE_CHOICES]
-        self.assertEqual(len(keys), 19)
+        self.assertEqual(len(keys), 20)
         self.assertEqual(set(LEAD_STAGE_GROUPS), set(keys))
         self.assertEqual(set(lead_stage.HINTS), set(keys))
         self.assertEqual(set(lead_stage.NEXT_STEPS), set(keys))
@@ -347,7 +347,7 @@ class WordsTests(LeadStageTestCase):
                 'signup_stuck', 'needs_reply', 'signup_failed', 'signup_started', 'link_sent', 'trial_no_show', 'trial_done',
                 'callback_due', 'answered_silent',
             ],
-            'wait': ['will_check', 'trial_booked', 'waiting_date', 'nothing_to_offer', 'in_conversation'],
+            'wait': ['will_check', 'trial_booked', 'waiting_date', 'waiting_list', 'nothing_to_offer', 'in_conversation'],
             'closed': ['registered', 'customer', 'not_interested', 'deleted', 'cold'],
         })
         self.assertEqual(set(lead_stage.STAGE_OWNERS), set(keys))
@@ -949,7 +949,7 @@ class BoardTests(ApiTestCase):
                     'signup_stuck', 'needs_reply', 'signup_failed', 'signup_started', 'link_sent', 'trial_no_show',
                     'trial_done', 'callback_due', 'answered_silent',
                 ],
-                ['will_check', 'trial_booked', 'waiting_date', 'nothing_to_offer', 'in_conversation'],
+                ['will_check', 'trial_booked', 'waiting_date', 'waiting_list', 'nothing_to_offer', 'in_conversation'],
                 ['registered', 'customer', 'not_interested', 'deleted', 'cold'],
             ],
         )
@@ -1445,6 +1445,7 @@ class SchemaTests(LeadStageTestCase):
                 ('lead_stage', 'NO', "''::character varying"),
                 ('lead_stage_since', 'YES', None),
                 ('lead_version', 'NO', '0'),
+                ('lead_waiting', 'NO', "'{}'::jsonb"),
             ])
             # The insert the previous code makes: none of the new columns named.
             cursor.execute(

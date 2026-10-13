@@ -12,6 +12,9 @@ The slice of background work one cron call does (every five minutes):
      Claude for every old conversation is money, and that is the owner's to decide;
   2. the match against the registrations, for contacts never checked or last
      checked more than twelve hours ago;
+  2a. the waiting lists: every row is held against the registration form's own
+     count of its lesson's seats; a seat that came free moves the lead to the
+     office's list (apps/wahub/waiting_list.py). Nothing is sent to anybody;
   2b. the lead stage of every contact something happened to, or whose time has
      come — rules over the row, no model (apps/wahub/lead_stage.py);
   2c. the bot's own follow-ups to leads whose moment has come
@@ -24,7 +27,7 @@ The slice of background work one cron call does (every five minutes):
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py).
 
-Nothing in 1b, 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
+Nothing in 1b, 2a, 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
 a few fields on the contact, the shadow keeps proposals, the reviewer keeps
 proposals-to-approve, the look only marks.
 
@@ -41,7 +44,7 @@ from django.conf import settings
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.wahub import analysis, lead_followups, lead_stage, live_test, matching, reviewer, shadow
+from apps.wahub import analysis, lead_followups, lead_stage, live_test, matching, reviewer, shadow, waiting_list
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
 logger = logging.getLogger(__name__)
@@ -110,6 +113,7 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         'shadow_proposed': 0, 'shadow_ai': 0, 'shadow_stub': 0, 'review_proposals': 0,
         'lead_checked': 0, 'lead_changed': 0, 'lead_understood': 0,
         'followups_sent': 0, 'followups_due': 0, 'followups_skipped': 0, 'followups_failed': 0,
+        'waiting_freed': 0, 'waiting_closed': 0, 'waiting_checked': 0,
     }
 
     places = course_types = external_places = None
@@ -169,8 +173,18 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         counts['matched'] += 1
         counts['outcomes_changed'] += int(changed)
 
-    # 2b. the lead stage — after the summary and the matching, so it reads today's facts
     shadow_until = budget_seconds * SHADOW_FLOOR
+    # 2a. the waiting lists — before the stages, which read what this finds (a seat that came free)
+    waiting_seconds = min(
+        waiting_list.CHECK_SECONDS, left() - (shadow_until + SHADOW_ANSWER_SECONDS if shadow_waiting else 0),
+    )
+    if waiting_seconds > 0:
+        try:
+            counts.update(waiting_list.check(budget_seconds=waiting_seconds))
+        except Exception:
+            logger.exception('wahub cron: the waiting lists were not looked at')
+
+    # 2b. the lead stage — after the summary and the matching, so it reads today's facts
     lead_seconds = min(
         lead_stage.SCAN_SECONDS, left() - (shadow_until + SHADOW_ANSWER_SECONDS if shadow_waiting else 0),
     )

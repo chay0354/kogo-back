@@ -747,15 +747,19 @@ def spoken_age(text: str) -> tuple[int, int] | None:
     return years, months
 
 
-def _come_back_by_rules(lines, today: date) -> tuple[dict, str]:
-    """(what was said about "when", why) from the customer's messages, newest first; ({}, '') when nothing was."""
+def _come_back_by_rules(lines, today: date, *, about_when: bool = False) -> tuple[dict, str]:
+    """
+    (what was said about "when", why) from the customer's messages, newest first; ({}, '') when nothing was.
+    `about_when` — the lines are the office's own notes: a time written in one is a time to come back on,
+    with no word of "I will get back to you" beside it.
+    """
     for line in reversed([line for line in lines if line.who == SENDER_CUSTOMER and line.text]):
         text = line.text
         said_on = (timezone.localtime(line.sent_at).date() if line.sent_at else today).isoformat()
         after = P_AFTER.search(text)
         if after:
             return {'kind': COME_BACK_AFTER, 'what': after.group(1), 'said_on': said_on}, f'ביקש לחזור אליו אחרי {after.group(1)}'
-        if not P_RETURN.search(text):
+        if not about_when and not P_RETURN.search(text):
             continue
         for pattern, build in OFFSET_RULES:
             found = pattern.search(text)
@@ -979,7 +983,7 @@ def from_rules(lines, known, *, course_types=(), external_places=(), today: date
         raw, why = _come_back_by_rules(lines, today)
         if not raw and noted:
             # What the office wrote down ("לחזור בעוד חודשיים", "אחרי החגים"), read as the words about "when" that they are.
-            raw, why = _come_back_by_rules([_as_said(note) for note in noted], today)
+            raw, why = _come_back_by_rules([_as_said(note) for note in noted], today, about_when=True)
             why = why.replace('ביקש לחזור אליו', 'לפי פתק של המשרד: לחזור')
     lead['come_back_why'] = why
     _settle_day(lead, raw, known, lines, today, noted)

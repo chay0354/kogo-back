@@ -303,7 +303,10 @@ def contact_list(params):
 
 def box_counts(queryset=None) -> dict:
     queryset = Contact.objects.all() if queryset is None else queryset
-    return queryset.aggregate(**{name: Count('id', filter=cond) for name, cond in boxes().items()})
+    # Counted under names of their own: a box called like a column ("needs_human") would hide the column
+    # from the conditions of the boxes after it.
+    row = queryset.aggregate(**{f'box_{name}': Count('id', filter=cond) for name, cond in boxes().items()})
+    return {name[4:]: value for name, value in row.items()}
 
 
 def all_counts(params) -> dict:

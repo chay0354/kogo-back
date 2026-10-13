@@ -85,8 +85,10 @@ class ConversationDetailTests(WahubTestCase):
         self.assertEqual(
             set(data['chat']),
             {'unread_count', 'waiting_since', 'handled_by', 'handled_by_label', 'needs_human',
-             'needs_human_reason', 'needs_human_at', 'can_free_text', 'window_closes_at'},
+             'needs_human_reason', 'needs_human_at', 'can_free_text', 'window_closes_at',
+             'open', 'open_reason', 'open_label'},
         )
+        self.assertEqual((data['chat']['open'], data['future'], data['waiting_list'], data['notes']), (False, None, None, []))
         self.assertEqual(data['chat']['handled_by_label'], 'הבוט עונה')
         self.assertEqual(
             set(data['known']),
@@ -188,7 +190,7 @@ class LiveUpdateTests(WahubTestCase):
         data = self.get('contacts/updates/').data
         self.assertEqual(data['contacts'], [])
         self.assertTrue(data['cursor'].endswith('Z'))
-        self.assertEqual(data['boxes'], {'all': 1, 'waiting': 1, 'needs_human': 0, 'unread': 1, 'human': 0, 'bot': 1})
+        self.assertEqual(data['boxes'], {'all': 1, 'waiting': 1, 'needs_human': 0, 'unread': 1, 'human': 0, 'bot': 1, 'open': 0, 'future': 0})
 
     def test_only_what_changed_since_the_cursor_comes_back(self):
         self.incoming('ישן', phone='972505550111')

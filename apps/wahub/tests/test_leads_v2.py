@@ -965,7 +965,7 @@ class StageTests(LeadsCase):
             'signup_stuck': 'office', 'needs_reply': 'office', 'signup_failed': 'office', 'callback_due': 'office',
             'signup_started': 'bot', 'link_sent': 'bot', 'will_check': 'bot', 'trial_no_show': 'bot', 'trial_done': 'bot',
             'waiting_date': 'bot', 'answered_silent': 'bot',
-            'trial_booked': '', 'nothing_to_offer': '', 'in_conversation': '',
+            'trial_booked': '', 'waiting_list': '', 'nothing_to_offer': '', 'in_conversation': '',
             'registered': '', 'customer': '', 'not_interested': '', 'deleted': '', 'cold': '',
         })
 
@@ -1077,8 +1077,9 @@ class LeadsApiTests(LeadsCase):
         row = self.rows(owner='bot')['results'][0]
         self.assertEqual(set(row), {
             'id', 'contact_id', 'name', 'phone', 'phone_display', 'is_demo', 'stage', 'stage_label', 'owner', 'summary',
-            'chips', 'since', 'next', 'last_message_at',
+            'chips', 'since', 'next', 'last_message_at', 'waiting_list', 'future',
         })
+        self.assertEqual((row['waiting_list'], row['future']), (None, None))
         self.assertEqual((row['id'], row['contact_id'], row['name'], row['phone'], row['is_demo']), (contact.id, contact.id, 'ליד 1', contact.phone, False))
         self.assertEqual((row['stage'], row['stage_label'], row['owner']), ('link_sent', 'קיבל קישור ועוד לא נרשם', 'bot'))
         self.assertEqual(row['summary'], 'אמא לילד בן 5 בראש העין, שאלה על קפוארה, קיבלה קישור ולא נרשמה')
@@ -1198,7 +1199,9 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual(set(details), {
             'reason', 'intent', 'intent_label', 'blocker', 'blocker_text', 'child', 'come_back_on', 'come_back_why',
             'link_sent_at', 'trial', 'followups', 'timeline', 'in_system', 'closed', 'taken', 'sending_enabled',
+            'notes', 'waiting_list_entries',
         })
+        self.assertEqual((details['notes'], details['waiting_list_entries']), ([], []))
         self.assertEqual(details['reason'], 'ניסיון ב-11.10, הגיע · נועה לוי · קפוארה גילאי 5–7. לא נרשם אחרי הניסיון.')
         self.assertEqual(details['trial'], {
             'course': 'קפוארה גילאי 5–7', 'branch': 'ראש העין', 'date': held.isoformat(), 'instructor': 'יואב שדה',

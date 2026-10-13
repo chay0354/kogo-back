@@ -22,6 +22,8 @@ TABLES = {
     'wahub_bot_eval_runs',
     # leads, version 2 (0008): the bot's own follow-ups
     'wahub_lead_followups',
+    # the waiting list of a lesson that is full (0009)
+    'wahub_waiting_list',
 }
 
 

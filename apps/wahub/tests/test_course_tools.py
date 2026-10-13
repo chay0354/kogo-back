@@ -836,6 +836,7 @@ class NothingOfMoneyThatIsNotAParentsBusinessTest(CourseToolsTestCase):
             ('office_hours_now', {}),
             ('customer_card', {}),
             ('request_human', {'reason': 'בדיקה'}),
+            ('join_waiting_list', {'lesson_id': str(self.young_lesson.id), 'child': 'בן 5'}),
             ('find_courses', {'city': 'ראש העין', 'show_all': True}),
             ('find_courses', {}),
             ('tag_conversation', {'tag': 'ברכת יום הולדת', 'details': 'נועה, בת, השרון'}),
