@@ -16,10 +16,12 @@ import uuid
 from datetime import date
 
 from django.db import transaction
-from django.db.models import Case, Count, F, IntegerField, Q, Value, When
+from django.db.models import Case, Count, DateTimeField, F, IntegerField, Q, Value, When
+from django.db.models.fields.json import KeyTextTransform
+from django.db.models.functions import Cast
 from django.utils import timezone
 
-from apps.wahub import lead_ai, lead_followups, lead_stage, queries, serializers, state, waiting_list
+from apps.wahub import lead_ai, lead_followups, lead_stage, queries, search, serializers, state, waiting_list, waiting_summary
 from apps.wahub.models import (
     EVENT_CLOSED,
     EVENT_CREATED,
@@ -72,7 +74,16 @@ from apps.wahub.phones import phone_display
 TAB_OFFICE = 'office'
 TAB_BOT = 'bot'
 TAB_CLOSED = 'closed'
+# "מחכים שיתפנה מקום" — the leads of the waiting list, under a heading of their own
+# (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.3); and every lead at once, for a search that crosses the lists.
+TAB_WAITING = 'waiting'
+TAB_ALL = 'all'
 TABS = (TAB_OFFICE, TAB_BOT, TAB_CLOSED)
+ASKED_FOR = (*TABS, TAB_WAITING, TAB_ALL)
+# The four lists a lead is shown under, and what each is called.
+LIST_LABELS = {
+    TAB_OFFICE: 'מחכים לך', TAB_BOT: 'הבוט מטפל', TAB_WAITING: waiting_list.LIST_TITLE, TAB_CLOSED: 'נסגרו',
+}
 PAGE = 50
 MAX_PAGE = 100
 FOLLOWUPS_SHOWN = 30
@@ -130,28 +141,77 @@ def _iso(moment):
 
 # --- the lists -------------------------------------------------------------------------------------------
 
-def tab_q(tab: str) -> Q:
+ON_THE_WAITING_LIST = Q(lead_stage=LEAD_WAITING_LIST)
+
+
+def tab_q(tab: str, *, apart: bool = False) -> Q:
     """
     Whose list a lead is on. Every open lead is on one of the two: the office's
     when the next move is a person's, the bot's otherwise — also when nobody has
     a step right now (a trial ahead, nothing to offer), so that no lead is out
     of sight. A contact with no stage is no lead, and is on none.
+
+    `apart` — the screen shows the leads of the waiting list under their own
+    heading (`waiting=apart`), so the office's list and the bot's are without
+    them. Who answers the customer is not touched by it: a lead whose seat came
+    free is still the office's.
     """
     if tab == TAB_CLOSED:
         return Q(lead_stage__in=CLOSED_STAGES)
+    if tab == TAB_WAITING:
+        return ON_THE_WAITING_LIST
+    if tab == TAB_ALL:
+        return Q(lead_stage__in=OPEN_STAGES + CLOSED_STAGES)
+    rest = ~ON_THE_WAITING_LIST if apart else Q()
     if tab == TAB_OFFICE:
-        return Q(lead_stage__in=OPEN_STAGES, lead_owner=LEAD_OWNER_OFFICE)
-    return Q(lead_stage__in=OPEN_STAGES) & ~Q(lead_owner=LEAD_OWNER_OFFICE)
+        return Q(lead_stage__in=OPEN_STAGES, lead_owner=LEAD_OWNER_OFFICE) & rest
+    return Q(lead_stage__in=OPEN_STAGES) & ~Q(lead_owner=LEAD_OWNER_OFFICE) & rest
 
 
-def counts() -> dict:
-    """{office, bot, closed} over every lead, whatever the list is filtered by. One aggregate."""
-    return Contact.objects.aggregate(**{tab: Count('id', filter=tab_q(tab)) for tab in TABS})
+# When the customer was told of the seat that is free now, out of the contact's copy of its row
+# (waiting_list._cache_of writes it as an ISO moment, or not at all). Read as a moment only when it
+# looks like one: a list of every lead must not fall over one odd value.
+_TOLD_AT = Case(
+    When(
+        lead_waiting__notified_at__regex=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}',
+        then=Cast(KeyTextTransform('notified_at', 'lead_waiting'), DateTimeField()),
+    ),
+    default=Value(None), output_field=DateTimeField(),
+)
+_SEAT_FREE = ON_THE_WAITING_LIST & Q(lead_waiting__status=WAITING_FREED)
+# "הלקוח ענה" and "התפנה מקום" — the two that ask the office for something now (waiting_list.NEEDS_OFFICE).
+_ANSWERED = _SEAT_FREE & Q(_told_at__isnull=False, last_inbound_at__gt=F('_told_at'))
+_NOT_TOLD = _SEAT_FREE & Q(_told_at__isnull=True)
+_TOLD = _SEAT_FREE & Q(_told_at__isnull=False)
+# A condition over contacts that carry `_told_at` (_TOLD_AT — annotated, where the condition is counted).
+ASKS_THE_OFFICE = _ANSWERED | _NOT_TOLD
 
 
-def stages_in(tab: str) -> list[dict]:
+def counts(*, apart: bool = False) -> dict:
+    """
+    {office, bot, closed, waiting, waiting_act} over every lead, whatever the
+    list is filtered by. One aggregate. With `apart` the office's and the bot's
+    numbers are without the leads of the waiting list.
+    """
+    return Contact.objects.annotate(_told_at=_TOLD_AT).aggregate(
+        **{tab: Count('id', filter=tab_q(tab, apart=apart)) for tab in TABS},
+        waiting=Count('id', filter=ON_THE_WAITING_LIST), waiting_act=Count('id', filter=ASKS_THE_OFFICE),
+    )
+
+
+def list_of(contact: Contact) -> str:
+    """The list a lead is shown under — always one of the four, whatever the request asked for."""
+    stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
+    if LEAD_STAGE_GROUPS.get(stage) == LEAD_GROUP_CLOSED:
+        return TAB_CLOSED
+    if stage == LEAD_WAITING_LIST:
+        return TAB_WAITING
+    return TAB_OFFICE if contact.lead_owner == LEAD_OWNER_OFFICE else TAB_BOT
+
+
+def stages_in(tab: str, *, apart: bool = False) -> list[dict]:
     """The stages somebody on this list is in, in the board's order — what the one filter offers."""
-    found = dict(Contact.objects.filter(tab_q(tab)).values_list('lead_stage').annotate(total=Count('id')))
+    found = dict(Contact.objects.filter(tab_q(tab, apart=apart)).values_list('lead_stage').annotate(total=Count('id')))
     for old, new in LEGACY_LEAD_STAGES.items():
         if old in found:
             found[new] = found.get(new, 0) + found.pop(old)
@@ -168,15 +228,25 @@ def _number(raw, default: int, low: int, high: int) -> int:
 
 def listed(params) -> dict:
     """
-    GET leads/?owner=office|bot|closed&stage=&branch=&q=&cursor= — one page.
+    GET leads/?owner=office|bot|waiting|closed|all&waiting=apart&stage=&branch=&q=&cursor= — one page.
     The office's list is a queue of work: whoever is stuck in a registration
-    first, then whoever has waited longest. The other two read newest first.
+    first, then whoever has waited longest. "מחכים שיתפנה מקום" is one too:
+    whoever answered, then a seat that came free, then whoever was told, then
+    whoever still waits — each the longest first. The others read newest first.
+
+    A search (`q`, or `search`; search.py) is the one of the conversations, and
+    looks in the lead's own sentences too. With one, whoever was found by name
+    or phone comes first, `found` counts what was found on each of the four
+    lists, and the first page says who else has that name or number: in the
+    conversations without being a lead (`contacts`), and among the customers
+    with no conversation (`customers`). `owner=all` is how a search crosses the lists.
     """
     tab = (params.get('owner') or TAB_OFFICE).strip()
-    if tab not in TABS:
-        raise LeadError('owner: office, bot או closed.')
+    if tab not in ASKED_FOR:
+        raise LeadError('owner: office, bot, waiting, closed או all.')
+    apart = (params.get('waiting') or '').strip() == 'apart'
     # With whoever set a future lead, read in the same query: a row says whose it is.
-    rows = Contact.objects.filter(tab_q(tab)).select_related('followup_by')
+    rows = Contact.objects.filter(tab_q(tab, apart=apart)).select_related('followup_by')
 
     stages = [key.strip() for key in (params.get('stage') or '').split(',') if key.strip()]
     if stages:
@@ -187,16 +257,22 @@ def listed(params) -> dict:
             rows = rows.filter(lead_branch_id=uuid.UUID(branch))
         except ValueError:
             rows = rows.none()
-    term = (params.get('q') or '').strip()
-    if term:
-        rows = rows.filter(queries.search_q(term) | Q(lead_reason__icontains=term) | Q(lead_ai__summary__icontains=term))
+    found = search.Search(params.get('q') or params.get('search'))
+    if found:
+        rows = found.apply(rows, extra_text=SEARCHED_SENTENCES)
+    first = ['_search_rank'] if found else []
 
     if tab == TAB_OFFICE:
         rows = rows.annotate(
             _first=Case(When(lead_stage__in=OFFICE_FIRST, then=Value(0)), default=Value(1), output_field=IntegerField()),
-        ).order_by('_first', F('lead_stage_since').asc(nulls_last=True), 'id')
+        ).order_by(*first, '_first', F('lead_stage_since').asc(nulls_last=True), 'id')
+    elif tab == TAB_WAITING:
+        rows = rows.alias(_told_at=_TOLD_AT).annotate(_first=Case(
+            When(_ANSWERED, then=Value(0)), When(_NOT_TOLD, then=Value(1)), When(_TOLD, then=Value(2)),
+            default=Value(3), output_field=IntegerField(),
+        )).order_by(*first, '_first', F('lead_stage_since').asc(nulls_last=True), 'id')
     else:
-        rows = rows.order_by(F('lead_stage_since').desc(nulls_last=True), '-id')
+        rows = rows.order_by(*first, F('lead_stage_since').desc(nulls_last=True), '-id')
 
     start = _number(params.get('cursor'), 0, 0, 10_000_000)
     size = _number(params.get('limit'), PAGE, 1, MAX_PAGE)
@@ -205,12 +281,55 @@ def listed(params) -> dict:
     page = page[:size]
     now = timezone.now()
     follows = open_followups(contact.pk for contact in page)
-    return {
-        'counts': counts(),
-        'stages': stages_in(tab),
-        'results': [row_payload(contact, now=now, follow=follows.get(contact.pk)) for contact in page],
+    queues_ = waiting_queues(page)
+    why = found.found_by(page) if found else None
+    results = []
+    for contact in page:
+        row = row_payload(contact, now=now, follow=follows.get(contact.pk), queue=queues_)
+        if why is not None:
+            row['found_by'] = why.get(contact.pk)
+        results.append(row)
+    answer = {
+        'counts': counts(apart=apart),
+        'stages': stages_in(tab, apart=apart),
+        'results': results,
         'next_cursor': str(start + size) if more else None,
     }
+    if found and not start:
+        every = found.apply(Contact.objects.filter(tab_q(TAB_ALL)), extra_text=SEARCHED_SENTENCES, rank=False)
+        answer['found'] = every.aggregate(
+            office=Count('id', filter=tab_q(TAB_OFFICE, apart=True)), bot=Count('id', filter=tab_q(TAB_BOT, apart=True)),
+            waiting=Count('id', filter=tab_q(TAB_WAITING)), closed=Count('id', filter=tab_q(TAB_CLOSED)), total=Count('id'),
+        )
+        # Somebody the conversations know and the leads do not; a customer with no conversation at all.
+        answer['contacts'] = serializers.found_elsewhere(found, Contact.objects.exclude(tab_q(TAB_ALL)), today=timezone.localtime(now).date())
+        answer['customers'], answer['customers_more'] = found.customers()
+    return answer
+
+
+# The lead's own sentences, searched beside the conversation's.
+SEARCHED_SENTENCES = ('lead_reason', 'lead_ai__summary')
+
+
+def waiting_queues(contacts) -> dict:
+    """
+    {entry id: (its place in its lesson's queue, how many wait for that lesson)}
+    for the rows the contacts given carry — two queries, and none when no row
+    among them waits for a seat.
+    """
+    lessons = set()
+    for contact in contacts:
+        kept = contact.lead_waiting if isinstance(contact.lead_waiting, dict) else {}
+        lesson_id = waiting_list._lesson_uuid(kept.get('lesson_id')) if kept.get('entry_id') else None
+        if lesson_id is not None:
+            lessons.add(lesson_id)
+    if not lessons:
+        return {}
+    places = waiting_list._positions(lessons)
+    lengths: dict = {}
+    for lesson_id, numbers in waiting_list._active_by_lesson(lessons).items():
+        lengths[str(lesson_id)] = sum(numbers.values())
+    return {'places': places, 'lengths': lengths}
 
 
 def open_followups(contact_ids) -> dict:
@@ -298,10 +417,15 @@ def no_step_because(contact: Contact, stage: str) -> str:
     return NOTHING_PLANNED
 
 
-def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None) -> dict:
+def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None, queue: dict | None = None) -> dict:
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     said = _said(contact)
     waits = waiting_list.contact_block(contact)
+    if waits is not None and queue:
+        # Where the lead stands in the queue of the lesson it waits for, and how long that queue is.
+        waits['position'] = queue['places'].get(waits['entry_id'])
+        waits['queue'] = queue['lengths'].get(waits['lesson_id'])
+    listed_under = list_of(contact)
     # A seat came free: that is the line of the lead now, above whatever the conversation was summed up as.
     seat_free = waits is not None and waits['status'] == WAITING_FREED and stage == LEAD_WAITING_LIST
     return {
@@ -316,6 +440,9 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         'stage': stage,
         'stage_label': STAGE_LABELS.get(stage, ''),
         'owner': contact.lead_owner,
+        # The list the lead is shown under — one of four, "מחכים שיתפנה מקום" among them (the same contract, ח.3.1).
+        'list': listed_under,
+        'list_label': LIST_LABELS[listed_under],
         # One sentence of "why is this a lead": the summary's when it wrote one, else the rules' own.
         'summary': contact.lead_reason if seat_free else ((said.get('summary') or '').strip() or contact.lead_reason),
         'chips': chips(contact),
@@ -326,6 +453,8 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         # conversations carry (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1); null when there is none.
         'waiting_list': waits,
         'future': serializers.future_payload(contact, today=timezone.localtime(now or timezone.now()).date()),
+        # The customer's card behind the lead (the same contract, ח.2); None for somebody the system does not know.
+        'customer': search.customer_block(contact),
     }
 
 
@@ -335,7 +464,8 @@ def trial_details(contact: Contact) -> dict | None:
     """
     The trial behind a "trial" stage — class, branch, day, instructor, child,
     whether they came — read from the registrations for the one lead that is
-    open. None when the lead is not about a trial.
+    open. None when the lead is not about a trial. `child_id` rides along for
+    the caller, which takes it out: it is the card to open, not a detail to show.
     """
     if contact.kogo_outcome not in (OUTCOME_TRIAL_ONLY, OUTCOME_TRIAL_UPCOMING):
         return None
@@ -343,7 +473,7 @@ def trial_details(contact: Contact) -> dict | None:
     came = {'attended': True, 'no_show': False}.get(facts.get('outcome'))
     trial = {
         'course': facts.get('course') or '', 'branch': '', 'date': facts.get('on') or None, 'instructor': '',
-        'child': '', 'attended': came,
+        'child': '', 'child_id': None, 'attended': came,
     }
     if contact.kogo_child_ids and facts.get('on'):
         from apps.enrollments.models import LessonEnrollment
@@ -364,6 +494,7 @@ def trial_details(contact: Contact) -> dict | None:
                 branch=row.lesson.course.branch.name,
                 instructor=f'{instructor.first_name} {instructor.last_name}'.strip() if instructor is not None else '',
                 child=row.child.first_name,
+                child_id=str(row.child_id),
             )
     return trial
 
@@ -394,7 +525,15 @@ def details_payload(contact: Contact, *, now=None) -> dict:
         ContactEvent.objects.filter(contact=contact, kind__in=TIMELINE_KINDS).select_related('actor')
         .order_by('-id')[:TIMELINE_EVENTS]
     )
-    payload = row_payload(contact, now=now, follow=still_open)
+    payload = row_payload(contact, now=now, follow=still_open, queue=waiting_queues([contact]))
+    trial = trial_details(contact)
+    waits = waiting_summary.of(contact, now=now)
+    # The card that opens from the lead: the child the lead is about, when it names one — the child of
+    # the trial, the child the waiting-list row was written about.
+    about = (waits or {}).get('customer') or {}
+    child_id = (trial.pop('child_id', None) if trial else None) or about.get('child_id')
+    if child_id:
+        payload['customer'] = search.customer_block(contact, child_id=child_id)
     payload['details'] = {
         # Why: the rules' own sentence — with the customer's words when the lead was closed as not interested.
         'reason': contact.lead_reason,
@@ -406,7 +545,7 @@ def details_payload(contact: Contact, *, now=None) -> dict:
         'come_back_on': contact.lead_come_back_on.isoformat() if contact.lead_come_back_on else None,
         'come_back_why': said.get('come_back_why') or '',
         'link_sent_at': _iso(contact.lead_link_sent_at),
-        'trial': trial_details(contact),
+        'trial': trial,
         'followups': [lead_followups.payload(row) for row in followups],
         'timeline': [
             {
@@ -425,6 +564,8 @@ def details_payload(contact: Contact, *, now=None) -> dict:
             for event in ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).select_related('actor', 'edited_by').order_by('-id')[:NOTES_SHOWN]
         ],
         'waiting_list_entries': waiting_list.entries_of(contact),
+        # What they wanted and where, in one sentence, and what can be offered instead now (the same contract, ח.3.2).
+        'waiting_summary': waits,
     }
     return payload
 

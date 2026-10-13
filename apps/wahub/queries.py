@@ -13,8 +13,8 @@ from django.db.models import BooleanField, Case, Count, F, Min, OuterRef, Q, Sub
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
-from apps.customers.phone_search import phone_query_digits
 from apps.wahub import state
+from apps.wahub.search import Search
 from apps.wahub.models import (
     CALLBACK_COUNTS_UNDER,
     DIRECTION_IN,
@@ -139,6 +139,29 @@ def open_reason(contact: Contact, today) -> str:
         return OPEN_HUMAN
     return ''
 
+# The box a conversation is shown under when a search crosses the boxes (the same contract, ח.1.2).
+BOX_BOT_LABEL = 'הבוט עונה'
+BOX_WAITING_LABEL = 'ממתין למענה'
+
+
+def box_of(contact: Contact, today) -> tuple:
+    """(the most telling box the conversation is in, that in words) — the first that holds."""
+    if contact.needs_human:
+        return 'needs_human', OPEN_LABELS[OPEN_NEEDS_HUMAN]
+    future = future_state(contact, today)
+    if future == FUTURE_DUE:
+        return 'open', OPEN_LABELS[OPEN_FUTURE_DUE]
+    if future == FUTURE_WROTE:
+        return 'open', OPEN_LABELS[OPEN_FUTURE_WROTE]
+    if future == FUTURE_PARKED:
+        return 'future', FUTURE_LABEL
+    if contact.handled_by == HANDLED_HUMAN:
+        return 'human', OPEN_LABELS[OPEN_HUMAN]
+    if contact.waiting_since is not None:
+        return 'waiting', BOX_WAITING_LABEL
+    return 'all', BOX_BOT_LABEL
+
+
 HIDDEN = Q(kogo_outcome__in=HIDDEN_OUTCOMES)
 
 
@@ -192,21 +215,16 @@ def flag(value) -> bool:
 _truthy = flag
 
 
-def search_q(term: str) -> Q:
-    """A name, a phone however it is typed, the last message, the summary."""
-    cond = Q(name__icontains=term) | Q(last_message_text__icontains=term) | Q(known_summary__icontains=term)
-    digits = phone_query_digits(term)
-    if digits:
-        # Stored as 9725XXXXXXXX: a typed 050… is the same number.
-        cond |= Q(phone__contains='972' + digits[1:] if digits.startswith('0') else digits)
-    return cond
-
-
-def common_filters(queryset, params):
-    """The filters both lists and the counts share."""
-    term = (params.get('search') or '').strip()
-    if term:
-        queryset = queryset.filter(search_q(term))
+def common_filters(queryset, params, *, found: Search | None = None, rank: bool = False):
+    """
+    The filters both lists and the counts share. `found` is the search of the
+    request when the caller built it already (it needs it again, for the rows);
+    `rank` adds `_search_rank` to what a search finds (search.py).
+    """
+    if found is None:
+        found = Search(params.get('search'))
+    if found:
+        queryset = found.apply(queryset, rank=rank)
 
     tag = (params.get('tag') or '').strip()
     if tag:
@@ -271,7 +289,7 @@ def _lead_order(stages: list, groups: list) -> list:
     return [F('lead_stage_since').desc(nulls_last=True), '-id']
 
 
-def contact_list(params):
+def contact_list(params, *, found: Search | None = None):
     """
     The list a screen asked for.
 
@@ -283,8 +301,15 @@ def contact_list(params):
     whoever is in that stage, in either view — a stage of registered customers
     or of trials ahead is asked for by name, so nothing is left out — in the
     stage's own order (`_lead_order`).
+
+    With a search (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.1) whoever was found by
+    their own name or phone comes first, then through the family, then by a
+    word in the conversation — each group in the list's own order. A search
+    crosses the boxes when the screen asks for `box=all` with it.
     """
-    queryset = common_filters(listed(), params)
+    if found is None:
+        found = Search(params.get('search'))
+    queryset = common_filters(listed(), params, found=found, rank=True)
     stages, groups = _lead_filter(params)
     by_stage = bool(stages or groups)
     view = (params.get('view') or VIEW_CHATS).strip()
@@ -298,7 +323,8 @@ def contact_list(params):
         box = (params.get('box') or 'all').strip()
         queryset = queryset.filter(boxes().get(box, Q()))
         order = [F('last_message_at').desc(nulls_last=True), '-id']
-    return queryset.order_by(*(_lead_order(stages, groups) if by_stage else order))
+    order = _lead_order(stages, groups) if by_stage else order
+    return queryset.order_by(*((['_search_rank'] if found else []) + order))
 
 
 def box_counts(queryset=None) -> dict:
@@ -423,6 +449,8 @@ ACT_STAGES = [(stage, label) for stage, label in LEAD_STAGE_CHOICES if LEAD_STAG
 
 def summary() -> dict:
     """The "today" tab: three queries, whatever the number of contacts."""
+    from apps.wahub import leads, waiting_list
+
     now = timezone.now()
     today = timezone.localtime(now).date()
     first_day = today - timedelta(days=6)
@@ -430,7 +458,7 @@ def summary() -> dict:
     since = timezone.make_aware(datetime.combine(first_day, time.min), zone)
     unregistered = unregistered_q(now - timedelta(days=UNREGISTERED_DAYS))
 
-    totals = Contact.objects.aggregate(
+    totals = Contact.objects.annotate(_told_at=leads._TOLD_AT).aggregate(
         waiting=Count('id', filter=BOXES['waiting']),
         needs_human=Count('id', filter=BOXES['needs_human']),
         unread=Count('id', filter=BOXES['unread']),
@@ -442,7 +470,16 @@ def summary() -> dict:
         unregistered_oldest_last_inbound=Min('last_inbound_at', filter=unregistered),
         # "דורש טיפול": how many contacts are in each stage that asks for something (lead_stage.py).
         **{f'lead_{stage}': Count('id', filter=Q(lead_stage=stage)) for stage, _label in ACT_STAGES},
+        # "מחכים שיתפנה מקום" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.3.1): the leads of the waiting list, counted
+        # under their own name — how many there are, and how many of them ask for the office now.
+        waiting_list_total=Count('id', filter=leads.ON_THE_WAITING_LIST),
+        waiting_list_act=Count('id', filter=leads.ASKS_THE_OFFICE),
     )
+    waiting = {
+        'label': waiting_list.LIST_TITLE,
+        'total': totals.pop('waiting_list_total'),
+        'act': totals.pop('waiting_list_act'),
+    }
     not_registered = {
         'total': totals.pop('unregistered_total'),
         'hot': totals.pop('unregistered_hot'),
@@ -474,6 +511,7 @@ def summary() -> dict:
 
     return {
         **totals,
+        'waiting_list': waiting,
         'new_contacts_today': days[today]['new_contacts'],
         'new_contacts_7d': sum(day['new_contacts'] for day in days.values()),
         'inbound_today': days[today]['inbound'],

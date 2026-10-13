@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import re
 
+from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.wahub import queries, state, waiting_list
+from apps.wahub import queries, search, state, waiting_list
 from apps.wahub.models import (
     CUSTOMER_OUTCOMES,
     EVENT_KIND_CHOICES,
@@ -122,10 +123,15 @@ def note_payload(event: ContactEvent) -> dict:
     }
 
 
-def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
+# A key that is there only when the list was searched: None is an answer ("found by what the row shows").
+NOT_SEARCHED = object()
+
+
+def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEARCHED) -> dict:
     now = now or timezone.now()
     today = today or timezone.localtime(now).date()
     open_reason = queries.open_reason(contact, today)
+    box, box_label = queries.box_of(contact, today)
     flags = [flag for flag in (contact.known_flags or []) if flag in FLAG_LABELS]
     last_message = None
     if contact.last_message_at and contact.last_message_direction:
@@ -135,7 +141,7 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
             'sender': contact.last_message_sender,
             'sent_at': _iso(contact.last_message_at),
         }
-    return {
+    payload = {
         'id': contact.id,
         'phone': contact.phone,
         'phone_display': phone_display(contact.phone),
@@ -164,9 +170,14 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
             'open': bool(open_reason),
             'open_reason': open_reason,
             'open_label': queries.OPEN_LABELS[open_reason],
+            # The box the conversation is shown under when a search crosses the boxes (the same contract, ח.1.2).
+            'box': box,
+            'box_label': box_label,
         },
         'future': future_payload(contact, today=today),
         'waiting_list': waiting_list.contact_block(contact),
+        # The customer's card behind the contact — the family, the child, the address (the same contract, ח.2).
+        'customer': search.customer_block(contact),
         'known': {
             'topic': contact.known_topic,
             'topic_label': TOPIC_LABELS.get(contact.known_topic, ''),
@@ -206,6 +217,40 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
         'lead': lead_payload(contact, today=today),
         'tags': [tag_payload(tag) for tag in sorted_tags(contact.tags.all())],
     }
+    if found_by is not NOT_SEARCHED:
+        # Why a search found the row, when it was not by what the row shows (the same contract, ח.1.1).
+        payload['found_by'] = found_by
+    return payload
+
+
+def found_elsewhere(found, contacts, *, today=None) -> list:
+    """
+    `contacts` of a searched list that is not the list of conversations (the
+    same contract, ח.1.4): whoever the search finds by name or by phone among
+    `contacts` — the ones that are not on that list — a few of them, the best
+    match first. Reads only.
+    """
+    today = today or state.now_israel_date()
+    rows = list(
+        found.apply(contacts, identity_only=True)
+        .order_by('_search_rank', F('last_message_at').desc(nulls_last=True), '-id')[:search.OTHERS_SHOWN]
+    )
+    why = found.found_by(rows)
+    shown = []
+    for contact in rows:
+        box, box_label = queries.box_of(contact, today)
+        shown.append({
+            'id': contact.id,
+            'name': contact.name,
+            'phone_display': phone_display(contact.phone),
+            'is_demo': contact.is_demo,
+            'box': box,
+            'box_label': box_label,
+            'found_by': why.get(contact.pk),
+            'customer': search.customer_block(contact),
+            'link': f'/wahub?tab=chats&contact={contact.id}',
+        })
+    return shown
 
 
 def message_payload(message: Message) -> dict:
