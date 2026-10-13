@@ -79,6 +79,34 @@ def is_active_student(child) -> bool:
     return getattr(child, 'status', None) in ACTIVE_STUDENT_CHILD_STATUSES
 
 
+# What a row on a lesson's register is, on one date. Every screen that says "how
+# many students" reads this, so the office's calendar, the instructor's day and
+# the lesson window cannot each count their own way (owner, 13.10.2026: "כמות
+# התלמידים שמופיעים ביומן של ה-admin לא תואמים למשתמשים של המורים").
+ON_REGISTER_STUDENT = 'student'
+ON_REGISTER_TRIAL = 'trial'
+ON_REGISTER_OTHER = 'other'
+
+
+def register_kind(enrollment, occurrence_date: Optional[date]) -> str:
+    """
+    * ``student`` — a regular place, and the child is פעיל or בעיית תשלום. The
+      owner's own definition of a student (24.9.2026), the one pay, the
+      catalogue and the dashboards already count by.
+    * ``trial`` — the row is a trial booked for this date.
+    * ``other`` — on the register for another reason: a sign-up nobody has paid
+      for yet, a child who left and whose place was never closed, an old trial
+      with no date, a walk-in. They stay on the register — the instructor may
+      well see them in the room — but they are not counted as students, and
+      each one is a row for the office to look at.
+    """
+    if occurrence_date is not None and enrollment.trial_lesson_date == occurrence_date:
+        return ON_REGISTER_TRIAL
+    if not enrollment.trial_lesson_date and is_active_student(getattr(enrollment, 'child', None)):
+        return ON_REGISTER_STUDENT
+    return ON_REGISTER_OTHER
+
+
 def paying_enrollment_q(prefix: str = '') -> Q:
     """
     The same rule as `paying_enrollments`, shaped for an annotation `filter=`.
