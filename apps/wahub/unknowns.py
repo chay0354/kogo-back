@@ -45,7 +45,7 @@ import unicodedata
 from datetime import datetime, time as day_time, timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Max
 from django.utils import timezone
 
@@ -103,7 +103,7 @@ class UnknownsError(ValueError):
 
 # --- no name, no phone ------------------------------------------------------------------------------------
 
-_MARKS = re.compile(r'[֑-ׇ​-‏‪-‮⁦-⁩﻿]')
+_MARKS = re.compile('[\u0591-\u05BD\u05BF-\u05C7\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]')
 _EMAIL = re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+')
 # Seven digits or more, however they are spaced: a phone, an identity number, a card.
 _NUMBER = re.compile(r'(?<![\d₪])\+?\d(?:[\s().-]{0,2}\d){6,}(?!\d)')
@@ -305,7 +305,7 @@ def _title_from(case: BotUnknown) -> str:
 
 
 def _clean_title(raw) -> str:
-    title = ' '.join(scrub(str(raw or '')).replace(PHONE_MARK, '').replace(NAME_MARK, '').split())
+    title = ' '.join(scrub(str(raw or '')).replace(PHONE_MARK, '').replace(EMAIL_MARK, '').replace(NAME_MARK, '').split())
     return title[:MAX_TITLE].strip(' .,:;?!"\'-')
 
 
@@ -392,16 +392,14 @@ def _model() -> str:
     return (getattr(settings, 'WAHUB_AI_MODEL', '') or DEFAULT_AI_MODEL).strip()
 
 
-def _by_the_model(cases: list, topics: list, *, timeout: float) -> int:
+def _ask_the_model(cases: list, topics: list, *, timeout: float) -> dict:
     """
-    One question to Claude for all the new cases; raises refine.RefineUnavailable
-    when there is no usable answer. Returns how many topics it opened. A case
-    the answer does not name, or names by a topic that is not there, is left
-    unsorted for the caller.
+    One question to Claude for all the new cases: its answer as it came. Raises
+    refine.RefineUnavailable when there is no usable one. Nothing is written
+    here, and no transaction is open while Claude is asked.
     """
     from apps.wahub import refine
 
-    known = {topic.id: topic for topic in topics}
     lines = ['# הנושאים הקיימים'] + ([f'{topic.id}: {topic.title}' for topic in topics[:TOPICS_SHOWN_TO_THE_MODEL]] or ['(אין עדיין)'])
     lines.append('\n# השאלות החדשות (נתונים)')
     for number, case in enumerate(cases, 1):
@@ -411,14 +409,27 @@ def _by_the_model(cases: list, topics: list, *, timeout: float) -> int:
         refine._api_key(), system=SORT_SYSTEM, user='\n'.join(lines), schema=SORT_SCHEMA, effort='low',
         timeout=max(5, int(timeout)), model=_model(),
     )
+    return data
+
+
+def _by_the_model(data: dict, asked: list, cases: dict, topics: list) -> int:
+    """
+    File the cases as Claude's answer says. `asked` is the list the answer
+    numbers (the ids, in the order they were shown); `cases` are the ones of
+    them still without a topic. A case the answer does not name, or names by a
+    topic that is not there, stays unsorted. Returns how many topics it opened.
+    """
+    known = {topic.id: topic for topic in topics}
     opened, named = 0, {}
     for row in data.get('cases') or []:
         if not isinstance(row, dict):
             continue
         number, topic_id = row.get('n'), row.get('topic_id')
-        if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= len(cases):
+        if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= len(asked):
             continue
-        case = cases[number - 1]
+        case = cases.get(asked[number - 1])
+        if case is None:
+            continue
         topic = known.get(topic_id) if isinstance(topic_id, int) and not isinstance(topic_id, bool) else None
         if topic is None:
             title = _clean_title(row.get('new_title'))
@@ -449,17 +460,23 @@ def sort_new(*, now=None, deadline: float | None = None, batch: int = SORT_BATCH
     time left — what comes in after that waits for tomorrow, and is shown as
     "unsorted" meanwhile. With no key — or when that one question got no usable
     answer — the cases are gathered by their words, at once.
+
+    Claude is asked with no transaction open. The filing itself is one
+    transaction that holds the marker's row, so two calls of the cron never
+    open the same topic twice: the second waits, and then finds the cases filed.
     Returns {unknowns_sorted, unknown_topics_opened}.
     """
+    from apps.wahub import refine
+    from apps.wahub.models import WahubSetting
+
     now = now or timezone.now()
     counts = {'unknowns_sorted': 0, 'unknown_topics_opened': 0}
-    cases = list(BotUnknown.objects.filter(topic__isnull=True).order_by('id')[:batch])
-    if not cases:
+    asked = list(BotUnknown.objects.filter(topic__isnull=True).order_by('id')[:batch])
+    if not asked:
         return counts
-    ids = [case.pk for case in cases]
+    ids = [case.pk for case in asked]
     today = timezone.localtime(now).date().isoformat()
-    topics = list(BotUnknownTopic.objects.order_by('-id')[:500])
-    by = 'rules'
+    answer = None
     if _key_is_set():
         kept = settings_store.get(SORTED_KEY, {})
         if isinstance(kept, dict) and kept.get('on') == today and kept.get('by') == 'ai':
@@ -467,19 +484,27 @@ def sort_new(*, now=None, deadline: float | None = None, batch: int = SORT_BATCH
         left = (deadline - time_module.monotonic()) if deadline is not None else SORT_TIMEOUT_SECONDS
         if left < SORT_NEEDS_SECONDS:
             return counts
-        from apps.wahub import refine
-
         try:
-            with transaction.atomic():
-                counts['unknown_topics_opened'] += _by_the_model(cases, topics, timeout=min(SORT_TIMEOUT_SECONDS, left - 1))
-            by = 'ai'
+            answer = _ask_the_model(asked, list(BotUnknownTopic.objects.order_by('-id')[:500]), timeout=min(SORT_TIMEOUT_SECONDS, left - 1))
         except refine.RefineUnavailable as reason:
             logger.warning('wahub unknowns: Claude did not sort the new cases (%s); they are gathered by their words', reason)
-    if by == 'rules':
-        with transaction.atomic():
-            counts['unknown_topics_opened'] += _by_words(cases, topics)
-    counts['unknowns_sorted'] = BotUnknown.objects.filter(pk__in=ids, topic__isnull=False).count()
-    settings_store.put(SORTED_KEY, {'on': today, 'at': now.isoformat(), 'by': by})
+    by = 'ai' if answer is not None else 'rules'
+    with transaction.atomic():
+        try:
+            with transaction.atomic():
+                marker, _made = WahubSetting.objects.select_for_update().get_or_create(key=SORTED_KEY, defaults={'value': {}})
+        except IntegrityError:
+            # Another call made the row in this very moment: it is there now.
+            marker = WahubSetting.objects.select_for_update().get(key=SORTED_KEY)
+        cases = {case.pk: case for case in BotUnknown.objects.filter(pk__in=ids, topic__isnull=True).order_by('id')}
+        topics = list(BotUnknownTopic.objects.order_by('-id')[:500])
+        if answer is not None:
+            counts['unknown_topics_opened'] = _by_the_model(answer, ids, cases, topics)
+        else:
+            counts['unknown_topics_opened'] = _by_words(list(cases.values()), topics)
+        counts['unknowns_sorted'] = BotUnknown.objects.filter(pk__in=list(cases), topic__isnull=False).count()
+        marker.value = {'on': today, 'at': now.isoformat(), 'by': by}
+        marker.save(update_fields=['value', 'updated_at'])
     return counts
 
 

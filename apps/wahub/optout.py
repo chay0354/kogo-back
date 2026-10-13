@@ -95,14 +95,17 @@ _EXPLICIT = re.compile('|'.join((
     r'take me off(?: (?:this|the|your) list)?',
 )))
 
-_MARKS = re.compile(r'[֑-ׇ​-‏‪-‮⁦-⁩﻿]')
+_MARKS = re.compile('[\u0591-\u05BD\u05BF-\u05C7\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]')
+MAQAF = '\u05be'
 _SENTENCE_END = re.compile(r'[.!?,;:\n\r…|()\[\]"“”״]+|\s[-–—]+\s')
 _NOT_A_WORD = re.compile(r"[^0-9a-zא-ת' ]+")
 
 
 def _sentences(text: str) -> list[list[str]]:
     """The message as sentences of plain words: no marks, no emoji, lower case, the apostrophe of "don't" kept."""
-    text = _MARKS.sub('', unicodedata.normalize('NFKC', str(text or ''))).lower().replace('’', "'").replace('׳', "'")
+    # The maqaf joins two words: it is read as the space between them.
+    text = unicodedata.normalize('NFKC', str(text or '')).replace(MAQAF, ' ')
+    text = _MARKS.sub('', text).lower().replace('’', "'").replace('׳', "'")
     found = []
     for part in _SENTENCE_END.split(text):
         words = _NOT_A_WORD.sub(' ', part).split()
