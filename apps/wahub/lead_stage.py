@@ -20,7 +20,8 @@ The rules, in order:
 
      1. deleted           a person deleted the lead, and the customer has not written since
      2. not_interested    a person closed it ("לא מעוניין" on the leads screen, "לא רלוונטי" of the office)
-    2w. waiting_list      a seat came free in the lesson they wait for                   office
+    2w. waiting_list      a seat came free in the lesson they wait for (and after the    office
+                          office told the customer of it, until the row is dealt with)
      3. registered        registered after writing (kogo), the office marked "נרשם", or the customer
                           said they already had ("כבר נרשמנו") — on their word, with no argument
      4. customer          was a paying customer before writing: service, not a lead — unless they
@@ -308,6 +309,9 @@ NEXT_STEPS = {
     LEAD_COLD: '',
 }
 OFFER_THE_SEAT = 'להציע ללקוח את המקום שהתפנה'
+# Once a person told the customer of the seat (waiting_notify.py): the move is the customer's, and then ours again.
+SEAT_TOLD = 'נשלחה ללקוח הודעה על המקום שהתפנה — מחכים לתשובה'
+SEAT_ANSWERED = 'הלקוח ענה להודעה על המקום שהתפנה — לענות לו'
 WROTE_BEFORE_THE_DAY = 'הלקוח כתב לפני המועד — לענות לו'
 NOBODY_SPOKE_YET = 'אף נציג עוד לא דיבר איתו — להתקשר ולהציע שיעור ניסיון'
 TRY_AGAIN = 'ניסו להשיג אותו ולא ענה — לנסות שוב'
@@ -870,8 +874,12 @@ def compute(contact: Contact, now=None) -> dict:
     # 2w. a seat came free in the lesson they wait for: the office offers it, before anything else is asked
     waits = contact.lead_waiting if isinstance(contact.lead_waiting, dict) else {}
     if waits.get('status') == WAITING_FREED:
+        # It stays the office's whether or not the customer was told: two may wait for one seat, and
+        # somebody has to see it through. Only the sentence of what to do next moves on.
+        told = _moment(waits.get('notified_at'))
+        offer = OFFER_THE_SEAT if told is None else SEAT_ANSWERED if facts.wrote_after(told) else SEAT_TOLD
         return done(
-            LEAD_WAITING_LIST, _sentences(waiting_list.freed_reason(waits)), next_step=OFFER_THE_SEAT,
+            LEAD_WAITING_LIST, _sentences(waiting_list.freed_reason(waits)), next_step=offer,
             since=_moment(waits.get('freed_at')), owner=LEAD_OWNER_OFFICE,
         )
     # Somebody who waits for a seat is a lead whatever else they are: a customer, registered to

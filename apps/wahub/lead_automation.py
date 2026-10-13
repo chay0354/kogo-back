@@ -38,7 +38,9 @@ from datetime import timedelta
 from django.db.models import Count, F, Max, Q
 from django.utils import timezone
 
-from apps.wahub import lead_ai, lead_followups, lead_stage, lead_templates, leads, sending, settings_store
+from apps.wahub import (
+    lead_ai, lead_followup_seed, lead_followups, lead_stage, lead_templates, leads, sending, settings_store,
+)
 from apps.wahub.lead_templates import STAGE_ONE
 from apps.wahub.models import (
     NUDGE_DATE_ARRIVED,
@@ -149,14 +151,21 @@ _UNLESS_SAID = {
 LAST_TIME_WORDS = 'הפנייה האחרונה'
 ONCE_WORDS = 'פעם אחת בלבד'
 OPENING_WORDS = 'יוצאת בלי תבנית; תבנית נדרשת רק למי שכתב בסוף השבוע'
+# The texts that leave on a person's press (lead_followup_seed.BY_HAND): no round, no delays — when is the press.
+BY_HAND_WHEN = {
+    lead_followup_seed.SEAT_FREED: 'בלחיצה של המשרד על "להודיע ללקוח", כשהתפנה מקום למי שברשימת ההמתנה',
+}
 
 
 def when_label(kind: str, variant: str, step: int) -> str:
     """
     When this text is sent, in the owner's words — worked out from the very
     delays the engine plans by (lead_stage.delays_for), so the screen cannot
-    say one thing while the bot does another.
+    say one thing while the bot does another. A text that leaves on a person's
+    press is planned by nobody: its "when" is the press itself.
     """
+    if kind in BY_HAND_WHEN:
+        return BY_HAND_WHEN[kind]
     delays = lead_stage.delays_for(kind, variant)
     delay = delays[step - 1] if step <= len(delays) else None
     if delay is None:

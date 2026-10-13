@@ -65,6 +65,8 @@ FLOW_NAMES = {
     'date_arrived_not_ready_1': 'kogo_lead_notready_1',
     # Asked what they are looking for, when the two hours end after the office has closed for the weekend.
     'opening_1': 'kogo_lead_opening_1',
+    # No follow-up of the bot's: the office's own press, "a seat came free" (waiting_notify.py).
+    'seat_freed_1': 'kogo_lead_seat_1',
 }
 
 BY_PERSON = 'manual'
