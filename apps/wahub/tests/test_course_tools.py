@@ -453,8 +453,9 @@ class CourseCardTest(CourseToolsTestCase):
 
         LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=first, reason='המדריך בחופשת מחלה')
         LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=third)
-        # One that passed is nobody's question.
-        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=first - timedelta(days=7))
+        # One that passed is nobody's question. Two weeks back, not one: on the lesson's own day, after it ended,
+        # the coming date is next week's and "a week before it" is today — which is still said.
+        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=first - timedelta(days=14))
         result = self.card(self.young)
         lesson = result['course']['lessons'][0]
         self.assertEqual(lesson['cancelled_dates'], [said(first), said(third)])
