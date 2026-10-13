@@ -65,6 +65,7 @@ from apps.wahub import bot_mode, knowledge, sending, shadow, state, waiting_list
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     DIRECTION_IN,
+    DIRECTION_OUT,
     EVENT_LIVE_TEST,
     EVENT_NEEDS_HUMAN,
     HANDLED_HUMAN,
@@ -136,8 +137,9 @@ LATE_WITHIN = timedelta(minutes=15)
 TOO_OLD = timedelta(minutes=20)
 # An answer computed this long ago with no sign that it left is said on the contact.
 UNKNOWN_AFTER = timedelta(minutes=2)
-# How far back the look goes (the cron of the night that did not run, a morning's first look), how many
-# contacts it reads, how many late answers one call starts, and how long starting them may take.
+# How far back the look goes (hours in which the cron did not run are still said in the end), how many
+# contacts it reads — the latest to write — how many late answers one call starts, and how long starting
+# them may take.
 LOOK_BACK = timedelta(hours=12)
 WATCHED = 200
 LATE_PER_RUN = 8
@@ -560,24 +562,29 @@ def _overdue(now) -> list:
     worked out (and nothing shows that it left); `since` is the moment before
     which this contact's messages are not answered (None for a test number).
 
-    Five queries whatever the number of contacts — the mode "all" makes every
-    contact one of these, so nothing here is asked contact by contact. Left
-    out: a demo contact, a conversation a person holds, a contact a call is
-    answering this moment, whoever was answered since (by anybody), a message
-    the journal already speaks of, and — always — a message from before the
-    mode became live.
+    Six queries whatever the number of contacts — the mode "all" makes every
+    contact one of these, so nothing here is asked contact by contact. Looked
+    at: whoever wrote lately and either still has a message no answer was
+    computed for (`needs_shadow`) or wrote last in the conversation. Left out:
+    a demo contact, a conversation a person holds, a contact a call is
+    answering this moment, whoever somebody else wrote to since (the office,
+    the old bot), a message the journal already speaks of, and — always — a
+    message from before the mode became live.
     """
     bot_mode.sync()
     since = bot_mode.live_since()
-    rows = Contact.objects.filter(
-        is_demo=False, last_message_direction=DIRECTION_IN, last_inbound_at__gte=now - LOOK_BACK,
+    rows = Contact.objects.filter(is_demo=False, last_inbound_at__gte=now - LOOK_BACK).filter(
+        Q(needs_shadow=True) | Q(last_message_direction=DIRECTION_IN),
     ).exclude(handled_by=HANDLED_HUMAN).filter(Q(live_test_busy_until__isnull=True) | Q(live_test_busy_until__lte=now))
     if since is None:
         rows = rows.filter(live_test=True)
     else:
         # The row's own time is ManyChat's when it gave one; the message's arrival is looked at below.
         rows = rows.filter(Q(live_test=True) | Q(last_inbound_at__gte=since - timedelta(minutes=5)))
-    contacts = {contact.id: contact for contact in rows.order_by('last_inbound_at', 'id')[:WATCHED]}
+    # The latest to write are the ones read (what is already said on a contact must not crowd out a new
+    # message), and whoever has waited longest among them comes first.
+    latest = list(rows.order_by('-last_inbound_at', '-id')[:WATCHED])
+    contacts = {contact.id: contact for contact in reversed(latest)}
     if not contacts:
         return []
     last_ids = (
@@ -594,6 +601,12 @@ def _overdue(now) -> list:
         ShadowReply.objects.filter(contact_id__in=contacts, after_message_id__isnull=False)
         .values('contact_id').annotate(last=Max('after_message_id')).values_list('contact_id', 'last')
     )
+    # Somebody other than the new bot wrote to him since (the office, the old bot's copy): the new bot's own
+    # lines answer other messages, and a line that did not leave answered nobody.
+    answered = dict(
+        Message.objects.filter(contact_id__in=contacts, direction=DIRECTION_OUT, new_bot=False, status__in=DELIVERED_STATUSES)
+        .values('contact_id').annotate(last=Max('id')).values_list('contact_id', 'last')
+    )
     oldest = min(message.created_at for message in lasts.values())
     said: dict = {}
     spoken = ContactEvent.objects.filter(contact_id__in=contacts, kind=EVENT_LIVE_TEST, created_at__gte=oldest)
@@ -603,7 +616,7 @@ def _overdue(now) -> list:
     overdue = []
     for contact_id, contact in contacts.items():
         last = lasts.get(contact_id)
-        if last is None or last.created_at > now - UNANSWERED_AFTER:
+        if last is None or last.created_at > now - UNANSWERED_AFTER or answered.get(contact_id, 0) > last.id:
             continue
         mine = None if contact.live_test else since
         if not contact.live_test and (since is None or last.created_at < since):

@@ -144,9 +144,23 @@ class CronTests(WahubTestCase):
         from django.conf import settings
 
         crons = json.loads((Path(settings.BASE_DIR) / 'vercel.json').read_text())['crons']
-        self.assertIn({'path': '/api/v1/wahub/cron/tick/', 'schedule': '*/5 4-20 * * *'}, crons)
+        # Round the clock since the new bot may answer everybody: a customer writes at night too, and the
+        # safety net of the live answers is this call (docs/WAHUB-CONTRACT-GO-LIVE.md, ב.3).
+        self.assertIn({'path': '/api/v1/wahub/cron/tick/', 'schedule': '*/5 * * * *'}, crons)
         self.assertIn({'path': '/api/v1/customers/cron/recurring-billing/', 'schedule': '*/5 5-17 * * *'}, crons)
         self.assertEqual(len(crons), 10)
+        # Every other line of the file exactly as it was: only the wahub one moved.
+        self.assertEqual({cron['path']: cron['schedule'] for cron in crons if 'wahub' not in cron['path']}, {
+            '/api/v1/customers/cron/recurring-billing/': '*/5 5-17 * * *',
+            '/api/v1/core/ping/': '*/5 5-19 * * *',
+            '/api/v1/enrollments/cron/register-reminders/': '*/5 4-20 * * *',
+            '/api/v1/enrollments/cron/trial-reminders/': '*/30 4-20 * * *',
+            '/api/v1/rental-billing/cron/charge/': '0 6 * * *',
+            '/api/v1/customers/cron/card-update-reminders/': '0 9 * * *',
+            '/api/v1/core/cron/daily-brief/': '*/4 6-7 * * *',
+            '/api/v1/documents/cron/sign-pending/': '*/10 * * * *',
+            '/api/v1/documents/cron/daily-backup/': '30 0 * * *',
+        })
 
 
 class LocalGuardTests(WahubTestCase):

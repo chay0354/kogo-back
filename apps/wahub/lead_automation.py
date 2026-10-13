@@ -68,8 +68,9 @@ logger = logging.getLogger(__name__)
 
 UPCOMING = 15
 # A contact whose stage has waited this long to be worked out: the cron is not getting to it. The
-# cron rests for seven hours every night (vercel.json), and every open lead is looked at again
-# after midnight, a few hundred a call — so anything shorter would call every morning a fault.
+# cron runs round the clock now (vercel.json; until 14.10.2026 it rested for seven hours a night, which
+# is where the nine hours came from). The threshold stays: every open lead is looked at again after
+# midnight, a few hundred a call, and a fault line on the owner's card must mean hours, not a slow night.
 STALE_AFTER = timedelta(hours=9)
 # A follow-up whose moment passed this long ago and that nobody acted on. Follow-ups are due inside
 # the office hours only, when the cron runs every five minutes.

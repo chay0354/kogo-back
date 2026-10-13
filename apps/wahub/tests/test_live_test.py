@@ -382,15 +382,14 @@ class InboundKickTests(LiveTestCase):
         self.turn_on()
         with patch(KICK_POST, side_effect=requests.ConnectionError('refused')), self.assertLogs('apps.wahub.live_test', level='WARNING'):
             self.assertEqual(self.manychat_message('א').data['stored'], True)
-        # Nobody will answer that message: the contact says so, where the office looks.
+        # The journal says why. The message is not given up on: the cron starts its answer again
+        # (docs/WAHUB-CONTRACT-GO-LIVE.md, ב.3), so nobody is asked for yet.
         self.assertEqual(self.answers()[-1].text, 'התשובה החיה לא הופעלה: השרת לא הגיע לעצמו (ConnectionError)')
-        contact = self.owner()
-        self.assertTrue(contact.needs_human)
-        self.assertIn('התשובה החיה לא הופעלה', contact.needs_human_reason)
+        self.assertFalse(self.owner().needs_human)
         with patch(KICK_POST, return_value=MagicMock(status_code=401)), self.assertLogs('apps.wahub.live_test', level='WARNING'):
             self.assertEqual(self.manychat_message('ב').data['stored'], True)
         self.assertEqual(self.answers()[-1].text, 'התשובה החיה לא הופעלה: השרת ענה לעצמו 401')
-        self.assertEqual(len(self.events('needs_human_changed')), 1)      # marked once
+        self.assertEqual(self.events('needs_human_changed'), [])
         # A call that came back at once (busy, say) is a call that arrived.
         with patch(KICK_POST, return_value=MagicMock(status_code=200)):
             self.assertEqual(self.manychat_message('ב2').data['stored'], True)
@@ -682,12 +681,19 @@ class LiveReplyTests(LiveTestCase):
         self.assertEqual(len(sends(request)), live_test.MAX_ANSWERS)
         self.assertTrue(self.owner().needs_shadow)                       # the next message's own call carries on
         self.assertIsNone(self.owner().live_test_busy_until)
-        # No next message came. Two minutes on, the cron says the last one was never answered —
+        # No next message came. Three minutes on, the cron starts the answer to the last one again —
         # the answers that went out since were for the ones before it.
         self.assertEqual(live_test.flag_unanswered(), 0)
         left = Message.objects.filter(contact_id=self.contact_id, direction='in').order_by('-id').first()
         Message.objects.filter(pk=left.pk).update(created_at=timezone.now() - timedelta(minutes=3))
-        ContactEvent.objects.filter(contact_id=self.contact_id, text__startswith='בדיקה חיה הופעלה').update(created_at=timezone.now() - timedelta(minutes=10))
+        ContactEvent.objects.filter(contact_id=self.contact_id, text__startswith='בדיקה חיה הופעלה').update(created_at=timezone.now() - timedelta(minutes=30))
+        self.assertEqual(live_test.flag_unanswered(), 0)
+        self.kick.reset_mock()                                           # the door's own calls, for the messages above
+        self.assertEqual(live_test.answer_late('http://kogo.test/reply/'), {'live_late_started': 1, 'live_late_not_started': 0})
+        self.kick.assert_called_once_with(self.contact_id, 'http://kogo.test/reply/', late=True)
+        # That call did not get through either, and a quarter of an hour passed: now it is said on the contact.
+        Message.objects.filter(pk=left.pk).update(created_at=timezone.now() - timedelta(minutes=16))
+        self.assertEqual(live_test.answer_late('http://kogo.test/reply/'), {'live_late_started': 0, 'live_late_not_started': 0})
         self.assertEqual(live_test.flag_unanswered(), 1)
         self.assertTrue(self.owner().needs_human)
         self.assertEqual(live_test.flag_unanswered(), 0)
@@ -867,18 +873,32 @@ class LiveReplyTests(LiveTestCase):
     def test_the_cron_says_on_the_contact_when_a_message_was_never_answered(self):
         self.manychat_message('יש חוג קפוארה?')
         last = Message.objects.filter(contact_id=self.contact_id).order_by('-id').first()
+        self.kick.reset_mock()                                           # the door's own call for that message
         with patch(REQUEST) as request:
             # A moment ago: its call may still be on its way.
             self.assertEqual(live_test.flag_unanswered(), 0)
-            # Three minutes, and no call ever took it (the self-call did not arrive, or was cut).
+            self.assertEqual(cron.tick(reply_url='http://kogo.test/reply/')['live_late_started'], 0)
+            # Three minutes, and no call ever took it (the self-call did not arrive, or was cut): not given
+            # up on yet — the cron starts its answer again, and says nothing on the contact.
             Message.objects.filter(pk=last.pk).update(created_at=timezone.now() - timedelta(minutes=3))
-            ContactEvent.objects.filter(contact_id=self.contact_id).update(created_at=timezone.now() - timedelta(minutes=10))
+            ContactEvent.objects.filter(contact_id=self.contact_id).update(created_at=timezone.now() - timedelta(minutes=30))
+            Contact.objects.filter(pk=self.contact_id).update(live_test_busy_until=timezone.now() + timedelta(seconds=30))
+            self.assertEqual(cron.tick(reply_url='http://kogo.test/reply/')['live_late_started'], 0)   # somebody is answering right now
+            Contact.objects.filter(pk=self.contact_id).update(live_test_busy_until=None)
+            ticked = cron.tick(reply_url='http://kogo.test/reply/')
+            self.assertEqual((ticked['live_test_unanswered'], ticked['live_late_started']), (0, 1))
+            self.kick.assert_called_once_with(self.contact_id, 'http://kogo.test/reply/', late=True)
+            self.assertFalse(self.owner().needs_human)
+            # Sixteen minutes: too late for an answer. Now it is said on the contact, once, and nothing is started.
+            Message.objects.filter(pk=last.pk).update(created_at=timezone.now() - timedelta(minutes=16))
             Contact.objects.filter(pk=self.contact_id).update(live_test_busy_until=timezone.now() + timedelta(seconds=30))
             self.assertEqual(live_test.flag_unanswered(), 0)              # somebody is answering right now
             Contact.objects.filter(pk=self.contact_id).update(live_test_busy_until=None)
-            self.assertEqual(cron.tick()['live_test_unanswered'], 1)
+            ticked = cron.tick(reply_url='http://kogo.test/reply/')
+            self.assertEqual((ticked['live_test_unanswered'], ticked['live_late_started']), (1, 0))
             self.assertEqual(live_test.flag_unanswered(), 0)              # said once
-        self.assertEqual(asked_to_do(request), [])                       # nothing is sent late
+            self.assertEqual(self.kick.call_count, 1)
+        self.assertEqual(asked_to_do(request), [])                       # the look itself sends nothing
         self.assertEqual(Message.objects.filter(direction='out').count(), 0)
         contact = self.owner()
         self.assertTrue(contact.needs_human)
