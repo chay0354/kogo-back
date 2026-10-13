@@ -30,7 +30,7 @@ from apps.core.manychat_service import (
     _manychat_error_text,
     manychat_error_detail,
 )
-from apps.wahub import lead_ai, state
+from apps.wahub import lead_ai, optout, state
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     DIRECTION_OUT,
@@ -66,7 +66,9 @@ class WindowClosed(Exception):
 
 
 SENDING_OFF = 'השליחה ללקוחות כבויה. מפעילים אותה בהגדרות המערכת (WAHUB_SENDING_ENABLED) כשמוכנים.'
-DEMO_CONTACT = 'איש קשר דמו — לא שולחים אליו הודעות, גם כשהשליחה דלוקה.'
+DEMO_CONTACT = 'איש קשר דמו — לא שולחים אליו הודעות, גם כשהשליחה דולקת.'
+# "הסר" (optout.py): a message the bot starts by itself never leaves for somebody who asked not to get any.
+OPTED_OUT = 'הלקוח ביקש הסר — הודעה שהבוט יוזם לא נשלחת אליו.'
 
 
 def sending_enabled(contact: Contact | None = None) -> bool:
@@ -293,8 +295,15 @@ def send_lead_followup(contact: Contact, text: str) -> Message:
     nothing, the owner's switch (or the contact's own live test) decides, and a
     developer's machine only records. Kept with sender "bot" and `new_bot=True`:
     it is Kogo's own bot that wrote, not the vendor's.
+
+    And a fourth door, before them: somebody who asked "הסר" gets nothing the
+    bot starts. lead_followups.py never brings such a follow-up here (it reads
+    the system's list right before); this is the same rule said once more at
+    the way out, so that no other caller can pass it by.
     """
     text = (text or '').strip()[:MAX_TEXT_CHARS]
+    if optout.is_marked(contact):
+        return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_FAILED, OPTED_OUT, sender=SENDER_BOT, new_bot=True)
     if not can_free_text(contact):
         return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_FAILED, WINDOW_CLOSED_DETAIL, sender=SENDER_BOT, new_bot=True)
     return _deliver(
@@ -311,11 +320,12 @@ def send_lead_followup_flow(contact: Contact, flow_ns: str, text: str) -> Messag
     (settings_store.lead_templates) — through `send_flow`, the same function
     the screen's "שלח תבנית" goes through, with the same three doors. `text` is
     what the conversation shows — the wording that actually reaches the
-    customer is the template's own.
+    customer is the template's own. Never to somebody who asked "הסר", as above.
     """
-    return send_flow(
-        contact, flow_ns, (text or '').strip()[:MAX_TEXT_CHARS], None, sender=SENDER_BOT, new_bot=True,
-    )
+    text = (text or '').strip()[:MAX_TEXT_CHARS]
+    if optout.is_marked(contact):
+        return _keep_outbound(contact, None, text, TYPE_TEMPLATE, STATUS_FAILED, OPTED_OUT, sender=SENDER_BOT, new_bot=True)
+    return send_flow(contact, flow_ns, text, None, sender=SENDER_BOT, new_bot=True)
 
 
 def keep_new_bot_reply(contact: Contact, text: str) -> Message:

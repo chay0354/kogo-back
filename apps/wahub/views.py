@@ -32,9 +32,10 @@ from rest_framework.views import APIView
 from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.core.permissions import IsManager
 from apps.customers.models import Family
+from apps.core.whatsapp_optout import OptOutListUnavailable
 from apps.wahub import (
-    analysis, cron, demo, future_leads, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending,
-    shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
+    analysis, cron, demo, future_leads, handoff, inbound, lead_stage, live_test, matching, media, office_clock, optout, queries,
+    reviewer, sending, shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
 )
 from apps.wahub.models import (
     EVENT_CREATED,
@@ -146,14 +147,16 @@ class ContactViewSet(viewsets.GenericViewSet):
         conversation here. The screen sends `box=all` with a search, so that it crosses the boxes.
         """
         found = Search(request.query_params.get('search'))
-        page = self.paginate_queryset(queries.contact_list(request.query_params, found=found))
         now = timezone.now()
         today = timezone.localtime(now).date()
+        # The office's hours, laid out once for the whole request: the order of the list and every row read them.
+        clock = office_clock.Clock(now)
+        page = self.paginate_queryset(queries.contact_list(request.query_params, found=found, clock=clock))
         if not found:
-            return self.get_paginated_response([contact_payload(contact, now=now, today=today) for contact in page])
+            return self.get_paginated_response([contact_payload(contact, now=now, today=today, clock=clock) for contact in page])
         why = found.found_by(page)
         response = self.get_paginated_response([
-            contact_payload(contact, now=now, today=today, found_by=why.get(contact.pk)) for contact in page
+            contact_payload(contact, now=now, today=today, found_by=why.get(contact.pk), clock=clock) for contact in page
         ])
         if self.paginator.page.number == 1:
             response.data['customers'], response.data['customers_more'] = found.customers()
@@ -204,8 +207,14 @@ class ContactViewSet(viewsets.GenericViewSet):
         behind the cursor. When more than a call's worth moved at once the
         cursor only advances over what was returned, and the next calls bring
         the rest.
+
+        A conversation crosses the three office hours of waiting for a person by
+        the clock alone, with nobody touching it — so every call also says who
+        is past them now (`overdue`, the longest wait first) and how many
+        (`boxes.overdue`); docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.2.5.
         """
         now = timezone.now()
+        clock = office_clock.Clock(now)
         since = _read_cursor(request.query_params.get('since'))
         contacts, cursor = [], now
         if since is not None:
@@ -223,8 +232,13 @@ class ContactViewSet(viewsets.GenericViewSet):
                 # The next call starts right after that instant.
                 cursor = last + UPDATES_OVERLAP
             today = timezone.localtime(now).date()
-            contacts = [contact_payload(contact, now=now, today=today) for contact in reversed(rows)]
-        return Response({'cursor': _cursor(cursor), 'contacts': contacts, 'boxes': queries.box_counts()})
+            contacts = [contact_payload(contact, now=now, today=today, clock=clock) for contact in reversed(rows)]
+        boxes = queries.box_counts(clock=clock)
+        return Response({
+            'cursor': _cursor(cursor), 'contacts': contacts, 'boxes': boxes,
+            # Asked for only when the count says there is somebody.
+            'overdue': queries.overdue_now(clock) if boxes.get('overdue') else [],
+        })
 
     # --- one conversation ---
 
@@ -426,6 +440,36 @@ class ContactViewSet(viewsets.GenericViewSet):
         except future_leads.FutureLeadError as exc:
             return _error(str(exc))
         return Response({'note': future_leads.note_payload(event), 'contact': self._payload(contact.id)})
+
+    # --- "הסר" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.1.4) ---
+
+    @action(detail=True, methods=['post'], url_path='opt-out')
+    def opt_out(self, request, pk=None):
+        """
+        POST contacts/{id}/opt-out/ — a person marks that the customer asked not
+        to get broadcast messages. The phone goes on the system's list; nothing
+        is written in ManyChat and nothing is sent. 200 with the contact; one
+        already marked comes back as it is. 503 when the list could not be
+        written — nothing changed.
+        """
+        contact = self.get_object()
+        try:
+            optout.opt_out(contact, request.user)
+        except OptOutListUnavailable as exc:
+            return _error(exc.detail, code=exc.code, http=status.HTTP_503_SERVICE_UNAVAILABLE)
+        lead_stage.refresh_quietly(contact.id)
+        return Response(self._payload(contact.id))
+
+    @action(detail=True, methods=['post'], url_path='opt-in')
+    def opt_in(self, request, pk=None):
+        """POST contacts/{id}/opt-in/ — "ביקש לחזור לתפוצה": off the list again. 200 with the contact; 503 as above."""
+        contact = self.get_object()
+        try:
+            optout.opt_in(contact, request.user)
+        except OptOutListUnavailable as exc:
+            return _error(exc.detail, code=exc.code, http=status.HTTP_503_SERVICE_UNAVAILABLE)
+        lead_stage.refresh_quietly(contact.id)
+        return Response(self._payload(contact.id))
 
     @action(detail=True, methods=['post'], url_path='waiting-list')
     def waiting_list(self, request, pk=None):

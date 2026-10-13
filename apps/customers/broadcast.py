@@ -5,6 +5,13 @@ old WhatsApp page (contacts only), each row here knows its child and lesson,
 so the Kogo templates (kind) go out with the child's own course, day and time.
 
 Nothing here sends unless ``dry_run`` is False; the default is a preview.
+
+Whoever asked "הסר" gets no broadcast (apps/core/whatsapp_optout.py). The list
+is read once, before the first message of the request, and a phone on it is
+skipped in whatever role it appears — the parent the message is for, or one of
+the family's extra phones. The other parent, on a number of their own, did not
+ask and still gets it. When the list cannot be read nothing is sent at all,
+the preview included: `OptOutListUnavailable` goes up to the caller.
 """
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ import logging
 import re
 from typing import Iterable
 
+from apps.core import whatsapp_optout
 from apps.core.enrollment_whatsapp import build_enrollment_whatsapp_context
 from apps.core.manychat_service import (
     ManyChatContactUnfindable,
@@ -118,14 +126,22 @@ def broadcast_to_children(
     Every parent in the request is sent to before any extra phone: a number
     that is one family's extra and another family's own phone gets the message
     about its own child, and the extra copy is then a duplicate.
+
+    A phone that asked "הסר" is skipped with reason ``opted_out``, as the
+    parent's phone or as an extra one, and is counted apart (``opted_out``,
+    ``extra_opted_out``) inside the skipped. Raises
+    ``whatsapp_optout.OptOutListUnavailable`` — before anything is sent — when
+    that list cannot be read.
     """
     svc = service or ManyChatService()
+    # Read once, before the first message: no row of this request is sent unless the list was read.
+    opted_out = whatsapp_optout.blocked_phones()
     seen_phones: set[str] = {ManyChatService.normalize_phone_e164(p) for p in skip_phones if p}
     seen_phones.discard('')
 
     results: list[dict] = []
-    counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0}
-    extra_counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0}
+    counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0}
+    extra_counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0}
     phones_used: list[str] = []
 
     def deliver(*, phone: str, parent_name: str, lookup_names, ctx: dict) -> dict:
@@ -207,7 +223,8 @@ def broadcast_to_children(
             row['reason'] = 'no_parent_phone'
             counts['skipped'] += 1
             continue
-        if automation_type == 'kind' and lesson is None and phone_key not in seen_phones:
+        asked_out = phone_key in opted_out
+        if not asked_out and automation_type == 'kind' and lesson is None and phone_key not in seen_phones:
             # The Kogo templates carry course/day/time; without a lesson the
             # parent would get a message full of dashes — and so would the
             # extra phones, which are skipped with it.
@@ -215,7 +232,13 @@ def broadcast_to_children(
             counts['skipped'] += 1
             continue
 
-        if phone_key in seen_phones:
+        if asked_out:
+            # Asked "הסר": no broadcast to this number, whatever else is true of the row. It does not
+            # use the phone up, so it is said again on a sibling's row rather than "duplicate".
+            row['reason'] = whatsapp_optout.REASON
+            counts['skipped'] += 1
+            counts['opted_out'] += 1
+        elif phone_key in seen_phones:
             row['reason'] = 'duplicate_phone'
             counts['skipped'] += 1
         elif dry_run:
@@ -253,6 +276,11 @@ def broadcast_to_children(
                 extra['reason'] = skip_reason
                 extra_counts['skipped'] += 1
                 continue
+            if key in opted_out:
+                extra['reason'] = whatsapp_optout.REASON
+                extra_counts['skipped'] += 1
+                extra_counts['opted_out'] += 1
+                continue
             if key in seen_phones:
                 extra['reason'] = 'duplicate_phone'
                 extra_counts['skipped'] += 1
@@ -282,10 +310,13 @@ def broadcast_to_children(
         'failed': counts['failed'],
         'skipped': counts['skipped'],
         'preview_count': counts['preview'],
+        # How many of the skipped were skipped because they asked "הסר".
+        'opted_out': counts['opted_out'],
         'extra_sent': extra_counts['sent'],
         'extra_failed': extra_counts['failed'],
         'extra_skipped': extra_counts['skipped'],
         'extra_preview_count': extra_counts['preview'],
+        'extra_opted_out': extra_counts['opted_out'],
         'phones': phones_used,
         'results': results,
     }

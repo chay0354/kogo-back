@@ -43,6 +43,10 @@ class WeeklyAuditTests(WahubTestCase):
             'api/v1/wahub/contacts/{pk}/waiting-list/', 'api/v1/wahub/waiting-list/{pk}/handled/', 'api/v1/wahub/waiting-list/{pk}/remove/',
             # A note is rewritten by PATCH and deleted by DELETE.
             'api/v1/wahub/contacts/{pk}/notes/{note_id}/',
+            # "הסר" — onto the list of who gets no broadcast and off it again — and what the owner does to a topic the
+            # bot did not know: all four change something, and answer POST only.
+            'api/v1/wahub/contacts/{pk}/opt-out/', 'api/v1/wahub/contacts/{pk}/opt-in/',
+            'api/v1/wahub/bot/unknowns/{pk}/dismiss/', 'api/v1/wahub/bot/unknowns/{pk}/restore/',
         ):
             self.assertFalse(by_template[template].callable_get, template)
         # Telling a customer that a seat came free answers GET too — what the press WOULD do, which reads only (the
@@ -110,6 +114,9 @@ class WeeklyAuditTests(WahubTestCase):
                 # "בדיקות הבוט": the list of scripts with their last results, read only. Playing one — which asks
                 # Claude and costs money — answers POST only, so the sweep never plays a script.
                 'api/v1/wahub/bot/evals/': 200,
+                # "מה הבוט לא ידע השבוע": the topics with their numbers, read only. Teaching a topic or setting it
+                # aside answers POST only.
+                'api/v1/wahub/bot/unknowns/': 200,
                 # leads, version 2: the lists, one lead in full, the texts of the follow-ups — read only. What a
                 # person does to a lead (close, reopen, snooze, owner) answers POST only.
                 'api/v1/wahub/leads/': 200,

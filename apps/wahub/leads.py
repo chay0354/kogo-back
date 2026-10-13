@@ -21,7 +21,9 @@ from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import Cast
 from django.utils import timezone
 
-from apps.wahub import lead_ai, lead_followups, lead_stage, queries, search, serializers, state, waiting_list, waiting_summary
+from apps.wahub import (
+    lead_ai, lead_followups, lead_stage, office_clock, optout, queries, search, serializers, state, waiting_list, waiting_summary,
+)
 from apps.wahub.models import (
     EVENT_CLOSED,
     EVENT_CREATED,
@@ -282,12 +284,14 @@ def listed(params) -> dict:
     more = len(page) > size
     page = page[:size]
     now = timezone.now()
+    # The office's hours, laid out once: every row says how long its customer has waited for a person.
+    clock = office_clock.Clock(now)
     follows = open_followups(contact.pk for contact in page)
     queues_ = waiting_queues(page)
     why = found.found_by(page) if found else None
     results = []
     for contact in page:
-        row = row_payload(contact, now=now, follow=follows.get(contact.pk), queue=queues_)
+        row = row_payload(contact, now=now, follow=follows.get(contact.pk), queue=queues_, clock=clock)
         if why is not None:
             row['found_by'] = why.get(contact.pk)
         results.append(row)
@@ -393,6 +397,9 @@ def next_move(contact: Contact, follow: LeadFollowUp | None) -> dict:
 def no_step_because(contact: Contact, stage: str) -> str:
     """Why nobody has a step on this open lead right now, in the screen's words."""
     said = _said(contact)
+    if optout.is_marked(contact):
+        # Asked "הסר": whatever the stage, the bot starts nothing with them.
+        return optout.HOLD
     if said.get('external'):
         return lead_stage.EXTERNAL_BRANCH
     if stage == LEAD_TRIAL_BOOKED:
@@ -415,7 +422,10 @@ def no_step_because(contact: Contact, stage: str) -> str:
     return NOTHING_PLANNED
 
 
-def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None, queue: dict | None = None) -> dict:
+def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None, queue: dict | None = None,
+                clock=None) -> dict:
+    now = now or timezone.now()
+    today = timezone.localtime(now).date()
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     said = _said(contact)
     waits = waiting_list.contact_block(contact)
@@ -450,9 +460,15 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         # The lesson the lead waits for a seat in, and the future lead a person set — the very blocks the
         # conversations carry (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1); null when there is none.
         'waiting_list': waits,
-        'future': serializers.future_payload(contact, today=timezone.localtime(now or timezone.now()).date()),
+        'future': serializers.future_payload(contact, today=today),
         # The customer's card behind the lead (the same contract, ח.2); None for somebody the system does not know.
         'customer': search.customer_block(contact),
+        # "הסר" — the customer asked not to get broadcast messages, and the bot does not come back to them
+        # (the same contract, ט.1); null for everybody else.
+        'opted_out': optout.payload(contact),
+        # How long the customer has waited for a person, in the office's own hours — the very flag the
+        # conversations carry (the same contract, ט.2): overdue, waited_office_minutes, waiting_label, waiting_from.
+        **queries.waiting_block(contact, today, clock or office_clock.Clock(now)),
     }
 
 

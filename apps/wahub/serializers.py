@@ -7,7 +7,7 @@ from django.db.models import F
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.wahub import queries, search, state, waiting_list
+from apps.wahub import office_clock, optout, queries, search, state, waiting_list
 from apps.wahub.models import (
     CUSTOMER_OUTCOMES,
     EVENT_KIND_CHOICES,
@@ -127,9 +127,15 @@ def note_payload(event: ContactEvent) -> dict:
 NOT_SEARCHED = object()
 
 
-def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEARCHED) -> dict:
+def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEARCHED, clock=None) -> dict:
+    """
+    One contact as every list, the live update and every action answer it.
+    `clock` is the office's hours laid out for this request (office_clock.Clock);
+    a caller that answers many rows builds one and passes it.
+    """
     now = now or timezone.now()
     today = today or timezone.localtime(now).date()
+    clock = clock or office_clock.Clock(now)
     open_reason = queries.open_reason(contact, today)
     box, box_label = queries.box_of(contact, today)
     flags = [flag for flag in (contact.known_flags or []) if flag in FLAG_LABELS]
@@ -173,8 +179,13 @@ def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEAR
             # The box the conversation is shown under when a search crosses the boxes (the same contract, ח.1.2).
             'box': box,
             'box_label': box_label,
+            # How long it has waited for a person, in the office's own hours, and whether that is three hours
+            # or more — pinned to the head of the list, its mark blinking (the same contract, ט.2).
+            **queries.waiting_block(contact, today, clock),
         },
         'future': future_payload(contact, today=today),
+        # The customer asked not to get broadcast messages — "הסר" (the same contract, ט.1); null for everybody else.
+        'opted_out': optout.payload(contact),
         'waiting_list': waiting_list.contact_block(contact),
         # The customer's card behind the contact — the family, the child, the address (the same contract, ח.2).
         'customer': search.customer_block(contact),

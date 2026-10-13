@@ -9,15 +9,16 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, time, timedelta
 
-from django.db.models import BooleanField, Case, Count, F, Min, OuterRef, Q, Subquery, Value, When
-from django.db.models.functions import TruncDate
+from django.db.models import BooleanField, Case, Count, DateTimeField, F, Min, OuterRef, Q, Subquery, Value, When
+from django.db.models.functions import Least, TruncDate
 from django.utils import timezone
 
-from apps.wahub import state
+from apps.wahub import office_clock, state
 from apps.wahub.search import Search
 from apps.wahub.models import (
     CALLBACK_COUNTS_UNDER,
     DIRECTION_IN,
+    DIRECTION_OUT,
     FLAG_LABELS,
     FOLLOWUP_ANSWERED,
     FOLLOWUP_LATER,
@@ -38,6 +39,7 @@ from apps.wahub.models import (
     OUTCOME_SIGNUP_DECLINED,
     OUTCOME_TRIAL_ONLY,
     OUTCOME_TRIAL_UPCOMING,
+    SENDER_OFFICE,
     STATUS_FAILED,
     Contact,
     Message,
@@ -100,9 +102,94 @@ def open_q(today) -> Q:
     )
 
 
-def boxes(today=None) -> dict:
+# --- waiting for a person, in the office's own hours (the same contract, ט.2) ---------------------
+# A conversation that is open for a person waits from the oldest message nobody answered
+# (`waiting_since`) — and, where the customer asked for a person, from that request, until the office
+# itself writes: the bot's automatic "a person will get back to you" is no person's answer. The
+# earlier of the two. Three office hours later (office_clock.OVERDUE_MINUTES) it is overdue: pinned
+# to the head of the list. Whether a row has waited that long is read by comparing these columns to
+# one moment worked out once for the request (office_clock.Clock.cutoff) — nothing is counted per row.
+_OFFICE_ANSWERED_THE_REQUEST = Q(
+    last_message_direction=DIRECTION_OUT, last_message_sender=SENDER_OFFICE, last_message_at__gte=F('needs_human_at'),
+)
+_ASKED_AND_NOT_ANSWERED = Q(needs_human=True, needs_human_at__isnull=False) & ~_OFFICE_ANSWERED_THE_REQUEST
+NOBODY = Q(pk__in=[])
+
+
+def overdue_q(today, cutoff) -> Q:
+    """Waiting for a person since `cutoff` or before it; nobody when there is no such moment."""
+    if cutoff is None:
+        return NOBODY
+    return open_q(today) & (Q(waiting_since__lte=cutoff) | (_ASKED_AND_NOT_ANSWERED & Q(needs_human_at__lte=cutoff)))
+
+
+def _waiting_from_expression():
+    """Since when a conversation that is open for a person waits. Meant for rows `open_q` holds for."""
+    asked = Case(When(_ASKED_AND_NOT_ANSWERED, then=F('needs_human_at')), default=None, output_field=DateTimeField())
+    # PostgreSQL's LEAST passes over a NULL: the earlier of the two that are there.
+    return Least(F('waiting_since'), asked, output_field=DateTimeField())
+
+
+def waiting_from(contact: Contact, today):
+    """The same, for a contact in hand: the moment it waits for a person from, or None when it does not."""
+    if not open_reason(contact, today):
+        return None
+    moments = [contact.waiting_since]
+    if contact.needs_human and contact.needs_human_at is not None:
+        answered = (
+            contact.last_message_direction == DIRECTION_OUT and contact.last_message_sender == SENDER_OFFICE
+            and contact.last_message_at is not None and contact.last_message_at >= contact.needs_human_at
+        )
+        if not answered:
+            moments.append(contact.needs_human_at)
+    moments = [moment for moment in moments if moment is not None]
+    return min(moments) if moments else None
+
+
+def waiting_block(contact: Contact, today, clock) -> dict:
+    """{overdue, waited_office_minutes, waiting_label, waiting_from} — what a row says of its wait for a person."""
+    since = waiting_from(contact, today)
+    waited = clock.waited(since)
+    return {
+        'overdue': waited is not None and waited >= office_clock.OVERDUE_MINUTES,
+        'waited_office_minutes': waited,
+        'waiting_label': clock.label(waited) if waited is not None else '',
+        'waiting_from': since.isoformat() if since is not None else None,
+    }
+
+
+OVERDUE_SHOWN = 50
+
+
+def overdue_now(clock, today=None, *, limit: int = OVERDUE_SHOWN) -> list:
+    """
+    Whoever is past the three office hours this minute, longest first —
+    [{id, waited_office_minutes, waiting_label, waiting_from}]. A conversation
+    crosses the line by the clock alone, with nobody touching it, so the live
+    update carries this list on every call. One query.
+    """
+    today = today or timezone.localtime(clock.now).date()
+    cutoff = clock.cutoff()
+    if cutoff is None:
+        return []
+    rows = (
+        Contact.objects.filter(overdue_q(today, cutoff)).annotate(_waiting_from=_waiting_from_expression())
+        .order_by('_waiting_from', '-id').values_list('id', '_waiting_from')[:limit]
+    )
+    found = []
+    for contact_id, since in rows:
+        waited = clock.waited(since)
+        found.append({
+            'id': contact_id, 'waited_office_minutes': waited, 'waiting_label': clock.label(waited),
+            'waiting_from': since.isoformat() if since is not None else None,
+        })
+    return found
+
+
+def boxes(today=None, *, clock=None) -> dict:
     """The boxes above the conversations, as conditions for today's date in Israel."""
-    today = today or state.now_israel_date()
+    clock = clock or office_clock.Clock()
+    today = today or timezone.localtime(clock.now).date()
     parked = parked_q(today)
     return {
         **BOXES,
@@ -110,6 +197,8 @@ def boxes(today=None) -> dict:
         'future': parked,
         # A conversation a person holds — but not one put off to a day that has not come.
         'human': Q(handled_by=HANDLED_HUMAN) & ~parked,
+        # Waiting for a person for three office hours or more.
+        'overdue': overdue_q(today, clock.cutoff()),
     }
 
 
@@ -289,11 +378,13 @@ def _lead_order(stages: list, groups: list) -> list:
     return [F('lead_stage_since').desc(nulls_last=True), '-id']
 
 
-def contact_list(params, *, found: Search | None = None):
+def contact_list(params, *, found: Search | None = None, clock=None):
     """
     The list a screen asked for.
 
-    chats — everything, newest message first, like any messaging app.
+    chats — whoever has waited for a person three office hours or more first,
+            the longest wait at the head (ט.2 of the same contract); then
+            everything, newest message first, like any messaging app.
     leads — newest incoming message first, a fixed order that no mark changes;
             registered customers and trials still ahead are left out unless asked for.
 
@@ -321,17 +412,26 @@ def contact_list(params, *, found: Search | None = None):
         order = [F('last_inbound_at').desc(nulls_last=True), '-id']
     else:
         box = (params.get('box') or 'all').strip()
-        queryset = queryset.filter(boxes().get(box, Q()))
+        clock = clock or office_clock.Clock()
+        today = timezone.localtime(clock.now).date()
+        queryset = queryset.filter(boxes(today, clock=clock).get(box, Q()))
         order = [F('last_message_at').desc(nulls_last=True), '-id']
+        cutoff = clock.cutoff()
+        if cutoff is not None and not found and not by_stage:
+            # Pinned to the head: since when each overdue conversation waits; NULL — and so after them — for the rest.
+            queryset = queryset.annotate(_pinned=Case(
+                When(overdue_q(today, cutoff), then=_waiting_from_expression()), default=None, output_field=DateTimeField(),
+            ))
+            order = [F('_pinned').asc(nulls_last=True)] + order
     order = _lead_order(stages, groups) if by_stage else order
     return queryset.order_by(*((['_search_rank'] if found else []) + order))
 
 
-def box_counts(queryset=None) -> dict:
+def box_counts(queryset=None, *, clock=None) -> dict:
     queryset = Contact.objects.all() if queryset is None else queryset
     # Counted under names of their own: a box called like a column ("needs_human") would hide the column
     # from the conditions of the boxes after it.
-    row = queryset.aggregate(**{f'box_{name}': Count('id', filter=cond) for name, cond in boxes().items()})
+    row = queryset.aggregate(**{f'box_{name}': Count('id', filter=cond) for name, cond in boxes(clock=clock).items()})
     return {name[4:]: value for name, value in row.items()}
 
 

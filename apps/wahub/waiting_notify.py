@@ -11,8 +11,9 @@ presses for one row (`tell`), after the screen showed what would leave and how
 (`preview`).
 
 Nothing leaves except through sending.py, with every door it has: a demo
-contact never gets anything; the owner's switch (or the contact's own live
-test) decides; without a ManyChat to send through nothing leaves; inside
+contact never gets anything; somebody who asked "הסר" gets no message the
+business starts (optout.py) — the office phones them instead; the owner's
+switch (or the contact's own live test) decides; without a ManyChat to send through nothing leaves; inside
 WhatsApp's 24 hours the message is free text, after them only the approved
 template connected to this message — the ManyChat automation `kogo_lead_seat_1`,
 found by its name or connected on the settings card like every other
@@ -46,7 +47,8 @@ from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
 
-from apps.wahub import lead_followup_seed, lead_followups, lead_stage, lead_templates, sending, state, waiting_list
+from apps.core.whatsapp_optout import UNAVAILABLE as OPT_OUT_UNAVAILABLE, UNAVAILABLE_CODE, OptOutListUnavailable
+from apps.wahub import lead_followup_seed, lead_followups, lead_stage, lead_templates, optout, sending, state, waiting_list
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     EVENT_WAITING_LIST,
@@ -75,6 +77,8 @@ ALREADY = 'already_notified'
 IN_PROGRESS = 'in_progress'
 # Why a message cannot leave for this customer now (200, `sent` False: nothing was written).
 DEMO = 'demo'
+# The customer asked "הסר" (optout.py): a seat that came free is told on the phone, not in a message we start.
+OPTED_OUT = 'opted_out'
 SENDING_OFF = 'sending_off'
 NO_MANYCHAT = 'no_manychat'
 NO_TEMPLATE = 'no_template'
@@ -91,6 +95,8 @@ DETAILS = {
     NO_LESSON: 'השיעור כבר לא מתקיים — הרשומה תיסגר לבד.',
     IN_PROGRESS: 'ההודעה לרשומה הזאת נשלחת ממש עכשיו. נסו שוב בעוד רגע.',
     DEMO: sending.DEMO_CONTACT,
+    OPTED_OUT: 'הלקוח ביקש הסר — לא שולחים לו הודעה יזומה. אפשר להתקשר אליו, או להחזיר אותו לתפוצה מתוך השיחה.',
+    UNAVAILABLE_CODE: OPT_OUT_UNAVAILABLE,
     SENDING_OFF: sending.SENDING_OFF,
     NO_MANYCHAT: 'השרת לא מחובר ל-ManyChat — ההודעה לא יכולה לצאת.',
     NO_TEMPLATE: (
@@ -170,6 +176,14 @@ def _standing(entry: WaitingListEntry) -> str:
     return ''
 
 
+def _asked_out(contact) -> str:
+    """'' when a message we start may go to this customer; else why not: they asked "הסר", or the list could not be read."""
+    try:
+        return OPTED_OUT if optout.blocked(contact) else ''
+    except OptOutListUnavailable:
+        return UNAVAILABLE_CODE
+
+
 def _pipe(entry: WaitingListEntry, now) -> dict:
     """
     How a message would leave for this row's customer now — {how, flow, text,
@@ -182,6 +196,8 @@ def _pipe(entry: WaitingListEntry, now) -> dict:
     flow, blocked = '', ''
     if contact.is_demo:
         blocked = DEMO
+    elif (asked_out := _asked_out(contact)):
+        blocked = asked_out
     elif not sending.sending_enabled(contact):
         blocked = SENDING_OFF
     elif not sending.manychat_reachable():

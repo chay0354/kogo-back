@@ -17,7 +17,7 @@ from rest_framework.test import APIClient
 
 from apps.core.models import UserProfile
 from apps.core.tests.test_fixtures import TestDataFactory
-from apps.wahub import analysis, cron, knowledge, lead_ai, lead_stage, state
+from apps.wahub import analysis, cron, knowledge, lead_ai, lead_stage, office_clock, state
 from apps.wahub.analysis import Line, Place
 from apps.wahub.models import Contact, ContactEvent, LeadFollowUp, Message
 from apps.wahub.tests.base import BASE, WahubTestCase, client_for, make_user
@@ -1078,8 +1078,11 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual(set(row), {
             'id', 'contact_id', 'name', 'phone', 'phone_display', 'is_demo', 'stage', 'stage_label', 'owner', 'summary',
             'chips', 'since', 'next', 'last_message_at', 'waiting_list', 'future', 'list', 'list_label', 'customer',
+            # "הסר", and how long the customer has waited for a person (test_optout, test_overdue)
+            'opted_out', 'overdue', 'waited_office_minutes', 'waiting_label', 'waiting_from',
         })
         self.assertEqual((row['waiting_list'], row['future'], row['customer']), (None, None, None))
+        self.assertEqual((row['opted_out'], row['overdue'], row['waited_office_minutes'], row['waiting_label']), (None, False, None, ''))
         self.assertEqual((row['list'], row['list_label']), ('bot', 'הבוט מטפל'))
         self.assertEqual((row['id'], row['contact_id'], row['name'], row['phone'], row['is_demo']), (contact.id, contact.id, 'ליד 1', contact.phone, False))
         self.assertEqual((row['stage'], row['stage_label'], row['owner']), ('link_sent', 'קיבל קישור ועוד לא נרשם', 'bot'))
@@ -1175,6 +1178,7 @@ class LeadsApiTests(LeadsCase):
     def test_the_list_does_not_grow_queries_with_rows(self):
         for index in range(6):
             self.placed(HOUR, lead_link_sent_at=self.clock() - HOUR)
+        office_clock.calendar()             # the office's hours: read once a minute, whoever asks (test_overdue holds that)
         with self.assertNumQueries(6):      # the user, the profile; the counts, the stages, the page, its open follow-ups
             self.rows(owner='bot')
 

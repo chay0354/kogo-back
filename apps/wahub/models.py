@@ -292,6 +292,9 @@ EVENT_WAITING_LIST = 'waiting_list'
 # A note about the customer was rewritten or deleted (the same contract, ז.5). The line says who and
 # when, never the words: a note that was deleted is gone.
 EVENT_NOTE_CHANGED = 'note_changed'
+# The customer asked not to get broadcasts ("הסר"), a person marked it, or it was taken off again
+# (the same contract, ט.1).
+EVENT_OPT_OUT = 'opt_out'
 EVENT_KIND_CHOICES = [
     (EVENT_CREATED, 'נוצר'),
     (EVENT_FOLLOWUP, 'סימון מעקב'),
@@ -308,6 +311,7 @@ EVENT_KIND_CHOICES = [
     (EVENT_CLOSED, 'השיחה נסגרה'),
     (EVENT_WAITING_LIST, 'רשימת המתנה'),
     (EVENT_NOTE_CHANGED, 'שינוי בפתק'),
+    (EVENT_OPT_OUT, 'הסר מתפוצה'),
 ]
 
 LAST_MESSAGE_PREVIEW_CHARS = 300
@@ -468,6 +472,13 @@ class Contact(models.Model):
     # child, since, freed_at, more}; {} when the contact waits for no lesson. A copy of the rows
     # of WaitingListEntry, written by waiting_list.py only.
     lead_waiting = models.JSONField(default=dict, blank=True)
+
+    # --- "הסר" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.1) ---
+    # The customer asked not to get broadcast messages — {at, source: message | office, text, by,
+    # by_name}; {} for everybody else. A copy of the system's list (apps/core/whatsapp_optout.py), kept
+    # here so the lists, the lead stage and the screens read it with no other query. Written by
+    # apps/wahub/optout.py only. A demo contact carries the mark without being on the list.
+    opted_out = models.JSONField(default=dict, blank=True)
 
     tags = models.ManyToManyField(Tag, blank=True, related_name='contacts', db_table='wahub_contact_tags')
 
@@ -1283,3 +1294,102 @@ class WaitingListEntry(models.Model):
 
     def __str__(self):
         return f'{self.course_name} · {self.get_status_display()}'
+
+
+# =====================================================================================
+# "מה הבוט לא ידע" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.3)
+# =====================================================================================
+
+UNKNOWN_OPEN = 'open'
+UNKNOWN_TAUGHT = 'taught'
+UNKNOWN_DISMISSED = 'dismissed'
+UNKNOWN_STATUS_CHOICES = [
+    (UNKNOWN_OPEN, 'פתוח'),
+    (UNKNOWN_TAUGHT, 'נלמד'),
+    (UNKNOWN_DISMISSED, 'לא רלוונטי'),
+]
+
+# How an answer was read as "the bot did not know": it said so itself in its structured answer, it
+# said the "missing info" phrasing, or it handed over to a person because the information is missing.
+UNKNOWN_BY_MODEL = 'model'
+UNKNOWN_BY_PHRASING = 'phrasing'
+UNKNOWN_BY_HANDOFF = 'handoff'
+UNKNOWN_HOW_CHOICES = [
+    (UNKNOWN_BY_MODEL, 'הבוט סימן'),
+    (UNKNOWN_BY_PHRASING, 'הנוסח "בודקת מול המשרד"'),
+    (UNKNOWN_BY_HANDOFF, 'העברה לנציג כי חסר מידע'),
+]
+
+
+class BotUnknownTopic(models.Model):
+    """
+    A subject customers ask about and the new bot has no answer to — "חניה
+    בסניף", "שיעורים בחגים" — under which the single cases are gathered
+    (apps/wahub/unknowns.py). The owner teaches it (a "ללמד" thread opened from
+    it; once he approves, the topic is `taught`) or says it does not matter
+    (`dismissed`). A taught topic that is asked again afterwards comes back.
+    """
+    title = models.CharField(max_length=120)
+    status = models.CharField(max_length=10, choices=UNKNOWN_STATUS_CHOICES, default=UNKNOWN_OPEN)
+    # The words a new question is matched to the topic by when no model is asked.
+    keywords = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    taught_at = models.DateTimeField(null=True, blank=True)
+    taught_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    # The "ללמד" thread whose approval taught it.
+    taught_thread = models.ForeignKey(RefineThread, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+    dismissed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        db_table = 'wahub_bot_unknown_topics'
+        ordering = ['-id']
+        verbose_name = 'נושא שהבוט לא ידע'
+        verbose_name_plural = 'נושאים שהבוט לא ידע'
+
+    def __str__(self):
+        return f'{self.title} · {self.get_status_display()}'
+
+
+class BotUnknown(models.Model):
+    """
+    One answer in which the new bot did not know: what the customer asked, in
+    the customer's own words, and what the bot said. Written when the answer is
+    kept (shadow.propose) — for a real customer's message only: never for a
+    demo contact, "נסה שאלה" or the bot's self-checks.
+
+    No name and no phone is kept in the texts: phones, addresses and the names
+    the system knows for the family are replaced before the row is written
+    (unknowns.scrub). The contact is kept as a link for the count alone, and is
+    never shown.
+    """
+    # No index of its own: the one below (topic, newest first) is what every read by topic goes through.
+    topic = models.ForeignKey(
+        BotUnknownTopic, on_delete=models.SET_NULL, null=True, blank=True, related_name='unknowns', db_index=False,
+    )
+    contact = models.ForeignKey(Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    shadow = models.ForeignKey(ShadowReply, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    question = models.TextField()
+    answer = models.TextField(blank=True)
+    # What was missing, in the bot's own short words — what the topics are named by.
+    hint = models.CharField(max_length=300, blank=True)
+    how = models.CharField(max_length=10, choices=UNKNOWN_HOW_CHOICES)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'wahub_bot_unknowns'
+        ordering = ['-id']
+        verbose_name = 'שאלה שהבוט לא ידע'
+        verbose_name_plural = 'שאלות שהבוט לא ידע'
+        indexes = [
+            models.Index(fields=['topic', '-id'], name='wahub_unknown_topic'),
+            # The counts of a week.
+            models.Index(fields=['created_at'], name='wahub_unknown_created'),
+        ]
+
+    def __str__(self):
+        return self.question[:60]

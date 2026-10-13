@@ -35,6 +35,11 @@ the end of the year — a belt, a certificate and a small gift, for ₪60, its d
 to be announced later in the year. It is the one sum written in the knowledge:
 it is his own word and Kogo has no field that holds it. A question about a
 belt is answered by it, and no longer by the prices of the shop.
+
+In the evening (`OWNER_13_10_EVENING`): somebody who writes "הסר" is taken off
+the broadcast list by the system itself (apps/wahub/optout.py), and the bot
+answers one short line that says so — its own phrasing, `opt_out_done` — with
+no question, no offer and no link.
 """
 from __future__ import annotations
 
@@ -69,6 +74,7 @@ IMPORT_TAG = 'ייבוא מהבוט הישן 10.10.2026'
 # The source written on what the owner said on 13.10.2026: on the records that are new, and in the reason of the rewritten ones.
 SAID_13_10 = 'בעל המערכת 13.10.2026'
 SAID_13_10_NOON = f'{SAID_13_10} (צהריים)'
+SAID_13_10_EVENING = f'{SAID_13_10} (ערב)'
 # The season the dynamic updates describe: dates without a year fall into it.
 SEASON_START = date(2026, 9, 1)
 SEASON_END = date(2027, 7, 28)
@@ -575,6 +581,22 @@ OWNER_13_10 = [
 ]
 
 # ======================================================================================
+# בעל המערכת, 13.10.2026 בערב (docs/WAHUB-MASTER-PLAN-2026-10-12.md, יב) — "הסר".
+# הרישום עצמו נעשה במערכת, בנקודת קליטת ההודעה (apps/wahub/optout.py); כאן רק מה שהבוט עונה.
+# ======================================================================================
+
+OWNER_13_10_EVENING = [
+    R(KIND_BEHAVIOR_RULE, SAID_13_10_EVENING, '"הסר" — מאשרים בשורה אחת',
+      'לקוח שכותב "הסר", "הסירו אותי", "תפסיקו לשלוח לי הודעות", או מבקש בכל דרך אחרת שלא נשלח לו יותר הודעות: '
+      'עונים שורה אחת קצרה שמאשרת — הנוסח opt_out_done — ולא יותר. בלי שאלה ("למה?", "אולי בכל זאת?"), בלי הצעה, בלי קישור, ובלי סימון לנציג. '
+      'המערכת כבר רשמה את הבקשה: הוא לא יקבל יותר הודעות תפוצה. לא מבטיחים דבר מעבר לזה, ולא מתנצלים באריכות. '
+      'זו לא בקשה לבטל חוג: מי ששואל איך להסיר ילד מחוג או לבטל מנוי — עונים לפי כלל הביטול, ולא בנוסח הזה.',
+      good='הוסרתם מרשימת התפוצה, לא נשלח יותר הודעות 🙏', bad='חבל לשמוע! אפשר לדעת למה? יש לנו עכשיו הטבה למצטרפים', priority=1),
+    R(KIND_PHRASING, SAID_13_10_EVENING, 'אישור "הסר"', 'הוסרתם מרשימת התפוצה, לא נשלח יותר הודעות 🙏', key='opt_out_done', verbatim=False,
+      when='כשלקוח מבקש "הסר" — שלא נשלח לו יותר הודעות. שורה אחת, בלי שאלה, בלי הצעה ובלי קישור'),
+]
+
+# ======================================================================================
 # נוסחים (מילה במילה מהטקסטים, אלא אם כתוב אחרת)
 # ======================================================================================
 
@@ -989,6 +1011,7 @@ DROPPED = [
 
 def all_items(today: date) -> list:
     return (
-        PROFILE + STYLE_RULES + BEHAVIOR_RULES + OWNER_12_10 + OWNER_13_10 + PHRASINGS + TOPICS + FACTS + CONTACTS + LINKS + ALIASES
+        PROFILE + STYLE_RULES + BEHAVIOR_RULES + OWNER_12_10 + OWNER_13_10 + OWNER_13_10_EVENING + PHRASINGS + TOPICS + FACTS + CONTACTS
+        + LINKS + ALIASES
         + special_days(today) + [office_hours()]
     )

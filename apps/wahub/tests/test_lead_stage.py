@@ -24,7 +24,7 @@ from apps.core.models import UserProfile
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.customers.models import Payment
 from apps.enrollments.models import LessonEnrollment
-from apps.wahub import cron, lead_stage, matching, state
+from apps.wahub import cron, lead_stage, matching, office_clock, state
 from apps.wahub.models import (
     LEAD_GROUP_CHOICES,
     LEAD_STAGE_CHOICES,
@@ -1127,6 +1127,7 @@ class ListTests(ApiTestCase):
             self.assertEqual(dot(known_interest=interest), 'cold')
 
     def test_the_list_of_a_stage_does_not_grow_queries_with_rows(self):
+        office_clock.calendar()          # the office's hours: read once a minute, whoever asks (test_overdue holds that)
         with self.assertNumQueries(5):      # the user, the profile, the count, the rows, their tags
             self.assertEqual(len(self.names(lead_group='act')), 3)
 

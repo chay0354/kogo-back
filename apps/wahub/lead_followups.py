@@ -25,7 +25,11 @@ moment comes, acts on it (`run`, a slice of the five-minute cron):
               nobody knows whether the customer got it.
 
 Nothing leaves except through sending.py, and only when
-`sending.sending_enabled(contact)` says a message may leave for this contact.
+`sending.sending_enabled(contact)` says a message may leave for this contact —
+and never to somebody who asked "הסר" (optout.py): the rules plan no round for
+them, a round planned before they asked is skipped with that reason, and the
+system's list is read once more right before a send; when it cannot be read,
+nothing is sent.
 The words are written when the row is planned — from the phrasings the owner
 edits (lead_followup_seed.py) and what is known about the lead — and put
 together again from the same phrasing right before they leave, in case he has
@@ -51,8 +55,9 @@ from datetime import date, datetime, time as day_time, timedelta
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.core.whatsapp_optout import OptOutListUnavailable
 from apps.wahub import (
-    knowledge, lead_ai, lead_followup_seed, lead_stage, lead_templates, matching, sending, settings_store, state,
+    knowledge, lead_ai, lead_followup_seed, lead_stage, lead_templates, matching, optout, sending, settings_store, state,
 )
 from apps.wahub.models import (
     DELIVERED_STATUSES,
@@ -433,6 +438,8 @@ def _why_skipped(contact: Contact, result: dict, row: LeadFollowUp) -> str:
         return 'לא ליד לחוגים'
     if result['group'] == LEAD_GROUP_CLOSED:
         return f'הליד נסגר: {result["label"]}'
+    if optout.is_marked(contact):
+        return optout.NOT_SENT
     wrote = contact.last_inbound_at is not None and contact.last_inbound_at > row.created_at
     if result['owner'] == LEAD_OWNER_OFFICE:
         return 'הלקוח כתב בינתיים — עבר לטיפול המשרד' if wrote else 'עבר לטיפול המשרד'
@@ -648,6 +655,19 @@ def _act(row: LeadFollowUp, now, *, calendar=None) -> str:
         _pass_over(contact, row, result['follow'], now)
         sync(contact.pk, now=now)
         return NUDGE_SKIPPED
+    # "הסר": the system's list, read this minute — also for a phone another part of the system put on it,
+    # and for the dormant leads, whom no rule of the stage looks at. A list that cannot be read sends nothing.
+    try:
+        asked_out = optout.blocked(contact)
+    except OptOutListUnavailable:
+        logger.warning('wahub follow-ups: the opt-out list could not be read for contact %s; nothing is sent', contact.pk)
+        _wait(row, now + LOOK_AGAIN)
+        return 'waiting'
+    if asked_out:
+        _close(row, NUDGE_SKIPPED, optout.NOT_SENT, now)
+        _log(contact, row, f'בוטלה — {optout.NOT_SENT}')
+        _after_step(contact, row, now, note=optout.NOT_SENT)
+        return NUDGE_SKIPPED
 
     opens = next_opening(now, calendar=calendar)
     if opens != now:
@@ -742,7 +762,8 @@ def plan_dormant(now) -> int:
     planned = 0
     when = next_opening(now)
     for contact in (
-        Contact.objects.filter(lead_stage=LEAD_COLD, last_inbound_at__gte=now - DORMANT_WITHIN)
+        # Never to somebody who asked "הסר": this is the one message here that goes to many at once.
+        Contact.objects.filter(lead_stage=LEAD_COLD, last_inbound_at__gte=now - DORMANT_WITHIN, opted_out={})
         .exclude(pk__in=asked).exclude(pk__in=busy).order_by('-last_inbound_at')[:DORMANT_BATCH]
     ):
         text = render(body, values_for(contact))

@@ -151,10 +151,16 @@ class ExternalStudentViewSet(ManagerWriteMixin, viewsets.ModelViewSet):
         if not students:
             return Response({'error': 'לא נמצאו תלמידים'}, status=status.HTTP_400_BAD_REQUEST)
 
-        result = broadcast_to_external_students(
-            students,
-            automation_id=payload.validated_data['automation_id'],
-            dry_run=payload.validated_data['dry_run'],
-            skip_phones=payload.validated_data.get('skip_phones') or [],
-        )
+        from apps.core.whatsapp_optout import OptOutListUnavailable
+
+        try:
+            result = broadcast_to_external_students(
+                students,
+                automation_id=payload.validated_data['automation_id'],
+                dry_run=payload.validated_data['dry_run'],
+                skip_phones=payload.validated_data.get('skip_phones') or [],
+            )
+        except OptOutListUnavailable as exc:
+            # The list of who asked "הסר" could not be read: nothing was sent, to anybody.
+            return Response({'error': exc.detail, 'code': exc.code}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(result)

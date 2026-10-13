@@ -675,17 +675,23 @@ class ChildViewSet(viewsets.ModelViewSet):
         }
         children = [by_id[pk] for pk in ids if pk in by_id]
 
-        payload = broadcast_to_children(
-            children,
-            automation_type=automation_type,
-            automation_id=automation_id,
-            dry_run=dry_run,
-            skip_phones=[str(p) for p in raw_skip],
-            service=svc,
-            lesson_id=lesson_hint,
-            day_of_week=day_hint,
-            include_extra_phones=include_extras,
-        )
+        from apps.core.whatsapp_optout import OptOutListUnavailable
+
+        try:
+            payload = broadcast_to_children(
+                children,
+                automation_type=automation_type,
+                automation_id=automation_id,
+                dry_run=dry_run,
+                skip_phones=[str(p) for p in raw_skip],
+                service=svc,
+                lesson_id=lesson_hint,
+                day_of_week=day_hint,
+                include_extra_phones=include_extras,
+            )
+        except OptOutListUnavailable as exc:
+            # The list of who asked "הסר" could not be read: nothing was sent, to anybody.
+            return Response({'error': exc.detail, 'code': exc.code}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         payload['automation_label'] = (
             ManyChatService.AUTOMATION_LABELS.get(automation_id) if automation_type == 'kind' else automation_id
         )
