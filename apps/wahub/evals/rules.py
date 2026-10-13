@@ -290,3 +290,23 @@ RULES['N6'] = 'טקס סוף שנה: חגורה, תעודה ומתנה קטנה,
 # The phone is put on the system's opt-out list where the message comes in (apps/wahub/optout.py), whichever bot
 # answers. What the bot itself is held to is only what it says back: one line that confirms, and nothing after it.
 RULES['OO1'] = '"הסר": שורה אחת שמאשרת שלא נשלח יותר הודעות — בלי שאלה, בלי הצעה, בלי קישור ובלי נציג; בקשה להסיר ילד מחוג היא ביטול, לא "הסר"'
+
+# --- the owner, 14.10.2026: the night before the bot answers everybody ---
+# (docs/CHANGE-IMPACT-2026-10-14-WAHUB-BOT-BEFORE-GO-LIVE.md.) A run of 161 conversations against the real bot found
+# four mistakes. The one that counts: it wrote ₪360 — a sum it had worked out by itself. E7 was a line of the
+# instructions, and was not enough; G1 is the same rule held in code, on every answer, before it is kept or sent
+# (shadow.py, "the money guard") — by the reading of money the check `grounded_amounts` holds an answer against
+# (apps/wahub/grounding.py). The other three are lines of the instructions made sharper, and keep their ids: a list
+# of five (O1), a line said again (M20), a tag nobody marked (H7). And two rules the checks had been stricter than:
+# several questions in one message are owed a line or two each (X5), and whoever is at a locked door is handed to a
+# person with no question asked (V12).
+RULES.update({
+    'G1': 'שומר הסכומים: סכום שלא חזר מהכלים בתשובה הזאת, אינו בידע והלקוח לא כתב אותו — לא יוצא ללקוח: ניסוח נוסף אחד, ואחריו "בודקת מול המשרד" ונציג',
+    'E7': 'לא מחשבים סכומים: לא לשנה, לא לכמה ילדים, לא "בערך", ולא כמה שיעורים בחודש; סכום כולל — רק כפי שחזר מ-quote_registration',
+    'O1': 'מבנה התשובה: נושא אחד בכל הודעה, רשימה עד 4 שורות של 🔹 גם כשחזרו יותר, לא הכול בבת אחת (בעל המערכת, 12.10 בוקר)',
+    'M20': 'תמיד קדימה: לא שואלים שוב, פרט שנמסר נעול, ולא חוזרים על פרט מהתשובה הקודמת בלי שנשאל עליו שוב',
+    'H7': 'הפעלת יום הולדת: גלעד, מילה במילה, ותגית — באותה תשובה',
+    'X5': 'שתי שאלות או שתי אפשרויות בהודעה — עונים על שתיהן; כמה שאלות מפורשות — שורה, לכל היותר שתיים, לכל שאלה',
+    'V12': 'בדחיפות — נציג מיד ובלי שאלות בירור, ולא חוזרים שוב ושוב על "הפנייה הועברה"',
+})
+GENERAL_COVERS['grounded_amounts'] = ('P4', 'H3', 'M5', 'G1')

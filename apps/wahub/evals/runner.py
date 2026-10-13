@@ -22,12 +22,14 @@ minute, and a conversation of four turns with the judge after it does not fit:
 from __future__ import annotations
 
 import logging
+import re
 import time as time_module
 from datetime import datetime, timedelta
+from urllib.parse import unquote
 
 from django.utils import timezone
 
-from apps.wahub import shadow, shadow_tools
+from apps.wahub import grounding, shadow, shadow_tools
 from apps.wahub.evals import checks, judge, rules, scenarios, world
 from apps.wahub.models import (
     EVAL_ERROR,
@@ -45,9 +47,10 @@ from apps.wahub.models import (
 
 logger = logging.getLogger(__name__)
 
-# A turn is not begun with less than this left of the request, nor the judge with less than that.
+# A turn is not begun with less than this left of the request, nor the judge with less than that. The judge reads
+# more since 14.10.2026 — what the tools returned and the knowledge behind every answer — and is given the time for it.
 MIN_TURN_SECONDS = 22
-MIN_JUDGE_SECONDS = 12
+MIN_JUDGE_SECONDS = 20
 # How many times a turn the model did not answer is tried again before the run is given up.
 MAX_ATTEMPTS = 3
 # A run nobody continued for this long is no longer "in progress".
@@ -174,25 +177,53 @@ def _customer(scenario, built: dict, today) -> dict | None:
     }
 
 
-def _knowledge_text(items, hours=None) -> str:
-    """What the knowledge lets the bot say: the bodies and the data. Not the examples — a "wrong" example holds what must not be said."""
-    def strings(value):
-        if isinstance(value, dict):
-            for inner in value.values():
-                yield from strings(inner)
-        elif isinstance(value, (list, tuple)):
-            for inner in value:
-                yield from strings(inner)
-        elif isinstance(value, str):
-            yield value
+# How many items of the knowledge the judge is shown for one answer, and how much of each is kept on the run.
+MAX_ITEMS_FOR_JUDGE = 8
+MAX_ITEM_TEXT = 1200
 
-    parts = []
-    for item in items:
-        parts.append(item.body or '')
-        parts.extend(strings(item.data or {}))
-    # The office's hours and special days are read to the bot beside the items: "פתוח עד 18:00" is the knowledge's.
-    parts.extend(strings(hours or {}))
-    return '\n'.join(part for part in parts if part)
+
+def _knowledge_behind(result, ctx) -> list:
+    """
+    The items of the knowledge an answer rests on, for the judge to read
+    (judge.py): the ones the bot itself named, and any other whose sum, date,
+    phone or link the answer says — the ₪60 of the ceremony is the knowledge's
+    whether or not the bot wrote which item it read it in. [{id, title, text}],
+    the text as `grounding.knowledge_text` reads an item: body and data, no examples.
+    """
+    by_id = {item.id: item for item in ctx.items}
+    chosen = [by_id[item_id] for item_id in result.knowledge_used if item_id in by_id]
+    reply = result.text or ''
+    amounts, dates = set(checks.amounts_in(reply)), set(checks.dates_in(reply))
+    phones, links = checks.phones_in(reply), checks.links_in(reply)
+    if amounts or dates or phones or links:
+        for item in ctx.items:
+            if item in chosen:
+                continue
+            text = grounding.knowledge_text([item])
+            if (
+                amounts & grounding.money_evidence([], text) or dates & set(checks.dates_in(text))
+                or any(phone in re.sub(r'[-\s]', '', text) for phone in phones)
+                or any(url.rstrip('/') in unquote(text) for url in links)
+            ):
+                chosen.append(item)
+    return [
+        {'id': item.id, 'title': item.title or item.key or '', 'text': grounding.knowledge_text([item])[:MAX_ITEM_TEXT]}
+        for item in chosen[:MAX_ITEMS_FOR_JUDGE]
+    ]
+
+
+def _clock_text(moment) -> str:
+    """ "יום רביעי 14.10.2026 11:00" — the clock of a turn, as the judge reads it: "tomorrow" is a date."""
+    local = timezone.localtime(moment)
+    return f'יום {checks.DAYS[(local.weekday() + 1) % 7]} {local:%d.%m.%Y %H:%M}'
+
+
+def _for_judge(scenario, run: BotEvalRun) -> dict:
+    """What the bot read that no turn of the run holds: the script's earlier conversation, and the card of the writer."""
+    words = run.world.get('words') or {}
+    before = [{'who': who, 'text': _fill(text, words), 'hours_ago': hours_ago} for who, text, hours_ago in scenario.before]
+    first = _moments_of(scenario, run.world['clocks'])[0]
+    return {'before': before, 'card': _customer(scenario, run.world, timezone.localtime(first).date())}
 
 
 def _office_days() -> tuple:
@@ -242,7 +273,7 @@ def _play(run: BotEvalRun, scenario, index: int, catalog, deadline: float | None
         calls=calls, earlier_calls=earlier_calls,
         previous_reply=run.turns[index - 1]['reply'] if index else '',
         request_human=result.request_human, tags=list(ctx.tool_ctx.tags), world=run.world,
-        knowledge_text=_knowledge_text(ctx.items, ctx.hours), office_days=_office_days(), catalog=catalog, allow=turn.allow,
+        knowledge_text=grounding.knowledge_text(ctx.items, ctx.hours), office_days=_office_days(), catalog=catalog, allow=turn.allow,
         # What the model was told about the writer before any tool: evidence as much as a tool's answer is.
         given=ctx.customer or {},
         # Turn by turn: whether he goes on in his own language after an answer is read from these.
@@ -252,6 +283,7 @@ def _play(run: BotEvalRun, scenario, index: int, catalog, deadline: float | None
     return {
         'turn': index + 1,
         'at': when[index].isoformat(),
+        'at_text': _clock_text(when[index]),
         'customer': messages,
         'last_outbound': last_outbound or '',
         'reply': result.text,
@@ -261,6 +293,8 @@ def _play(run: BotEvalRun, scenario, index: int, catalog, deadline: float | None
         'request_human': result.request_human,
         'request_human_reason': result.request_human_reason,
         'tags': list(ctx.tool_ctx.tags),
+        # For the judge alone, as the tools' full answers below are: neither is sent to the screen (run_payload).
+        'knowledge': _knowledge_behind(result, ctx),
         'tools': [
             {
                 'name': call['name'], 'input': call['input'],
@@ -346,7 +380,7 @@ def advance(run: BotEvalRun, *, deadline: float | None = None, with_judge: bool 
         if with_judge and judge.configured():
             if left() < MIN_JUDGE_SECONDS:
                 return run
-            verdicts = judge.judge(run.turns, sentences, deadline=deadline)
+            verdicts = judge.judge(run.turns, sentences, deadline=deadline, **_for_judge(scenario, run))
         else:
             reason = judge.NO_KEY if with_judge else 'לא נשפט: הריצה הזאת בלי שיפוט'
             verdicts = [{'status': 'not_judged', 'explain': reason} for _ in sentences]

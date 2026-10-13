@@ -603,6 +603,10 @@ class TheNewConversationsTests(EvalTestCase):
         )
 
     def test_a_bot_that_answers_badly_fails_every_turn_that_expects_something(self):
+        # This test is of the checks: the worst answer there is, held against them as it was written. Since 14.10.2026
+        # an answer like it never gets this far — the money guard (shadow.py) stops its made-up ₪99 before it is kept,
+        # and the customer is sent the office's line (test_money_guard) — so here the guard stands aside.
+        self.enterContext(patch('apps.wahub.shadow.money_without_source', return_value=None))
         for scenario in NEW + (scenarios.BY_ID['ground_wifi'], scenarios.BY_ID['limit_english']):
             with self.subTest(scenario=scenario.id):
                 loud = self.play(scenario.id, [[say(LOUD)] for _turn in scenario.turns])
@@ -653,9 +657,22 @@ class TheNewConversationsTests(EvalTestCase):
         self.assertEqual(change.status, 'passed', runner.run_payload(change)['failures'])
         door = self.play('handoff_at_the_door', [
             [person('בדלת ואין אף אחד'), say('נציג מהמשרד יחזור אליכם מיד')],
-            [find(city=PLACE, course_type=MAIN), person('שיעור שלא מתקיים'), say('אמור להיות שיעור ב-11:00 — בודקים מיד מול המשרד. בן כמה הילד?')],
+            [find(city=PLACE, course_type=MAIN), person('שיעור שלא מתקיים'), say('אמור להיות שיעור ב-11:00 — בודקים מיד מול המשרד')],
         ])
         self.assertEqual(door.status, 'passed', runner.run_payload(door)['failures'])
+        # Until 14.10.2026 that answer passed only with "בן כמה הילד?" at its end — the order of a search, held against a
+        # parent at a locked door. "דחוף עכשיו — נציג מיד" is one line and no questions, and now it is the question that fails.
+        asks = self.play('handoff_at_the_door', [
+            [person('בדלת ואין אף אחד'), say('נציג מהמשרד יחזור אליכם מיד')],
+            [find(city=PLACE, course_type=MAIN), person('שיעור שלא מתקיים'), say('אמור להיות שיעור ב-11:00 — בודקים מיד מול המשרד. בן כמה הילד?')],
+        ])
+        self.assertEqual(self.failed(asks), {'has_not:הבוט לא שואל שאלות בירור כשעומדים בדלת'})
+        # Without a person the order still holds: the tool said to ask, and nothing was asked.
+        silent = self.play('handoff_at_the_door', [
+            [person('בדלת ואין אף אחד'), say('נציג מהמשרד יחזור אליכם מיד')],
+            [find(city=PLACE, course_type=MAIN), say('אמור להיות שיעור ב-11:00 — בודקים')],
+        ])
+        self.assertLessEqual({'order_kept', 'human:True'}, self.failed(silent))
 
     def test_7_the_date_the_customer_names(self):
         back = self.play('trial_dates_a_date_the_customer_names', [[THE_MAIN, say(lambda found: 'ב-31.12 אין כרגע שיעור ניסיון פתוח\n' + trial_dates(found))]])
