@@ -383,11 +383,19 @@ def lessons_evidence(calls: list) -> list:
 
 
 def _gated(moment: Moment) -> dict | None:
-    """The question `find_courses` said to ask in this turn, when no later call of the turn returned a class."""
+    """
+    The question `find_courses` said to ask in this turn, when no call of the turn returned a class.
+
+    A class found by one search of the turn is found: a second search of the same turn that came back with
+    "ask first" takes nothing from it (the full run of 14.10.2026 — a right answer about seats, read from the
+    first search, failed here because the bot had searched once more).
+    """
     need = None
     for call in moment.calls:
         result = call.get('result') if isinstance(call.get('result'), dict) else {}
         if call.get('name') == 'find_courses':
+            if result.get('courses'):
+                return None
             need = result if result.get('need') else None
         elif call.get('name') in ('course_card', 'quote_registration') and (result.get('found') or result.get('can_quote')):
             need = None
@@ -824,7 +832,9 @@ def _list_of_four(m: Moment) -> str:
     if _word_for_word(m) or any((call.get('input') or {}).get('show_all') is True for call in m.calls):
         return ''                     # a line said word for word, or a customer who asked to see everything
     items = [line for line in m.reply.split('\n') if line.lstrip().startswith(_BULLET)]
-    if len(items) > 4:
+    # Four things asked in one message are answered a fact to a line (X5): those lines are answers, not a list of
+    # choices to narrow — a class held on two days is already one line more than the questions.
+    if len(items) > max(4, min(questions_asked(m.customer) + 2, 7)):
         return f'רשימה של {len(items)} פריטים בתשובה אחת. עד 4 — ויותר מזה שואלים שאלה שמצמצמת, או כותבים את השמות בשורה אחת'
     return ''
 
@@ -842,8 +852,23 @@ def _one_subject(m: Moment) -> str:
     return ''
 
 
+def questions_put(reply: str) -> int:
+    """
+    How many questions an answer puts. The options said straight after a question, on its own line —
+    "כמה שיעורים הפסיד? אחד, או כמה ברצף?" — spell out the same one, and are not a second.
+    """
+    count = 0
+    for line in _plain(reply).split('\n'):
+        for index, part in enumerate(line.split('?')[:-1]):
+            words = part.split()
+            if index and 'או' in words and len(words) <= 8:
+                continue
+            count += 1
+    return count
+
+
 def _one_question(m: Moment) -> str:
-    count = _plain(m.reply).count('?')
+    count = questions_put(m.reply)
     return f'הבוט שאל {count} שאלות בתשובה אחת. שואלים שאלה אחת בכל פעם: "{_quote(m.reply)}"' if count > 1 else ''
 
 
@@ -886,8 +911,16 @@ def _no_internal_money(m: Moment) -> str:
 _TO_A_MAN = re.compile(r'(?<![א-ת])(?:תוכל|תרצה|תגיד|תכתוב|תשלח|תבדוק|תבחר|תספר|אתה|מעוניין|מוזמן)(?![א-ת])')
 _TO_A_WOMAN = re.compile(r'(?<![א-ת])(?:תוכלי|תרצי|תגידי|תכתבי|תשלחי|תבדקי|תבחרי|תספרי|מעוניינת|מוזמנת)(?![א-ת])')
 # What tells who is writing: how she speaks of herself, or who she says she is.
-_WRITES_AS_A_WOMAN = re.compile(r'(?<![א-ת])(?:מעוניינת|מחפשת|שואלת|מתעניינת|רציתי לשאול כאמא|אמא של|אני אמא|הסבתא|סבתא של|אני סבתא)(?![א-ת])')
-_WRITES_AS_A_MAN = re.compile(r'(?<![א-ת])(?:מעוניין|מחפש|שואל|מתעניין|אבא של|אני אבא|הסבא|סבא של|אני סבא)(?![א-ת])')
+# "אני נרשם עכשיו" says it as much as "מעוניין" does (the full run of 14.10.2026); the verb is read only after
+# "אני", because "הוא צריך" is said of the child.
+_WRITES_AS_A_WOMAN = re.compile(
+    r'(?<![א-ת])(?:מעוניינת|מחפשת|שואלת|מתעניינת|רציתי לשאול כאמא|אמא של|אני אמא|הסבתא|סבתא של|אני סבתא'
+    r'|אני (?:כבר |לא |עדיין |גם )*(?:נרשמת|צריכה|יכולה|מעדיפה|חושבת|מבינה|יודעת|מגיעה|מתלבטת|שוקלת|יושבת|מרגישה|רושמת))(?![א-ת])'
+)
+_WRITES_AS_A_MAN = re.compile(
+    r'(?<![א-ת])(?:מעוניין|מחפש|שואל|מתעניין|אבא של|אני אבא|הסבא|סבא של|אני סבא'
+    r'|אני (?:כבר |לא |עדיין |גם )*(?:נרשם|צריך|יכול|מעדיף|חושב|מבין|יודע|מגיע|מתלבט|שוקל|יושב|מרגיש|רושם))(?![א-ת])'
+)
 
 
 def _neutral_address(m: Moment) -> str:

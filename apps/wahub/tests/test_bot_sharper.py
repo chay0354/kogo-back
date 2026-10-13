@@ -257,6 +257,46 @@ class SharperChecksTests(SimpleTestCase):
 
     # ---- how full a lesson is ----
 
+    # ---- the right answers the full run of 14.10.2026 failed ----
+
+    def test_a_date_said_not_to_be_among_the_open_ones_is_not_offered(self):
+        asked = 'אפשר לבוא לשיעור ניסיון ב-31.12?'
+        said = dict(customer=[asked], customer_all=asked, customer_now=asked)
+        back = '*31.12* לא נמצא כרגע בין התאריכים שפתוחים לשיעור ניסיון\nאפשר להגיע ביום רביעי *21.10* בשעה 16:00'
+        self.assertEqual(checks.only_open_trial_dates().test(self.moment(back, **said)), '')
+        self.assertEqual(self.failed(back, **said), {})
+        self.assertIn('31.12', checks.only_open_trial_dates().test(self.moment('*31.12* נמצא בין התאריכים הפתוחים', **said)))
+
+    def test_a_class_found_by_one_search_of_the_turn_is_found(self):
+        counted = 'ביום רביעי ב-16:00 רשומים *6 מתוך 14*'
+        self.assertEqual(self.failed(counted, calls=(LESSONS, GATED)), {})
+        self.assertIn('16:00', self.failed('יש שיעור ב-16:00', calls=(GATED,))['order_kept'])
+
+    def test_options_said_after_a_question_are_the_same_question(self):
+        self.assertEqual(checks.questions_put('כדי לבדוק מה אפשר לעשות, כמה שיעורים הפסדתם? אחד, או כמה שיעורים ברצף?'), 1)
+        self.assertEqual(checks.questions_put('באיזו עיר אתם מחפשים? ולאיזה גיל?'), 2)
+        self.assertEqual(checks.questions_put('באיזו עיר אתם מחפשים?\nבראש העין או בפתח תקווה?'), 2)
+        self.assertEqual(checks.questions_put('נתראה בשיעור'), 0)
+
+    def test_who_writes_of_himself_as_a_man_may_be_addressed_as_one(self):
+        man = 'אפשר הנחה? אם תורידו ל-200 אני נרשם עכשיו'
+        said = dict(calls=(), customer=[man], customer_all=man, customer_now=man)
+        self.assertNotIn('neutral_address', self.failed('המחיר קבוע, ואתה מוזמן לשיעור ניסיון', **said))
+        self.assertIn('לשון נקבה', self.failed('המחיר קבוע, ואת מוזמנת לשיעור ניסיון', **said)['neutral_address'])
+        # "הוא צריך" is said of the child, and tells nothing of who writes.
+        child = 'הוא צריך חוג ביום רביעי'
+        self.assertIn('עוד לא ברור', self.failed('אתה מוזמן', calls=(), customer=[child], customer_all=child, customer_now=child)['neutral_address'])
+
+    def test_four_questions_are_answered_a_fact_to_a_line(self):
+        four = 'רציתי לדעת באיזה יום ושעה זה, כמה זה עולה לחודש, אם יש שיעור ניסיון, ומה צריך להביא'
+        facts = '\n'.join(['*קפוארה כיתות ג-ד*:'] + ['🔹 ראשון 16:00', '🔹 רביעי 16:00', '🔹 *₪270* לחודש', '🔹 שיעור ניסיון ביום רביעי', '🔹 בגדים נוחים'])
+        self.assertNotIn('list_of_four', self.failed(facts, customer=[four], customer_all=four, customer_now=four))
+        self.assertIn('5 פריטים', self.failed(facts)['list_of_four'])
+
+    def test_a_parent_in_distress_is_a_sensitive_moment(self):
+        for words in ('מתוך מצוקה של עצמו', 'request_human באותה תשובה', 'בלי להציע חוג'):
+            self.assertIn(words, shadow.SYSTEM_TASK)
+
     def test_a_count_is_the_count_of_the_lesson_asked_about(self):
         enrolled = checks.says_seats('two_day', 'enrolled')
         self.assertEqual(enrolled.test(self.moment('ביום רביעי ב-16:00 רשומים 6 מתוך 14 מקומות, נשארו 8')), '')

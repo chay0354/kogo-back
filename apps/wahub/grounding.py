@@ -142,10 +142,12 @@ _AFFIRMS = re.compile(
 )
 _DENIES = re.compile(r'(?<![א-ת])(?:לא|אין|אי אפשר|איננו|אינו|אינה|בלי)(?![א-ת])')
 # A date said to be taken or closed is the truth about it, not an offer of it.
-# ("ב-31.12 אין כרגע שיעור ניסיון פתוח" says it as much as "אין שיעור" does: a word between the two is not an offer.)
+# ("ב-31.12 אין כרגע שיעור ניסיון פתוח" says it as much as "אין שיעור" does: a word between the two is not an offer;
+# so does "31.12 לא נמצא כרגע בין התאריכים שפתוחים" — the full run of 14.10.2026 failed that right answer.)
 _UNAVAILABLE = re.compile(
     r'מלא|אין מקום|לא נשאר|תפוס|לא מתקיים|לא יתקיים|בוטל|מבוטל|לא פתוח|סגור|אי אפשר|לא ניתן|לא אפשרי|לא זמין|חופש|כבר התחיל'
     r'|אין (?:כרגע |עדיין |שם |אצלנו |לנו |בו )*(?:שיעור|ניסיון|תאריך|מועד)'
+    r'|לא (?:כרגע |עדיין )?(?:נמצאת?|מופיעה?|קיימת?|קיים|מוצעת?|נפתחה?)(?![א-ת])'
 )
 
 
