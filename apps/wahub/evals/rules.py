@@ -285,3 +285,8 @@ GENERAL_COVERS['board_really_sent'] = ('N5',)
 # The one sum the knowledge itself holds (it is his word, and Kogo has no field for it). A question about a belt is
 # answered by it — and no longer by the shop, the instructor or the office (D10, as the belt was read until now).
 RULES['N6'] = 'טקס סוף שנה: חגורה, תעודה ומתנה קטנה, ₪60 (מהידע — הסכום של בעל המערכת); התאריך יעודכן בהמשך השנה ולא ממציאים אותו; על חגורה לא מפנים לחנות'
+
+# --- the owner, 13.10.2026 in the evening: "הסר" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.1) ---
+# The phone is put on the system's opt-out list where the message comes in (apps/wahub/optout.py), whichever bot
+# answers. What the bot itself is held to is only what it says back: one line that confirms, and nothing after it.
+RULES['OO1'] = '"הסר": שורה אחת שמאשרת שלא נשלח יותר הודעות — בלי שאלה, בלי הצעה, בלי קישור ובלי נציג; בקשה להסיר ילד מחוג היא ביטול, לא "הסר"'

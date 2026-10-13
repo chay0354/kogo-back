@@ -28,6 +28,11 @@ urlpatterns = [
     path('bot/evals/', views_bot.BotEvalsView.as_view(), name='wahub-bot-evals'),
     path('bot/evals/run/', views_bot.BotEvalRunView.as_view(), name='wahub-bot-evals-run'),
     path('bot/evals/runs/<int:pk>/', views_bot.BotEvalRunDetailView.as_view(), name='wahub-bot-evals-run-detail'),
+    # "מה הבוט לא ידע השבוע" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.3): the topics with their numbers, and the two
+    # things the owner does to one that are not teaching it. Teaching is refine/ with `unknown_topic`.
+    path('bot/unknowns/', views_bot.BotUnknownsView.as_view(), name='wahub-bot-unknowns'),
+    path('bot/unknowns/<int:pk>/dismiss/', views_bot.BotUnknownDismissView.as_view(), name='wahub-bot-unknown-dismiss'),
+    path('bot/unknowns/<int:pk>/restore/', views_bot.BotUnknownRestoreView.as_view(), name='wahub-bot-unknown-restore'),
     path('demo/scenarios/', views.DemoScenariosView.as_view(), name='wahub-demo-scenarios'),
     path('demo/scenario/', views.DemoScenarioView.as_view(), name='wahub-demo-scenario'),
     path('demo/contacts/', views.DemoContactsView.as_view(), name='wahub-demo-contacts'),

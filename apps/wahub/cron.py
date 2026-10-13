@@ -24,6 +24,10 @@ The slice of background work one cron call does (every five minutes):
   3. the shadow bot's answer to every customer message it has not answered yet,
      twenty seconds after the last one of a burst (apps/wahub/shadow.py);
   4. the reviewer's sweep over the last day's conversations (apps/wahub/reviewer.py);
+  4c. "מה הבוט לא ידע": the shadow answers in which the new bot had no answer
+     are filed under topics for the owner to teach (apps/wahub/unknowns.py) —
+     one question to Claude a day, the quick model, and only with time left;
+     with no key, by their words. It changes nothing the bot knows;
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py);
   6. the holidays boards: which of their automations ManyChat has, by name —
@@ -48,7 +52,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.wahub import (
-    analysis, holiday_flows, lead_followups, lead_stage, live_test, matching, reviewer, shadow, waiting_list,
+    analysis, holiday_flows, lead_followups, lead_stage, live_test, matching, reviewer, shadow, unknowns, waiting_list,
 )
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
@@ -121,6 +125,7 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
         'lead_checked': 0, 'lead_changed': 0, 'lead_understood': 0,
         'followups_sent': 0, 'followups_due': 0, 'followups_skipped': 0, 'followups_failed': 0,
         'waiting_freed': 0, 'waiting_closed': 0, 'waiting_checked': 0,
+        'unknowns_sorted': 0, 'unknown_topics_opened': 0,
     }
 
     places = course_types = external_places = None
@@ -239,6 +244,13 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS) -> dict:
             counts['recordings_heard_again'] = shadow.hear_again(now=timezone.now(), deadline=time.monotonic() + left())
         except Exception:
             logger.exception('wahub cron: the second try at the recordings failed')
+
+    # 4c. "מה הבוט לא ידע": the answers in which the new bot did not know are filed under topics — Claude is
+    # asked once a day, and only with time to spare; with no key they are gathered by their words (unknowns.py)
+    try:
+        counts.update(unknowns.sort_new(now=timezone.now(), deadline=time.monotonic() + left()))
+    except Exception:
+        logger.exception('wahub cron: what the bot did not know was not filed under topics')
 
     # 5. the live test: a message nobody answered is said on the contact (nothing is sent from here)
     try:

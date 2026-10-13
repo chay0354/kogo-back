@@ -33,7 +33,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.wahub import analysis, inbound, knowledge, media, shadow_tools, state, transcribe
+from apps.wahub import analysis, inbound, knowledge, media, optout, shadow_tools, state, transcribe, unknowns
 from apps.wahub.analysis import ANTHROPIC_URL, ANTHROPIC_VERSION, P_CLASS, P_COLD, P_INFO, P_REG, P_TRIAL, Line
 from apps.wahub.models import (
     DIRECTION_IN,
@@ -95,8 +95,17 @@ REPLY_SCHEMA = {
         'text': {'type': 'string', 'description': 'ההודעה ללקוח, מוכנה לשליחה בוואטסאפ'},
         'reasoning': {'type': 'string', 'description': 'למה ככה: 2–4 שורות בעברית פשוטה, עם [#id] של רשומות הידע שהשתמשת בהן'},
         'knowledge_ids': {'type': 'array', 'items': {'type': 'integer'}, 'description': 'מזהי רשומות הידע שהתשובה נשענת עליהן'},
+        # "מה הבוט לא ידע" (unknowns.py): the bot says itself when it had no answer, and what was asked for.
+        'unknown': {
+            'type': 'string',
+            'description': (
+                'ריק כמעט תמיד. רק כשלא ידעת לענות כי המידע לא חזר מהכלים ואינו בידע — אמרת את הנוסח missing_info או סימנת לנציג '
+                'בגלל זה: מה הלקוח ביקש לדעת, ב-3 עד 8 מילים, בלי שם ובלי טלפון ("חניה ליד הסניף", "מחיר תלבושת"). '
+                'שאלת הבהרה, תשובה מלאה, או נציג מסיבה אחרת (כעס, תקלה כספית, בקשה חריגה) — מחרוזת ריקה.'
+            ),
+        },
     },
-    'required': ['text', 'reasoning', 'knowledge_ids'],
+    'required': ['text', 'reasoning', 'knowledge_ids', 'unknown'],
     'additionalProperties': False,
 }
 
@@ -161,7 +170,8 @@ found=false: הנוסח missing_info ו-request_human, ולא כותבים שנ�
 17. מקרה לא רגיל (הודעה לא ברורה, כמה ילדים יחד, מיקוח, בקשה חריגה, כעס) — לפי הכללים שבידע; שתי שאלות בהודעה — עונים על שתיהן. \
 וכשאין כלל: לא ממציאים — שאלה קצרה אחת, או נציג. לא מחשבים סכום או תאריך שהמערכת לא החזירה, ולא מאשרים שעה, תאריך או מחיר רק כי הלקוח הציע אותם.
 
-הפלט הסופי: JSON בלבד לפי הסכמה — text (ההודעה ללקוח), reasoning (למה ככה, בעברית פשוטה, 2–4 שורות, עם [#id] של הרשומות ששימשו), knowledge_ids.
+הפלט הסופי: JSON בלבד לפי הסכמה — text (ההודעה ללקוח), reasoning (למה ככה, בעברית פשוטה, 2–4 שורות, עם [#id] של הרשומות ששימשו), knowledge_ids, \
+ו-unknown: ריק כמעט תמיד; רק כשלא ידעת לענות כי המידע לא חזר מהכלים ואינו בידע — מה הלקוח ביקש לדעת, בכמה מילים, בלי שם ובלי טלפון.
 """
 
 _GREETING = re.compile(r'^(היי+|הי+|שלום|הלו|בוקר טוב|ערב טוב|צהריים טובים|שבת שלום|hi|hello)[\s!?.,🙂👋]*$', re.I)
@@ -292,6 +302,9 @@ class Draft:
     took_ms: int = 0
     request_human: bool = False
     request_human_reason: str = ''
+    # What the customer asked for that the bot had no answer to, in the bot's own few words; '' when it
+    # knew (unknowns.py reads it when the answer is kept). Not part of what a screen is shown.
+    unknown: str = ''
 
     def as_dict(self) -> dict:
         return {
@@ -576,6 +589,10 @@ def _stub(ctx: Context) -> Draft:
     elif inbound.asks_for_human(merged):
         reasons.append('הלקוח מבקש נציג במפורש')
         text = handoff('הלקוח ביקש נציג')
+    # 2b. "הסר": one line that confirms and nothing after it — the system itself has put the phone on the list (optout.py)
+    elif optout.is_request(merged):
+        rule('"הסר"')
+        text = say('opt_out_done') or 'הוסרתם מרשימת התפוצה, לא נשלח יותר הודעות 🙏'
     # 3. a short answer to the last message the system sent
     elif ctx.last_outbound and len(short) <= 40 and (_YES.match(short) or _NO.match(short) or _NOT_ANSWERED.search(short)):
         outbound_text = ctx.last_outbound.get('text') or ''
@@ -1066,13 +1083,14 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
 
 def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) -> Draft:
     tctx = ctx.tool_ctx
-    reply, reasoning, ids = text.strip(), '', []
+    reply, reasoning, ids, unknown = text.strip(), '', [], ''
     try:
         data = json.loads(text)
         if isinstance(data, dict):
             reply = str(data.get('text') or '').strip()
             reasoning = str(data.get('reasoning') or '').strip()
             ids = [int(value) for value in data.get('knowledge_ids') or [] if str(value).lstrip('-').isdigit()]
+            unknown = ' '.join(str(data.get('unknown') or '').split())[:200]
     except (ValueError, TypeError):
         reasoning = ''
     if not reply:
@@ -1090,6 +1108,7 @@ def _draft_from_answer(text: str, ctx: Context, tools_used: list, model: str) ->
         text=polish(reply, keep=shadow_tools.letter_for_letter(tctx.calls)), reasoning=reasoning or 'Claude לא הסביר', tools_used=tools_used,
         knowledge_used=used,
         model=model, request_human=bool(tctx.request_human_reason), request_human_reason=tctx.request_human_reason or '',
+        unknown=unknown,
     )
 
 
@@ -1360,6 +1379,13 @@ def propose(contact: Contact, *, now=None, deadline: float | None = None, fallba
         newer = Message.objects.filter(contact=contact, direction=DIRECTION_IN, id__gt=burst[-1].id).exists()
         state.touch(contact.pk, needs_shadow=newer, last_shadow_at=now)
     contact.needs_shadow, contact.last_shadow_at = newer, now
+    # "מה הבוט לא ידע": an answer in which the bot had no answer is kept as a case of its own — for a real
+    # customer only, with no name and no phone (unknowns.py). The answer above is kept already; a fault here must not undo it.
+    try:
+        with transaction.atomic():
+            unknowns.note(reply, result, targets, items=ctx.items, now=now)
+    except Exception:
+        logger.exception('wahub shadow: the answer to contact %s was not looked at for what the bot did not know', contact.pk)
     # Older messages this answer passed over (a recording, then a question minutes later) count as
     # answered from here on, so their files are fetched now or never: a few, with the time that is left.
     passed_over = [row for row in messages if row not in burst and media.is_external(row.media_url)]

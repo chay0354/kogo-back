@@ -28,7 +28,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsManager
-from apps.wahub import knowledge, knowledge_import, refine, reviewer, settings_store, shadow
+from apps.wahub import knowledge, knowledge_import, refine, reviewer, settings_store, shadow, unknowns
 from apps.wahub.evals import runner as evals
 from apps.wahub.models import (
     PROPOSAL_PENDING,
@@ -36,6 +36,7 @@ from apps.wahub.models import (
     VERDICT_BAD,
     VERDICT_CHOICES,
     BotEvalRun,
+    BotUnknownTopic,
     Contact,
     KnowledgeHistory,
     KnowledgeItem,
@@ -372,8 +373,18 @@ class RefineViewSet(_ManagerViewSet):
             return _error('mode לא תקין.')
         if mode and raw_proposal not in (None, ''):
             return _error('דיוק על הצעה נפתח בלי mode.')
+        raw_topic = data.get('unknown_topic')
+        if raw_topic not in (None, ''):
+            # "ללמד" on a topic of "מה הבוט לא ידע" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.3.4): the context comes
+            # ready, and the owner only writes the answer. It names no conversation, no message and no proposal.
+            if raw_proposal not in (None, '') or raw_contact not in (None, '') or data.get('message_ids') or data.get('shadow_ids'):
+                return _error('unknown_topic נשלח לבד: בלי contact, בלי message_ids ובלי proposal.')
+            if mode != refine.MODE_TEACH:
+                return _error('unknown_topic נשלח עם mode: "teach".')
         try:
-            if raw_proposal in (None, '') and raw_contact in (None, '') and not data.get('message_ids') and not data.get('shadow_ids'):
+            if raw_topic not in (None, ''):
+                thread = refine.teach_unknown(raw_topic, data.get('text'), request.user)
+            elif raw_proposal in (None, '') and raw_contact in (None, '') and not data.get('message_ids') and not data.get('shadow_ids'):
                 # "ללמד את הבוט": the owner's words and nothing else — no conversation, no messages, no proposal.
                 thread = refine.teach(data.get('text'), request.user)
             elif raw_proposal not in (None, ''):
@@ -518,7 +529,51 @@ class ReviewSummaryView(APIView):
     permission_classes = [IsAuthenticated, IsManager]
 
     def get(self, request):
-        return Response(reviewer.summary())
+        summary = reviewer.summary()
+        # "מה הבוט לא ידע" this week — the small number beside "ללמד" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.3.3).
+        tally = unknowns.counts()
+        summary['unknowns'] = {'topics': tally['topics'], 'questions': tally['questions']}
+        return Response(summary)
+
+
+# --- "מה הבוט לא ידע השבוע" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.3) -------------------------------------------
+
+class BotUnknownsView(APIView):
+    """
+    GET bot/unknowns/?week=this|last&status=active|taught|dismissed|all — what
+    the new bot did not know, gathered by topic: how often this week and the
+    week before, a few of the questions in the customers' own words (no name,
+    no phone), and what the bot said. Reads only. Teaching a topic is
+    POST refine/ {mode: "teach", unknown_topic}.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        try:
+            return Response(unknowns.listed(request.query_params))
+        except unknowns.UnknownsError as exc:
+            return _error(str(exc))
+
+
+class _BotUnknownActionView(APIView):
+    """POST bot/unknowns/{id}/dismiss/ — "לא רלוונטי"; POST bot/unknowns/{id}/restore/ — back to the list. 200 with the topic."""
+    permission_classes = [IsAuthenticated, IsManager]
+    act = None
+
+    def post(self, request, pk: int):
+        try:
+            topic = type(self).act(pk, request.user)
+        except BotUnknownTopic.DoesNotExist:
+            return _error('הנושא לא נמצא.', http=status.HTTP_404_NOT_FOUND)
+        return Response(unknowns.one(topic))
+
+
+class BotUnknownDismissView(_BotUnknownActionView):
+    act = staticmethod(unknowns.dismiss)
+
+
+class BotUnknownRestoreView(_BotUnknownActionView):
+    act = staticmethod(unknowns.restore)
 
 
 # --- "בדיקות הבוט": the bot's self-checks (docs/WAHUB-CONTRACT-BOT-EVALS.md) ----------------------------------------

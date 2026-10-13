@@ -207,6 +207,9 @@ MODE_TEACH = 'teach'
 ASKS_WHAT_TO_TEACH = 'מה תרצה להסביר לבוט?'
 # Where a "ללמד" thread came from: his own words alone, messages picked in a conversation, a shadow reply.
 ORIGIN_FREE, ORIGIN_CONVERSATION, ORIGIN_SHADOW = 'free', 'conversation', 'shadow'
+# Opened from a topic of "מה הבוט לא ידע" (unknowns.py; docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.3.4): the system
+# speaks first — what customers asked, what the bot said — and the owner only writes the answer.
+ORIGIN_UNKNOWN = 'unknown'
 FROM_A_CONVERSATION = 'מתוך שיחה'
 FROM_A_SHADOW_REPLY = 'על תשובה של הבוט בצל'
 CONVERSATION_GONE = 'מתוך שיחה שנמחקה'
@@ -837,6 +840,17 @@ def _teach_user_text(thread: RefineThread, turns: list[RefineTurn], earlier: lis
     # His first words in the thread: its first turn — or his answer to the summary the system opened it with.
     first = not any(turn.role == TURN_OPERATOR for turn in before)
     opened = _summary_of(before[0]) if before else None
+    if first and opened is not None and (before[0].meta or {}).get('origin') == ORIGIN_UNKNOWN:
+        # Opened from "מה הבוט לא ידע": the questions customers asked and got no answer to, and his answer to them.
+        parts.append(
+            '# שאלות שלקוחות שאלו והבוט לא ידע לענות עליהן, ומה שהוא ענה (נתונים; בלי שמות ובלי טלפונים)\n'
+            f'"""\n{_clip(before[0].text, MAX_TEXT)}\n"""'
+        )
+        parts.append(
+            '# מה בעל העסק ענה (נתונים — התשובה הנכונה לשאלות האלה: מה שהבוט צריך לדעת מעכשיו)\n'
+            f'"""\n{latest.text}\n"""'
+        )
+        return '\n\n'.join(parts)
     if first and opened is not None:
         parts.append(
             '# הסיכום שבו המערכת פתחה, והשאלה ששאלה (נתונים; הסיכום הוא השערה של המערכת, לא עובדה)\n'
@@ -871,10 +885,13 @@ def _api_key() -> str:
 
 
 def _ask(api_key: str, *, system: str, user: str, schema: dict, effort: str = EFFORT,
-         timeout: int = TIMEOUT_SECONDS) -> tuple[dict, str]:
-    """One question to Claude, answered as JSON by `schema`: (the answer, the model that gave it). No usable answer → RefineUnavailable."""
+         timeout: int = TIMEOUT_SECONDS, model: str | None = None) -> tuple[dict, str]:
+    """
+    One question to Claude, answered as JSON by `schema`: (the answer, the model that gave it). No usable answer →
+    RefineUnavailable. `model` — another model than the bot's own, for a question that needs less (unknowns.py).
+    """
     body = {
-        'model': model_name(),
+        'model': model or model_name(),
         # A ceiling, not a spend: thinking counts toward it.
         'max_tokens': MAX_TOKENS,
         'system': system,
@@ -920,7 +937,7 @@ def _ask(api_key: str, *, system: str, user: str, schema: dict, effort: str = EF
         raise RefineUnavailable('תשובה לא קריאה מ-Claude') from exc
     if not isinstance(data, dict):
         raise RefineUnavailable('תשובה לא קריאה מ-Claude')
-    return data, str(payload.get('model') or model_name())
+    return data, str(payload.get('model') or model or model_name())
 
 
 def _interpret(thread: RefineThread, turns: list[RefineTurn], earlier: list[KnowledgeProposal], teach: bool = False) -> Answer:
@@ -1620,6 +1637,12 @@ def undo(thread: RefineThread, user) -> RefineThread:
         meta = {'outcome': OUTCOME_UNDONE}
     RefineTurn.objects.create(thread=thread, role=TURN_SYSTEM, text=said, meta=meta)
     _set_status(thread, REFINE_OPEN)
+    topic_id = unknown_topic_of(thread) if teach else None
+    if topic_id:
+        # What taught a topic of "מה הבוט לא ידע" was taken back: the topic is open again.
+        from apps.wahub import unknowns
+
+        unknowns.untaught(topic_id, thread)
     return thread
 
 
@@ -1690,6 +1713,49 @@ def teach(text, user) -> RefineThread:
         RefineTurn.objects.create(thread=thread, role=TURN_OPERATOR, text=text, created_by=actor, meta=_teach_mark(ORIGIN_FREE))
     _respond(thread, user)
     return thread
+
+
+def teach_unknown(topic_id, text, user) -> RefineThread:
+    """
+    POST refine/ {mode: "teach", unknown_topic, text?} — "ללמד" on a topic the
+    bot did not know (unknowns.py). The system speaks first, with the context
+    ready: what customers asked, how often, and what the bot said; the owner
+    only writes the answer — here, when `text` came with the request, or
+    through say/. From there it is a "ללמד" thread like any other: nothing is
+    applied until his "מאשר", and the approval is what marks the topic taught.
+    """
+    from apps.wahub import unknowns
+    from apps.wahub.models import BotUnknownTopic
+
+    topic = BotUnknownTopic.objects.filter(pk=topic_id).first() if str(topic_id or '').strip().isdigit() else None
+    if topic is None:
+        raise RefineError('הנושא לא נמצא.')
+    answered = not _no_text(text)
+    text = _clean_text(text, unknowns.ASKS_FOR_THE_ANSWER) if answered else ''
+    opened = unknowns.opening(topic)
+    actor = user if getattr(user, 'is_authenticated', False) else None
+    mark = {**_teach_mark(ORIGIN_UNKNOWN), 'unknown_topic': topic.id, 'unknown_title': topic.title}
+    with transaction.atomic():
+        thread = RefineThread.objects.create(created_by=actor)
+        RefineTurn.objects.create(
+            thread=thread, role=TURN_SYSTEM, text=opened['text'], needs_answer=True,
+            meta={
+                **mark, 'outcome': OUTCOME_SUMMARY, 'summary': opened['summary'], 'question': opened['question'],
+                'quotes': opened['quotes'], 'model': 'rules', 'took_ms': 0,
+            },
+        )
+        if answered:
+            RefineTurn.objects.create(thread=thread, role=TURN_OPERATOR, text=text, created_by=actor, meta={'mode': MODE_TEACH})
+    if answered:
+        _respond(thread, user)
+    return thread
+
+
+def unknown_topic_of(thread: RefineThread, turns=None):
+    """The id of the topic of "מה הבוט לא ידע" a thread was opened from; None for every other thread."""
+    first = turns[0] if turns else thread.turns.first()
+    meta = (first.meta or {}) if first is not None else {}
+    return meta.get('unknown_topic') if meta.get('origin') == ORIGIN_UNKNOWN else None
 
 
 def _names_money(change) -> bool:
@@ -2044,6 +2110,12 @@ def approve(thread: RefineThread, user, *, deadline: float | None = None) -> lis
             meta={'mode': MODE_TEACH, 'outcome': OUTCOME_APPROVED, 'approved': applied, 'check': None},
         )
         _set_status(thread, REFINE_DONE)
+        topic_id = unknown_topic_of(thread)
+        if topic_id:
+            # Opened from "מה הבוט לא ידע": his approval is what teaches the topic, and takes it off that list.
+            from apps.wahub import unknowns
+
+            unknowns.taught(topic_id, thread, user)
     # Outside the transaction: the bot is asked for whole answers, and the change is already his.
     # Whatever happens to the check, the approval stands and is answered; GET refine/{id}/check/ tries again.
     try:
@@ -2471,6 +2543,14 @@ def origin_of(thread: RefineThread, turns: list[RefineTurn]) -> dict:
     and never by its phone; a shadow reply — said so. `thread.contact` is read.
     """
     kind = (turns[0].meta or {}).get('origin') if turns else None
+    if kind == ORIGIN_UNKNOWN:
+        from apps.wahub import unknowns
+
+        meta = turns[0].meta or {}
+        return {
+            'kind': ORIGIN_UNKNOWN, 'label': unknowns.origin_label(str(meta.get('unknown_title') or '')), 'contact_id': None,
+            'contact_name': None, 'link': unknowns.SCREEN_LINK, 'topic_id': meta.get('unknown_topic'),
+        }
     if kind not in (ORIGIN_CONVERSATION, ORIGIN_SHADOW):
         kind = ORIGIN_CONVERSATION if (thread.contact_id or thread.message_ids or thread.shadow_ids) else ORIGIN_FREE
     if kind == ORIGIN_FREE:
@@ -2497,6 +2577,12 @@ def _context(thread: RefineThread) -> dict | None:
     None for a thread on his own words alone.
     """
     if not (thread.contact_id or thread.message_ids or thread.shadow_ids):
+        first = thread.turns.first()
+        meta = (first.meta or {}) if first is not None else {}
+        if meta.get('origin') == ORIGIN_UNKNOWN:
+            # Opened from "מה הבוט לא ידע": the customers' questions, kept with no name and no phone.
+            quotes = [quote for quote in (meta.get('quotes') or []) if isinstance(quote, dict)]
+            return {'contact_id': None, 'message_ids': [], 'shadow_ids': [], 'quotes': quotes[:MAX_QUOTES]}
         return None
     rows = list(Message.objects.filter(pk__in=thread.message_ids or []).order_by('id')[:MAX_QUOTES])
     shadows = list(ShadowReply.objects.filter(pk__in=thread.shadow_ids or []).order_by('id')[:MAX_QUOTES])
