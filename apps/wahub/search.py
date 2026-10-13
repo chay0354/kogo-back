@@ -47,6 +47,7 @@ from apps.wahub.phones import normalize_phone, phone_display
 MIN_PHONE_DIGITS = 4
 MAX_WORDS = 6
 MAX_PHONES = 2
+MAX_TYPED = 200
 # One letter is in every name: it is looked for in the contact's own name and words, not in the families.
 MIN_FAMILY_WORD = 2
 CUSTOMERS_SHOWN = 5
@@ -109,7 +110,8 @@ class Phone:
     def in_customers(self) -> tuple:
         """The spellings to look for in a customer's phone (kept as it was typed, compared digits only)."""
         found = [self.digits]
-        if self.digits.startswith('972') and len(self.digits) > 3:
+        if self.digits.startswith('972') and len(self.digits) >= 3 + MIN_PHONE_DIGITS - 1:
+            # Never a spelling shorter than a number may be: "97250" is not looked for as "050".
             found.append('0' + self.digits[3:])
         if self.digits.startswith('0'):
             found.append('972' + self.digits[1:])
@@ -130,6 +132,8 @@ def parse(term) -> list:
     digits are a word like any other.
     """
     tokens, run = [], ''
+    # What nobody types: a NUL (the database refuses one), a text of pages.
+    term = str(term or '').replace('\x00', '')[:MAX_TYPED]
 
     def close_run():
         nonlocal run
@@ -140,7 +144,7 @@ def parse(term) -> list:
         tokens.append(Phone(run) if len(run) >= MIN_PHONE_DIGITS else Word(run, run))
         run = ''
 
-    for piece in str(term or '').split():
+    for piece in term.split():
         if _DIGITISH.fullmatch(piece) and any(char.isdigit() for char in piece):
             run += _NON_DIGITS.sub('', piece)
             continue

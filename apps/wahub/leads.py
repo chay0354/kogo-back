@@ -142,6 +142,8 @@ def _iso(moment):
 # --- the lists -------------------------------------------------------------------------------------------
 
 ON_THE_WAITING_LIST = Q(lead_stage=LEAD_WAITING_LIST)
+# The lead's own sentences, searched beside the conversation's (search.py).
+SEARCHED_SENTENCES = ('lead_reason', 'lead_ai__summary')
 
 
 def tab_q(tab: str, *, apart: bool = False) -> Q:
@@ -307,15 +309,11 @@ def listed(params) -> dict:
     return answer
 
 
-# The lead's own sentences, searched beside the conversation's.
-SEARCHED_SENTENCES = ('lead_reason', 'lead_ai__summary')
-
-
 def waiting_queues(contacts) -> dict:
     """
-    {entry id: (its place in its lesson's queue, how many wait for that lesson)}
-    for the rows the contacts given carry — two queries, and none when no row
-    among them waits for a seat.
+    For the waiting-list rows the contacts given carry: {places: {entry id: its
+    place in its lesson's queue}, lengths: {lesson id: how many wait for it}} —
+    two queries, and none (an empty answer) when nobody among them waits for a seat.
     """
     lessons = set()
     for contact in contacts:
@@ -525,9 +523,12 @@ def details_payload(contact: Contact, *, now=None) -> dict:
         ContactEvent.objects.filter(contact=contact, kind__in=TIMELINE_KINDS).select_related('actor')
         .order_by('-id')[:TIMELINE_EVENTS]
     )
-    payload = row_payload(contact, now=now, follow=still_open, queue=waiting_queues([contact]))
+    payload = row_payload(contact, now=now, follow=still_open)
     trial = trial_details(contact)
     waits = waiting_summary.of(contact, now=now)
+    if waits is not None and payload['waiting_list'] is not None and payload['waiting_list']['entry_id'] == waits['entry_id']:
+        # The place in the queue, as the summary has just counted it.
+        payload['waiting_list'].update(position=waits['position'], queue=waits['queue'])
     # The card that opens from the lead: the child the lead is about, when it names one — the child of
     # the trial, the child the waiting-list row was written about.
     about = (waits or {}).get('customer') or {}
