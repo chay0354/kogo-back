@@ -94,6 +94,10 @@ class ScriptsTests(SimpleTestCase):
         'second_child', 'other_field', 'bring_field', 'bring_child', 'no_class_child', 'boundary_field', 'missing_field', 'multi_city',
         'external_place', 'far_city', 'young_child',
         'trial_field', 'trial_child', 'full_field', 'full_child', 'skipped_field', 'skipped_child',
+        # the words of the seats and edge-case conversations (12.10.2026)
+        'place_typo', 'place_glued', 'way_place', 'field_typo', 'main_day', 'busy_field', 'busy_child', 'busy_day',
+        'packed_field', 'packed_child', 'packed_day', 'empty_field', 'empty_child', 'empty_day', 'two_day_field', 'two_day_child',
+        'two_day_day', 'two_day_other', 'sibling_child', 'wifi_place', 'no_wifi_place', 'short_city', 'birth_date', 'off_day', 'trial_day',
     }
 
     def test_the_scripts_are_well_formed(self):
@@ -103,7 +107,7 @@ class ScriptsTests(SimpleTestCase):
         for scenario in scenarios.SCENARIOS:
             with self.subTest(scenario=scenario.id):
                 self.assertIn(scenario.group, scenarios.GROUP_TITLES)
-                self.assertIn(scenario.clock, ('open', 'closed', 'before_cancel_deadline', 'after_cancel_deadline'))
+                self.assertIn(scenario.clock, ('open', 'closed', 'weekend', 'before_cancel_deadline', 'after_cancel_deadline'))
                 self.assertTrue(scenario.turns and scenario.title and scenario.what and scenario.rules)
                 self.assertLessEqual(set(scenario.needs), self.WORLD_KEYS)
                 texts = [said if isinstance(said, str) else said.text for turn in scenario.turns for said in turn.says]
@@ -359,6 +363,18 @@ class WorldTests(EvalTestCase):
         self.assertNotEqual((facts['second']['field'], facts['second']['child']), (facts['main']['field'], facts['main']['child']))
         self.assertEqual(facts['links']['registration'], 'https://cogomelo.co.il/הרשמה-לחוגים-שיעור-ניסיון/')
         self.assertEqual(facts['stage']['fields'], ['היפ הופ', 'קפוארה'])
+        # How full each lesson is, the network of the branch, and the words a hurried parent writes.
+        self.assertEqual((words['busy_field'], words['busy_child'], words['busy_day']), ('קפוארה', 'בן 5', 'שלישי'))
+        self.assertEqual(facts['busy']['seats'], {'enrolled': 9, 'capacity': 14, 'seats_left': 5, 'is_full': False})
+        self.assertEqual((words['packed_child'], words['packed_day'], facts['packed']['seats']['is_full']), ('בכיתה ה', 'שני', True))
+        self.assertEqual((words['empty_field'], words['empty_day'], facts['empty']['seats']['enrolled']), ('היפ הופ', 'חמישי', 0))
+        self.assertEqual((words['two_day_day'], words['two_day_other'], facts['two_day']['seats']['enrolled']), ('רביעי', 'ראשון', 6))
+        self.assertEqual((words['wifi_place'], facts['wifi']['name'], facts['wifi']['code']), ('ראש העין', fixtures.WIFI_NAME, fixtures.WIFI_CODE))
+        self.assertEqual((words['no_wifi_place'], words['short_city'], words['off_day']), ('אם המושבות - הדגמה', 'פ"ת', 'שבת'))
+        self.assertEqual((words['place_typo'], words['place_glued'], words['field_typo']), ('רשא העין', 'ראשהעין', 'הפי הופ'))
+        self.assertEqual((words['sibling_child'], words['main_day'], words['trial_day'], words['way_place']), ('בכיתה א', 'חמישי', 'חמישי', 'ראש העין'))
+        self.assertEqual({key: entry['child'] for key, entry in facts['boundary'].items()}, {'young': 'בן 5', 'old': 'בכיתה א'})
+        self.assertRegex(words['birth_date'], r'^\d{2}\.\d{2}\.\d{4}$')
         json.dumps(built)                                   # plain JSON: it is kept on the run
 
     def test_the_facts_follow_the_system_when_it_changes(self):
@@ -377,6 +393,7 @@ class WorldTests(EvalTestCase):
         clocks = {name: datetime.fromisoformat(value) for name, value in world.build()['clocks'].items()}
         self.assertTrue(knowledge.office_hours_now(clocks['open'])['open'])
         self.assertFalse(knowledge.office_hours_now(clocks['closed'])['open'])
+        self.assertEqual((clocks['weekend'].weekday(), clocks['weekend'].hour), (5, 10))            # a Saturday morning
         after, before = clocks['after_cancel_deadline'], clocks['before_cancel_deadline']
         self.assertTrue((after.month, after.day) >= (4, 2) and after.month < 9)
         self.assertTrue(before.month >= 9 or before.month < 4)

@@ -31,6 +31,31 @@ FAR_CITIES = ('אילת', 'טבריה', 'קריית שמונה', 'דימונה',
 # Activities a parent may ask for: the first one the stage branch really has not is used.
 OTHER_ACTIVITIES = ('ג׳ודו', 'שחייה', 'שחמט', 'כדורגל', 'קרמיקה', 'רובוטיקה')
 YOUNG_CHILD = 'בן שנתיים ושבעה חודשים'
+# How parents shorten a city: the first one the system has a branch of ours in is used.
+SHORT_CITIES = (('פתח תקווה', 'פ"ת'), ('כפר סבא', 'כ"ס'), ('ראש העין', 'רה"ע'), ('רמת גן', 'ר"ג'), ('תל אביב', 'ת"א'), ('הוד השרון', 'הוד"ש'))
+
+
+def typo(word: str) -> str:
+    """
+    The word as a parent in a hurry types it: a final ה for א ("קפוארא"), a
+    doubled ו written once ("תקוה"), or two neighbouring letters changed
+    places. Never the word itself.
+    """
+    word = str(word or '').strip()
+    if 'וו' in word:
+        return word.replace('וו', 'ו', 1)
+    if word.endswith('ה') and len(word) > 2:
+        return word[:-1] + 'א'
+    letters = [index for index, char in enumerate(word) if 'א' <= char <= 'ת']
+    for left, right in zip(letters[1:], letters[2:]):
+        if right == left + 1 and word[left] != word[right]:
+            return word[:left] + word[right] + word[left] + word[right + 1:]
+    return word + word[-1:] if word else word
+
+
+def glued(word: str) -> str:
+    """The same words with no space between them: "ראשהעין"."""
+    return ''.join(str(word or '').split())
 
 
 def _child(code: int) -> dict | None:
@@ -110,6 +135,7 @@ def _trial_dates(offer, at) -> dict:
             skip.day.strftime('%d.%m') for skip in offer.skipped if skip.why != trial_offer.SKIP_STARTED
         )),
         'today_open': today in opened,
+        'tomorrow_open': today + timedelta(days=1) in opened,
         'this_week_open': any(week <= day < week + timedelta(days=7) for day in opened),
     }
 
@@ -151,9 +177,12 @@ def _clocks(now) -> dict:
     deadline_year = today.year + 1 if today.month >= 9 else today.year
     after = _clock(now, is_open=True, start=date(deadline_year, 5, 10))
     in_season_before = today if (today.month >= 9 or today < date(today.year, 4, 1)) else date(today.year, 11, 10)
+    saturday = today + timedelta(days=(5 - today.weekday()) % 7)
     return {
         'open': _clock(now, is_open=True).isoformat(),
         'closed': _clock(now, is_open=False).isoformat(),
+        # A Saturday morning: nobody is in the office, and most classes do not meet.
+        'weekend': timezone.make_aware(datetime.combine(saturday, time(10, 0))).isoformat(),
         'before_cancel_deadline': _clock(now, is_open=True, start=in_season_before).isoformat(),
         'after_cancel_deadline': after.isoformat(),
     }
@@ -252,7 +281,14 @@ def build(now=None) -> dict:
         'branch': stage.name, 'city': stage.city.name if stage.city_id else '',
         'fields': sorted({_field(course) for course in stage_courses}),
         'address': stage.address or '', 'phone': stage.phone or '',
+        'directions': (stage.arrival_directions or '').strip(),
     }
+    # The place as a parent in a hurry writes it: a letter wrong, or no space at all.
+    words.update(place_typo=typo(words['place']), place_glued=glued(words['place']))
+    if facts['stage']['directions']:
+        words['way_place'] = words['place']
+    else:
+        missing['way_place'] = 'לסניף שנבחר לבדיקה לא כתוב במערכת "איך מגיעים"'
 
     pairs = askable(stage_courses)
 
@@ -273,6 +309,21 @@ def build(now=None) -> dict:
     main = free or paid or sorted(pairs, key=narrow)[0]
     facts['main'] = describe(main)
     words.update(field=facts['main']['field'], child=facts['main']['child'], course=facts['main']['name'])
+    words['field_typo'] = typo(facts['main']['field'])
+    facts['stage']['place'] = words['place']
+    # The child of the main class by his date of birth, when he is asked about by his age in years: a quarter past it.
+    if main[1]['age'] is not None:
+        born = today - timedelta(days=round((main[1]['age'] + 0.25) * 365.25))
+        words['birth_date'] = born.strftime('%d.%m.%Y')
+    else:
+        missing['birth_date'] = 'החוג שנבחר לבדיקה הוא של כיתה, ולא של גיל בשנים — אין תאריך לידה לשאול לפיו'
+    # A day of the week none of the classes this question is about meets on — Saturday, where it is free.
+    taken = {lesson['day'] for course in facts['main']['same_question'] for lesson in course['lessons']}
+    free_day = next((day for day in ['שבת'] + DAY_NAMES[:6] if day not in taken), '')
+    if free_day:
+        words['off_day'] = free_day
+    else:
+        missing['off_day'] = 'החוג שנבחר לבדיקה מתקיים בכל ימות השבוע — אין יום לשאול עליו בלי שיעור'
     if facts['main']['lessons'] and facts['main']['lessons'][0]['instructor']:
         words['instructor'] = facts['main']['lessons'][0]['instructor']
     else:
@@ -304,8 +355,12 @@ def build(now=None) -> dict:
     if bookable is not None:
         facts['trial'] = with_trial(bookable)
         words.update(trial_field=facts['trial']['field'], trial_child=facts['trial']['child'])
+        if facts['trial']['lessons'] and facts['trial']['lessons'][0]['day']:
+            words['trial_day'] = facts['trial']['lessons'][0]['day']
+        else:
+            missing['trial_day'] = 'לחוג שאפשר להירשם בו לשיעור ניסיון אין יום קבוע בשבוע'
     else:
-        missing['trial_field'] = missing['trial_child'] = 'בסניף שנבחר לבדיקה אין כרגע חוג שאפשר להירשם בו לשיעור ניסיון'
+        missing['trial_field'] = missing['trial_child'] = missing['trial_day'] = 'בסניף שנבחר לבדיקה אין כרגע חוג שאפשר להירשם בו לשיעור ניסיון'
     # A class one of whose coming dates is full for a trial.
     taken = next((pair for pair in by_narrow if offers[pair[0].id].full), None)
     if taken is not None:
@@ -326,6 +381,75 @@ def build(now=None) -> dict:
             'בסניף שנבחר לבדיקה אין כרגע חוג שתאריך קרוב שלו סגור לשיעור ניסיון (חופשה או שיעור שבוטל)'
         )
 
+    # --- how full a lesson is: the form's own count, per lesson (trial_offer.Seats.cap → _lesson_widget_capacity) ---
+    def day_of(lesson) -> str:
+        return DAY_NAMES[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
+
+    def with_seats(pair, lesson) -> dict:
+        """The class, and the lesson of it a script asks about: its day and hour, and its seats as they stood when the run began."""
+        entry = describe(pair)
+        cap = seats.cap(lesson, pair[0])
+        entry.update(
+            seat_day=day_of(lesson), seat_start=str(lesson.start_time)[:5],
+            seats={'enrolled': cap['enrolled_count'], 'capacity': cap['capacity'], 'seats_left': cap['available_spots'], 'is_full': cap['is_full']},
+        )
+        return entry
+
+    def a_lesson(holds):
+        """The first class, alone in its question, with a lesson `holds` is true of — on a day no other lesson of that class has."""
+        for pair in by_narrow:
+            lessons = list(pair[0].lessons.all())
+            if narrow(pair) != 1 or pair[0].must_attend_all_lessons:
+                continue
+            for lesson in lessons:
+                if day_of(lesson) and sum(1 for other in lessons if day_of(other) == day_of(lesson)) == 1 and holds(seats.cap(lesson, pair[0])):
+                    return pair, lesson
+        return None
+
+    main_lessons = list(main[0].lessons.all())
+    facts['main'] = with_seats(main, main_lessons[0])
+    words['main_day'] = facts['main']['seat_day']
+    for key, holds, reason in (
+        ('busy', lambda cap: cap['capacity'] is not None and cap['enrolled_count'] >= 1 and not cap['is_full'],
+         'בסניף שנבחר לבדיקה אין כרגע שיעור שיש בו רשומים ועוד נשאר בו מקום'),
+        ('packed', lambda cap: cap['is_full'], 'בסניף שנבחר לבדיקה אין כרגע שיעור מלא'),
+        ('empty', lambda cap: cap['capacity'] is not None and cap['enrolled_count'] == 0, 'בסניף שנבחר לבדיקה אין כרגע שיעור שעוד אין בו רשומים'),
+    ):
+        found = a_lesson(holds)
+        if found is not None:
+            facts[key] = with_seats(*found)
+            words.update({f'{key}_field': facts[key]['field'], f'{key}_child': facts[key]['child'], f'{key}_day': facts[key]['seat_day']})
+        else:
+            missing[f'{key}_field'] = missing[f'{key}_child'] = missing[f'{key}_day'] = reason
+    # A class of several days, asked about one of them: the day with the most children, and another day of it.
+    several = None
+    for pair in by_narrow:
+        lessons = [lesson for lesson in pair[0].lessons.all() if day_of(lesson)]
+        if narrow(pair) == 1 and not pair[0].must_attend_all_lessons and len({day_of(lesson) for lesson in lessons}) == len(lessons) > 1:
+            asked = max(lessons, key=lambda lesson: seats.cap(lesson, pair[0])['enrolled_count'])
+            other = next(lesson for lesson in lessons if lesson.id != asked.id)
+            several = (pair, asked, other)
+            break
+    if several is not None:
+        facts['two_day'] = with_seats(several[0], several[1])
+        facts['two_day']['other_day'] = day_of(several[2])
+        words.update(
+            two_day_field=facts['two_day']['field'], two_day_child=facts['two_day']['child'],
+            two_day_day=facts['two_day']['seat_day'], two_day_other=facts['two_day']['other_day'],
+        )
+    else:
+        missing['two_day_field'] = missing['two_day_child'] = missing['two_day_day'] = missing['two_day_other'] = (
+            'בסניף שנבחר לבדיקה אין חוג שמתקיים בכמה ימים שאפשר לבחור ביניהם'
+        )
+
+    # Another child of the same family: the same field, another age group.
+    sibling = next((pair for pair in pairs if _field(pair[0]) == facts['main']['field'] and pair[1]['code'] != main[1]['code']), None)
+    if sibling is not None:
+        facts['sibling'] = describe(sibling)
+        words['sibling_child'] = facts['sibling']['child']
+    else:
+        missing['sibling_child'] = 'בסניף שנבחר לבדיקה אין לתחום שנבחר חוג לקבוצת גיל נוספת'
+
     # A second class, of another question, to ask about in the same conversation.
     main_key = (facts['main']['field'], main[1]['code'])
     others = [pair for pair in pairs if (_field(pair[0]), pair[1]['code']) != main_key and pair[0].id != main[0].id]
@@ -340,6 +464,7 @@ def build(now=None) -> dict:
     other_field = next((name for name in facts['stage']['fields'] if name != facts['main']['field']), '')
     if other_field:
         words['other_field'] = other_field
+        facts['stage']['other_field'] = other_field
 
     # A class whose type says what to bring to a trial.
     bring = next((pair for pair in pairs if (pair[0].course_type.trial_bring_note if pair[0].course_type_id else '')), None)
@@ -369,6 +494,14 @@ def build(now=None) -> dict:
     boundary = next((name for name in facts['stage']['fields'] if len(groups_at_six(name)) > 1), '')
     if boundary:
         words['boundary_field'] = boundary
+        # The two groups that meet at six, each as the question of its own child: the one still in גן, the one in כיתה א.
+        for key, code in (('young', age_groups.KINDERGARTEN), ('old', age_groups.FIRST_GRADE)):
+            child = _child(code)
+            group = [course for course in stage_courses if _field(course) == boundary and age_groups.fits(course.min_age, course.max_age, {code})]
+            if group:
+                facts.setdefault('boundary', {})[key] = {
+                    'field': boundary, 'child': child['words'], 'same_question': [_course_facts(course, child) for course in group],
+                }
     else:
         missing['boundary_field'] = 'אין בסניף שנבחר תחום עם שתי קבוצות גיל שנפגשות בגיל 6'
 
@@ -405,6 +538,33 @@ def build(now=None) -> dict:
         words['far_city'] = far
     else:
         missing['far_city'] = 'לא נמצאה עיר לשאול עליה שאין לנו בה סניף'
+
+    # --- the network of a branch: one of ours whose card holds the name and the password, and one whose card holds neither ---
+    def named(branch) -> str:
+        """How a parent names the branch: by its city when it is our only one there, by its own name otherwise."""
+        return branch.city.name if branch.city_id and len(per_city.get(branch.city.name, [])) == 1 else branch.name
+
+    with_courses = [stage] + [row for row in ours if row.id in by_branch and row.id != stage.id]
+    online = next((row for row in with_courses if (row.wifi_name or '').strip() and (row.wifi_code or '').strip()), None)
+    if online is not None:
+        words['wifi_place'] = named(online)
+        facts['wifi'] = {'branch': online.name, 'name': online.wifi_name.strip(), 'code': online.wifi_code.strip()}
+    else:
+        missing['wifi_place'] = 'אין במערכת סניף שלנו שרשומים בכרטיס שלו שם הרשת והסיסמה'
+    offline = next((row for row in with_courses if not (row.wifi_name or '').strip() and not (row.wifi_code or '').strip()), None)
+    if offline is not None:
+        words['no_wifi_place'] = named(offline)
+        facts['no_wifi'] = {'branch': offline.name}
+    else:
+        missing['no_wifi_place'] = 'לכל הסניפים שלנו רשומים שם רשת וסיסמה — אין סניף לשאול עליו בלי'
+
+    # A city as parents shorten it ("פ"ת"), when we have a branch there.
+    short = next(((city, word) for city, word in SHORT_CITIES if city in per_city), None)
+    if short is not None:
+        words['short_city'] = short[1]
+        facts['short_city'] = {'city': short[0], 'word': short[1], 'several': len(per_city[short[0]]) > 1}
+    else:
+        missing['short_city'] = 'אין לנו סניף בעיר שנוהגים לקצר את שמה'
 
     facts['cities'] = sorted({row.city.name for row in branches if row.city_id})
     return {'words': words, 'facts': facts, 'missing': missing, 'clocks': clocks}

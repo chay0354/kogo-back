@@ -40,7 +40,11 @@ SEND = 'apps.wahub.sending._deliver'
 HANDOFF = 'apps.wahub.handoff._in_manychat'
 
 # What no tool may answer with: a key that names it…
-FORBIDDEN_KEYS = ('salary', 'bonus', 'payment', 'invoice', 'card', 'token', 'iban')
+FORBIDDEN_KEYS = (
+    'salary', 'bonus', 'payment', 'invoice', 'card', 'token', 'iban',
+    # of a branch's card: the codes of its door and of its speakers, what it costs, who cleans it, its own notes, its e-mail
+    'branch_codes', 'bluetooth', 'cleaning', 'monthly_cost', 'custom_details', 'email',
+)
 # …or the thing itself, planted in the data below.
 SALARY_OF_THE_GROUP = Decimal('7777.77')
 SALARY_OF_THE_LESSON = Decimal('5555.55')
@@ -48,12 +52,18 @@ SALARY_PER_LESSON = Decimal('8888.88')
 COST_OF_THE_BRANCH = Decimal('6666.66')
 INSTRUCTOR_PHONE = '050-9999999'
 INSTRUCTOR_EMAIL = 'moshe.private@example.com'
-WIFI_CODE = 'wifi-secret-77'
+# The network of a branch is handed over since 12.10.2026 — by `branch_info`, to whoever asks, and by no other tool.
+WIFI_NAME = 'Studio-Guests'
+WIFI_CODE = 'wifi*secret.77'
+DOOR_CODE, BLUETOOTH_CODE, SAFE_NOTE = 'DOOR-4471', 'BT-9912', 'SAFE-3321'
+CLEANING_COST = Decimal('2222.22')
+CLEANER_PHONE = '050-7777777'
+BRANCH_EMAIL = 'branch.private@example.com'
 CARD_TOKEN = 'tok_SECRET_4580'
 FAMILY_PAID = Decimal('431.37')
 FORBIDDEN_VALUES = (
-    '7777.77', '5555.55', '8888.88', '6666.66', INSTRUCTOR_PHONE, '0509999999', INSTRUCTOR_EMAIL, WIFI_CODE,
-    CARD_TOKEN, '431.37',
+    '7777.77', '5555.55', '8888.88', '6666.66', INSTRUCTOR_PHONE, '0509999999', INSTRUCTOR_EMAIL,
+    CARD_TOKEN, '431.37', DOOR_CODE, BLUETOOTH_CODE, SAFE_NOTE, '2222.22', CLEANER_PHONE, '0507777777', BRANCH_EMAIL, 'מנקה בדוי',
 )
 
 
@@ -100,7 +110,10 @@ class CourseToolsTestCase(WahubTestCase):
         city = TestDataFactory.create_city('ראש העין')
         self.branch = TestDataFactory.create_branch(
             name='קרל וגרטי קורי 8', city=city, address='קרל וגרטי קורי 8, ראש העין', phone='03-5550000',
-            arrival_directions='חניה מאחור, קומה 2', manager_name='דנה', monthly_cost=COST_OF_THE_BRANCH, wifi_code=WIFI_CODE,
+            arrival_directions='חניה מאחור, קומה 2', manager_name='דנה', monthly_cost=COST_OF_THE_BRANCH,
+            wifi_name=WIFI_NAME, wifi_code=WIFI_CODE, branch_codes=[DOOR_CODE], bluetooth_codes=[BLUETOOTH_CODE],
+            cleaning_cost=CLEANING_COST, cleaning_managers=[{'name': 'מנקה בדוי', 'phone': CLEANER_PHONE}],
+            custom_details=[{'title': 'כספת', 'value': SAFE_NOTE}], email=BRANCH_EMAIL,
         )
         self.capoeira = TestDataFactory.create_course_type('קפוארה')
         self.capoeira.description = 'אומנות לחימה ברזילאית עם מוזיקה'
@@ -686,7 +699,44 @@ class InstructorAndBranchTest(CourseToolsTestCase):
         ])
         self.assertEqual(result['office_phone'], OFFICE_PHONE)
         self.assertTrue(ctx.knowledge_used)                           # the office's contact item is named in "למה"
-        self.assertEqual(summarize_result('branch_info', result), 'קרל וגרטי קורי 8 (שלנו)')
+        self.assertEqual(summarize_result('branch_info', result), 'קרל וגרטי קורי 8 (שלנו; וויפי רשום)')
+
+    def test_the_network_of_a_branch_of_ours_and_nothing_else_of_its_card(self):
+        """The owner, 12.10.2026: "take the wifi code and the wifi name too, when the branches' are asked for"."""
+        row = self.tool('branch_info', branch='קרל וגרטי')['branches'][0]
+        self.assertEqual(row['wifi'], {'name': WIFI_NAME, 'code': WIFI_CODE})
+        # Every key of a branch is one somebody decided on: a new one does not slip in with the card.
+        self.assertEqual(set(row), {
+            'id', 'name', 'city', 'is_external', 'external_link', 'address', 'directions', 'phone', 'manager_name', 'missing', 'note',
+            'course_types', 'class_days', 'wifi',
+        })
+        text = json.dumps(row, ensure_ascii=False, default=str)
+        for value in (DOOR_CODE, BLUETOOTH_CODE, SAFE_NOTE, '2222.22', '6666.66', CLEANER_PHONE, 'מנקה בדוי', BRANCH_EMAIL):
+            self.assertNotIn(value, text)
+        # A branch the municipality runs has no network of ours to give; a card with nothing on it says so; half a card is half.
+        self.assertNotIn('wifi', self.tool('branch_info', branch='רמת גן')['branches'][0])
+        self.branch.wifi_code = ''
+        self.branch.save(update_fields=['wifi_code'])
+        partial = self.tool('branch_info', branch='קרל וגרטי')
+        self.assertEqual(partial['branches'][0]['wifi'], {'name': WIFI_NAME, 'code': ''})
+        self.assertEqual(summarize_result('branch_info', partial), 'קרל וגרטי קורי 8 (שלנו; וויפי רשום חלקית)')
+        self.branch.wifi_name = '  '
+        self.branch.save(update_fields=['wifi_name'])
+        nothing = self.tool('branch_info', branch='קרל וגרטי')
+        self.assertIsNone(nothing['branches'][0]['wifi'])
+        self.assertEqual(summarize_result('branch_info', nothing), 'קרל וגרטי קורי 8 (שלנו; וויפי לא רשום)')
+        self.assertIn('רק כששואלים', {tool['name']: tool['description'] for tool in shadow_tools.TOOLS}['branch_info'])
+
+    def test_the_password_travels_with_no_other_tool(self):
+        for name, arguments in (
+            ('find_courses', {'city': 'ראש העין', 'show_all': True}), ('find_courses', {'city': 'ראש העין', 'age': 5, 'course_type': 'קפוארה'}),
+            ('course_card', {'course_id': str(self.young.id)}), ('quote_registration', {'course_id': str(self.young.id)}),
+            ('instructor_info', {'name': 'משה'}), ('office_hours_now', {}), ('customer_card', {}),
+        ):
+            text = json.dumps(run_tool(name, arguments, ToolContext()), ensure_ascii=False, default=str)
+            self.assertNotIn(WIFI_CODE, text, name)
+            self.assertNotIn(WIFI_NAME, text, name)
+            self.assertNotIn('wifi', text, name)
 
 
 class NothingOfMoneyThatIsNotAParentsBusinessTest(CourseToolsTestCase):
@@ -758,6 +808,10 @@ class NothingOfMoneyThatIsNotAParentsBusinessTest(CourseToolsTestCase):
             text = json.dumps(result, ensure_ascii=False, default=str)
             for value in FORBIDDEN_VALUES:
                 self.assertNotIn(value, text, f'{call}: "{value}"')
+            # The network's password is `branch_info`'s to give, and nobody else's.
+            if not call.startswith('branch_info'):
+                self.assertNotIn(WIFI_CODE, text, call)
+        self.assertEqual((self.branch.branch_codes, self.branch.bluetooth_codes, self.branch.cleaning_cost), ([DOOR_CODE], [BLUETOOTH_CODE], CLEANING_COST))
         # The planted figures are really there to be found.
         self.assertEqual(self.young.instructor_salary_override, SALARY_OF_THE_GROUP)
         self.assertEqual(self.young_lesson.instructor_salary_override, SALARY_OF_THE_LESSON)

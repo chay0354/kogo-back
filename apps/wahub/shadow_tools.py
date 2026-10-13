@@ -79,6 +79,10 @@ TOOLS = [
             'trial.is_paid=false פירושו ללא עלות, וזה מה שאומרים; is_paid=true — אומרים את trial.price ואת trial.credit_rule. '
             'קבוצת הגיל של חוג היא ages (במילים); גיל על הגבול בין שתי קבוצות (בן 6: גן חובה או כיתה א) מחזיר את שתיהן, ואז שואלים באיזו כיתה הילד. '
             '"מה להביא לשיעור ניסיון" הוא trial.bring של החוג — מצטטים אותו; ריק = "אין לי את הפרט הזה, אפשר לבדוק במשרד". '
+            '"כמה רשומים", "כמה מקומות נשארו", "יש מקום", "קבוצה קטנה או גדולה" — עונים מהשיעור שנשאל עליו (היום והשעה): '
+            'lessons[].enrolled (רשומים), capacity (כמה מקומות יש), seats_left (כמה פנויים), is_full (מלא), ומצטטים את lessons[].seats_text. '
+            'לא מחברים ולא מחסרים לבד, לא עונים על ימים שלא נשאלו, ולא מעבירים מספר מיום אחד לאחר; כשלא ברור על איזה יום שואלים — שואלים. '
+            'trial_seats_left הוא מקומות לשיעור ניסיון בתאריך מסוים, לא "כמה מקומות נשארו בקבוצה". '
             '"מתי אפשר להגיע לשיעור ניסיון", "אפשר השבוע", "אפשר היום" — עונים רק מ-trial.dates של החוג (התאריכים שהאתר מציע עכשיו; this_week ו-when אומרים אם זה השבוע, היום או מחר) '
             'ומצטטים את trial.dates_text. תאריך שלא שם לא מציעים ולא מחשבים לבד; full_dates מלאים, not_offered לא פתוחים לניסיון, ו-can_book=false פירושו שאין כרגע תאריך. '
             'כשיש הרבה חוגים, 12 מפורטים והשאר ב-more_courses בשורה אחת כל אחד — מצמצמים לפי תחום וגיל, או קוראים ל-course_card. '
@@ -106,6 +110,7 @@ TOOLS = [
             'כל מה שיש במערכת על חוג אחד: תיאור, קבוצת גיל, מחיר חודשי, דמי הרישום שייגבו בפועל לחוג הזה, שיעור ניסיון '
             '(בתשלום או לא, מחיר, כלל הקיזוז, מה להביא, פתוח או סגור), כל המועדים עם מדריך, חדר, כמות רשומים, מגבלת המקומות, '
             'מקומות פנויים, מסלולים משולבים (פעמיים בשבוע) ומחירם, וההנחות שמוגדרות במערכת. '
+            'כמה רשומים וכמה מקומות נשארו נאמרים לכל מועד בנפרד, מהמועד שנשאל עליו (lessons[].seats_text) — לא מחשבים לבד. '
             'ב-trial: כל התאריכים שהאתר מציע עכשיו לשיעור ניסיון (dates), המשפט המוכן (dates_text), התאריכים המלאים (full_dates) '
             'ואלה שלא פתוחים לניסיון ולמה (not_offered); תאריך לניסיון נאמר רק מתוך dates. '
             'קוראים עם course_id מתוך find_courses (או שם החוג וסניף). ' + FROM_KOGO_ONLY
@@ -167,7 +172,10 @@ TOOLS = [
         'name': 'branch_info',
         'description': (
             'סניף: כתובת, עיר, הוראות הגעה, טלפון הסניף, טלפון המשרד, מנהל, התחומים שיש בו, הימים והשעות שבהם יש בו חוגים, '
-            'והאם הוא סניף חיצוני. שדה ריק = אין את המידע; לא להמציא.'
+            'והאם הוא סניף חיצוני. לסניף שלנו גם wifi — שם הרשת האלחוטית (name) והסיסמה שלה (code), כפי שהם רשומים במערכת: '
+            'נמסרים רק כששואלים עליהם, בשתי שורות קצרות, ונכתבים אות באות כפי שהם (גם כשהם באותיות לועזיות; לא מתעתקים ולא מתקנים). '
+            'wifi ריק (null), או סיסמה ריקה = לא רשום במערכת: אומרים שבודקים מול המשרד ומסמנים לנציג, ולא מנחשים. '
+            'קוד כניסה, קוד לדלת וכל קוד אחר אינם בכלי ואינם נמסרים. שדה ריק = אין את המידע; לא להמציא.'
         ),
         'input_schema': {
             'type': 'object',
@@ -333,6 +341,40 @@ def _branch_payload(branch) -> dict:
         'missing': missing,
         'note': EXTERNAL_NOTE if branch.is_external else '',
     }
+
+
+def branch_wifi(branch) -> dict | None:
+    """
+    The wireless network of a branch of ours as its card holds it — the name
+    and the password, and nothing else of the card (the owner, 12.10.2026: "take
+    the wifi code and the wifi name too, when the branches' are asked for").
+    None when neither is on the card. The door codes, the bluetooth codes and
+    what the branch costs stay where they are: no tool reads them.
+    """
+    name, code = (branch.wifi_name or '').strip(), (branch.wifi_code or '').strip()
+    return {'name': name, 'code': code} if (name or code) else None
+
+
+def letter_for_letter(calls: list) -> list:
+    """
+    What the tools of a run returned that has to reach the customer exactly as
+    it is written — today, a network's name and its password. The style rules
+    (shadow.polish) and the Hebrew-only check pass over these.
+    """
+    found = []
+    for call in calls or []:
+        result = call.get('result') if isinstance(call.get('result'), dict) else {}
+        for row in result.get('branches') or []:
+            wifi = row.get('wifi') if isinstance(row, dict) else None
+            if isinstance(wifi, dict):
+                found += [str(wifi.get(key) or '') for key in ('name', 'code')]
+    return [value for value in dict.fromkeys(found) if value.strip()]
+
+
+WIFI_NOTE = (
+    'wifi — שם הרשת והסיסמה של הסניף כפי שהם במערכת: נמסרים רק כששואלים עליהם, אות באות. '
+    'null או סיסמה ריקה = לא רשום במערכת; אז בודקים מול המשרד ומסמנים לנציג. קודי כניסה לא נמסרים.'
+)
 
 
 # --- the tools -----------------------------------------------------------------------------------
@@ -505,10 +547,17 @@ def branch_info(ctx: ToolContext, *, branch: str = '') -> dict:
     if not rows:
         return {'branches': [], 'hint': 'לא נמצא סניף כזה במערכת.'}
     office_phone = _office_phone(ctx)
+    branches = []
+    for row in rows:
+        payload = {**_branch_payload(row), **course_tools.branch_extras(row)}
+        if not row.is_external:
+            # Only here, and only of a branch of ours: a password does not travel with every search for a class.
+            payload['wifi'] = branch_wifi(row)
+        branches.append(payload)
     return {
-        'branches': [{**_branch_payload(row), **course_tools.branch_extras(row)} for row in rows],
+        'branches': branches,
         'office_phone': office_phone,
-        'note': 'class_days הם הימים והשעות שבהם יש חוגים בסניף, לא שעות קבלה. שעות המשרד — בכלי office_hours_now.',
+        'note': 'class_days הם הימים והשעות שבהם יש חוגים בסניף, לא שעות קבלה. שעות המשרד — בכלי office_hours_now. ' + WIFI_NOTE,
     }
 
 
@@ -692,6 +741,9 @@ def summarize_result(name: str, result: dict) -> str:
         text = f'{len(branches)} סניפים, {shown} חוגים'
         if total > shown:
             text += f' מפורטים מתוך {total}'
+        if not shown and result.get('course_types'):
+            # What the branch does have, said on the line: whoever reads it (the owner, the judge) sees what the bot could offer instead.
+            text += f'; אין חוג שמתאים למה שנשאל. התחומים שיש שם: {", ".join(result["course_types"][:8])}'
         trial = result.get('trial_summary') or {}
         if trial.get('paid_courses'):
             text += f'; ניסיון בתשלום ב-{trial["paid_courses"]}, ללא עלות ב-{trial.get("free_courses", 0)}'
@@ -732,7 +784,21 @@ def summarize_result(name: str, result: dict) -> str:
         return names + (f' ועוד {len(rows) - 3}' if len(rows) > 3 else '')
     if name == 'branch_info':
         rows = result.get('branches') or []
-        return ', '.join(f'{row["name"]} ({"חיצוני" if row["is_external"] else "שלנו"})' for row in rows) or 'לא נמצא'
+
+        def described(row: dict) -> str:
+            if row['is_external']:
+                return f'{row["name"]} (חיצוני)'
+            wifi = row.get('wifi') or {}
+            # Whether the network is on the card — never the password: this line is shown on the screen.
+            if wifi.get('name') and wifi.get('code'):
+                network = 'וויפי רשום'
+            elif wifi.get('name') or wifi.get('code'):
+                network = 'וויפי רשום חלקית'
+            else:
+                network = 'וויפי לא רשום'
+            return f'{row["name"]} (שלנו; {network})'
+
+        return ', '.join(described(row) for row in rows) or 'לא נמצא'
     if name == 'office_hours_now':
         return 'המשרד פתוח' if result.get('open') else 'המשרד סגור'
     if name == 'customer_card':
