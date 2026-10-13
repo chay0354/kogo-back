@@ -104,7 +104,7 @@ class Migration(migrations.Migration):
                 ('created_at', models.DateTimeField(default=django.utils.timezone.now)),
                 ('contact', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='wahub.contact')),
                 ('shadow', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='wahub.shadowreply')),
-                ('topic', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='unknowns', to='wahub.botunknowntopic')),
+                ('topic', models.ForeignKey(blank=True, db_index=False, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='unknowns', to='wahub.botunknowntopic')),
             ],
             options={
                 'verbose_name': 'שאלה שהבוט לא ידע',

@@ -1367,7 +1367,10 @@ class BotUnknown(models.Model):
     (unknowns.scrub). The contact is kept as a link for the count alone, and is
     never shown.
     """
-    topic = models.ForeignKey(BotUnknownTopic, on_delete=models.SET_NULL, null=True, blank=True, related_name='unknowns')
+    # No index of its own: the one below (topic, newest first) is what every read by topic goes through.
+    topic = models.ForeignKey(
+        BotUnknownTopic, on_delete=models.SET_NULL, null=True, blank=True, related_name='unknowns', db_index=False,
+    )
     contact = models.ForeignKey(Contact, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     shadow = models.ForeignKey(ShadowReply, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     question = models.TextField()
