@@ -260,8 +260,10 @@ class HolidayDatesToolTests(WahubTestCase):
         description = {tool['name']: tool['description'] for tool in shadow_tools.TOOLS}
         for words in ('יש שיעורים בחנוכה?', 'found=true', 'need=branch', 'לא מפרטים תאריכי חופשה בעצמנו', 'missing_info', 'רק כשהלקוח שאל על חגים או על חופשות'):
             self.assertIn(words, description['holiday_dates'])
-        self.assertIn('manager_name — שם מנהל הסניף', description['branch_info'])
-        self.assertIn('לא עונים במספר טלפון', description['branch_info'])
+        # No manager, one phone (the owner, 13.10.2026 at noon): the tool says so, and names nobody.
+        self.assertIn('phone — הטלפון של המשרד, שהוא הטלפון של כל הסניפים', description['branch_info'])
+        self.assertIn('לסניף אין מנהל', description['branch_info'])
+        self.assertNotIn('manager_name', description['branch_info'])
         task = shadow.SYSTEM_TASK
         for line in (
             'כל שאלה על חגים וחופשות', 'קראי ל-holiday_dates עם הסניף', 'תאריכי חופשה לא מפרטים בעצמך, גם לא מהימים המיוחדים שבידע',
@@ -600,13 +602,13 @@ class TheAnswersInTheKnowledgeTests(WahubTestCase):
             for item in KnowledgeItem.objects.filter(source_note__contains=self.SAID).exclude(title=waiting)
         }
         self.assertEqual(set(new), {
-            'חגים וחופשות — שולחים את לוח החופשות של הסניף', 'מנהל הסניף — השם כן, הקשר דרך המשרד', 'קייטנה בקיץ — לפי סניף, אצל המדריך',
+            'חגים וחופשות — שולחים את לוח החופשות של הסניף', 'אין מנהל סניף — הכול דרך המשרד', 'קייטנה בקיץ — לפי סניף, אצל המדריך',
         })
-        holidays, manager, camp = (new[title] for title in sorted(new))
+        manager, holidays, camp = (new[title] for title in sorted(new))
         self.assertEqual((holidays.kind, manager.kind, camp.kind, camp.when_to_say, camp.scope_level), ('behavior_rule', 'behavior_rule', 'fact', 'if_asked', 'business'))
         for words in ('holiday_dates', 'לא מפרטים תאריכי חופשה בעצמנו', 'missing_info', 'כשלא ידוע באיזה סניף — שואלים קודם'):
             self.assertIn(words, holidays.body)
-        for words in ('branch_info', 'טלפון של המנהל לא נמסר', 'הקשר איתו דרך המשרד', 'request_human'):
+        for words in ('branch_info', 'לסניפים אין מנהל', 'שם של מנהל לא אומרים ולא ממציאים', 'הטלפון של כל הסניפים הוא הטלפון של המשרד', 'request_human'):
             self.assertIn(words, manager.body)
         # Three branches with a camp, each with who runs it and a number; everywhere else there is none for now.
         self.assertEqual([row[0].strip() for row in world._CAMP_LINE.findall(camp.body)], ['אם המושבות', 'מינץ', 'ראש העין (קרל וגרטי קורי)'])
@@ -704,7 +706,7 @@ def good_answers(built: dict) -> dict:
         'lang_asks_in_hebrew_for_english': [[find(), say('Sure! Which city are you looking in?')]],
         'manager_who_and_how_to_reach': [[
             person('מבקשת לדבר עם מנהלת הסניף'), ('tool', 'branch_info', {'branch': words['manager_place']}),
-            say(lambda found: f'את הסניף מנהלת {found["branches"][0]["manager_name"]}. העברתי את הבקשה למשרד, והם יעבירו אותה אליה'),
+            say('את הסניפים מלווה המשרד שלנו. העברתי את הבקשה, ויחזרו אליכם'),
         ]],
         'absence_one_time_make_up': [[person('השלמת שיעור לילד חולה'), say(
             'רפואה שלמה 🙏 בגדול אפשר להשלים בשיעור אחר באותו שבוע, באותו תחום ובאותה קבוצת גיל\nהמשרד מאשר ומתאם, ויחזרו אליכם',

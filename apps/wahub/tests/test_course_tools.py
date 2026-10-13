@@ -745,7 +745,10 @@ class InstructorAndBranchTest(CourseToolsTestCase):
         ctx = ToolContext(items=items)
         result = run_tool('branch_info', {'branch': 'קרל וגרטי'}, ctx)
         row = result['branches'][0]
-        self.assertEqual((row['address'], row['city'], row['phone'], row['directions']), ('קרל וגרטי קורי 8, ראש העין', 'ראש העין', '03-5550000', 'חניה מאחור, קומה 2'))
+        # The phone of every branch is the office's (the owner, 13.10.2026); the number on the branch's own card is not said.
+        self.assertEqual((row['address'], row['city'], row['phone'], row['directions']), ('קרל וגרטי קורי 8, ראש העין', 'ראש העין', OFFICE_PHONE, 'חניה מאחור, קומה 2'))
+        self.assertNotIn('03-5550000', json.dumps(result, ensure_ascii=False, default=str))
+        self.assertNotIn('manager_name', row)
         self.assertEqual(row['course_types'], ['היפהופ - מחול', 'קפוארה'])
         self.assertEqual(row['class_days'], [
             {'day': 'ראשון', 'from': '16:00', 'to': '17:00'}, {'day': 'שני', 'from': '17:00', 'to': '18:00'},
@@ -761,7 +764,7 @@ class InstructorAndBranchTest(CourseToolsTestCase):
         self.assertEqual(row['wifi'], {'name': WIFI_NAME, 'code': WIFI_CODE})
         # Every key of a branch is one somebody decided on: a new one does not slip in with the card.
         self.assertEqual(set(row), {
-            'id', 'name', 'city', 'is_external', 'external_link', 'address', 'directions', 'phone', 'manager_name', 'missing', 'note',
+            'id', 'name', 'city', 'is_external', 'external_link', 'address', 'directions', 'phone', 'missing', 'note',
             'course_types', 'class_days', 'wifi',
         })
         text = json.dumps(row, ensure_ascii=False, default=str)

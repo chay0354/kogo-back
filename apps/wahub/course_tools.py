@@ -723,7 +723,7 @@ def course_card(ctx, *, course_id: str = '', name: str = '', branch: str = '', c
     return {
         'found': True,
         'course': payload,
-        'branch': shadow_tools._branch_payload(course.branch),
+        'branch': shadow_tools._branch_payload(course.branch, ctx),
         'discounts_available': discounts_available(today_of(ctx)),
         'note': TRIAL_PER_COURSE,
         'trial_dates_rule': TRIAL_DATES_RULE,

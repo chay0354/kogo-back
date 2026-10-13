@@ -633,7 +633,7 @@ def build(now=None) -> dict:
         else:
             missing['no_camp_place'] = 'לכל הסניפים יש שורה בעובדה על הקייטנה — אין סניף לשאול עליו בלי'
 
-    # A branch of ours whose card names its manager.
+    # A branch of ours whose card names a manager — a name the bot is not to say (the owner, 13.10.2026: "אין מנהל").
     managed = next((row for row in with_courses if (row.manager_name or '').strip()), None)
     if managed is not None:
         words['manager_place'] = named(managed)
