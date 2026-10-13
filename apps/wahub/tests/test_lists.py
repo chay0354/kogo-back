@@ -3,7 +3,7 @@ from datetime import datetime, time, timedelta
 
 from django.utils import timezone
 
-from apps.wahub import state
+from apps.wahub import office_clock, state
 from apps.wahub.models import Contact, Message, Tag
 from apps.wahub.tests.base import WahubTestCase
 
@@ -104,6 +104,8 @@ class ListTests(WahubTestCase):
         data = self.get('contacts/counts/').data
         self.assertEqual(data['boxes'], {
             'all': 9, 'waiting': 1, 'needs_human': 1, 'unread': 1, 'human': 1, 'bot': 8, 'open': 2, 'future': 1,
+            # Nobody here has waited for a person three office hours (test_overdue holds who does).
+            'overdue': 0,
         })
         self.assertEqual(data['queues'], {
             'all': 6, 'due': 1, 'none': 3, 'no_answer': 0, 'answered': 1, 'later': 2, 'registered': 0,
@@ -119,6 +121,7 @@ class ListTests(WahubTestCase):
         tag = Tag.objects.create(name='חם')
         self.waiting.tags.add(tag)
         self.customer.tags.add(tag)
+        office_clock.calendar()          # the office's hours: read once a minute, whoever asks (test_overdue holds that)
         with self.assertNumQueries(3):   # the user, the profile, one aggregate
             data = self.get('contacts/counts/', tag=tag.id).data
         self.assertEqual(data['boxes']['all'], 2)
@@ -137,6 +140,7 @@ class ListTests(WahubTestCase):
         self.assertEqual(len(self.get('contacts/', page_size=500).data['results']), 9)   # capped at 100
 
     def test_the_list_does_not_grow_queries_with_rows(self):
+        office_clock.calendar()          # the office's hours: read once a minute, whoever asks (test_overdue holds that)
         with self.assertNumQueries(5):   # the user, the profile, the count, the rows, their tags
             self.get('contacts/')
 

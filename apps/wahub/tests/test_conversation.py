@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from django.utils import timezone
 
+from apps.wahub import office_clock
 from apps.wahub.models import Contact, Message
 from apps.wahub.tests.base import WahubTestCase
 
@@ -86,7 +87,14 @@ class ConversationDetailTests(WahubTestCase):
             set(data['chat']),
             {'unread_count', 'waiting_since', 'handled_by', 'handled_by_label', 'needs_human',
              'needs_human_reason', 'needs_human_at', 'can_free_text', 'window_closes_at',
-             'open', 'open_reason', 'open_label', 'box', 'box_label'},
+             'open', 'open_reason', 'open_label', 'box', 'box_label',
+             # waiting for a person, in the office's own hours (test_overdue)
+             'overdue', 'waited_office_minutes', 'waiting_label', 'waiting_from'},
+        )
+        # The bot handles it: nobody waits for a person, and nobody asked to be taken off the broadcasts (test_optout).
+        self.assertEqual(
+            (data['chat']['overdue'], data['chat']['waited_office_minutes'], data['chat']['waiting_label'], data['opted_out']),
+            (False, None, '', None),
         )
         self.assertEqual((data['chat']['open'], data['future'], data['waiting_list'], data['notes']), (False, None, None, []))
         # The box it is shown under when a search crosses the boxes; no card behind somebody the system does not
@@ -194,7 +202,10 @@ class LiveUpdateTests(WahubTestCase):
         data = self.get('contacts/updates/').data
         self.assertEqual(data['contacts'], [])
         self.assertTrue(data['cursor'].endswith('Z'))
-        self.assertEqual(data['boxes'], {'all': 1, 'waiting': 1, 'needs_human': 0, 'unread': 1, 'human': 0, 'bot': 1, 'open': 0, 'future': 0})
+        self.assertEqual(data['boxes'], {
+            'all': 1, 'waiting': 1, 'needs_human': 0, 'unread': 1, 'human': 0, 'bot': 1, 'open': 0, 'future': 0, 'overdue': 0,
+        })
+        self.assertEqual(data['overdue'], [])
 
     def test_only_what_changed_since_the_cursor_comes_back(self):
         self.incoming('ישן', phone='972505550111')
@@ -315,6 +326,7 @@ class LiveUpdateTests(WahubTestCase):
         for index in range(12):
             self.incoming('שלום', phone=f'9725055501{index:02d}')
         cursor = (timezone.now() - timedelta(minutes=1)).isoformat().replace('+00:00', 'Z')
+        office_clock.calendar()          # the office's hours: read once a minute, whoever asks (test_overdue holds that)
         # The user, the profile; the touched rows, their tags; the counts.
         with self.assertNumQueries(5):
             data = self.get('contacts/updates/', since=cursor).data

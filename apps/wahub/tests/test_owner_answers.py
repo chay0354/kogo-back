@@ -597,9 +597,11 @@ class TheAnswersInTheKnowledgeTests(WahubTestCase):
         knowledge_import.run()
         # The waiting list is his word of the same day too; it is held by its own tests (test_waiting_list).
         waiting = 'שיעור מלא — מועד אחר, ואז רשימת המתנה'
+        # ... and so is what he said in the evening about "הסר": the rule and its phrasing (test_optout).
+        evening = ('"הסר" — מאשרים בשורה אחת', 'אישור "הסר"')
         new = {
             item.title: item
-            for item in KnowledgeItem.objects.filter(source_note__contains=self.SAID).exclude(title=waiting)
+            for item in KnowledgeItem.objects.filter(source_note__contains=self.SAID).exclude(title__in=(waiting, *evening))
         }
         ceremony_title = 'טקס סוף שנה — חגורה, תעודה ומתנה קטנה'
         self.assertEqual(set(new), {
@@ -749,6 +751,9 @@ def good_answers(built: dict) -> dict:
         'holiday_which_branch': [[board(), say(lambda found: found['ask'])]],
         'holiday_branch_with_no_board': [[person('אין לוח חופשות לסניף'), board(words['holiday_none_place']), say(MISSING)]],
         'holiday_registered_customer': [[person('אין לוח חופשות לסניף'), board(), say(MISSING)]],
+        # the evening of the same day: "הסר" is one line that confirms; a child taken out of a class is a cancellation
+        'opt_out_one_line': [[say('הוסרתם מרשימת התפוצה, לא נשלח יותר הודעות 🙏')]],
+        'opt_out_is_not_a_cancellation': [[person('מבקשת לבטל את החוג של הבן'), say('העברתי את בקשת הביטול למשרד, ויחזרו אליכם')]],
     }
 
 

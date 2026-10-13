@@ -16,7 +16,7 @@ from django.utils import timezone
 from apps.core.models import UserProfile
 from apps.core.tests.test_fixtures import TestDataFactory
 from apps.customers.customer_details import SHARED_GHOST_FAMILY_NAME
-from apps.wahub import search
+from apps.wahub import office_clock, search
 from apps.wahub.models import Contact
 from apps.wahub.tests.base import WahubTestCase, client_for, make_user
 
@@ -221,6 +221,7 @@ class ConversationsSearchTests(SearchCase):
                 self.assertEqual(self.chats(term).status_code, 200)
             return len(seen)
 
+        office_clock.calendar()          # the office's hours: read once a minute, whoever asks (test_overdue holds that)
         few = questions('דנה לוי')
         for index in range(30):
             self.make(f'9725066600{index:02d}', f'דנה לוי {index}', 30 + index, kogo_family_id=self.levi.id, kogo_child_ids=[str(self.noam.id)])

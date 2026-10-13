@@ -257,27 +257,43 @@ def note(reply, draft, targets, *, items=None, now=None) -> BotUnknown | None:
 # Words that say nothing about what was asked.
 _EVERYDAY = frozenset('''
 של את עם על אל זה זו זאת יש אין אם או גם רק כי מה מי איך כמה איפה מתי למה האם אפשר צריך רוצה רוצים אני אנחנו אתם שלי שלנו שלכם
-לי לנו לכם לו לה הוא היא הם כל עוד כבר לא כן היי שלום תודה בבקשה שאלה לדעת לשאול רציתי רצינו בוקר ערב טוב אצלכם אצלנו
-שאלו ואין אותו אותה במערכת בידע הבוט הלקוח הלקוחה לקוח שואל שואלת שאל שאלה מבקש מבקשת לגבי בנוגע מידע פרט חסר חסרה
-הילד הילדה הבן הבת ילד ילדה בן בת חוג החוג שיעור השיעור סניף הסניף
+לי לנו לכם לו לה הוא היא הם כל עוד כבר לא כן היי שלום תודה בבקשה שאלה לדעת לשאול רציתי רצינו בוקר ערב טוב אצלכם אצלנו ליד
+שאלו אותו אותה מערכת ידע הבוט לקוח הלקוחה שואל שואלת שאל מבקש מבקשת לגבי בנוגע מידע פרט חסר חסרה מחיר עולה עלות
+ילד ילדה הילד הילדה חוג שיעור סניף בן בת
 '''.split())
-_GLUED = re.compile(r'^(?:וש|וב|ול|ומ|וה|שב|של|שה|מה|כש|[ובלמהשכ])(?=[א-ת]{3,})')
+# The letter or two Hebrew glues to the front of a word: "בסניף", "והחניה".
+_GLUED = re.compile(r'^(?:ו?[בלמהשכ]|ו)')
+
+
+def _forms(word: str) -> set:
+    """The word, and the word without what may be a glued letter: "החניה" is also "חניה"."""
+    forms = {word}
+    glued = _GLUED.match(word)
+    if glued and len(word) - glued.end() >= 3:
+        forms.add(word[glued.end():])
+    if word.startswith('ו') and len(word) >= 4:
+        forms.add(word[1:])
+    return forms
+
+
+def _same_word(a: str, b: str) -> bool:
+    return bool(_forms(a) & _forms(b))
 
 
 def keywords_of(*texts: str) -> list:
-    """The words of a question that say what it is about, each once, in order — the glued letter of "בסניף" taken off."""
+    """The words of a question that say what it is about — each once, in order, as they were written."""
     found = []
     for text in texts:
         for word in _plain(_VARIABLE.sub(' ', re.sub(r'\[[^\]]*\]', ' ', str(text or '')))).split():
-            if len(word) < 3 or word.isdigit() or word in _EVERYDAY:
+            if len(word) < 3 or word.isdigit() or _forms(word) & _EVERYDAY:
                 continue
-            bare = _GLUED.sub('', word)
-            bare = bare if len(bare) >= 3 and bare not in _EVERYDAY else word
-            if bare in _EVERYDAY:
-                continue
-            if bare not in found:
-                found.append(bare)
+            if not any(_same_word(word, kept) for kept in found):
+                found.append(word)
     return found
+
+
+def _shared(words, keywords) -> int:
+    return sum(1 for word in words if any(_same_word(word, kept) for kept in keywords))
 
 
 def _title_from(case: BotUnknown) -> str:
@@ -303,7 +319,7 @@ def _file(cases: list, topic: BotUnknownTopic) -> None:
     words = list(topic.keywords or [])
     for case in cases:
         for word in keywords_of(case.hint, case.question):
-            if word not in words:
+            if not any(_same_word(word, kept) for kept in words):
                 words.append(word)
     if words != list(topic.keywords or []):
         topic.keywords = words[:40]
@@ -312,20 +328,22 @@ def _file(cases: list, topic: BotUnknownTopic) -> None:
 
 def _by_words(cases: list, topics: list) -> int:
     """
-    Gather by words alone: a case goes to the topic it shares the most telling
-    words with — two at least, or its only one — else it opens a topic named by
-    what was missing. Returns how many topics it opened.
+    Gather by words alone: a case goes to the topic whose name it shares a
+    telling word with — or two of the words that topic's questions were made
+    of — and otherwise opens a topic named by what was missing. Not clever on
+    purpose: it is what there is without a key. Returns how many topics it opened.
     """
     opened = 0
     for case in cases:
-        words = set(keywords_of(case.hint, case.question))
-        best, shared = None, 0
+        words = keywords_of(case.hint, case.question)
+        best, best_score = None, (0, 0)
         for topic in topics:
-            common = len(words & (set(topic.keywords or []) | set(keywords_of(topic.title))))
-            if common > shared:
-                best, shared = topic, common
-        if best is None or shared < min(2, max(1, len(words))):
-            best = BotUnknownTopic.objects.create(title=_title_from(case), keywords=keywords_of(_title_from(case)))
+            score = (_shared(words, keywords_of(topic.title)), _shared(words, topic.keywords or []))
+            if (score[0] >= 1 or score[1] >= 2) and score > best_score:
+                best, best_score = topic, score
+        if best is None:
+            title = _title_from(case)
+            best = BotUnknownTopic.objects.create(title=title, keywords=keywords_of(title))
             topics.append(best)
             opened += 1
         _file([case], best)
@@ -563,7 +581,7 @@ def _examples_for(topic_ids, week: dict) -> dict:
     if not topic_ids:
         return found
     by_topic: dict = {}
-    for case in BotUnknown.objects.filter(topic_id__in=topic_ids, created_at__lt=week['end']).order_by('-id')[:EXAMPLES_LOOKED_AT]:
+    for case in BotUnknown.objects.filter(topic_id__in=topic_ids, created_at__lt=week['end']).order_by('-created_at', '-id')[:EXAMPLES_LOOKED_AT]:
         by_topic.setdefault(case.topic_id, []).append(case)
     for topic_id, rows in by_topic.items():
         of_week = [case for case in rows if case.created_at >= week['start']]
@@ -601,7 +619,8 @@ def listed(params, *, now=None) -> dict:
     rows.sort(key=lambda row: (-row[1], -(row[4].timestamp() if row[4] else 0), -row[0].id))
     examples = _examples_for([row[0].id for row in rows], week)
     unsorted = list(
-        BotUnknown.objects.filter(topic__isnull=True, created_at__gte=week['start'], created_at__lt=week['end']).order_by('-id')[:EXAMPLES_SHOWN]
+        BotUnknown.objects.filter(topic__isnull=True, created_at__gte=week['start'], created_at__lt=week['end'])
+        .order_by('-created_at', '-id')[:EXAMPLES_SHOWN]
     )
     sorted_ = settings_store.get(SORTED_KEY, {})
     tally = counts(now, week=week, numbers=numbers)
@@ -670,7 +689,7 @@ def opening(topic: BotUnknownTopic, *, now=None) -> dict:
     what the bot said, and that the information is missing.
     """
     week = week_of(WEEK_THIS, now)
-    cases = list(BotUnknown.objects.filter(topic=topic).order_by('-id')[:EXAMPLES_SHOWN])
+    cases = list(BotUnknown.objects.filter(topic=topic).order_by('-created_at', '-id')[:EXAMPLES_SHOWN])
     this_week = BotUnknown.objects.filter(topic=topic, created_at__gte=week['start'], created_at__lt=week['end']).count()
     total = BotUnknown.objects.filter(topic=topic).count()
     if this_week:
