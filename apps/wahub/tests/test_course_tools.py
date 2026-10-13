@@ -436,6 +436,60 @@ class CourseCardTest(CourseToolsTestCase):
         self.assertNotIn(first.strftime('%d.%m.%Y'), course['lessons'][0]['trial_dates'])
         self.assertIn(second.strftime('%d.%m.%Y'), course['lessons'][0]['trial_dates'])
 
+    def _coming(self, lesson, weeks):
+        """The coming dates of a weekly lesson by the timetable alone — today counts until it ends."""
+        from apps.enrollments.trial_reminders import next_lesson_occurrence
+
+        first = next_lesson_occurrence(lesson.day_of_week, lesson.end_time)
+        return [first + timedelta(days=7 * week) for week in range(weeks)]
+
+    def test_is_there_a_lesson_today_the_cancelled_dates_and_when_it_is_next_held(self):
+        said = lambda day: day.strftime('%d.%m.%Y')   # noqa: E731
+        first, second, third = self._coming(self.young_lesson, 3)
+        lesson = self.card(self.young)['course']['lessons'][0]
+        # Nothing cancelled: the coming one — and whose word it is, for the timetable knows no holiday nobody marked.
+        self.assertEqual((lesson['cancelled_dates'], lesson['next_date']), ([], said(first)))
+        self.assertEqual(lesson['held_text'], f'לפי המערכת השיעור הקרוב מתקיים ביום {lesson["day"]} {said(first)}')
+
+        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=first, reason='המדריך בחופשת מחלה')
+        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=third)
+        # One that passed is nobody's question.
+        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=first - timedelta(days=7))
+        result = self.card(self.young)
+        lesson = result['course']['lessons'][0]
+        self.assertEqual(lesson['cancelled_dates'], [said(first), said(third)])
+        self.assertEqual(lesson['next_date'], said(second))
+        self.assertEqual(
+            lesson['held_text'],
+            f'השיעור של {said(first)} בוטל; לפי המערכת השיעור הקרוב מתקיים ביום {lesson["day"]} {said(second)}',
+        )
+        # Why it was cancelled is the office's note to itself: no tool passes it on.
+        self.assertNotIn('מחלה', json.dumps(result, ensure_ascii=False, default=str))
+
+        # Two in a row: both are said, and the one after them.
+        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=second)
+        lesson = self.card(self.young)['course']['lessons'][0]
+        fourth = third + timedelta(days=7)
+        self.assertEqual(lesson['next_date'], said(fourth))
+        self.assertTrue(lesson['held_text'].startswith(f'השיעורים של {said(first)}, {said(second)}, {said(third)} בוטלו; '))
+
+    def test_in_a_list_of_classes_only_a_lesson_with_a_cancelled_date_says_so(self):
+        def lessons():
+            return {row['id']: row for course in self.find(age=5, course_type='קפוארה')['courses'] for row in course['lessons']}
+
+        self.assertTrue(all('cancelled_dates' not in row for row in lessons().values()))
+        first, = self._coming(self.young_lesson, 1)
+        LessonCancellation.objects.create(lesson=self.young_lesson, occurrence_date=first)
+        rows = lessons()
+        self.assertEqual(rows[str(self.young_lesson.id)]['cancelled_dates'], [first.strftime('%d.%m.%Y')])
+        self.assertEqual([key for key, row in rows.items() if 'cancelled_dates' in row], [str(self.young_lesson.id)])
+
+    def test_a_lesson_that_is_not_running_has_no_next_date(self):
+        self.young_lesson.status = 'cancelled'
+        self.young_lesson.save(update_fields=['status'])
+        lesson = self.card(self.young)['course']['lessons'][0]
+        self.assertEqual((lesson['next_date'], lesson['held_text']), ('', 'במערכת אין תאריך קרוב שבו השיעור מתקיים'))
+
     def test_tracks_a_price_of_its_own_for_a_second_class_and_an_extra_price(self):
         self.older_sunday.additional_course_prices = [{'course_index': 2, 'price': 220}]
         self.older_sunday.save(update_fields=['additional_course_prices'])

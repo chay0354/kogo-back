@@ -46,6 +46,8 @@ STATUS_LABELS = {'scheduled': 'מתוכנן', 'completed': 'הושלם', 'cancel
 
 LIST_DATES = 3          # the trial dates a class of a list spells out: the nearest ones
 SENTENCE_DATES = 3      # the dates the ready sentence names
+CANCELLED_DATES = 6     # the coming cancelled dates of a lesson that are spelled out: the nearest ones
+HELD_WEEKS = 16         # how far ahead the next date a lesson takes place on is looked for
 MAX_INSTRUCTORS = 5
 MAX_INSTRUCTOR_NAMES = 40
 SHORT_DESCRIPTION = 280
@@ -196,6 +198,59 @@ def seats_text(day: str, start: str, cap: dict) -> str:
     return f'{where} {registered} מתוך {capacity} מקומות, ' + ('נשאר מקום אחד' if left == 1 else f'נשארו {left}')
 
 
+def cancelled_ahead(lesson, seats: Seats) -> list:
+    """
+    The coming dates on which this weekly lesson does not take place, nearest
+    first — the ones the office cancelled in the timetable (LessonCancellation,
+    already read once for all the lessons with their seats). Without the reason:
+    that is the office's note to itself.
+    """
+    cancelled = (seats.occurrences[0] or {}).get(lesson.id) or ()
+    today = _today(seats)
+    return sorted(day for day in cancelled if day >= today)
+
+
+def next_held(lesson, seats: Seats, cancelled) -> date | None:
+    """
+    The nearest date this lesson takes place on, by the timetable: its coming
+    weekday that was not cancelled (today counts until the lesson ends, as in
+    the form). None for a lesson that is not running, or cancelled all the way.
+    """
+    from apps.enrollments.trial_reminders import next_lesson_occurrence
+
+    if lesson.status != 'scheduled':
+        return None
+    cancelled = set(cancelled)
+    if not lesson.is_recurring:
+        day = lesson.lesson_date
+        return day if day and day >= _today(seats) and day not in cancelled else None
+    day = next_lesson_occurrence(lesson.day_of_week, lesson.end_time, now=seats.now)
+    for _week in range(HELD_WEEKS):
+        if day not in cancelled:
+            return day
+        day += timedelta(days=7)
+    return None
+
+
+def held_text(lesson, held: date | None, cancelled: list) -> str:
+    """
+    Whether the lesson takes place, as a customer is told it — ready, and saying
+    whose word it is: the timetable knows a date the office cancelled, not a
+    holiday nobody marked.
+    """
+    day = DAY_NAMES[lesson.day_of_week] if 0 <= lesson.day_of_week < 7 else ''
+    # What was cancelled between now and the next time it is held: those are the ones a parent asks about.
+    skipped = [value for value in cancelled if held is None or value < held]
+    said = ''
+    if skipped:
+        dates = ', '.join(_day(value) for value in skipped[:CANCELLED_DATES])
+        said = f'השיעור של {dates} בוטל' if len(skipped) == 1 else f'השיעורים של {dates} בוטלו'
+    if held is None:
+        return said + ('; ' if said else '') + 'במערכת אין תאריך קרוב שבו השיעור מתקיים'
+    coming = f'לפי המערכת השיעור הקרוב מתקיים ב{("יום " + day + " ") if day else ""}{_day(held)}'
+    return f'{said}; {coming}' if said else coming
+
+
 def lesson_payload(lesson, course, seats: Seats, *, offer=None, detail: bool = False) -> dict:
     """A weekly lesson: when, with whom, how full, and — with the class's `offer` — the dates a trial can be booked on."""
     cap = seats.cap(lesson, course)
@@ -221,6 +276,13 @@ def lesson_payload(lesson, course, seats: Seats, *, offer=None, detail: bool = F
         # In words, whether a trial can be booked on this day of the class — and on which dates. Only those.
         payload['trial_status'] = LESSON_TRIAL_WORDS.get(offer.by_lesson.get(lesson.id, ''), NO_TRIAL_DATE)
         payload['trial_dates'] = [_day(slot.day) for slot in offer.open if slot.lesson.id == lesson.id]
+    cancelled = cancelled_ahead(lesson, seats)
+    if cancelled or detail:
+        # "Is there a lesson today?" — the dates the office cancelled, when it is next held, and the sentence to quote.
+        held = next_held(lesson, seats, cancelled)
+        payload['cancelled_dates'] = [_day(value) for value in cancelled[:CANCELLED_DATES]]
+        payload['next_date'] = _day(held) if held else ''
+        payload['held_text'] = held_text(lesson, held, cancelled)
     if lesson.status != 'scheduled' or detail:
         payload['status'] = STATUS_LABELS.get(lesson.status, lesson.status)
     if not lesson.is_recurring:
