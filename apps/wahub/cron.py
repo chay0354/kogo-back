@@ -47,11 +47,9 @@ from django.conf import settings
 from django.db.models import F, Q
 from django.utils import timezone
 
-<<<<<<< HEAD
-from apps.wahub import analysis, holiday_flows, lead_followups, lead_stage, live_test, matching, reviewer, shadow
-=======
-from apps.wahub import analysis, lead_followups, lead_stage, live_test, matching, reviewer, shadow, waiting_list
->>>>>>> origin/main
+from apps.wahub import (
+    analysis, holiday_flows, lead_followups, lead_stage, live_test, matching, reviewer, shadow, waiting_list,
+)
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
 logger = logging.getLogger(__name__)
