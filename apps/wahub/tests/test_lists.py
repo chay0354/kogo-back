@@ -53,6 +53,8 @@ class ListTests(WahubTestCase):
     def test_boxes(self):
         expected = {
             'all': 9, 'waiting': 1, 'needs_human': 1, 'unread': 1, 'human': 1, 'bot': 8,
+            # Open for a person: the one who asked for one, and the future lead whose day is today. Parked: the one whose day is ahead.
+            'open': 2, 'future': 1,
         }
         for box, count in expected.items():
             with self.subTest(box=box):
@@ -100,7 +102,9 @@ class ListTests(WahubTestCase):
 
     def test_counts_match_the_lists(self):
         data = self.get('contacts/counts/').data
-        self.assertEqual(data['boxes'], {'all': 9, 'waiting': 1, 'needs_human': 1, 'unread': 1, 'human': 1, 'bot': 8})
+        self.assertEqual(data['boxes'], {
+            'all': 9, 'waiting': 1, 'needs_human': 1, 'unread': 1, 'human': 1, 'bot': 8, 'open': 2, 'future': 1,
+        })
         self.assertEqual(data['queues'], {
             'all': 6, 'due': 1, 'none': 3, 'no_answer': 0, 'answered': 1, 'later': 2, 'registered': 0,
             'not_relevant': 0, 'hidden': 3,

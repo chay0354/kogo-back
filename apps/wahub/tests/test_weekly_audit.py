@@ -34,6 +34,9 @@ class WeeklyAuditTests(WahubTestCase):
             'api/v1/wahub/leads/{pk}/snooze/', 'api/v1/wahub/leads/{pk}/owner/',
             # Connecting a WhatsApp template to a follow-up answers PUT only.
             'api/v1/wahub/leads/templates/{template_key}/',
+            # The ✓ and the clock of a conversation, and the waiting list: what a person does (POST only).
+            'api/v1/wahub/contacts/{pk}/close/', 'api/v1/wahub/contacts/{pk}/hand-to-bot/', 'api/v1/wahub/contacts/{pk}/future/',
+            'api/v1/wahub/contacts/{pk}/waiting-list/', 'api/v1/wahub/waiting-list/{pk}/handled/', 'api/v1/wahub/waiting-list/{pk}/remove/',
         ):
             self.assertFalse(by_template[template].callable_get, template)
 
@@ -98,6 +101,10 @@ class WeeklyAuditTests(WahubTestCase):
                 # the one read the audit itself makes; with no key, as here, nobody is asked).
                 'api/v1/wahub/leads/automation/': 200,
                 'api/v1/wahub/leads/templates/options/': 200,
+                # the notes about a customer and the waiting lists: read only. Writing a note, and whatever is done
+                # to a row of a list, answers POST only.
+                f'api/v1/wahub/contacts/{contact.id}/notes/': 200,
+                'api/v1/wahub/waiting-list/': 200,
             },
         )
         self.assertEqual([outcome.error for outcome in ours if outcome.error], [])

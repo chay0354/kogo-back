@@ -153,6 +153,8 @@ LEAD_ANSWERED_SILENT = 'answered_silent'
 LEAD_WILL_CHECK = 'will_check'
 LEAD_TRIAL_BOOKED = 'trial_booked'
 LEAD_WAITING_DATE = 'waiting_date'
+# On the waiting list of one lesson that is full (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ד).
+LEAD_WAITING_LIST = 'waiting_list'
 LEAD_NOTHING_TO_OFFER = 'nothing_to_offer'
 LEAD_IN_CONVERSATION = 'in_conversation'
 LEAD_REGISTERED = 'registered'
@@ -174,6 +176,7 @@ LEAD_STAGE_CHOICES = [
     (LEAD_WILL_CHECK, 'אמר שיבדוק ויחזור'),
     (LEAD_TRIAL_BOOKED, 'רשום לשיעור ניסיון'),
     (LEAD_WAITING_DATE, 'מחכה למועד'),
+    (LEAD_WAITING_LIST, 'ברשימת המתנה'),
     (LEAD_NOTHING_TO_OFFER, 'אין כרגע מה להציע'),
     (LEAD_IN_CONVERSATION, 'בשיחה'),
     (LEAD_REGISTERED, 'נרשם'),
@@ -195,6 +198,7 @@ LEAD_STAGE_GROUPS = {
     LEAD_WILL_CHECK: LEAD_GROUP_WAIT,
     LEAD_TRIAL_BOOKED: LEAD_GROUP_WAIT,
     LEAD_WAITING_DATE: LEAD_GROUP_WAIT,
+    LEAD_WAITING_LIST: LEAD_GROUP_WAIT,
     LEAD_NOTHING_TO_OFFER: LEAD_GROUP_WAIT,
     LEAD_IN_CONVERSATION: LEAD_GROUP_WAIT,
     LEAD_REGISTERED: LEAD_GROUP_CLOSED,
@@ -281,6 +285,10 @@ EVENT_LIVE_TEST = 'live_test'
 EVENT_LEAD_STAGE = 'lead_stage_changed'
 EVENT_LEAD_FOLLOWUP = 'lead_followup'
 EVENT_LEAD_ACTION = 'lead_action'
+# A person closed the conversation (✓), and what happened to a place on a waiting list
+# (docs/WAHUB-CONTRACT-FUTURE-LEADS.md).
+EVENT_CLOSED = 'conversation_closed'
+EVENT_WAITING_LIST = 'waiting_list'
 EVENT_KIND_CHOICES = [
     (EVENT_CREATED, 'נוצר'),
     (EVENT_FOLLOWUP, 'סימון מעקב'),
@@ -294,6 +302,8 @@ EVENT_KIND_CHOICES = [
     (EVENT_LEAD_STAGE, 'מצב הליד'),
     (EVENT_LEAD_FOLLOWUP, 'חזרה של הבוט לליד'),
     (EVENT_LEAD_ACTION, 'פעולה על הליד'),
+    (EVENT_CLOSED, 'השיחה נסגרה'),
+    (EVENT_WAITING_LIST, 'רשימת המתנה'),
 ]
 
 LAST_MESSAGE_PREVIEW_CHARS = 300
@@ -449,6 +459,11 @@ class Contact(models.Model):
     lead_bot = models.JSONField(default=dict, blank=True)
     # Which version of the rules last worked the stage out; an older one is looked at again.
     lead_version = models.PositiveSmallIntegerField(default=0)
+    # The contact's place on a waiting list, as the stage and the lists read it without another
+    # query — {status: waiting | freed, entry_id, lesson_id, label, course, day, start, branch,
+    # child, since, freed_at, more}; {} when the contact waits for no lesson. A copy of the rows
+    # of WaitingListEntry, written by waiting_list.py only.
+    lead_waiting = models.JSONField(default=dict, blank=True)
 
     tags = models.ManyToManyField(Tag, blank=True, related_name='contacts', db_table='wahub_contact_tags')
 
@@ -1149,3 +1164,91 @@ class LeadFollowUp(models.Model):
 
     def __str__(self):
         return f'{self.get_kind_display()} · {self.get_status_display()}'
+
+
+# =====================================================================================
+# The waiting list of a lesson that is full (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ד)
+# =====================================================================================
+
+WAITING_WAITING = 'waiting'
+WAITING_FREED = 'freed'
+WAITING_HANDLED = 'handled'
+WAITING_REMOVED = 'removed'
+WAITING_STATUS_CHOICES = [
+    (WAITING_WAITING, 'ממתין'),
+    (WAITING_FREED, 'התפנה מקום'),
+    (WAITING_HANDLED, 'טופל'),
+    (WAITING_REMOVED, 'הוסר'),
+]
+# Still on the list: at most one of these per contact and lesson (the constraint below).
+WAITING_ACTIVE_STATUSES = (WAITING_WAITING, WAITING_FREED)
+
+WAITING_BY_BOT = 'bot'
+WAITING_BY_PERSON = 'person'
+WAITING_BY_CHOICES = [(WAITING_BY_BOT, 'הבוט'), (WAITING_BY_PERSON, 'נציג')]
+
+
+class WaitingListEntry(models.Model):
+    """
+    A contact who wants one lesson that is full — the class, the day, the hour
+    and the branch — put on its waiting list by the bot (the tool
+    `join_waiting_list`) or by the office. The cron looks at every waiting row
+    with the very count the registration form uses; when a seat is free the row
+    becomes `freed` and the lead goes to the office's list. Nothing is ever
+    sent from here, to the customer or to the office.
+
+    Like the rest of the app, the lesson is kept as a plain id with a copy of
+    what the screen shows, not as a foreign key: deleting or moving a lesson
+    never touches this table, and a row whose lesson is gone still says what
+    was waited for. apps/wahub/waiting_list.py is the only writer.
+    """
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name='waiting_list')
+    lesson_id = models.UUIDField()
+    course_id = models.UUIDField(null=True, blank=True)
+    branch_id = models.UUIDField(null=True, blank=True)
+    # What the screen shows, copied when the row was made.
+    course_name = models.CharField(max_length=200, blank=True)
+    branch_name = models.CharField(max_length=200, blank=True)
+    day_of_week = models.SmallIntegerField(null=True, blank=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    # What is known about the child, in a few words: an age, a grade, a name.
+    child = models.CharField(max_length=200, blank=True)
+    status = models.CharField(max_length=10, choices=WAITING_STATUS_CHOICES, default=WAITING_WAITING)
+    added_by_kind = models.CharField(max_length=10, choices=WAITING_BY_CHOICES, default=WAITING_BY_BOT)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    freed_at = models.DateTimeField(null=True, blank=True)
+    # When the cron last counted the seats of this row's lesson: the rows longest unlooked-at go first.
+    checked_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    # Why it left the list when no person took it off: the lesson is gone, the child registered.
+    closed_reason = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        db_table = 'wahub_waiting_list'
+        ordering = ['id']
+        verbose_name = 'רשומה ברשימת המתנה'
+        verbose_name_plural = 'רשימת המתנה'
+        indexes = [
+            models.Index(fields=['contact', '-id'], name='wahub_waiting_contact'),
+            # What the cron walks, and the list of one lesson.
+            models.Index(
+                fields=['lesson_id', 'id'], name='wahub_waiting_active',
+                condition=Q(status__in=WAITING_ACTIVE_STATUSES),
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['contact', 'lesson_id'], condition=Q(status__in=WAITING_ACTIVE_STATUSES),
+                name='wahub_waiting_one_active',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.course_name} · {self.get_status_display()}'

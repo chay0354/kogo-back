@@ -1069,13 +1069,28 @@ SEATS = (
     ),
     Scenario(
         'seats_full_lesson', 'seats', 'שיעור מלא',
-        'הבוט אומר שהשיעור מלא, לא מבטיח מקום ולא ממציא רשימת המתנה', ('W2', 'V9', 'P6'),
+        'הבוט אומר שהשיעור מלא ולא מבטיח מקום', ('W2', 'V9', 'P6'),
         (
             T('יש עוד מקום ב{packed_field} ב{place} ביום {packed_day}? הילד {packed_child}', expect=(
                 c.called_any(LOOKS_UP, 'בודק במערכת את השיעור'), c.says_whether_full('packed'), c.has_not(PROMISES_A_SEAT, 'הבוט לא מבטיח מקום'),
-                c.no_link('registration', 'להרשמה'), c.has_not(r'רשימת המתנה|נרשום אתכם להמתנה', 'הבוט לא ממציא רשימת המתנה'),
-            ), rubric=('הבוט אמר שהשיעור מלא, והציע מועד אחר שהמערכת החזירה או נציג',)),
+                c.no_link('registration', 'להרשמה'),
+            ), rubric=('הבוט אמר שהשיעור מלא, והציע מועד אחר שהמערכת החזירה, רשימת המתנה או נציג',)),
             T('וכמה רשומים שם?', expect=(c.says_seats('packed', 'enrolled'),)),
+        ),
+        needs=('place', 'packed_field', 'packed_child', 'packed_day'),
+    ),
+    Scenario(
+        'waiting_list_full_lesson', 'seats', 'שיעור מלא, ורק היום הזה מתאים — רשימת המתנה',
+        'הלקוח רוצה דווקא את השיעור המלא: הבוט מוסיף אותו לרשימת ההמתנה של השיעור הזה, ולא מבטיח מקום או מועד', ('WL1', 'W2', 'P6'),
+        (
+            T('יש עוד מקום ב{packed_field} ב{place} ביום {packed_day}? הילד {packed_child}', expect=(
+                c.called_any(LOOKS_UP, 'בודק במערכת את השיעור'), c.says_whether_full('packed'), c.has_not(PROMISES_A_SEAT, 'הבוט לא מבטיח מקום'),
+            )),
+            T('אנחנו יכולים רק ביום {packed_day}. אפשר להיכנס לרשימת המתנה לשיעור הזה?', expect=(
+                c.called('join_waiting_list', 'מוסיף לרשימת ההמתנה של השיעור'),
+                c.has(r'רשימת ה?המתנה', 'הבוט אומר שהלקוח ברשימת ההמתנה'),
+                c.has_not(PROMISES_A_SEAT, 'הבוט לא מבטיח מקום'), c.no_link('registration', 'להרשמה'),
+            ), rubric=('הבוט אמר בקצרה שהלקוח ברשימת ההמתנה לשיעור הזה ושיעדכנו כשיתפנה מקום, בלי להבטיח מקום, מועד או מקום בתור',)),
         ),
         needs=('place', 'packed_field', 'packed_child', 'packed_day'),
     ),

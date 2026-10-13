@@ -19,8 +19,9 @@ from django.db import transaction
 from django.db.models import Case, Count, F, IntegerField, Q, Value, When
 from django.utils import timezone
 
-from apps.wahub import lead_ai, lead_followups, lead_stage, queries, state
+from apps.wahub import lead_ai, lead_followups, lead_stage, queries, serializers, state, waiting_list
 from apps.wahub.models import (
+    EVENT_CLOSED,
     EVENT_CREATED,
     EVENT_FOLLOWUP,
     EVENT_HANDLED_BY,
@@ -29,7 +30,9 @@ from apps.wahub.models import (
     EVENT_LEAD_FOLLOWUP,
     EVENT_LEAD_STAGE,
     EVENT_NEEDS_HUMAN,
+    EVENT_NOTE,
     EVENT_OUTCOME,
+    EVENT_WAITING_LIST,
     FOLLOWUP_LATER,
     FOLLOWUP_NOT_RELEVANT,
     LEAD_CLOSE_CHOICES,
@@ -45,6 +48,7 @@ from apps.wahub.models import (
     LEAD_STAGE_GROUPS,
     LEAD_TRIAL_BOOKED,
     LEAD_WAITING_DATE,
+    LEAD_WAITING_LIST,
     LEGACY_LEAD_STAGES,
     NUDGE_DATE_ARRIVED,
     NUDGE_DORMANT,
@@ -58,6 +62,7 @@ from apps.wahub.models import (
     OUTCOME_CHOICES,
     OUTCOME_TRIAL_ONLY,
     OUTCOME_TRIAL_UPCOMING,
+    WAITING_FREED,
     Contact,
     ContactEvent,
     LeadFollowUp,
@@ -72,6 +77,7 @@ PAGE = 50
 MAX_PAGE = 100
 FOLLOWUPS_SHOWN = 30
 TIMELINE_EVENTS = 10
+NOTES_SHOWN = 10
 
 STAGE_LABELS = dict(LEAD_STAGE_CHOICES)
 OUTCOME_LABELS = dict(OUTCOME_CHOICES)
@@ -104,12 +110,13 @@ NEXT_BY_STEP = {
 NOTHING_PLANNED = 'אין חזרה מתוכננת'
 WAITING_FOR_AN_ANSWER = 'הבוט חזר אליו — מחכים לתשובה'
 KEPT_FOR_LATER = 'נשמר: נודיע כשנפתח'
+ON_A_WAITING_LIST = 'ברשימת המתנה — נתריע כשיתפנה מקום'
 TALKING_NOW = 'בשיחה עכשיו'
 WEEKDAYS = ('שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת', 'ראשון')        # Python's weekday(): Monday is 0
 # What goes into the short timeline of one lead: what happened to it, not every summary and tag.
 TIMELINE_KINDS = (
     EVENT_CREATED, EVENT_LEAD_STAGE, EVENT_LEAD_FOLLOWUP, EVENT_LEAD_ACTION, EVENT_OUTCOME, EVENT_FOLLOWUP,
-    EVENT_NEEDS_HUMAN, EVENT_HANDLED_BY,
+    EVENT_NEEDS_HUMAN, EVENT_HANDLED_BY, EVENT_CLOSED, EVENT_WAITING_LIST,
 )
 
 
@@ -168,7 +175,8 @@ def listed(params) -> dict:
     tab = (params.get('owner') or TAB_OFFICE).strip()
     if tab not in TABS:
         raise LeadError('owner: office, bot או closed.')
-    rows = Contact.objects.filter(tab_q(tab))
+    # With whoever set a future lead, read in the same query: a row says whose it is.
+    rows = Contact.objects.filter(tab_q(tab)).select_related('followup_by')
 
     stages = [key.strip() for key in (params.get('stage') or '').split(',') if key.strip()]
     if stages:
@@ -276,6 +284,8 @@ def no_step_because(contact: Contact, stage: str) -> str:
         except ValueError:
             return 'מחכים לשיעור הניסיון'
         return f'מחכים לשיעור הניסיון ביום {WEEKDAYS[on.weekday()]}, {on.day}.{on.month}'
+    if stage == LEAD_WAITING_LIST:
+        return ON_A_WAITING_LIST
     if stage == LEAD_NOTHING_TO_OFFER:
         return KEPT_FOR_LATER
     if stage == LEAD_IN_CONVERSATION:
@@ -291,6 +301,9 @@ def no_step_because(contact: Contact, stage: str) -> str:
 def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None) -> dict:
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     said = _said(contact)
+    waits = waiting_list.contact_block(contact)
+    # A seat came free: that is the line of the lead now, above whatever the conversation was summed up as.
+    seat_free = waits is not None and waits['status'] == WAITING_FREED and stage == LEAD_WAITING_LIST
     return {
         # The contact's id under both names: `contact_id` is the contract's, `id` is what every other
         # list of the section calls it (and what the weekly audit follows into the lead itself).
@@ -304,11 +317,15 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         'stage_label': STAGE_LABELS.get(stage, ''),
         'owner': contact.lead_owner,
         # One sentence of "why is this a lead": the summary's when it wrote one, else the rules' own.
-        'summary': (said.get('summary') or '').strip() or contact.lead_reason,
+        'summary': contact.lead_reason if seat_free else ((said.get('summary') or '').strip() or contact.lead_reason),
         'chips': chips(contact),
         'since': _iso(contact.lead_stage_since),
         'next': next_move(contact, follow),
         'last_message_at': _iso(contact.last_message_at),
+        # The lesson the lead waits for a seat in, and the future lead a person set — the very blocks the
+        # conversations carry (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1); null when there is none.
+        'waiting_list': waits,
+        'future': serializers.future_payload(contact, today=timezone.localtime(now or timezone.now()).date()),
     }
 
 
@@ -402,6 +419,12 @@ def details_payload(contact: Contact, *, now=None) -> dict:
         'closed': manual.get('closed') if isinstance(manual.get('closed'), dict) else None,
         'taken': manual.get('owner') if isinstance(manual.get('owner'), dict) else None,
         'sending_enabled': _may_send(contact),
+        # What a person wrote about the customer, and every lesson they waited for.
+        'notes': [
+            serializers.note_payload(event)
+            for event in ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).select_related('actor').order_by('-id')[:NOTES_SHOWN]
+        ],
+        'waiting_list_entries': waiting_list.entries_of(contact),
     }
     return payload
 
@@ -454,7 +477,11 @@ def close(contact_id, reason: str, note: str, user) -> Contact:
         words = 'הליד נמחק מהרשימה' if reason == LEAD_CLOSE_DELETED else 'הליד נסגר: לא מעוניין'
         return {}, f'{words}: {note}' if note else words
 
-    return _act(contact_id, user, change)
+    contact = _act(contact_id, user, change)
+    # Nobody waits for a seat on behalf of a lead a person closed.
+    if waiting_list.close_for_contact(contact_id, user=user):
+        contact = Contact.objects.get(pk=contact_id)
+    return contact
 
 
 def reopen(contact_id, user) -> Contact:

@@ -6,13 +6,14 @@ import re
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.wahub import state
+from apps.wahub import queries, state, waiting_list
 from apps.wahub.models import (
     CUSTOMER_OUTCOMES,
     EVENT_KIND_CHOICES,
     FLAG_LABELS,
     FOLLOWUP_CHOICES,
     HANDLED_BY_CHOICES,
+    HANDLED_HUMAN,
     HIDDEN_OUTCOMES,
     INTEREST_CHOICES,
     LEAD_STAGE_CHOICES,
@@ -86,9 +87,42 @@ def lead_payload(contact: Contact, *, today) -> dict:
     }
 
 
+def future_payload(contact: Contact, *, today) -> dict | None:
+    """
+    The future lead of docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג: the office's "בזמן
+    אחר" with its day — the reason, whose it is, and where it stands today
+    (parked / due / wrote). None for a contact that is not one.
+    """
+    where = queries.future_state(contact, today)
+    if not where:
+        return None
+    return {
+        'due': contact.followup_due.isoformat(),
+        'reason': contact.followup_note,
+        'by_name': state.user_display_name(contact.followup_by) if contact.followup_by_id else None,
+        'at': _iso(contact.followup_at),
+        'state': where,
+        'label': queries.FUTURE_LABEL,
+        'days_left': (contact.followup_due - today).days,
+        # Whether the bot keeps quiet for this customer now: a person holds the conversation.
+        'muted': contact.handled_by == HANDLED_HUMAN,
+    }
+
+
+def note_payload(event: ContactEvent) -> dict:
+    """A note a person wrote about the customer — a line of the journal, never a message."""
+    return {
+        'id': event.id,
+        'text': event.text,
+        'by_name': state.user_display_name(event.actor) if event.actor_id else None,
+        'created_at': _iso(event.created_at),
+    }
+
+
 def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
     now = now or timezone.now()
     today = today or timezone.localtime(now).date()
+    open_reason = queries.open_reason(contact, today)
     flags = [flag for flag in (contact.known_flags or []) if flag in FLAG_LABELS]
     last_message = None
     if contact.last_message_at and contact.last_message_direction:
@@ -123,7 +157,13 @@ def contact_payload(contact: Contact, *, now=None, today=None) -> dict:
             'needs_human_at': _iso(contact.needs_human_at),
             'can_free_text': can_free_text(contact, now),
             'window_closes_at': _iso(window_closes_at(contact)),
+            # Whether a person has to deal with the conversation now, and why (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1).
+            'open': bool(open_reason),
+            'open_reason': open_reason,
+            'open_label': queries.OPEN_LABELS[open_reason],
         },
+        'future': future_payload(contact, today=today),
+        'waiting_list': waiting_list.contact_block(contact),
         'known': {
             'topic': contact.known_topic,
             'topic_label': TOPIC_LABELS.get(contact.known_topic, ''),

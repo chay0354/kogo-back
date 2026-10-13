@@ -262,6 +262,26 @@ TOOLS = [
             'additionalProperties': False,
         },
     },
+    {
+        'name': 'join_waiting_list',
+        'description': (
+            'רשימת המתנה לשיעור מסוים שמלא (חוג, יום ושעה). קוראים רק כשהשיעור שהלקוח רוצה חזר מלא (lessons[].is_full=true), '
+            'אחרי שהוצע לו מועד אחר שחזר מהכלי והוא רוצה דווקא את השיעור הזה — או שאין מועד אחר שמתאים. '
+            'הכלי בודק בעצמו את התפוסה: כשיש מקום הוא מחזיר has_room=true ולא מוסיף — אז מציעים להירשם. '
+            'כשהשיעור מלא חוזר would_add=true (או already=true כשהלקוח כבר ברשימה): רק מסמן — לא שולח דבר. '
+            'אחרי הסימון אומרים בקצרה שהלקוח ברשימת ההמתנה לשיעור הזה ושנעדכן כשיתפנה מקום. '
+            'לא מבטיחים מקום, לא מועד ולא מקום בתור. lesson_id הוא ה-id של המועד (lessons[].id) מתוך find_courses או course_card.'
+        ),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'lesson_id': {'type': 'string', 'description': 'ה-id של המועד המלא (lessons[].id), לא של החוג'},
+                'child': {'type': 'string', 'description': 'מה שהלקוח אמר על הילד, בקצרה: גיל, כיתה, שם אם נכתב'},
+            },
+            'required': ['lesson_id'],
+            'additionalProperties': False,
+        },
+    },
 ]
 TOOL_NAMES = {tool['name'] for tool in TOOLS}
 
@@ -282,6 +302,9 @@ class ToolContext:
         self.calls: list = []
         # A conversation that exists only in memory (shadow.scripted_context) may be given the card of a customer who is nobody's.
         self.scripted_customer: dict | None = None
+        # The waiting lists the bot would put the customer on ([{lesson_id, child, label}]) — marks only, like
+        # request_human: a row is written where the answer really leaves (waiting_list.apply_bot_marks).
+        self.waiting_list: list = []
 
     def used(self, item: KnowledgeItem) -> None:
         if item.id not in self.knowledge_used:
@@ -817,6 +840,12 @@ def _run(name: str, arguments: dict, ctx: ToolContext) -> dict:
             return request_human(ctx, reason=str(arguments.get('reason') or ''))
         if name == 'tag_conversation':
             return tag_conversation(ctx, tag=str(arguments.get('tag') or ''), details=str(arguments.get('details') or ''))
+        if name == 'join_waiting_list':
+            from apps.wahub import waiting_list
+
+            return waiting_list.bot_would_join(
+                ctx, lesson_id=str(arguments.get('lesson_id') or ''), child=str(arguments.get('child') or ''),
+            )
     except Exception as exc:  # the answer must still come, and the fault is not lost
         logger.exception('wahub tool %s failed', name)
         return {'error': f'הכלי נכשל: {type(exc).__name__}'}
@@ -949,4 +978,11 @@ def summarize_result(name: str, result: dict) -> str:
         return 'סומן שצריך נציג'
     if name == 'tag_conversation':
         return f'סומנה התגית "{result.get("tag", "")}"'
+    if name == 'join_waiting_list':
+        label = (result.get('lesson') or {}).get('label', '')
+        if result.get('has_room'):
+            return f'יש מקום בשיעור — לא נוסף לרשימת המתנה ({label})'
+        if result.get('already'):
+            return f'כבר ברשימת ההמתנה: {label}'
+        return f'סומן לרשימת ההמתנה: {label}' if result.get('would_add') else 'לא נוסף לרשימת ההמתנה'
     return ''

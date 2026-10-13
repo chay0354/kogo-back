@@ -41,9 +41,9 @@ def _response(payload, status_code=200):
 class FakeClaude:
     """
     Claude behind a mock, playing a script: ('tool', name, input) asks for a
-    tool, ('say', text) is the bot's answer — a callable is given what the
-    last tool returned — and ('json', payload) is any other JSON answer (the
-    judge's). The requests it was sent are kept.
+    tool, ('say', text) is the bot's answer — a callable, as the text or as the
+    input of a tool, is given what the last tool returned — and ('json', payload)
+    is any other JSON answer (the judge's). The requests it was sent are kept.
     """
 
     def __init__(self, *steps):
@@ -54,7 +54,8 @@ class FakeClaude:
         self.requests.append(json)
         step = self.steps.pop(0)
         if step[0] == 'tool':
-            block = {'type': 'tool_use', 'id': f'toolu_{len(self.requests)}', 'name': step[1], 'input': step[2]}
+            given = step[2](self._last_tool_result(json)) if callable(step[2]) else step[2]
+            block = {'type': 'tool_use', 'id': f'toolu_{len(self.requests)}', 'name': step[1], 'input': given}
             return _response({'model': MODEL, 'stop_reason': 'tool_use', 'content': [block]})
         if step[0] == 'json':
             return _response({'model': MODEL, 'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': globals()['json'].dumps(step[1], ensure_ascii=False)}]})

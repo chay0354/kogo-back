@@ -277,7 +277,7 @@ class ClaudeTests(ShadowTestCase):
         self.assertEqual(body['tool_choice'], {'type': 'auto'})
         self.assertEqual([tool['name'] for tool in body['tools']], [
             'find_courses', 'course_card', 'quote_registration', 'instructor_info', 'branch_info', 'holiday_dates',
-            'office_hours_now', 'customer_card', 'request_human', 'tag_conversation',
+            'office_hours_now', 'customer_card', 'request_human', 'tag_conversation', 'join_waiting_list',
         ])
         self.assertEqual(body['fallbacks'], 'default')
         self.assertEqual(headers['anthropic-beta'], 'server-side-fallback-2026-07-01')

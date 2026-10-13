@@ -57,6 +57,11 @@ urlpatterns = [
     path('leads/<int:pk>/reopen/', views_leads.LeadReopenView.as_view(), name='wahub-lead-reopen'),
     path('leads/<int:pk>/snooze/', views_leads.LeadSnoozeView.as_view(), name='wahub-lead-snooze'),
     path('leads/<int:pk>/owner/', views_leads.LeadOwnerView.as_view(), name='wahub-lead-owner'),
+    # The waiting list of a lesson that is full (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ד): who waits for what, and
+    # the two things the office does to a row. Putting somebody on a list is contacts/{id}/waiting-list/.
+    path('waiting-list/', views.WaitingListView.as_view(), name='wahub-waiting-list'),
+    path('waiting-list/<int:pk>/handled/', views.WaitingListHandledView.as_view(), name='wahub-waiting-list-handled'),
+    path('waiting-list/<int:pk>/remove/', views.WaitingListRemoveView.as_view(), name='wahub-waiting-list-remove'),
     path('for-customer/', views.ForCustomerView.as_view(), name='wahub-for-customer'),
     path('for-customer/recheck/', views.ForCustomerRecheckView.as_view(), name='wahub-for-customer-recheck'),
     path('', include(router.urls)),
