@@ -407,7 +407,7 @@ class TellTests(NotifyCase):
         response = self.press()
         notify = response.data['notify']
         self.assertEqual((notify['sent'], notify['how'], notify['code']), (True, 'template', 'sent_template'))
-        self.assertEqual(notify['detail'], 'נשלח כתבנית (kogo_lead_seat_1)')
+        self.assertEqual(notify['detail'], 'נשלח כתבנית מאושרת')
         self.assertEqual([sent[1:] for sent in self.manychat.sent], [('template', SEAT_FLOW)])
         # The conversation shows our words; the customer got the template's own.
         self.assertEqual(self.out(), [('template', 'sent', WORDS)])

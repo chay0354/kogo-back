@@ -105,7 +105,7 @@ HOW_LABELS = {
         'תצא כתבנית מאושרת (עברו 24 שעות מההודעה האחרונה של הלקוח) — הלקוח מקבל את הנוסח הקבוע של התבנית'
     ),
 }
-SENT_DETAILS = {SENT_TEXT: 'נשלח כהודעה רגילה', SENT_TEMPLATE: f'נשלח כתבנית ({FLOW_NAME})'}
+SENT_DETAILS = {SENT_TEXT: 'נשלח כהודעה רגילה', SENT_TEMPLATE: 'נשלח כתבנית מאושרת'}
 SIMULATED_NOTE = ' (הדמיה — לא יצא לאף אחד)'
 SEND_FAILED = 'השליחה נכשלה.'
 
@@ -336,7 +336,8 @@ def tell(entry_id, user, *, again: bool = False, now=None) -> dict:
         if not waiting_list.sync_contact(entry.contact_id):
             lead_stage.refresh_quietly(entry.contact_id)
     except Exception:
-        # The message has left and the row says so; the journal and the lead's sentence are the cron's to catch up on.
+        # The message has left, the conversation shows it and the row says so. What may be missing is the line of
+        # the journal and the lead's sentence ("the customer was told") — said here, so that somebody can see why.
         logger.exception('wahub waiting list: the telling of contact %s was sent but not written in full', entry.contact_id)
     detail = SENT_DETAILS[code] + (SIMULATED_NOTE if message.status == STATUS_SIMULATED else '')
     return answer(True, code, detail, how, message)
