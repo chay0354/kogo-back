@@ -34,7 +34,7 @@ from apps.core.permissions import IsManager
 from apps.customers.models import Family
 from apps.wahub import (
     analysis, cron, demo, future_leads, handoff, inbound, lead_stage, live_test, matching, media, queries, reviewer, sending,
-    shadow, state, transcribe, waiting_list,
+    shadow, state, transcribe, waiting_list, waiting_notify,
 )
 from apps.wahub.models import (
     EVENT_CREATED,
@@ -388,6 +388,26 @@ class ContactViewSet(viewsets.GenericViewSet):
             {'note': future_leads.note_payload(event), 'contact': self._payload(contact.id)}, status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=True, methods=['patch', 'delete'], url_path=r'notes/(?P<note_id>[0-9]+)')
+    def note(self, request, pk=None, note_id=None):
+        """
+        PATCH contacts/{id}/notes/{note_id}/ {text} → 200 {note, contact};
+        DELETE → 200 {deleted, contact} (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ז.5).
+        404 for a note this contact does not have — also for a line of its
+        journal that is no note. The journal keeps who and when, not the words.
+        """
+        contact = self.get_object()
+        try:
+            if request.method == 'DELETE':
+                deleted = future_leads.delete_note(contact, note_id, request.user)
+                return Response({'deleted': deleted, 'contact': self._payload(contact.id)})
+            event = future_leads.edit_note(contact, note_id, request.data.get('text'), request.user)
+        except future_leads.NoteNotFound:
+            return _error('הפתק לא נמצא.', http=status.HTTP_404_NOT_FOUND)
+        except future_leads.FutureLeadError as exc:
+            return _error(str(exc))
+        return Response({'note': future_leads.note_payload(event), 'contact': self._payload(contact.id)})
+
     @action(detail=True, methods=['post'], url_path='waiting-list')
     def waiting_list(self, request, pk=None):
         """
@@ -404,7 +424,7 @@ class ContactViewSet(viewsets.GenericViewSet):
             )
         except waiting_list.WaitingListError as exc:
             return _error(exc.detail, code=exc.code)
-        entry = WaitingListEntry.objects.select_related('contact', 'added_by', 'closed_by').get(pk=entry.pk)
+        entry = WaitingListEntry.objects.select_related(*waiting_list.ROW_RELATED).get(pk=entry.pk)
         body = {'entry': waiting_list.payloads([entry])[0], 'contact': self._payload(contact.id)}
         if not created:
             return Response(
@@ -1045,6 +1065,64 @@ class WaitingListView(APIView):
             return Response(waiting_list.listed(request.query_params))
         except waiting_list.WaitingListError as exc:
             return _error(exc.detail, code=exc.code)
+
+
+class WaitingListLessonsView(APIView):
+    """
+    GET waiting-list/lessons/?q=&branch=<uuid>&full=1&contact=<id> — the lessons a
+    person chooses from when putting somebody on a waiting list (the same
+    contract, ז.2), each with its seats as the form counts them. Reads only.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        try:
+            return Response(waiting_list.lessons_to_choose(request.query_params))
+        except waiting_list.WaitingListError as exc:
+            return _error(exc.detail, code=exc.code)
+
+
+class WaitingListNotifyView(APIView):
+    """
+    Telling one row's customer that a seat came free (the same contract, ז.4) —
+    only ever on a person's press. GET: what the press would do now (the words,
+    how they would leave, what stops them); reads only. POST {again?}: the press.
+    200 {entry, contact, notify} — `notify.sent` says whether a message left,
+    and why not when it did not; 409 {detail, code, entry, contact} for a row
+    that is not one to tell about, or whose customer was already told of this
+    seat and the press did not say `again`. Every door of sending.py stands.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    @staticmethod
+    def _contact(entry):
+        return contact_payload(queries.listed().get(pk=entry.contact_id))
+
+    def get(self, request, pk):
+        try:
+            return Response(waiting_notify.preview(pk))
+        except WaitingListEntry.DoesNotExist:
+            return _error('הרשומה לא נמצאה.', http=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request, pk):
+        again = request.data.get('again') in (True, 'true', '1', 1)
+        try:
+            result = waiting_notify.tell(pk, request.user, again=again)
+        except WaitingListEntry.DoesNotExist:
+            return _error('הרשומה לא נמצאה.', http=status.HTTP_404_NOT_FOUND)
+        except waiting_notify.Refused as exc:
+            entry = waiting_list.payloads([exc.entry])[0]
+            return _error(
+                exc.detail, code=exc.code, http=status.HTTP_409_CONFLICT, entry=entry, contact=self._contact(exc.entry),
+                already_notified_at=entry['notified_at'], already_notified_by_name=entry['notified_by_name'],
+            )
+        notify = result['notify']
+        notify['message'] = message_payload(notify['message']) if notify['message'] is not None else None
+        return Response({
+            'entry': waiting_list.payloads([result['entry']])[0],
+            'contact': self._contact(result['entry']),
+            'notify': notify,
+        })
 
 
 class WaitingListEntryView(APIView):

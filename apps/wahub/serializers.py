@@ -116,6 +116,9 @@ def note_payload(event: ContactEvent) -> dict:
         'text': event.text,
         'by_name': state.user_display_name(event.actor) if event.actor_id else None,
         'created_at': _iso(event.created_at),
+        # A note a person rewrote (the same contract, ז.5); both empty for a note as it was first written.
+        'edited_at': _iso(event.edited_at),
+        'edited_by_name': state.user_display_name(event.edited_by) if event.edited_by_id else None,
     }
 
 

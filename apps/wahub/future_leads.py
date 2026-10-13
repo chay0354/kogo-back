@@ -43,6 +43,7 @@ from apps.wahub.models import (
     EVENT_FOLLOWUP,
     EVENT_LEAD_ACTION,
     EVENT_NOTE,
+    EVENT_NOTE_CHANGED,
     FOLLOWUP_ANSWERED,
     FOLLOWUP_LATER,
     FOLLOWUP_NOT_RELEVANT,
@@ -82,10 +83,16 @@ NO_WORDS = 'לבוט אין נוסח פעיל לחזרה מהסוג הזה — �
 OFFICE_ONLY = 'זה ליד שרק אדם יכול לקדם'
 MUTE_FAILED = 'תקלה לא צפויה בהשתקת הבוט. לא ידוע אם הבוט הושתק — אפשר לנסות "לקחת שיחה".'
 ON_A_WAITING_LIST = 'הלקוח ברשימת המתנה — המערכת תתריע כשיתפנה מקום. אין לבוט מה לתזמן מעבר לזה.'
+NOTE_EDITED = 'פתק נערך'
+NOTE_DELETED = 'פתק נמחק'
 
 
 class FutureLeadError(ValueError):
     """An action refused, with the reason in Hebrew."""
+
+
+class NoteNotFound(LookupError):
+    """No such note on this contact — also for a line of the journal that is no note."""
 
 
 def _person(user):
@@ -322,24 +329,79 @@ def _understood(contact: Contact, planned: LeadFollowUp | None, now) -> dict:
 
 # --- notes ------------------------------------------------------------------------------------------------
 
+def _note_text(text) -> str:
+    text = str(text or '').strip()
+    if not text:
+        raise FutureLeadError('נדרש טקסט לפתק.')
+    if len(text) > NOTE_CHARS:
+        raise FutureLeadError(f'הפתק ארוך מדי (עד {NOTE_CHARS} תווים).')
+    return text
+
+
 def add_note(contact: Contact, text, user) -> ContactEvent:
     """
     A note about the customer, written by a person while talking to them. A
     line of the journal: it is no message and is sent to nobody. The summary
     reads it the next time it reads the conversation (analysis.office_notes).
     """
-    text = str(text or '').strip()
-    if not text:
-        raise FutureLeadError('נדרש טקסט לפתק.')
-    if len(text) > NOTE_CHARS:
-        raise FutureLeadError(f'הפתק ארוך מדי (עד {NOTE_CHARS} תווים).')
-    event = state.log_event(contact.pk, EVENT_NOTE, text, actor=user)
+    event = state.log_event(contact.pk, EVENT_NOTE, _note_text(text), actor=user)
     # The screens show it; and what the office now knows may change what the lead is.
     state.touch(contact.pk, needs_analysis=True)
     return event
 
 
+def _note_of(contact: Contact, note_id):
+    """The note itself, held for the change — a line of this contact's journal that is a note, or NoteNotFound."""
+    try:
+        wanted = int(note_id)
+    except (TypeError, ValueError):
+        raise NoteNotFound
+    event = ContactEvent.objects.select_for_update().filter(pk=wanted, contact=contact, kind=EVENT_NOTE).first()
+    if event is None:
+        raise NoteNotFound
+    return event
+
+
+def edit_note(contact: Contact, note_id, text, user) -> ContactEvent:
+    """
+    A note rewritten (the contract, ז.5). It stays where it was in the
+    conversation — who wrote it and when do not move — and says when it was
+    rewritten and by whom. The journal gets a line of its own, without the
+    words. The same text again changes nothing.
+    """
+    text = _note_text(text)
+    with transaction.atomic():
+        event = _note_of(contact, note_id)
+        if text != event.text:
+            event.text, event.edited_at, event.edited_by = text, timezone.now(), _person(user)
+            event.save(update_fields=['text', 'edited_at', 'edited_by'])
+            state.log_event(contact.pk, EVENT_NOTE_CHANGED, NOTE_EDITED, actor=user)
+            # What the office knows has changed: the lead is read again with the note as it now is.
+            state.touch(contact.pk, needs_analysis=True)
+    return ContactEvent.objects.select_related('actor', 'edited_by').get(pk=event.pk)
+
+
+def delete_note(contact: Contact, note_id, user) -> int:
+    """
+    A note deleted — for good, not marked: every reader of the notes (the
+    screens, the lead's details, the summary that reads them beside the
+    conversation) stops seeing it at once. The journal keeps that a note was
+    deleted, by whom and when, and not what it said: a deletion that kept the
+    words would be no deletion. The lead is read again without it, so the bot
+    stops going by what the note said.
+    """
+    with transaction.atomic():
+        event = _note_of(contact, note_id)
+        deleted = event.pk
+        event.delete()
+        state.log_event(contact.pk, EVENT_NOTE_CHANGED, NOTE_DELETED, actor=user)
+        state.touch(contact.pk, needs_analysis=True)
+    return deleted
+
+
 def notes(contact: Contact, limit: int = NOTES_IN_CONVERSATION) -> list:
     """The notes of one contact, the newest first."""
-    rows = ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).select_related('actor').order_by('-id')[:limit]
+    rows = (
+        ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).select_related('actor', 'edited_by').order_by('-id')[:limit]
+    )
     return [note_payload(event) for event in rows]

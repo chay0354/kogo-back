@@ -422,7 +422,7 @@ def details_payload(contact: Contact, *, now=None) -> dict:
         # What a person wrote about the customer, and every lesson they waited for.
         'notes': [
             serializers.note_payload(event)
-            for event in ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).select_related('actor').order_by('-id')[:NOTES_SHOWN]
+            for event in ContactEvent.objects.filter(contact=contact, kind=EVENT_NOTE).select_related('actor', 'edited_by').order_by('-id')[:NOTES_SHOWN]
         ],
         'waiting_list_entries': waiting_list.entries_of(contact),
     }

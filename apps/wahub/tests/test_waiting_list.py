@@ -205,7 +205,9 @@ class OfficeTests(WaitingListCase):
         self.assertEqual(set(entry), {
             'id', 'contact_id', 'name', 'phone_display', 'is_demo', 'status', 'status_label', 'lesson', 'child', 'added_by',
             'added_by_name', 'created_at', 'freed_at', 'closed_at', 'closed_by_name', 'closed_reason', 'position', 'title',
+            'notified_at', 'notified_by_name', 'notified_how', 'notified_how_label', 'customer_replied_at',
         })
+        self.assertEqual((entry['notified_at'], entry['notified_how'], entry['customer_replied_at']), (None, '', None))
         self.assertEqual((entry['status'], entry['status_label'], entry['added_by'], entry['added_by_name']), ('waiting', 'ממתין', 'person', 'דנה מנהלת'))
         self.assertEqual((entry['position'], entry['title'], entry['child']), (1, f'ברשימת המתנה: {LABEL}', 'בן 5'))
         self.assertEqual(entry['lesson'], {
@@ -216,7 +218,7 @@ class OfficeTests(WaitingListCase):
         block = response.data['contact']['waiting_list']
         self.assertEqual(set(block), {
             'status', 'status_label', 'entry_id', 'lesson_id', 'label', 'course', 'day', 'start', 'branch', 'child', 'since',
-            'freed_at', 'title', 'more',
+            'freed_at', 'notified_at', 'title', 'more',
         })
         self.assertEqual((block['status'], block['status_label'], block['label'], block['more']), ('waiting', 'ברשימת המתנה', LABEL, 0))
         self.assertEqual(self.journal(), [f'נוסף לרשימת ההמתנה: {LABEL} (בן 5)'])

@@ -219,7 +219,13 @@ class TemplatesApiTests(AutomationCase):
 
     def test_what_the_screen_says_is_what_the_engine_plans(self):
         """`when_label` and `days` are read from the very delays a round is planned by."""
-        for row in self.get('leads/templates/').data:
+        rows = self.get('leads/templates/').data
+        # The message a person sends by a press is planned by nobody (test_waiting_notify has it).
+        by_hand = [row for row in rows if row['kind'] in lead_followup_seed.BY_HAND]
+        self.assertEqual([(row['template_key'], row['days']) for row in by_hand], [('seat_freed_1', None)])
+        for row in rows:
+            if row in by_hand:
+                continue
             delays = lead_stage.delays_for(row['kind'], row['variant'])
             with self.subTest(key=row['template_key']):
                 self.assertEqual(row['days'], delays[row['step'] - 1].days)
@@ -379,7 +385,7 @@ class AutomationCardTests(AutomationCase):
         card = self.card()
         self.assertIs(card['ready'], True)
         self.assertTrue(all(line['ok'] and line['how'] == '' for line in card['lines']))
-        self.assertEqual(self.line('templates')['detail'], '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 1 מתוך 12')
+        self.assertEqual(self.line('templates')['detail'], '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 1 מתוך 13')
         self.assertEqual(self.line('sending')['detail'], 'דלוקה — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
         # One of the five taken off: not ready any more.
         settings_store.set_lead_template('trial_feedback_1', '', user=self.manager)
@@ -1147,7 +1153,7 @@ class ByNameTests(AutomationCase):
         # One automation serves the two last reminders.
         self.assertEqual(rows['link_reminder_3']['target'], rows['date_arrived_3']['target'])
         templates = self.line('templates')
-        self.assertEqual((templates['ok'], templates['detail']), (True, '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 12 מתוך 12'))
+        self.assertEqual((templates['ok'], templates['detail']), (True, '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 13 מתוך 13'))
         self.assertEqual(settings_store.lead_templates(), {})        # nothing was written as a person's decision
 
     def test_only_some_are_there_yet(self):

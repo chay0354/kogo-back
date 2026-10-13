@@ -34,6 +34,18 @@ second and the third. What a phrasing may use:
 These phrasings are never read out to the bot that answers customers
 (knowledge.relevant_items leaves them out): they are what the system sends by
 itself, not what an answer may be built from.
+
+One phrasing here is no round of the bot's at all (BY_HAND): the message that
+tells a customer on a waiting list that a seat came free. It leaves only when
+a person presses for one row of the list (waiting_notify.py), and it is filed
+with the others so that it, too, is edited on the "הבוט" screen and has its
+line on the templates card. It names the lesson itself — the row's own class,
+day, hour and branch — so its variables are its own:
+
+    {חוג}     the class of the lesson waited for ("קפוארה גן חובה")
+    {יום}     its day ("שלישי")
+    {שעה}     its hour ("17:00")
+    {סניף}    its branch
 """
 from __future__ import annotations
 
@@ -55,6 +67,14 @@ from apps.wahub.models import (
 
 SEED_TAG = 'חזרה ללידים 12.10.2026'
 VARIABLES_NOTE = 'משתנים: {חוג} {סניף} {ילד} {גיל} {קישור}. קטע בסוגריים מרובעים נשמט כשחסר בו פרט.'
+# The message a person sends by a press — "a seat came free" — to one customer on a waiting list
+# (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ז.4). Not a kind of LeadFollowUp: the engine never plans it.
+SEAT_FREED = 'seat_freed'
+# The kinds that leave on a person's press and not by a round of the engine: no delays, no steps.
+BY_HAND = (SEAT_FREED,)
+VARIABLES_NOTES = {
+    SEAT_FREED: 'משתנים (של השיעור שחיכו לו): {חוג} {יום} {שעה} {סניף}. קטע בסוגריים מרובעים נשמט כשחסר בו פרט.',
+}
 # Why the texts changed after they were first filed (the evening of 11.10). A row still as the filing left it is
 # brought to the text below, as a new version with this reason in its history; a row a person has edited is left as
 # they wrote it. `REVISED_BEFORE` holds the reasons of earlier rewrites, so a row only this file has rewritten still
@@ -153,6 +173,13 @@ PHRASINGS = [
         [],
         False,
     ),
+    (
+        SEAT_FREED, '', 'הודעה ללקוח: התפנה מקום ברשימת ההמתנה',
+        'בלחיצה של המשרד על "להודיע ללקוח", כשהתפנה מקום למי שברשימת ההמתנה. לא נשלחת לבד',
+        'היי התפנה מקום ב *{חוג}*[ ביום {יום}][ ב-{שעה}][ ({סניף})] 🎉 רוצים שנשמור לכם אותו?',
+        [],
+        True,
+    ),
 ]
 
 KEY_PREFIX = knowledge.LEAD_PHRASING_PREFIX
@@ -173,7 +200,7 @@ def records() -> list[dict]:
             'kind': KIND_PHRASING, 'key': phrasing_key(kind, variant), 'title': title, 'body': body,
             'is_active': active, 'when_to_say': WHEN_INTERNAL, 'scope_level': SCOPE_BUSINESS,
             'source_note': _source_note(phrasing_key(kind, variant)),
-            'data': {'variants': list(later), 'verbatim': True, 'when': f'{when}. {VARIABLES_NOTE}'},
+            'data': {'variants': list(later), 'verbatim': True, 'when': f'{when}. {VARIABLES_NOTES.get(kind, VARIABLES_NOTE)}'},
         }
         for kind, variant, title, when, body, later, active in PHRASINGS
     ]

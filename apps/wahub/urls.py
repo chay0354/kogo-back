@@ -60,6 +60,10 @@ urlpatterns = [
     # The waiting list of a lesson that is full (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ד): who waits for what, and
     # the two things the office does to a row. Putting somebody on a list is contacts/{id}/waiting-list/.
     path('waiting-list/', views.WaitingListView.as_view(), name='wahub-waiting-list'),
+    # The same contract, ז: the lessons a person chooses from, and telling one row's customer that a seat
+    # came free — GET shows what the press would do, POST is the press.
+    path('waiting-list/lessons/', views.WaitingListLessonsView.as_view(), name='wahub-waiting-list-lessons'),
+    path('waiting-list/<int:pk>/notify/', views.WaitingListNotifyView.as_view(), name='wahub-waiting-list-notify'),
     path('waiting-list/<int:pk>/handled/', views.WaitingListHandledView.as_view(), name='wahub-waiting-list-handled'),
     path('waiting-list/<int:pk>/remove/', views.WaitingListRemoveView.as_view(), name='wahub-waiting-list-remove'),
     path('for-customer/', views.ForCustomerView.as_view(), name='wahub-for-customer'),

@@ -436,10 +436,13 @@ def _details_given(m: Moment) -> list:
     The details of a class the bot itself gave in this answer. An hour or a sum
     the customer wrote in the conversation ("אמור להיות עכשיו שיעור ב-17:30"),
     said back to him, is not one; nor is the hour of his own registered child's
-    lesson, which the card he was answered from holds.
+    lesson, which the card he was answered from holds; nor a sum the knowledge
+    itself states — the ceremony at the end of the year, the owner's own word,
+    which no tool returns and no class holds.
     """
     own = _hours_written(m.customer_all) | {_shekels(value) for value in _numbers_written(m.customer_all)}
     own |= set(times_in(_dump([{'result': m.given}]))) if m.given else set()
+    own |= {_shekels(number) for number in money_evidence([], m.knowledge_text)}
     return [detail for detail in _class_details(m.reply) if detail not in own]
 
 

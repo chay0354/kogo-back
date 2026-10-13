@@ -289,6 +289,9 @@ EVENT_LEAD_ACTION = 'lead_action'
 # (docs/WAHUB-CONTRACT-FUTURE-LEADS.md).
 EVENT_CLOSED = 'conversation_closed'
 EVENT_WAITING_LIST = 'waiting_list'
+# A note about the customer was rewritten or deleted (the same contract, ז.5). The line says who and
+# when, never the words: a note that was deleted is gone.
+EVENT_NOTE_CHANGED = 'note_changed'
 EVENT_KIND_CHOICES = [
     (EVENT_CREATED, 'נוצר'),
     (EVENT_FOLLOWUP, 'סימון מעקב'),
@@ -304,6 +307,7 @@ EVENT_KIND_CHOICES = [
     (EVENT_LEAD_ACTION, 'פעולה על הליד'),
     (EVENT_CLOSED, 'השיחה נסגרה'),
     (EVENT_WAITING_LIST, 'רשימת המתנה'),
+    (EVENT_NOTE_CHANGED, 'שינוי בפתק'),
 ]
 
 LAST_MESSAGE_PREVIEW_CHARS = 300
@@ -571,6 +575,14 @@ class ContactEvent(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # A note (`kind` "note") a person rewrote: when, and who. Empty for every other line and for a
+    # note as it was first written — a line of the journal is otherwise never changed.
+    # No index: nothing looks a line up by who rewrote it, and building one would hold the whole
+    # journal locked while the migration runs.
+    edited_at = models.DateTimeField(null=True, blank=True)
+    edited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+', db_index=False,
+    )
 
     class Meta:
         db_table = 'wahub_contact_events'
@@ -1187,6 +1199,12 @@ WAITING_BY_BOT = 'bot'
 WAITING_BY_PERSON = 'person'
 WAITING_BY_CHOICES = [(WAITING_BY_BOT, 'הבוט'), (WAITING_BY_PERSON, 'נציג')]
 
+# How the customer was told that a seat came free: free text inside WhatsApp's 24 hours, an
+# approved template after them.
+WAITING_TOLD_TEXT = 'text'
+WAITING_TOLD_TEMPLATE = 'template'
+WAITING_TOLD_CHOICES = [(WAITING_TOLD_TEXT, 'הודעה רגילה'), (WAITING_TOLD_TEMPLATE, 'תבנית')]
+
 
 class WaitingListEntry(models.Model):
     """
@@ -1195,12 +1213,15 @@ class WaitingListEntry(models.Model):
     `join_waiting_list`) or by the office. The cron looks at every waiting row
     with the very count the registration form uses; when a seat is free the row
     becomes `freed` and the lead goes to the office's list. Nothing is ever
-    sent from here, to the customer or to the office.
+    sent by itself, to the customer or to the office: the customer is told only
+    when a person presses for this very row (apps/wahub/waiting_notify.py), and
+    `notified_*` keeps when, by whom and how.
 
     Like the rest of the app, the lesson is kept as a plain id with a copy of
     what the screen shows, not as a foreign key: deleting or moving a lesson
     never touches this table, and a row whose lesson is gone still says what
-    was waited for. apps/wahub/waiting_list.py is the only writer.
+    was waited for. apps/wahub/waiting_list.py is the only writer — but for
+    `notified_*`, which waiting_notify.py writes.
     """
     contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name='waiting_list')
     lesson_id = models.UUIDField()
@@ -1229,6 +1250,16 @@ class WaitingListEntry(models.Model):
     )
     # Why it left the list when no person took it off: the lesson is gone, the child registered.
     closed_reason = models.CharField(max_length=200, blank=True)
+    # The last time the customer was told a seat came free — a message that really left. A second
+    # telling is allowed and writes over the first; the journal keeps every one.
+    notified_at = models.DateTimeField(null=True, blank=True)
+    notified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    notified_how = models.CharField(max_length=10, choices=WAITING_TOLD_CHOICES, blank=True, default='')
+    # A press that is being sent this moment: taken before ManyChat is asked and given back after,
+    # so two presses on one row never send two messages. A claim nobody gave back goes stale by itself.
+    notify_claimed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'wahub_waiting_list'

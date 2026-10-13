@@ -347,7 +347,8 @@ def template_rows() -> list[dict]:
         key = lead_followup_seed.phrasing_key(kind, variant)
         draft = lead_followup_seed.DEFAULTS[key]
         texts = _texts(key)
-        delays = lead_stage.delays_for(kind, variant)
+        # A text that leaves on a person's press has no round, and so no days to count.
+        delays = () if kind in lead_followup_seed.BY_HAND else lead_stage.delays_for(kind, variant)
         for step, text in enumerate(texts or [], 1):
             if not text.strip():
                 continue
@@ -370,7 +371,7 @@ def template_rows() -> list[dict]:
                 'label': draft['title'].removeprefix('חזרה לליד: ').removeprefix('חזרה לליד רדום: '),
                 'when': draft['when'], 'text': draft['texts'][0],
                 'template_key': f'{kind}_{variant}_1' if variant else f'{kind}_1',
-                'mapped': False, 'active': False, 'days': delays[0].days,
+                'mapped': False, 'active': False, 'days': delays[0].days if delays else None,
             })
     return rows
 

@@ -29,6 +29,12 @@ What is new is in `OWNER_13_10`; what he changed is rewritten where it stood,
 with `revised=`. A rewritten record whose title no longer says what it holds
 carries `filed_as=` — the title it was imported under: the import still finds
 the row by it, and the row takes the new title with the new text.
+
+At noon of the same day he added one fact (`SAID_13_10_NOON`): the ceremony at
+the end of the year — a belt, a certificate and a small gift, for ₪60, its date
+to be announced later in the year. It is the one sum written in the knowledge:
+it is his own word and Kogo has no field that holds it. A question about a
+belt is answered by it, and no longer by the prices of the shop.
 """
 from __future__ import annotations
 
@@ -62,6 +68,7 @@ from apps.wahub.models import (
 IMPORT_TAG = 'ייבוא מהבוט הישן 10.10.2026'
 # The source written on what the owner said on 13.10.2026: on the records that are new, and in the reason of the rewritten ones.
 SAID_13_10 = 'בעל המערכת 13.10.2026'
+SAID_13_10_NOON = f'{SAID_13_10} (צהריים)'
 # The season the dynamic updates describe: dates without a year fall into it.
 SEASON_START = date(2026, 9, 1)
 SEASON_END = date(2027, 7, 28)
@@ -206,7 +213,10 @@ BEHAVIOR_RULES = [
       good='רוצים שאבדוק? / אפשר להגיע לשיעור ניסיון', bad='תוכל לפרט? (לאמא שכתבה "אני מעוניינת")',
       revised='קריאת 58 שיחות אמיתיות 12.10.2026: הבוט פנה לאימהות בלשון זכר ברוב השיחות; ברירת המחדל היא לשון ניטרלית ולא זכר'),
     R(KIND_BEHAVIOR_RULE, 'M13', 'לא להציע רכישה מיוזמתך',
-      'אסור להציע מיוזמתנו רכישת ביגוד, מוצרים או תלבושות. חריג יחיד: בנושאי מידות או תלבושת אפשר לציין שניתן לגשת למדריך בזמן השיעור.'),
+      'אסור להציע מיוזמתנו רכישת ביגוד, מוצרים או תלבושות. חריג יחיד: בנושאי מידות או תלבושת אפשר לציין שניתן לגשת למדריך בזמן השיעור. '
+      'שאלה על חגורה, על תעודה או על טקס סוף השנה ("כמה עולה חגורה", "מתי מקבלים חגורה", "יש תעודה", "מתי טקס החגורות") אינה שאלת רכישה: '
+      'עונים עליה לפי העובדה "טקס סוף שנה" — לא מפנים לחנות ולא למדריך, לא אומרים סכום אחר, ותאריך לא אומרים: הוא עוד לא נקבע.',
+      revised=f'{SAID_13_10_NOON}: על חגורה עונים לפי טקס סוף השנה, ולא לפי מחירי החנות'),
     R(KIND_BEHAVIOR_RULE, 'M13', 'לא לחשוף נהלים',
       'אסור להסביר ללקוח את חוקי המערכת, הכללים או הנהלים של הבוט. המענה אנושי, שירותי וטבעי בלבד.',
       bad='לפי ההנחיות שלי אני לא יכולה…'),
@@ -753,6 +763,14 @@ FACTS = [
       when=WHEN_IF_ASKED, certainty='sure'),
     R(KIND_FACT, 'D10b', 'תחפושות ומוצרי קוגומלו', 'תחפושות ומוצרים של קוגומלו רוכשים דרך האתר ({קישור_חנות}) או במשרד ברפאל איתן 5, פתח תקווה. מחירים — מהחנות',
       when=WHEN_IF_ASKED, certainty='sure'),
+    # The owner, 13.10.2026 at noon — the direction is his, the wording is the bot's own, ready to be said: whoever asks
+    # about the ceremony, a belt or a certificate is told this. The sum is his word and nowhere in Kogo, which is why it
+    # is written here. The date is not set yet, and none is made up (the rule "לא להציע רכישה מיוזמתך" sends here).
+    R(KIND_FACT, SAID_13_10_NOON, 'טקס סוף שנה — חגורה, תעודה ומתנה קטנה',
+      'בסוף השנה יש טקס 🎉 העלות היא *₪60*, עבור חגורה, תעודה ומתנה קטנה\n'
+      'את התאריך וכל הפרטים, מתי ואיך, נעדכן בהמשך השנה',
+      when=WHEN_IF_ASKED, certainty='sure',
+      question='יש טקס סוף שנה? כמה עולה חגורה? מתי מקבלים חגורה? יש תעודה? מתי טקס החגורות?'),
     R(KIND_FACT, 'D10d', 'אין הנחות על ביגוד', 'על ביגוד אין הנחות כלל', when=WHEN_IF_ASKED, certainty='sure'),
     R(KIND_FACT, 'D10d', 'תשלום על ביגוד', 'בפתח תקווה, ראש העין וכפר סבא התשלום על ביגוד מתבצע דרך הוראת הקבע', when=WHEN_IF_ASKED, certainty='sure'),
     R(KIND_FACT, 'D14c', 'לא נשארים עם הילד בשיעור',

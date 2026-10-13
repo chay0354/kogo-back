@@ -21,7 +21,15 @@ The cron looks at every row on the list (`check`): a seat is free → `freed`,
 a line in the contact's journal, and the lead goes to the office's list; the
 seat was taken again → back to `waiting`; the child registered → `handled`;
 the lesson is gone → `removed`, with the reason. Nothing here sends anything,
-to the customer or to the office.
+to the customer or to the office. Telling the customer that a seat came free
+is a person's press on one row, and lives in waiting_notify.py — the only
+thing about the list that sends; this module only shows what it kept
+(`notified_*`).
+
+The screen of the whole list (the contract, ז.1–ז.2) reads two more things
+here: the rows grouped by lesson with the lesson's seats as they are now
+(`listed` → `lessons`), and the lessons somebody can be put on the list of
+(`lessons_to_choose`). Both count seats the way the form does.
 
 The contact carries a copy of its place on a list (`lead_waiting`), which is
 what the lead stage and the lists read; `sync_contact` keeps it.
@@ -46,6 +54,7 @@ from apps.wahub.models import (
     WAITING_HANDLED,
     WAITING_REMOVED,
     WAITING_STATUS_CHOICES,
+    WAITING_TOLD_CHOICES,
     WAITING_WAITING,
     Contact,
     WaitingListEntry,
@@ -62,8 +71,13 @@ CHECK_BATCH = 200
 CHILD_CHARS = 200
 ENTRIES_SHOWN = 20
 LIST_LIMIT = 500
+# The lessons a person chooses from when putting somebody on a list.
+LESSONS_LIMIT = 500
+# What every reader of a row's payload loads with it.
+ROW_RELATED = ('contact', 'added_by', 'closed_by', 'notified_by')
 
 STATUS_LABELS = dict(WAITING_STATUS_CHOICES)
+TOLD_LABELS = dict(WAITING_TOLD_CHOICES)
 ON_THE_LIST = 'ברשימת המתנה'
 DAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת']
 
@@ -146,6 +160,24 @@ def look(lesson_id, *, now=None) -> dict:
     return {'found': True, 'lesson': lesson, 'course': course, 'cap': Seats([course], now=now).cap(lesson, course)}
 
 
+def seats_block(cap: dict | None) -> dict:
+    """
+    The seats of a lesson for a screen of the office: the form's own numbers
+    (`_lesson_widget_capacity`) and one short line of them. None — the lesson
+    is gone, or nobody can be registered to it any more — gives empty numbers.
+    """
+    if cap is None:
+        return {'enrolled': None, 'capacity': None, 'seats_left': None, 'is_full': False, 'seats_label': ''}
+    enrolled, capacity, left = cap['enrolled_count'], cap['capacity'], cap['available_spots']
+    if capacity is None:
+        label = f'{enrolled} רשומים · בלי מגבלת מקומות' if enrolled else 'אין רשומים · בלי מגבלת מקומות'
+    elif cap['is_full']:
+        label = f'{enrolled} מתוך {capacity} · מלא'
+    else:
+        label = f'{enrolled} מתוך {capacity} · ' + ('נשאר מקום אחד' if left == 1 else f'נשארו {left}')
+    return {'enrolled': enrolled, 'capacity': capacity, 'seats_left': left, 'is_full': bool(cap['is_full']), 'seats_label': label}
+
+
 # --- the words ------------------------------------------------------------------------------------------
 
 def _day_name(day_of_week) -> str:
@@ -206,7 +238,19 @@ def payload(entry: WaitingListEntry, *, position: int | None = None) -> dict:
         'closed_reason': entry.closed_reason,
         'position': position,
         'title': title_of(entry),
+        # The last time the customer was told a seat came free (waiting_notify.py), and whether they wrote since.
+        'notified_at': _iso(entry.notified_at),
+        'notified_by_name': state.user_display_name(entry.notified_by) if entry.notified_by_id else None,
+        'notified_how': entry.notified_how,
+        'notified_how_label': TOLD_LABELS.get(entry.notified_how, ''),
+        'customer_replied_at': _iso(replied_after(entry, contact)),
     }
+
+
+def replied_after(entry: WaitingListEntry, contact: Contact):
+    """The customer's last message, when it was written after they were told of the seat; else None."""
+    told, wrote = entry.notified_at, contact.last_inbound_at
+    return wrote if told is not None and wrote is not None and wrote > told else None
 
 
 def _positions(lesson_ids) -> dict:
@@ -247,8 +291,20 @@ def _cache_of(entries: list) -> dict:
         'child': chosen.child,
         'since': _iso(chosen.created_at),
         'freed_at': _iso(chosen.freed_at),
+        'notified_at': _iso(told_of_this_seat(chosen)),
         'more': len(entries) - 1,
     }
+
+
+def told_of_this_seat(entry: WaitingListEntry):
+    """
+    When the customer was told of the seat that is free NOW; None when they were
+    not — also when they were told of an earlier one that was taken again since
+    (the row keeps that moment as history; the lead does not go by it).
+    """
+    if entry.status != WAITING_FREED or entry.notified_at is None:
+        return None
+    return entry.notified_at if entry.freed_at is None or entry.notified_at >= entry.freed_at else None
 
 
 def sync_contact(contact_id) -> bool:
@@ -290,6 +346,7 @@ def contact_block(contact: Contact) -> dict | None:
         'child': kept.get('child') or '',
         'since': kept.get('since'),
         'freed_at': kept.get('freed_at'),
+        'notified_at': kept.get('notified_at') if freed else None,
         'title': (
             freed_title(kept.get('course') or '', kept.get('day') or '', kept.get('start') or '') if freed
             else f'{ON_THE_LIST}: {label}'
@@ -323,7 +380,7 @@ def join(contact: Contact, lesson_id, *, child: str = '', by: str = WAITING_BY_P
     lesson, course = seen['lesson'], seen['course']
     existing = WaitingListEntry.objects.filter(
         contact=contact, lesson_id=lesson.id, status__in=WAITING_ACTIVE_STATUSES,
-    ).select_related('contact', 'added_by', 'closed_by').first()
+    ).select_related(*ROW_RELATED).first()
     if existing is not None:
         return existing, False
     if not seen['cap']['is_full']:
@@ -459,7 +516,7 @@ def _act(entry_id, status: str, user, words: str) -> WaitingListEntry:
         if entry.status in WAITING_ACTIVE_STATUSES:
             _close(entry, status, user=user, line=f'{words}: {lesson_block(entry)["label"]}')
     sync_contact(entry.contact_id)
-    return WaitingListEntry.objects.select_related('contact', 'added_by', 'closed_by').get(pk=entry_id)
+    return WaitingListEntry.objects.select_related(*ROW_RELATED).get(pk=entry_id)
 
 
 def mark_handled(entry_id, user) -> WaitingListEntry:
@@ -600,12 +657,15 @@ def counts() -> dict:
     )
 
 
-def listed(params) -> dict:
-    """GET waiting-list/?status=&lesson= — whose seat came free first, then whoever has waited longest."""
+def listed(params, *, now=None) -> dict:
+    """
+    GET waiting-list/?status=&lesson= — whose seat came free first, then whoever
+    has waited longest; and the same rows grouped by lesson, with its seats now.
+    """
     wanted = (params.get('status') or 'active').strip()
     if wanted not in FILTERS:
         raise WaitingListError('bad_status', 'status: active, waiting, freed, closed או all.')
-    rows = WaitingListEntry.objects.filter(FILTERS[wanted]).select_related('contact', 'added_by', 'closed_by')
+    rows = WaitingListEntry.objects.filter(FILTERS[wanted]).select_related(*ROW_RELATED)
     lesson = (params.get('lesson') or '').strip()
     if lesson:
         lesson_id = _lesson_uuid(lesson)
@@ -613,10 +673,152 @@ def listed(params) -> dict:
     rows = rows.annotate(
         _first=Case(When(status=WAITING_FREED, then=Value(0)), default=Value(1), output_field=IntegerField()),
     ).order_by('_first', 'id')
-    return {'counts': counts(), 'results': payloads(rows[:LIST_LIMIT])}
+    results = payloads(rows[:LIST_LIMIT])
+    return {'counts': counts(), 'lessons': lessons_of(results, now=now), 'results': results}
+
+
+def _active_by_lesson(lesson_ids) -> dict:
+    """{lesson id: {waiting, freed}} over the whole list, for the lessons given. One query."""
+    found: dict = {}
+    rows = (
+        WaitingListEntry.objects.filter(lesson_id__in=list(lesson_ids), status__in=WAITING_ACTIVE_STATUSES)
+        .values_list('lesson_id', 'status').annotate(n=Count('id'))
+    )
+    for lesson_id, status, n in rows:
+        found.setdefault(lesson_id, {WAITING_WAITING: 0, WAITING_FREED: 0})[status] = n
+    return found
+
+
+def lessons_of(results: list, *, now=None) -> list:
+    """
+    The rows of a list grouped by lesson (the contract, ז.1): one line per
+    lesson, in the order its first row has in `results` — so a lesson a seat
+    came free in is first — with the lesson's seats as the form counts them
+    this minute, and how many wait for it on the whole list. A lesson that is
+    gone, or that nobody can be registered to any more, is shown from the copy
+    its rows keep, with `exists` False and no numbers.
+    """
+    from apps.wahub.trial_offer import Seats
+
+    groups: dict = {}
+    for row in results:
+        lesson = row['lesson']
+        group = groups.setdefault(lesson['id'], {**lesson, 'entry_ids': []})
+        group['entry_ids'].append(row['id'])
+    if not groups:
+        return []
+    wanted = [uuid.UUID(lesson_id) for lesson_id in groups]
+    there = {lesson_id: pair for lesson_id, pair in _courses_with(wanted).items() if _runs(*pair)}
+    seats = Seats(list({course.id: course for _lesson, course in there.values()}.values()), now=now) if there else None
+    active = _active_by_lesson(wanted)
+    by_lesson = []
+    for lesson_id, group in zip(wanted, groups.values()):
+        pair = there.get(lesson_id)
+        waiting = active.get(lesson_id, {})
+        # In queue order: the oldest first, whatever order the rows came in.
+        group['entry_ids'].sort()
+        by_lesson.append({
+            **group,
+            'exists': pair is not None,
+            **seats_block(seats.cap(*pair) if pair is not None else None),
+            'waiting': waiting.get(WAITING_WAITING, 0),
+            'freed': waiting.get(WAITING_FREED, 0),
+        })
+    return by_lesson
+
+
+def _contact_id(raw) -> int | None:
+    raw = str(raw or '').strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise WaitingListError('bad_contact', 'contact: מזהה איש קשר (מספר).')
+    return int(raw)
+
+
+def lessons_to_choose(params, *, now=None) -> dict:
+    """
+    GET waiting-list/lessons/?q=&branch=&full=1&contact= — the lessons a person
+    chooses from when putting somebody on a waiting list (the contract, ז.2):
+    every lesson `join` would take (`_runs`), by branch, class, day and hour,
+    with its seats as the form counts them. `can_join` is `is_full`: the office
+    waits for a seat only where the system says there is none, as the bot does.
+    Reads only.
+    """
+    from apps.courses.models import Course
+    from apps.wahub import course_tools
+    from apps.wahub.trial_offer import Seats
+
+    branch = (params.get('branch') or '').strip()
+    branch_id = _lesson_uuid(branch) if branch else None
+    if branch and branch_id is None:
+        raise WaitingListError('bad_branch', 'branch: מזהה סניף לא תקין.')
+    contact_id = _contact_id(params.get('contact'))
+    words = [word.casefold() for word in str(params.get('q') or '').split()]
+    only_full = str(params.get('full') or '').strip().lower() in ('1', 'true', 'yes')
+
+    courses = list(course_tools.with_lessons(
+        Course.objects.filter(is_active=True, branch__is_active=True, branch__is_external=False)
+    ))
+    branches = {}
+    found = []
+    for course in courses:
+        place = course.branch
+        city = place.city.name if place.city_id else ''
+        for lesson in course.lessons.all():
+            if not _runs(lesson, course):
+                continue
+            branches[place.id] = place.name
+            if branch_id is not None and place.id != branch_id:
+                continue
+            day, start = _day_name(lesson.day_of_week), _clock(lesson.start_time)
+            searched = ' '.join((course.name or '', place.name or '', city, day, f'יום {day}', start)).casefold()
+            if any(word not in searched for word in words):
+                continue
+            found.append((lesson, course))
+    found.sort(key=lambda pair: (pair[1].branch.name or '', pair[1].name or '', pair[0].day_of_week, _clock(pair[0].start_time)))
+
+    seats = Seats(list({course.id: course for _lesson, course in found}.values()), now=now) if found else None
+    lesson_ids = [lesson.id for lesson, _course in found]
+    active = _active_by_lesson(lesson_ids)
+    on_list = set(
+        WaitingListEntry.objects.filter(
+            contact_id=contact_id, lesson_id__in=lesson_ids, status__in=WAITING_ACTIVE_STATUSES,
+        ).values_list('lesson_id', flat=True)
+    ) if contact_id is not None else set()
+    results = []
+    for lesson, course in found:
+        block = seats_block(seats.cap(lesson, course))
+        if only_full and not block['is_full']:
+            continue
+        day, start = _day_name(lesson.day_of_week), _clock(lesson.start_time)
+        waiting = active.get(lesson.id, {})
+        results.append({
+            'id': str(lesson.id),
+            'course_id': str(course.id),
+            'course': course.name,
+            'day': day,
+            'start': start,
+            'end': _clock(lesson.end_time),
+            'branch_id': str(course.branch_id),
+            'branch': course.branch.name,
+            'label': lesson_label(course.name, day, start, course.branch.name),
+            **block,
+            # Only a lesson the system counts as full has a waiting list — for the office as for the bot.
+            'can_join': block['is_full'],
+            'waiting': waiting.get(WAITING_WAITING, 0) + waiting.get(WAITING_FREED, 0),
+            'on_list': lesson.id in on_list,
+        })
+        if len(results) >= LESSONS_LIMIT:
+            break
+    return {
+        'branches': [{'id': str(key), 'name': name} for key, name in sorted(branches.items(), key=lambda item: item[1] or '')],
+        'total': len(results),
+        'results': results,
+    }
 
 
 def entries_of(contact: Contact) -> list:
     """Every row of one contact, the newest first — what the lead's details show."""
-    rows = WaitingListEntry.objects.filter(contact=contact).select_related('contact', 'added_by', 'closed_by').order_by('-id')
+    rows = WaitingListEntry.objects.filter(contact=contact).select_related(*ROW_RELATED).order_by('-id')
     return payloads(rows[:ENTRIES_SHOWN])
