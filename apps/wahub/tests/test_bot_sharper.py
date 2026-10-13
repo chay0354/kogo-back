@@ -134,6 +134,9 @@ class SeatsAreTheFormsTest(CourseToolsTestCase):
         cap = {'enrolled_count': 1, 'capacity': 8, 'available_spots': 7, 'is_full': False}
         self.assertEqual(course_tools.seats_text('שני', '18:00', cap), 'ביום שני ב-18:00 רשום 1 מתוך 8 מקומות, נשארו 7')
         self.assertEqual(course_tools.seats_text('', '18:00', {**cap, 'enrolled_count': 0}), 'ב-18:00 עדיין אין רשומים, ויש 8 מקומות')
+        # More enrolled than the limit: a customer hears that it is full, never "8 out of 4".
+        over = {'enrolled_count': 8, 'capacity': 4, 'available_spots': 0, 'is_full': True}
+        self.assertEqual(course_tools.seats_text('רביעי', '16:00', over), 'ביום רביעי ב-16:00 השיעור מלא')
         self.assertIn('lessons[].seats_text', {tool['name']: tool['description'] for tool in shadow_tools.TOOLS}['find_courses'])
         self.assertIn('seats_text', shadow.SYSTEM_TASK)
 
