@@ -142,7 +142,8 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 ונוסח נאמר רק במצב שכתוב לצידו ("מתי") — לא במצב אחר. \
 כלל או נושא למטה שסותר את סדר השיחה או את מה שכתוב כאן — מה שכאן גובר.
 13. בלי נקודה בסוף משפט, ₪ לפני המספר, כוכבית אחת להדגשה עם רווח לפניה, 🔹 לכל פריט ברשימה, קישורים עם https:// מלא. \
-עונים בשפה שבה הלקוח כותב: בעברית — עברית בלבד; באנגלית, ברוסית, בערבית — באותה שפה, כששמות החוגים והסניפים נשארים כפי שהם במערכת. \
+עונים בעברית — גם להודעה ראשונה בשפה אחרת. לשפה של הלקוח עוברים רק כשהוא ממשיך לכתוב בה אחרי שקיבל תשובה בעברית (הודעה שנייה שלו ברצף בשפה הזאת), \
+או כשביקש במפורש או כתב שאינו מבין עברית; מאז עונים בשפה שלו, כששמות החוגים והסניפים נשארים כפי שהם במערכת. \
 1–3 שורות (נוסח "מילה במילה" נאמר כמו שהוא), שאלה אחת בכל פעם, אימוג׳י אחד לכל היותר, בלי "אשמח לעזור" ובלי שאלת נימוס בסוף. \
 נושא אחד בכל הודעה — מה שנשאל; רשימה עד 4 פריטים, ויותר מזה שואלים שאלה שמצמצמת; לא מביאים את כל המידע בבת אחת. \
 הודעה שנוח לקרוא: כל עובדה בשורה משלה, והעיקר בה מודגש (שם החוג, יום ושעה, מחיר) — הדגשה אחת בשורה, לא הכול; קישור תמיד בשורה משלו אחרי 🔗; שורה ריקה בין התשובה לבין הצעד הבא.
@@ -152,7 +153,11 @@ show_all=true רק כשהלקוח ביקש במפורש לראות הכול ("פ
 קוד כניסה, קוד לדלת או כל קוד אחר לא נמסר.
 16. "יש שיעור היום", "יש שיעור השבוע", "השיעור מתקיים ב…" — קראי ל-course_card של החוג וצטטי את held_text של המועד שנשאל עליו: \
 תאריך שמופיע ב-cancelled_dates בוטל, ואומרים מתי השיעור הקרוב (next_date). תאריך שלא מופיע שם — "לפי המערכת השיעור מתקיים כרגיל"; \
-בחג, בערב חג או בחופשה שלא סומנו במערכת לא מאשרים ולא שוללים: בודקים מול המשרד ומסמנים לנציג. סיבת הביטול לא נמסרת.
+בחג, בערב חג או בחופשה שלא סומנו במערכת לא מאשרים ולא שוללים — שולחים את לוח החופשות של הסניף. סיבת הביטול לא נמסרת. \
+כל שאלה על חגים וחופשות ("יש שיעורים בחנוכה", "יש שיעור בחג", "מתי החופשה") — קראי ל-holiday_dates עם הסניף \
+(ללקוח רשום: הסניף של החוג של הילד; לא ידוע באיזה סניף — שואלים קודם). found=true: משפט קצר אחד שלוח החופשות נשלח (say) — \
+המערכת שולחת אחרי התשובה את התמונה עם כל התאריכים; תאריכי חופשה לא מפרטים בעצמך, גם לא מהימים המיוחדים שבידע. \
+found=false: הנוסח missing_info ו-request_human, ולא כותבים שנשלח לוח.
 17. מקרה לא רגיל (הודעה לא ברורה, כמה ילדים יחד, מיקוח, בקשה חריגה, כעס) — לפי הכללים שבידע; שתי שאלות בהודעה — עונים על שתיהן. \
 וכשאין כלל: לא ממציאים — שאלה קצרה אחת, או נציג. לא מחשבים סכום או תאריך שהמערכת לא החזירה, ולא מאשרים שעה, תאריך או מחיר רק כי הלקוח הציע אותם.
 
@@ -181,6 +186,12 @@ _SHOW_ALL = re.compile(r'פשוט תגיד|רק תגיד|תגידו כבר|תג�
 # The network of a branch, as parents spell it; and how full a lesson is.
 _WIFI = re.compile(r'ו{1,2}י{1,2}\s?פי{1,2}(?![א-ת])|wi-?\s?fi|אינטרנט (?:ה)?אלחוטי|סיסמת (?:ה)?(?:רשת|אינטרנט)|רשת (?:ה)?אלחוטית', re.I)
 _SEATS = re.compile(r'כמה (?:ילדים|ילדות|רשומים|רשומות|משתתפים|תלמידים|מקומות|נרשמו)|יש (?:עוד )?מקום|נשאר(?:ו)? (?:עוד )?מקו|מקומות פנויים|קבוצה (?:קטנה|גדולה)')
+# A holiday or a vacation, as parents ask about one — not the summer, which is the season's end and the camps.
+_HOLIDAY = re.compile(
+    r'חנוכה|פסח|פורים|סוכות|ראש השנה|כיפור|שבועות|שמחת תורה|יום העצמאות|ל"ג בעומר|חול המועד|(?<![א-ת])[בהלמו]?ה?חג(?:ים)?(?![א-ת])'
+    r'|חופש(?:ה|ות)(?![א-ת])|חופשת (?!הקיץ)|לוח (?:ה)?חופשות'
+)
+_SUMMER = re.compile(r'חופש הגדול|חופשת הקיץ|בקיץ|קייטנ')
 _BARE_AGE = re.compile(r'^\s*(\d{1,2})(\s*וחצי|\.5)?\s*$')
 _KINDERGARTEN = re.compile(r'גן חובה|טרום חובה|טרום-חובה')
 # 260₪ → ₪260. A number, whole, with the sign right after it — and not a sign that already stands before the next number:
@@ -493,7 +504,7 @@ def _stub(ctx: Context) -> Draft:
 
     def call(name: str, **arguments) -> dict:
         result = run_tool(name, arguments, tctx)
-        tools_used.append({'name': name, 'input': arguments, 'summary': summarize_result(name, result)})
+        tools_used.append(shadow_tools.used(name, arguments, result))
         reasons.append(f'קראתי לכלי {name}: {summarize_result(name, result)}')
         return result
 
@@ -633,7 +644,23 @@ def _stub(ctx: Context) -> Draft:
             P_CLASS.search(merged) or P_INFO.search(merged) or P_TRIAL.search(merged) or P_REG.search(merged)
             or _SEATS.search(merged) or known.topic in ('trial', 'registration', 'info')
         )
-        if _WIFI.search(merged):
+        if _HOLIDAY.search(merged) and not _SUMMER.search(merged):
+            # Holidays and vacations: the board of the branch is sent after the answer, and no date is spelled out here.
+            rule('חגים וחופשות')
+            where = (known.branch_name if known.branch_id else '') or known.city
+            board = call('holiday_dates', branch=where) if where else call('holiday_dates')
+            if board.get('found'):
+                text = board['say']
+            elif board.get('need'):
+                reasons.append('שאלו על חגים ולא ידוע באיזה סניף — שואלים')
+                choice = [row['name'] for row in board.get('branches') or []]
+                text = board['ask'] + (''.join(f'\n🔹 {name}' for name in choice[:4]) if len(choice) > 1 else '')
+            else:
+                reasons.append('לסניף הזה אין לוח חופשות לשלוח — בודקים מול המשרד ומסמנים לנציג')
+                request_human = 'שאלו על חגים וחופשות, ואין לוח חופשות לשלוח לסניף'
+                call('request_human', reason=request_human)
+                text = missing()
+        elif _WIFI.search(merged):
             # The network of a branch: only when asked, only of a branch that is known, and letter for letter.
             rule('וויפי')
             where = (known.branch_name if known.branch_id else '') or known.city
@@ -1024,7 +1051,7 @@ def _claude(ctx: Context, deadline: float | None, *, max_tokens: int | None = No
             for block in tool_uses:
                 arguments = block.get('input') if isinstance(block.get('input'), dict) else {}
                 result = run_tool(block.get('name', ''), arguments, tctx)
-                tools_used.append({'name': block.get('name', ''), 'input': arguments, 'summary': summarize_result(block.get('name', ''), result)})
+                tools_used.append(shadow_tools.used(block.get('name', ''), arguments, result))
                 results.append({
                     'type': 'tool_result', 'tool_use_id': block.get('id'),
                     'content': json.dumps(result, ensure_ascii=False, default=str),
@@ -1402,6 +1429,29 @@ def scripted_context(history: list, targets: list, *, now=None, last_outbound: s
         hours=knowledge.office_hours_now(now), items=items, customer=customer, places=analysis.load_places(),
         tool_ctx=tool_ctx,
     )
+
+
+def flows_to_send(answer) -> list:
+    """
+    The ManyChat automations an answer sends after its text — today, the
+    holidays board of a branch (the `holiday_dates` tool, holiday_flows.py).
+    Read from the answer's own record of its tool calls — a ShadowReply's
+    `tools_used`, or a Draft's — where the tool's line carries `send_flow`
+    (shadow_tools.used). Each automation once, in the order it was asked for:
+    [{name, ns, label}].
+
+    Nothing here sends, and an answer that is only kept — the shadow's, "נסה
+    שאלה", a self-check — sends nothing at all: this is what a path that really
+    sends the new bot's answer asks, after the text has left (live_test.py).
+    """
+    flows, seen = [], set()
+    for line in getattr(answer, 'tools_used', None) or []:
+        flow = line.get('send_flow') if isinstance(line, dict) and line.get('name') in shadow_tools.SENDING_TOOLS else None
+        flow_ns = str(flow.get('ns') or '').strip() if isinstance(flow, dict) else ''
+        if flow_ns and flow_ns not in seen:
+            seen.add(flow_ns)
+            flows.append({'name': str(flow.get('name') or ''), 'ns': flow_ns, 'label': str(flow.get('label') or '')})
+    return flows
 
 
 def old_bot_reply_for(reply: ShadowReply) -> dict | None:

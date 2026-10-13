@@ -32,6 +32,12 @@ flips from the screen, and a marker the cron moves, are neither.
                             other; read and written by lead_templates.py only.
     lead_dormant_on         the day dormant leads are written to once (YYYY-MM-DD:
                             registration opens, a season starts). Empty: never.
+    holiday_flows_found     what ManyChat last said about the automations that carry
+                            the names of the branches' holidays boards, and when it
+                            was asked: {"at": "…", "ok": true, "flows":
+                            {"kogo_Holidays": {"flow", "name"}, …}, "twice": […]}.
+                            The same kind of cache; read and written by
+                            holiday_flows.py only.
 """
 from __future__ import annotations
 
@@ -46,6 +52,7 @@ REVIEW_HISTORY_CURSOR = 'review_history_cursor'
 LEAD_FOLLOWUP_TEMPLATES = 'lead_followup_templates'
 LEAD_TEMPLATES_FOUND = 'lead_followup_templates_found'
 LEAD_DORMANT_ON = 'lead_dormant_on'
+HOLIDAY_FLOWS_FOUND = 'holiday_flows_found'
 
 
 def row(key: str) -> WahubSetting | None:

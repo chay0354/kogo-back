@@ -69,6 +69,15 @@ def fetched(content, content_type, status=200):
     return response
 
 
+def asked_to_do(request):
+    """
+    What ManyChat was asked to do — every call but the read of its list of
+    automations, which the cron makes for the branches' holidays boards
+    (holiday_flows.py) and which sends nothing.
+    """
+    return [call.args[:2] for call in request.call_args_list if call.args[:2] != ('GET', '/fb/page/getFlows')]
+
+
 def sends(request):
     """The sendContent calls ManyChat got, as (subscriber_id, text)."""
     return [
@@ -869,7 +878,7 @@ class LiveReplyTests(LiveTestCase):
             Contact.objects.filter(pk=self.contact_id).update(live_test_busy_until=None)
             self.assertEqual(cron.tick()['live_test_unanswered'], 1)
             self.assertEqual(live_test.flag_unanswered(), 0)              # said once
-        request.assert_not_called()                                      # nothing is sent late
+        self.assertEqual(asked_to_do(request), [])                       # nothing is sent late
         self.assertEqual(Message.objects.filter(direction='out').count(), 0)
         contact = self.owner()
         self.assertTrue(contact.needs_human)
@@ -1413,7 +1422,7 @@ class LiveMediaTests(LiveTestCase):
         with patch(FETCH, return_value=fetched(OGG, 'audio/ogg')), patch(REQUEST) as request:
             counts = cron.tick()
         self.assertEqual(counts['shadow_proposed'], 1)
-        request.assert_not_called()                                      # the shadow never sends
+        self.assertEqual(asked_to_do(request), [])                       # the shadow never sends
         self.assertEqual(ShadowReply.objects.get(contact=contact).text, VOICE_RULE)   # no transcription key here
         message = Message.objects.get(contact=contact)
         self.assertTrue(ARCHIVED.match(message.media_url))

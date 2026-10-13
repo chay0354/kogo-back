@@ -222,7 +222,7 @@ class ListTests(WahubTestCase):
             set(data),
             {'inbound_configured', 'inbound_key_set_at', 'bot_replies_seen', 'ai_configured', 'send_configured',
              'sending_enabled', 'simulate_send', 'last_inbound_at', 'contacts_total', 'messages_last_24h', 'inbound_url',
-             'shadow_configured', 'shadow_model', 'live_test_contacts', 'transcribe'},
+             'shadow_configured', 'shadow_model', 'live_test_contacts', 'transcribe', 'holiday_flows'},
         )
         self.assertEqual(data['live_test_contacts'], 0)
         self.assertEqual(data['contacts_total'], 9)

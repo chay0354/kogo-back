@@ -334,11 +334,13 @@ class SharperChecksTests(SimpleTestCase):
     # ---- the customer's language ----
 
     def test_an_answer_is_in_the_language_the_customer_writes_in(self):
+        # Since 13.10.2026 the customer's language is owed once he asked for it or went on in it (test_owner_answers.py);
+        # here: a customer who wrote that she does not read Hebrew.
         english = 'Hi! We just moved to Israel and I dont speak Hebrew. Do you have classes for a 6 year old?'
         said = dict(calls=(GATED,), customer=[english], customer_all=english, customer_now=english)
         self.assertEqual(self.failed('Sure! We have היפ הופ and קפוארה there — which activity are you interested in?', **said), {})
         in_hebrew = self.failed('באיזה תחום מדובר?', **said)
-        self.assertIn('עונים בשפה שבה הלקוח כותב', in_hebrew['hebrew_only'])
+        self.assertIn('והבוט ענה בעברית', in_hebrew['hebrew_only'])
         mixed = self.failed('Sure!\nיש לנו שם חוגים מכמה תחומים לכל הגילים\nWhich activity?', **said)
         self.assertIn('משפט שלם בעברית', mixed['hebrew_only'])
         self.assertEqual(checks.answers_in('latin').test(self.moment('Which city are you in?', **said)), '')
@@ -354,7 +356,7 @@ class SharperChecksTests(SimpleTestCase):
         self.assertEqual(checks.customers_language(self.moment('', customer=[ad], customer_now=ad)), '')
         self.assertNotIn('hebrew_only', self.failed('היי 🙂 באיזו עיר אתם מחפשים חוג?', calls=(), customer=[ad], customer_all=ad, customer_now=ad))
         # An answer in English that carries a class — a day, an hour, a price, a link — trips none of the checks written for Hebrew.
-        asked = 'When is capoeira for a third grader, how much is it, and where do we sign up?'
+        asked = 'English please. When is capoeira for a third grader, how much is it, and where do we sign up?'
         full = 'קפוארה כיתות ג-ד meets on Wednesday at 16:00, ₪270 a month\n🔗 https://cogomelo.co.il/signup'
         self.assertEqual(self.failed(full, customer=[asked], customer_all=asked, customer_now=asked, knowledge_text='https://cogomelo.co.il/signup'), {})
         self.assertEqual(rules.GENERAL_COVERS['hebrew_only'], ('M2', 'X1'))
@@ -444,7 +446,7 @@ BRANCH = ('tool', 'branch_info', {'branch': PLACE})
 # What a bot that answers well does in each turn of each conversation: the tools it asks, and the answer.
 GOOD = {
     'ground_wifi': [[BRANCH, say(network)]],
-    'limit_english': [[find(), say('Sure! Which city are you looking in?')]],
+    'limit_english': [[find(), say('באיזו עיר מדובר?')], [find(), say('Sure! Which city are you looking in?')]],
     'seats_registered_then_left': [
         [THE_BUSY, say(lambda found: f'ביום שלישי ב-17:00 רשומים {found["courses"][0]["lessons"][0]["enrolled"]} ילדים')],
         [THE_BUSY, say(lambda found: f'נשארו {found["courses"][0]["lessons"][0]["seats_left"]} מקומות')],
@@ -489,7 +491,7 @@ GOOD = {
     'edge_slang_no_spaces': [[THE_MAIN, say(lesson)]],
     'edge_english_no_hebrew': [[find(), say('Welcome! Which city are you in?')]],
     'edge_russian': [[find(), say('Здравствуйте! В каком городе вы ищете кружок?')]],
-    'edge_arabic': [[find(), say('أهلاً! في أي مدينة تبحثون عن دورة؟')]],
+    'edge_arabic': [[find(), say('באיזו עיר מדובר?')], [find(), say('أهلاً! في أي مدينة تبحثون عن دورة؟')]],
     'edge_two_children_two_ages': [[THE_MAIN, THE_SIBLING, say('לבן 5: יום חמישי 16:30\nלכיתה א: יום שני 17:00')]],
     'edge_three_children_discount': [[say('על איזה חוג ובאיזו עיר מדובר? ההנחה נקבעת לפי החוג')]],
     'edge_will_be_three_next_month': [[find(city=PLACE, course_type=MAIN, age=2.9), say('החוגים אצלנו מגיל 3, אז עדיין לא. כשימלאו לו 3 נשמח לראות אתכם')]],
@@ -510,7 +512,7 @@ GOOD = {
     'edge_haggling_with_a_competitor': [[say('המחיר קבוע, ואין עליו הנחה מעבר למה שמוגדר במערכת. בן כמה הילד?')]],
     'edge_cash_or_bit': [[say('התשלום בהוראת קבע בכרטיס אשראי בלבד — לא במזומן ולא בביט')]],
     'edge_one_month_only': [[say('המנוי שנתי, בהוראת קבע. מתחילים משיעור ניסיון, וכך רואים קודם אם הוא נהנה')]],
-    'edge_why_a_registration_fee': [[say('דמי הרישום משולמים פעם בשנה, לכל ילד')]],
+    'edge_why_a_registration_fee': [[say('דמי הרישום הם תשלום חד-פעמי לשנה: עבור הביטוח, ועבור שמירת המקום של הילד בחוג עד סוף השנה')]],
     'edge_invoice': [[person('חשבונית'), say('מעבירה את הבקשה למשרד, ויחזרו אליך עם החשבונית')]],
     'edge_no_arithmetic': [
         [THE_MAIN, say(price)], [THE_MAIN, say('החוג פעם בשבוע, ביום חמישי 16:30')],
@@ -518,13 +520,15 @@ GOOD = {
     ],
     'edge_a_price_the_customer_heard': [[THE_MAIN, say(price)]],
     'edge_double_charge_wants_the_money_today': [[person('חיוב כפול'), say('מצטערת על אי הנעימות. בודקים את החיוב, ונציג מהמשרד יחזור אליך')]],
-    'edge_sick_child_make_up_lesson': [[person('השלמה או זיכוי'), say('רפואה שלמה! נציג מהמשרד יחזור אליכם עם תשובה לגבי השיעורים שהוחמצו')]],
+    'edge_sick_child_make_up_lesson': [[person('השלמה או זיכוי'), say(
+        'רפואה שלמה 🙏 בגדול אפשר להשלים בשיעור אחר באותו שבוע, והמשרד מאשר ומתאם\nזיכוי ניתן רק עם אישור רפואי. העברתי למשרד, ויחזרו אליכם',
+    )]],
     'edge_angry_then_threatens': [
         [person('לקוחה כועסת'), say('סליחה על ההמתנה. נציג מהמשרד יחזור אליך')],
         [person('איום בביקורת'), say('מבינה. הפנייה אצל הצוות, ונציג יחזור אליך לבדוק את החיוב')],
     ],
     'edge_child_with_autism': [[person('צרכים מיוחדים'), say('תודה ששיתפת. מישהו מהצוות יחזור אליך כדי לדבר על זה לפני השיעור')]],
-    'edge_very_shy_girl': [[say('לא ניתן להישאר בסטודיו בזמן השיעור, אבל אם קשה לה אפשר להיכנס קצת בהתחלה והמדריך יאמר מתי לצאת')]],
+    'edge_very_shy_girl': [[say('השיעור הוא הרגע של הילדים, בלי הורים. בהתחלה, אם היא ממש צריכה — המדריך מחליט אם להיכנס איתה ולכמה זמן')]],
     'edge_the_instructor_yelled': [[person('תלונה על מדריך'), say('מצטערת מאוד לשמוע. נציג מהמשרד יחזור אליך בהקדם')]],
     'edge_wants_the_manager': [[person('מבקש מנהל'), say('מעבירה לנציג מהמשרד, יחזרו אליך בהקדם')]],
     'edge_parent_in_distress': [[person('הורה במצוקה'), say('זה באמת לא פשוט. מישהו מהצוות יחזור אליך')]],
@@ -542,7 +546,7 @@ GOOD = {
     'edge_cut_off_message': [[say('כן, מקשיבה')], [THE_MAIN, say(lesson)]],
     'edge_yes_after_two_questions': [[say('לשלוח קישור לשיעור ניסיון, או קודם את המחיר?')]],
     'edge_registered_asks_about_own_class': [[say('החוג של נגה ביום חמישי ב-16:30')]],
-    'edge_second_trial': [[person('ניסיון נוסף'), say('ניסיון נוסף מתאמים מול המשרד, נציג יחזור אליכם')]],
+    'edge_second_trial': [[person('ניסיון נוסף'), say('לשיעור ניסיון שני לא ניתן להירשם, אבל העברתי את הבקשה למשרד — אולי יוכלו לעזור, ויחזרו אליכם')]],
     'edge_child_did_not_want': [[say('תודה שעדכנתם, לגמרי מובן. אנחנו כאן אם ירצה בהמשך')]],
 }
 # One answer nobody should give, to every turn: it invents, confirms, promises, argues and asks everything again.
@@ -674,8 +678,9 @@ class TheRulesOfThatDayTests(SimpleTestCase):
         edge = [record for record in knowledge_seed.OWNER_12_10 if 'מקרי קצה 12.10.2026' in record['source_note']]
         extreme = [record for record in knowledge_seed.OWNER_12_10 if 'בדיקות קיצון 12.10.2026' in record['source_note']]
         self.assertEqual((len(edge), len(extreme)), (18, 6))
+        # The rule about the language was rewritten by the owner on 13.10.2026, and took a new title with the new text.
         self.assertEqual({record['title'] for record in extreme}, {
-            'עונים בשפה שבה הלקוח כותב', 'לא מתמקחים', 'לא מאשרים תקלה כספית שלא נבדקה', 'דחוף כשהמשרד סגור — פעם אחת ובכנות',
+            'שפה: עברית, עד שהלקוח ממשיך בשפה שלו או מבקש', 'לא מתמקחים', 'לא מאשרים תקלה כספית שלא נבדקה', 'דחוף כשהמשרד סגור — פעם אחת ובכנות',
             'שתי שאלות בהודעה — עונים על שתיהן', 'היעדרות, השלמה וזיכוי',
         })
         # Every rule id of that day has a conversation, and every conversation names rules that exist.

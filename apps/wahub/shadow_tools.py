@@ -21,6 +21,14 @@ While one of them is missing it answers with `need` and the question to ask,
 and with no class at all, so there is nothing to offer too early; `show_all`
 is for a customer who really asked to see everything. An instruction can be
 forgotten; a class that never came back cannot be recited.
+
+`holiday_dates` (the owner, 13.10.2026) is the one tool whose answer is followed
+by something: it names the ManyChat automation that carries the holidays board
+of the branch (apps/wahub/holiday_flows.py). The tool itself still only reads —
+which board, and whether ManyChat was last heard to have it. The automation
+leaves after the answer's text, and only where the answer itself really leaves
+(shadow.flows_to_send, live_test.py); in the shadow, in "נסה שאלה" and in the
+bot's self-checks nothing is sent.
 """
 from __future__ import annotations
 
@@ -30,7 +38,7 @@ import re
 from django.conf import settings
 
 from apps.courses import age_groups
-from apps.wahub import analysis, course_tools, knowledge, matching, trial_offer
+from apps.wahub import analysis, course_tools, holiday_flows, knowledge, matching, trial_offer
 from apps.wahub.analysis import _same_city
 from apps.wahub.course_tools import DAY_NAMES, trial_line  # noqa: F401 — both are read from here too
 from apps.wahub.models import KIND_ALIAS, KIND_CONTACT, SCOPE_BRANCH, Contact, KnowledgeItem
@@ -178,12 +186,36 @@ TOOLS = [
             'והאם הוא סניף חיצוני. לסניף שלנו גם wifi — שם הרשת האלחוטית (name) והסיסמה שלה (code), כפי שהם רשומים במערכת: '
             'נמסרים רק כששואלים עליהם, בשתי שורות קצרות, ונכתבים אות באות כפי שהם (גם כשהם באותיות לועזיות; לא מתעתקים ולא מתקנים). '
             'wifi ריק (null), או סיסמה ריקה = לא רשום במערכת: אומרים שבודקים מול המשרד ומסמנים לנציג, ולא מנחשים. '
-            'קוד כניסה, קוד לדלת וכל קוד אחר אינם בכלי ואינם נמסרים. שדה ריק = אין את המידע; לא להמציא.'
+            'קוד כניסה, קוד לדלת וכל קוד אחר אינם בכלי ואינם נמסרים. שדה ריק = אין את המידע; לא להמציא. '
+            'manager_name — שם מנהל הסניף: נאמר כששואלים מי המנהל או מבקשים לדבר איתו. טלפון שלו אינו בכלי ואינו נמסר, '
+            'ולבקשה לדבר איתו לא עונים במספר טלפון: הקשר איתו דרך המשרד — request_human עם מה שהלקוח ביקש.'
         ),
         'input_schema': {
             'type': 'object',
             'properties': {'branch': {'type': 'string', 'description': 'שם הסניף או כינוי'}},
             'required': ['branch'],
+            'additionalProperties': False,
+        },
+    },
+    {
+        'name': 'holiday_dates',
+        'description': (
+            'חגים וחופשות: לכל שאלה על שיעורים בחג או בחופשה — "יש שיעורים בחנוכה?", "יש שיעור בחג?", "מתי החופשה?", '
+            '"עובדים בפסח?", ערב חג, חול המועד — קוראים לכלי הזה עם הסניף שנשאל עליו (או העיר). '
+            'לכל סניף יש לוח חופשות: אוטומציה שהמערכת שולחת ללקוח אחרי התשובה, עם תמונה של כל התאריכים. '
+            'found=true: התשובה היא משפט קצר אחד שהלוח נשלח (אפשר לצטט את say), והמערכת שולחת אותו מיד אחריה. '
+            'לא מפרטים תאריכי חופשה בעצמנו — לא מהזיכרון, לא מהשיחה ולא מהימים המיוחדים שבידע — ולא עונים "כן" או "לא" על חג מסוים: הלוח עונה. '
+            'need=branch: עוד לא ידוע באיזה סניף — שואלים את ask, ורק אותה. ללקוח רשום אפשר לקרוא בלי סניף: הכלי לוקח את הסניף של החוג של הילד. '
+            'found=false בלי need: לסניף הזה אין לוח, או שהוא לא נמצא — אומרים את הנוסח missing_info ומסמנים לנציג (request_human); '
+            'לא כותבים שנשלח לוח. הכלי עצמו רק קורא, אבל קריאה שחזרה עם found=true פירושה שהלוח יישלח ללקוח אחרי התשובה: '
+            'קוראים לו רק כשהלקוח שאל על חגים או על חופשות, ולא "ליתר ביטחון".'
+        ),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'branch': {'type': 'string', 'description': 'שם הסניף או כינוי שלו, כפי שהלקוח כתב או כפי שהוא בכרטיס הלקוח'},
+                'city': {'type': 'string', 'description': 'עיר, כשהלקוח אמר רק עיר'},
+            },
             'additionalProperties': False,
         },
     },
@@ -587,6 +619,76 @@ def branch_info(ctx: ToolContext, *, branch: str = '') -> dict:
     }
 
 
+HOLIDAYS_ASK = 'באיזה סניף מדובר?'
+HOLIDAYS_ASK_FIRST = 'לוח החופשות הוא של סניף מסוים: קודם שואלים את הלקוח את השאלה שב-ask, ורק אותה. לא מפרטים תאריכים.'
+HOLIDAYS_SENT = (
+    'אחרי התשובה המערכת שולחת ללקוח את לוח החופשות של הסניף — תמונה עם כל התאריכים. '
+    'בתשובה: משפט קצר אחד שהלוח נשלח (אפשר לצטט את say). לא מפרטים תאריכים ולא מוסיפים קישור.'
+)
+HOLIDAYS_OFFICE = (
+    'אין לוח חופשות לשלוח לסניף הזה: אומרים את הנוסח missing_info (שבודקים מול המשרד ושיחזרו עם תשובה) '
+    'ומסמנים לנציג (request_human). לא מפרטים תאריכים ולא כותבים שנשלח לוח.'
+)
+
+
+def _registered_branches(ctx: ToolContext) -> list:
+    """The branches the writer's registered children go to, as their card names them — what a registered parent means by "the branch"."""
+    card = customer_card(ctx) if (ctx.contact is not None or ctx.scripted_customer) else {}
+    names = [
+        str(row.get('branch') or '').strip()
+        for child in card.get('children') or [] if isinstance(child, dict)
+        for row in child.get('classes') or [] if isinstance(row, dict)
+    ]
+    return list(dict.fromkeys(name for name in names if name))
+
+
+def holiday_dates(ctx: ToolContext, *, branch: str = '', city: str = '') -> dict:
+    """
+    Which holidays board is sent for the branch asked about, and whether there
+    is one to send (holiday_flows.py). The branch is settled as every tool
+    settles it (resolve_branches); with none named, a registered parent's is
+    the branch of the child's class. Several branches that are not on one
+    board are a question — which branch — and never a guess.
+
+    Reads only: the board of a branch is a constant, and whether ManyChat has
+    its automation is what the cron last kept. `send_flow` in the answer is
+    what the paths that really send an answer look for (shadow.flows_to_send).
+    """
+    rows = resolve_branches(ctx, city=city, branch=branch)
+    if not rows and (branch or city):
+        # A city written where the branch goes, or the other way round — as `branch_info` reads it.
+        word = branch or city
+        rows = resolve_branches(ctx, city=word) or resolve_branches(ctx, branch=word)
+    if not rows and not (branch or city):
+        for name in _registered_branches(ctx):
+            rows += [row for row in resolve_branches(ctx, branch=name) if row not in rows]
+    if not rows:
+        result = {'found': False, 'need': '', 'branches': [], 'cities': _cities()}
+        if branch or city:
+            return {**result, 'hint': 'לא נמצא סניף כזה במערכת.'}
+        return {**result, 'need': NEED_BRANCH, 'ask': HOLIDAYS_ASK, 'hint': HOLIDAYS_ASK_FIRST}
+
+    listed = [{'name': row.name, 'city': row.city.name if row.city_id else ''} for row in rows]
+    boards = [holiday_flows.board_of(row) for row in rows]
+    flows = {board.flow if board else '' for board in boards}
+    if len(flows) > 1:
+        # A city whose branches are on different boards (or one of them on none): the customer says which.
+        return {'found': False, 'need': NEED_BRANCH, 'ask': HOLIDAYS_ASK, 'branches': listed, 'hint': HOLIDAYS_ASK_FIRST}
+    board = boards[0]
+    if board is None:
+        return {'found': False, 'need': '', 'branches': listed, 'flow_name': '', 'why': 'הסניף אינו באף לוח חופשות', 'note': HOLIDAYS_OFFICE}
+    flow = holiday_flows.flow_of(board)
+    if flow is None:
+        return {
+            'found': False, 'need': '', 'branches': listed, 'flow_name': board.flow,
+            'why': holiday_flows.why_missing(board), 'note': HOLIDAYS_OFFICE,
+        }
+    return {
+        'found': True, 'need': '', 'branches': listed, 'flow_name': board.flow, 'send_flow': flow,
+        'say': holiday_flows.SAY, 'note': HOLIDAYS_SENT,
+    }
+
+
 def office_hours_now(ctx: ToolContext) -> dict:
     hours = knowledge.office_hours_now(ctx.now)
     hours.pop('special', None) if hours.get('special') is None else None
@@ -728,6 +830,8 @@ def _run(name: str, arguments: dict, ctx: ToolContext) -> dict:
             )
         if name == 'branch_info':
             return branch_info(ctx, branch=str(arguments.get('branch') or ''))
+        if name == 'holiday_dates':
+            return holiday_dates(ctx, branch=str(arguments.get('branch') or ''), city=str(arguments.get('city') or ''))
         if name == 'office_hours_now':
             return office_hours_now(ctx)
         if name == 'customer_card':
@@ -746,6 +850,26 @@ def _run(name: str, arguments: dict, ctx: ToolContext) -> dict:
         logger.exception('wahub tool %s failed', name)
         return {'error': f'הכלי נכשל: {type(exc).__name__}'}
     return {'error': f'כלי לא מוכר: {name}'}
+
+
+# The tools whose answer is followed by an automation. Which automation is the tool's own to say (a constant of
+# holiday_flows.py) — never the model's, which chooses only the branch it asks about.
+SENDING_TOOLS = ('holiday_dates',)
+
+
+def used(name: str, arguments: dict, result: dict) -> dict:
+    """
+    One line of an answer's `tools_used`: the call, the line the screen shows
+    under "אילו כלים נקראו" — and, for the tool whose answer is followed by an
+    automation, which one (`send_flow`: {name, ns, label}). That mark is how
+    the automation reaches the path that sends the answer, with no table to
+    change (shadow.flows_to_send).
+    """
+    line = {'name': name, 'input': arguments, 'summary': summarize_result(name, result)}
+    flow = result.get('send_flow') if name in SENDING_TOOLS and isinstance(result, dict) and result.get('found') else None
+    if isinstance(flow, dict) and str(flow.get('ns') or '').strip():
+        line['send_flow'] = {key: str(flow.get(key) or '') for key in ('name', 'ns', 'label')}
+    return line
 
 
 def _shekel_text(amount) -> str:
@@ -831,6 +955,21 @@ def summarize_result(name: str, result: dict) -> str:
             return f'{row["name"]} (שלנו; {network})'
 
         return ', '.join(described(row) for row in rows) or 'לא נמצא'
+    if name == 'holiday_dates':
+        where = ', '.join(row['name'] for row in result.get('branches') or [])
+        flow = result.get('send_flow') or {}
+        if result.get('found') and flow:
+            # What will follow the answer — and that it follows only an answer that is itself sent.
+            return (
+                f'אחרי התשובה נשלחת האוטומציה {flow.get("name", "")} ({flow.get("label") or "לוח החופשות"}) ל{where} — '
+                'רק כשהתשובה עצמה נשלחת ללקוח; בתשובה בצל, ב"נסה שאלה" ובבדיקות לא נשלח דבר'
+            )
+        if result.get('need'):
+            return 'קודם שואלים באיזה סניף; לוח חופשות לא נשלח' + (f' ({where})' if where else '')
+        if not result.get('branches'):
+            return result.get('hint') or 'לא נמצא סניף'
+        named = f'האוטומציה {result["flow_name"]}: ' if result.get('flow_name') else ''
+        return f'{where}: {named}{result.get("why") or "אין לוח חופשות"} — לא נשלח דבר; בודקים מול המשרד'
     if name == 'office_hours_now':
         return 'המשרד פתוח' if result.get('open') else 'המשרד סגור'
     if name == 'customer_card':

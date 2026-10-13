@@ -99,6 +99,8 @@ class ScriptsTests(SimpleTestCase):
         'place_typo', 'place_glued', 'way_place', 'field_typo', 'main_day', 'busy_field', 'busy_child', 'busy_day',
         'packed_field', 'packed_child', 'packed_day', 'empty_field', 'empty_child', 'empty_day', 'two_day_field', 'two_day_child',
         'two_day_day', 'two_day_other', 'sibling_child', 'wifi_place', 'no_wifi_place', 'short_city', 'birth_date', 'off_day', 'trial_day',
+        # the words of the owner's answers of 13.10.2026
+        'holiday_place', 'holiday_other_place', 'holiday_none_place', 'camp_place', 'no_camp_place', 'manager_place',
     }
 
     def test_the_scripts_are_well_formed(self):

@@ -245,6 +245,8 @@ def _play(run: BotEvalRun, scenario, index: int, catalog, deadline: float | None
         knowledge_text=_knowledge_text(ctx.items, ctx.hours), office_days=_office_days(), catalog=catalog, allow=turn.allow,
         # What the model was told about the writer before any tool: evidence as much as a tool's answer is.
         given=ctx.customer or {},
+        # Turn by turn: whether he goes on in his own language after an answer is read from these.
+        customer_before=recent + ['\n'.join(message['text'] for message in played['customer']) for played in run.turns[:index]],
     )
     verdicts = checks.run(checks.GENERAL + tuple(turn.expect), moment, turn=index + 1)
     return {
