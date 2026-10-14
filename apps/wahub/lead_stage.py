@@ -111,7 +111,7 @@ from django.db import connection, transaction
 from django.db.models import Count, F, Max, Min, Q
 from django.utils import timezone
 
-from apps.wahub import lead_ai, matching, optout, queries, state, waiting_list
+from apps.wahub import bot_mode, lead_ai, matching, optout, queries, state, waiting_list
 from apps.wahub.models import (
     CALLBACK_COUNTS_UNDER,
     Contact,
@@ -195,7 +195,7 @@ COLD_AFTER = timedelta(days=30)
 # contacts that were already there. 3 (14.10.2026): the rounds of an external branch and of a
 # lead that went quiet, the price or the days to the office, a class that opened
 # (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md) — at once after the deploy, not at the next midnight.
-RULES_VERSION = 3
+RULES_VERSION = 4
 
 # --- the bot's own follow-ups (docs/WAHUB-CONTRACT-LEADS-V2.md, ג and ח.10) ---
 DAY = timedelta(days=1)
@@ -529,6 +529,30 @@ def old_bot_replies_seen(now=None) -> bool:
     return replies_copied_since(now) is not None
 
 
+# The switch from the old bot (bot_mode.first_live_at), read at most once a minute, whoever asks.
+_switch_seen = {'at': None, 'since': None}
+# A request for a person older than this, at the switch, was the office's in ManyChat's own inbox.
+OLD_REQUEST_FOR = timedelta(hours=24)
+
+
+def switched_at(now=None):
+    """The first moment the new bot answered everybody; None before it ever did."""
+    now = now or timezone.now()
+    if _switch_seen['at'] is None or abs(now - _switch_seen['at']) >= _SEEN_TTL:
+        _switch_seen['since'] = bot_mode.first_live_at()
+        _switch_seen['at'] = now
+    return _switch_seen['since']
+
+
+def answered_by_the_old_bot(contact: Contact, moment, now=None) -> bool:
+    """
+    A customer's message written at `moment` was answered by the old bot: it came before the switch, to a
+    contact whose answers were not Kogo's own. The old bot answered every message, and Kogo never saw how.
+    """
+    switched = switched_at(now)
+    return switched is not None and moment is not None and moment < switched and not answers_itself(contact)
+
+
 def answers_itself(contact: Contact) -> bool:
     """The answers this contact gets are Kogo's own: a demo, a live test, a conversation a person took."""
     return bool(contact.is_demo or contact.live_test or contact.handled_by == HANDLED_HUMAN)
@@ -566,6 +590,10 @@ class _Facts:
         # Without the answers on record, "nobody answered" cannot be said of this contact — nor of a
         # message written before ManyChat began copying them: the wait is counted from what came after.
         copied_since = None if answers_itself(contact) else replies_copied_since(now)
+        # From the switch on every answer is Kogo's own: a wait is counted from what came after it.
+        switched = None if answers_itself(contact) else switched_at(now)
+        if switched is not None:
+            copied_since = switched if copied_since is None else min(copied_since, switched)
         self.replies_visible = answers_itself(contact) or copied_since is not None
         if not self.replies_visible:
             waiting = None
@@ -985,8 +1013,16 @@ def compute(contact: Contact, now=None) -> dict:
             since=contact.last_inbound_at,
         )
 
-    # 6. asks for a person
-    if contact.needs_human:
+    # 6. asks for a person — not a request made a day and more before the switch: that one the office dealt
+    #    with in ManyChat's own inbox, where Kogo cannot see it
+    old_request = bool(
+        contact.needs_human
+        and answered_by_the_old_bot(contact, contact.needs_human_at, now)
+        and switched_at(now) - contact.needs_human_at >= OLD_REQUEST_FOR
+        # ...and the customer has not written since the switch: then the new bot, and the rules, see them again
+        and answered_by_the_old_bot(contact, contact.last_inbound_at, now)
+    )
+    if contact.needs_human and not old_request:
         return needs_reply()
 
     # 7. said, in words of their own, that they are not interested — and nobody goes on writing to them
@@ -996,7 +1032,10 @@ def compute(contact: Contact, now=None) -> dict:
         )
 
     # 8. what only a person can settle; or wrote, and nobody answered
-    if said.blocker in lead_ai.OFFICE_BLOCKERS and not facts.person_answered:
+    # An unanswered question the summary read in a conversation the old bot answered is not one: its answers were
+    # never copied to Kogo (the owner, 14.10.2026). The other things only a person settles stand.
+    old_question = said.blocker == lead_ai.BLOCKER_OPEN_QUESTION and answered_by_the_old_bot(contact, contact.last_inbound_at, now)
+    if said.blocker in lead_ai.OFFICE_BLOCKERS and not facts.person_answered and not old_question:
         if said.blocker == lead_ai.BLOCKER_OPEN_QUESTION:
             return needs_reply(f'שאל ולא קיבל תשובה: {said.blocker_text}')
         return needs_reply(said.blocker_text)

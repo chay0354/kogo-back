@@ -193,11 +193,43 @@ def _armed(key: str, wanted, now, *, clear: bool = False):
             done['since'] = kept
             return None
         value['since'] = now.isoformat()
+        # The first time the new bot answered everybody is kept for good (first_live_at): what came before it
+        # was answered by the old bot, whose answers Kogo never saw.
+        if key == settings_store.BOT_MODE:
+            value.setdefault('first_since', now.isoformat())
         done.update(since=now, changed=True)
         return value
 
     settings_store.change(key, mutate, default={})
     return done['since'], done['changed']
+
+
+def first_live_at():
+    """
+    The first moment the new bot answered everybody — the switch from the old bot
+    (14.10.2026). Kept even when the mode goes back to "test". None before it ever
+    did. Until then every customer's message was answered by the old bot, whose
+    answers were never copied to Kogo (the owner, 14.10.2026: "המערכת לא מסונכרנת
+    עם מה שהיה… לידים שאולי ענו להם"): lead_stage reads no wait, and no unanswered
+    question, from before it.
+    """
+    kept = _dict(settings_store.BOT_MODE)
+    first = _moment(kept.get('first_since'))
+    if first is not None:
+        return first
+    since = _moment(kept.get('since'))
+    if since is None:
+        return None
+    # Live before this was kept: the moment it went live is the first one, and is kept now.
+    def mutate(value):
+        value = dict(value) if isinstance(value, dict) else {}
+        if value.get('first_since'):
+            return None
+        value['first_since'] = since.isoformat()
+        return value
+
+    settings_store.change(settings_store.BOT_MODE, mutate, default={})
+    return since
 
 
 def live_since(*, arm: bool = False):

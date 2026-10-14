@@ -129,6 +129,22 @@ def takeover(contact: Contact, user) -> None:
     _set_handled_by(contact, HANDLED_HUMAN, user, 'נציג לקח את השיחה, הבוט הושתק')
 
 
+OFFICE_ANSWERED = 'נציג ענה מתוך Kogo — השיחה אצל נציג, הבוט לא עונה בה'
+
+
+def office_answered(contact: Contact, user) -> None:
+    """
+    Somebody of the office wrote to the customer from Kogo: the conversation is a person's from here on,
+    and the bot keeps quiet in it (the owner, 14.10.2026, an hour after the switch: "ברגע שהמשרד התחיל
+    לענות… זה עובר לטיפול נציג; לא הגיוני שהוא עדיין יישאר על הבוט"). Only Kogo's own state moves: the new
+    bot reads Kogo, and ManyChat's tags only ever silenced the old bot, which no longer answers — so the
+    office's message is not held up by three more calls to ManyChat. "החזר לבוט" gives the conversation back.
+    """
+    if contact.is_demo or contact.handled_by == HANDLED_HUMAN:
+        return
+    _set_handled_by(contact, HANDLED_HUMAN, user, OFFICE_ANSWERED)
+
+
 def release(contact: Contact, user) -> None:
     """Back to the bot — the NEW one, for a live-test contact: its mute stays on, only the status field says so again."""
     if contact.live_test:
