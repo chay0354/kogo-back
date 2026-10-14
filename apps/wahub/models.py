@@ -472,6 +472,11 @@ class Contact(models.Model):
     # child, since, freed_at, more}; {} when the contact waits for no lesson. A copy of the rows
     # of WaitingListEntry, written by waiting_list.py only.
     lead_waiting = models.JSONField(default=dict, blank=True)
+    # The daily look for a lead with nothing to offer (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ד) —
+    # {checked_on: the day it was last looked at, found_at: when a class that fits them was found open,
+    # what: "נפתח: …" — the classes and the branch}; {} until the first look. Written by
+    # lead_openings.py only; lead_stage.py reads it.
+    lead_opened = models.JSONField(default=dict, blank=True)
 
     # --- "הסר" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.1) ---
     # The customer asked not to get broadcast messages — {at, source: message | office, text, by,

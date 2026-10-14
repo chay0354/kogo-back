@@ -51,6 +51,10 @@ FLOW_NAMES = {
     'link_reminder_3': 'kogo_lead_last',
     'link_reminder_signup_1': 'kogo_lead_signup_1',
     'link_reminder_commitment_1': 'kogo_lead_commitment_1',
+    # Once each (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ג): an external branch — did it work out with the
+    # municipality? — and whoever got an answer and went quiet.
+    'link_reminder_external_1': 'kogo_lead_external_1',
+    'link_reminder_silent_1': 'kogo_lead_silent_1',
     'will_check_1': 'kogo_lead_check_1',
     'trial_feedback_1': 'kogo_lead_trial_1',
     'trial_feedback_2': 'kogo_lead_trial_2',

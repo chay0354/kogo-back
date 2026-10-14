@@ -217,7 +217,9 @@ class LeadTests(EngineCase):
         self.assertEqual(contact.lead_owner, '')
         self.assertEqual(self.rows(contact), [])
         row = next(row for row in self.get('leads/', owner='bot').data['results'] if row['contact_id'] == contact.id)
-        self.assertEqual(row['next'], {'who': 'none', 'what': 'ביקש הסר — הבוט לא חוזר אליו', 'when': None, 'state': 'none', 'note': ''})
+        self.assertEqual(row['next'], {
+            'who': 'none', 'what': 'ביקש הסר — הבוט לא חוזר אליו', 'when': None, 'state': 'none', 'note': '', 'hold': '',
+        })
         self.assertEqual((row['opted_out']['source'], row['opted_out']['by_name'], row['opted_out']['label']), ('office', 'מיכל', 'ביקש הסר'))
         self.assertEqual(self.get(f'leads/{contact.id}/').data['opted_out']['label'], 'ביקש הסר')
 

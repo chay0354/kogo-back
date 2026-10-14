@@ -22,7 +22,8 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 
 from apps.wahub import (
-    lead_ai, lead_followups, lead_stage, office_clock, optout, queries, search, serializers, state, waiting_list, waiting_summary,
+    lead_ai, lead_followups, lead_openings, lead_stage, office_clock, optout, queries, search, serializers, state, waiting_list,
+    waiting_summary,
 )
 from apps.wahub.models import (
     EVENT_CLOSED,
@@ -128,7 +129,9 @@ NEXT_BY_STEP = {
 }
 NOTHING_PLANNED = 'אין חזרה מתוכננת'
 WAITING_FOR_AN_ANSWER = 'הבוט חזר אליו — מחכים לתשובה'
-KEPT_FOR_LATER = 'נשמר: נודיע כשנפתח'
+# A lead with nothing to offer is looked at every day (lead_openings.py) — when its field, age and place are known.
+KEPT_FOR_LATER = 'נבדק כל יום — כשייפתח חוג שמתאים, יעבור אליך'
+NOTHING_TO_LOOK_FOR = 'אין כרגע מה להציע — חסר תחום, גיל או מקום כדי לבדוק כל יום'
 ON_A_WAITING_LIST = 'ברשימת המתנה — נתריע כשיתפנה מקום'
 TALKING_NOW = 'בשיחה עכשיו'
 WEEKDAYS = ('שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת', 'ראשון')        # Python's weekday(): Monday is 0
@@ -424,8 +427,14 @@ def no_step_because(contact: Contact, stage: str) -> str:
     if optout.is_marked(contact):
         # Asked "הסר": whatever the stage, the bot starts nothing with them.
         return optout.HOLD
+    round_ = contact.lead_bot if isinstance(contact.lead_bot, dict) else {}
+    came_back = contact.lead_owner == LEAD_OWNER_BOT and round_.get('done') and round_.get('attempts')
     if said.get('external'):
-        return lead_stage.EXTERNAL_BRANCH
+        # Once the bot has asked whether it worked out with the municipality, and nobody answered it, the lead
+        # waits for that answer.
+        last_at = lead_stage._moment(round_.get('last_at'))
+        unanswered = last_at is not None and (contact.last_inbound_at is None or last_at > contact.last_inbound_at)
+        return WAITING_FOR_AN_ANSWER if came_back and unanswered else lead_stage.EXTERNAL_BRANCH
     if stage == LEAD_TRIAL_BOOKED:
         try:
             on = date.fromisoformat(str((contact.kogo_trial or {}).get('on') or ''))
@@ -435,13 +444,12 @@ def no_step_because(contact: Contact, stage: str) -> str:
     if stage == LEAD_WAITING_LIST:
         return ON_A_WAITING_LIST
     if stage == LEAD_NOTHING_TO_OFFER:
-        return KEPT_FOR_LATER
+        return KEPT_FOR_LATER if lead_openings.search_terms(contact) is not None else NOTHING_TO_LOOK_FOR
     if stage == LEAD_IN_CONVERSATION:
         return TALKING_NOW
     if said.get('blocker') in lead_ai.NO_NUDGE_BLOCKERS:
         return f'הבוט לא חוזר לבד: {lead_ai.BLOCKER_LABELS[said["blocker"]]}'
-    round_ = contact.lead_bot if isinstance(contact.lead_bot, dict) else {}
-    if contact.lead_owner == LEAD_OWNER_BOT and round_.get('done') and round_.get('attempts'):
+    if came_back:
         return WAITING_FOR_AN_ANSWER
     return NOTHING_PLANNED
 
