@@ -605,6 +605,9 @@ class ManyChatService:
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
         'MANYCHAT_REGISTER_LESSON_FLOW_NS': ('register-missing', 'register missing'),
         'MANYCHAT_REGISTER_MORNING_FLOW_NS': ('register-morning', 'register morning'),
+        # Five minutes before the end of a lesson: a walk-in the instructor added
+        # has no phone yet (owner, 14.10.2026).
+        'MANYCHAT_WALK_IN_PHONE_FLOW_NS': ('kogo_instructor_walkin_phone', 'kogo-instructor-walkin-phone'),
         # The studio tenants (apps/rentals, apps/rental_billing). Two automations
         # of their own: the tenant is a merchant, not a parent, and the courses'
         # templates name a child and a course.

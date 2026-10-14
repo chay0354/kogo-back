@@ -309,6 +309,9 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
     # Attendance (computed from annotated counts to avoid N+1)
     attendance_rate = serializers.SerializerMethodField()
     is_ghost_visible = serializers.SerializerMethodField()
+    # A walk-in only: which lesson it came to, when, and until when the
+    # instructor still sees it (enrollments/ghost_students.walk_in_summary).
+    walk_in = serializers.SerializerMethodField()
     
     # Only when the list is searched: the off-row field the search hit, if any.
     search_match = serializers.SerializerMethodField()
@@ -382,7 +385,7 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
             'parent_first_name', 'parent_last_name', 'family_notes', 'extra_phones', 'family_editable', 'notes',
             # NEW status fields
             'status', 'paid_until_date', 'trial_classes_attended',
-            'absent_irregularly', 'is_ghost_visible',
+            'absent_irregularly', 'is_ghost_visible', 'walk_in',
             # Subscription dates (kept for reference)
             'subscription_start_date', 'subscription_end_date',
             'enrollments', 'trial_enrollment', 'attendance_rate',
@@ -487,6 +490,13 @@ class ChildWithDetailsSerializer(serializers.ModelSerializer):
         parent = self._primary_parent(obj)
         return str(parent.id) if parent else None
     
+    def get_walk_in(self, obj):
+        if obj.status != 'ghost':
+            return None
+        from apps.enrollments.ghost_students import walk_in_summary
+
+        return walk_in_summary(obj)
+
     def get_enrollments(self, obj):
         """
         רשימת רישומים פעילים - from both Course and Lesson enrollments

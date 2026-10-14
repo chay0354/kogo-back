@@ -213,9 +213,12 @@ class RegisterReminder(models.Model):
     """
     KIND_LESSON = 'lesson'
     KIND_MORNING = 'morning'
+    # Five minutes before the end: a walk-in on the register still has no phone.
+    KIND_WALK_IN_PHONE = 'walk_in_phone'
     KIND_CHOICES = [
         (KIND_LESSON, 'תזכורת אחרי השיעור'),
         (KIND_MORNING, 'סיכום בוקר על אתמול'),
+        (KIND_WALK_IN_PHONE, 'תלמיד מזדמן בלי טלפון'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
