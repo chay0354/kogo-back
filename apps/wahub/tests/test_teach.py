@@ -313,7 +313,7 @@ class NothingByItselfTests(TeachTestCase):
 class ExampleTests(TeachTestCase):
     def answers(self):
         """The bot answers by what it was shown: the new wording in its knowledge, or the old."""
-        return Claude(answer=lambda body: bot(THEN if NEW_BODY in shadow.system_text(body) else TODAY))
+        return Claude(answer=lambda body: bot(THEN if NEW_BODY in shadow.system_text(body) else TODAY), verdict=verdict())
 
     def test_the_example_is_made_a_part_a_call_with_the_change_in_memory_and_saves_nothing(self):
         data = self.taught(self.edited_rule())
@@ -330,10 +330,14 @@ class ExampleTests(TeachTestCase):
             self.assertEqual(first.status_code, 200, first.data)
             self.assertEqual(first.data, {'thread': thread, 'preview': {'question': ASKED, 'before': TODAY, 'after': None, 'pending': True}})
             second = self.get(f'refine/{thread}/preview/').data
-            self.assertEqual(second['preview'], {'question': ASKED, 'before': TODAY, 'after': THEN, 'pending': False})
+            # The answer after the change is judged before he approves (the owner, 14.10.2026: no "done" that does not work).
+            self.assertEqual(second['preview'], {'question': ASKED, 'before': TODAY, 'after': THEN, 'pending': False, 'note': refine.EXAMPLE_FOLLOWS})
             # Made once: asked for again, it is read from where it was kept.
             self.assertEqual(self.get(f'refine/{thread}/preview/').data, second)
-        self.assertEqual(asked.count(), (0, 2, 0))
+        self.assertEqual(asked.count(), (0, 2, 1))
+        judged = asked.asked['verdict'][0]['messages'][0]['content']
+        self.assertIn(THEN, judged)
+        self.assertIn(TODAY, judged)
 
         today, then = asked.asked['answer']
         self.assertIn(f'[#{self.price.id}] מחיר: {OLD_BODY}', shadow.system_text(today))
@@ -368,13 +372,33 @@ class ExampleTests(TeachTestCase):
         self.assertEqual([item.id for item in items], [self.price.id, self.person.id, self.parking.id])
         self.assertEqual((KnowledgeItem.objects.count(), KnowledgeItem.objects.get(pk=self.parking.id).is_active), (3, True))
 
-        asked = Claude(answer=lambda body: bot('אחרי' if NEW_BODY in shadow.system_text(body) and 'יש חניה' not in shadow.system_text(body) else 'היום'))
+        asked = Claude(answer=lambda body: bot('אחרי' if NEW_BODY in shadow.system_text(body) and 'יש חניה' not in shadow.system_text(body) else 'היום'),
+                       verdict=verdict())
         with patch(POST, side_effect=asked):
             self.get(f'refine/{thread}/preview/')
             example = self.get(f'refine/{thread}/preview/').data['preview']
         self.assertEqual((example['before'], example['after'], example['pending']), ('היום', 'אחרי', False))
         self.assertIn('"קפו" → קפוארה', shadow.system_text(asked.asked['answer'][1]))
         self.assertEqual(KnowledgeItem.objects.count(), 3)
+
+    def test_an_example_that_still_does_not_do_what_was_taught_is_said_before_the_approval(self):
+        thread = self.taught(self.edited_rule())['thread']
+        asked = Claude(answer=lambda body: bot(TODAY), verdict=verdict(False, 'הבוט עדיין ענה מחיר בלי לשאול על איזה חוג'))
+        with patch(POST, side_effect=asked), self.assertLogs('apps.wahub.refine', level='WARNING') as logged:
+            self.get(f'refine/{thread}/preview/')
+            example = self.get(f'refine/{thread}/preview/').data['preview']
+        self.assertEqual(example['note'], refine.EXAMPLE_FAILS.format(line='הבוט עדיין ענה מחיר בלי לשאול על איזה חוג'))
+        self.assertIn('עדיף לא לאשר', example['note'])
+        self.assertIn('still does not answer as taught', logged.output[-1])
+        # Nothing was applied by it, and it is judged once.
+        self.assertEqual(KnowledgeProposal.objects.get().status, 'pending')
+        with patch(POST, side_effect=asked):
+            self.assertEqual(self.get(f'refine/{thread}/preview/').data['preview'], example)
+        self.assertEqual(asked.count(), (0, 2, 1))
+
+    def test_saved_is_not_said_to_work_before_the_bot_was_asked_again(self):
+        self.assertNotIn('כבר עונה', refine.TEACH_APPROVED)
+        self.assertIn('לוודא שהוא באמת עונה לפיו', refine.TEACH_APPROVED)
 
     def test_an_example_that_cannot_be_made_is_given_up_and_never_asked_for_for_ever(self):
         thread = self.taught()['thread']

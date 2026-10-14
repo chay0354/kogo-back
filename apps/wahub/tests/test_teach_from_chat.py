@@ -129,7 +129,7 @@ class SameFlowTests(FromChatCase):
     def test_the_example_the_approval_the_check_and_the_undo_are_the_ones_of_teach(self):
         data, _post = self.opened()
         thread = data['thread']
-        with patch(POST, side_effect=Claude(answer=lambda body: bot(THEN if NEW_BODY in shadow.system_text(body) else TODAY))):
+        with patch(POST, side_effect=Claude(answer=lambda body: bot(THEN if NEW_BODY in shadow.system_text(body) else TODAY), verdict=verdict())):
             first = self.get(f'refine/{thread}/preview/').data['preview']
             second = self.get(f'refine/{thread}/preview/').data['preview']
         self.assertEqual((first['before'], first['pending']), (TODAY, True))
