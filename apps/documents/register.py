@@ -187,13 +187,20 @@ def store_documents(branch_ids, start, end, document_type: str = '') -> list[Cha
         else:
             net, vat, gross = split_vat_inclusive(invoice.total_amount)
         # A receipt says the money came in. A sale whose payment failed, or was
-        # never completed at the counter, holds its number and nothing else. A
-        # confirmed website order counts, as it does on the dashboard.
+        # never completed, holds its number and nothing else — a website order
+        # included. A website order used to count while still pending, on the
+        # site's word that it was paid; that word was never true: until 29.9.2026
+        # the site paid on Tranzila's test terminal (realtest), which collected
+        # nothing, and since then an order is completed only when Tranzila's own
+        # report confirms the charge (payment_followup). The September register
+        # listed eight such orders, ₪1,760, as issued receipts; none has a
+        # charge on any of the business's terminals, and none has a signed
+        # original (signing issues a store sale only once it is completed).
         void_reason = ''
         if not on_account:
             if invoice.payment_status == 'failed':
                 void_reason = 'התשלום נכשל'
-            elif invoice.payment_status == 'pending' and not invoice.website_order_number:
+            elif invoice.payment_status == 'pending':
                 void_reason = 'התשלום טרם הושלם'
         customer = (
             (invoice.child.full_name if invoice.child_id and invoice.child else '')

@@ -7,11 +7,12 @@ from django.db.models.functions import TruncMonth
 
 from apps.store.models import StoreSale
 
-# Completed in-store charges plus confirmed B2C website orders (stock already taken).
-_STORE_REVENUE_INVOICE_FILTER = Q(invoice__payment_status='completed') | Q(
-    invoice__website_order_number__isnull=False,
-    invoice__payment_status='pending',
-)
+# Completed charges, at the counter and on the website alike. A pending website
+# order counted here once, on the site's word that it was paid; the site paid on
+# Tranzila's test terminal until 29.9.2026, and since then an order is completed
+# only when Tranzila's report confirms the charge — pending means unpaid
+# (apps/documents/register.py, store_documents; 14.10.2026).
+_STORE_REVENUE_INVOICE_FILTER = Q(invoice__payment_status='completed')
 
 
 def aggregate_store_revenue(date_from, date_to, branch_id=None, branch_ids=None):

@@ -153,8 +153,18 @@ class ChannelsInTheReportTests(RegisterFixture, TestCase):
         self.assertEqual([row.document_number for row in report.void_rows], [sale.invoice_number])
         self.assertEqual(report.void_rows[0].void_reason, 'התשלום נכשל')
 
-    def test_a_website_order_awaiting_payment_counts(self):
+    def test_a_website_order_awaiting_payment_keeps_its_number_but_is_never_summed(self):
+        # The site's word that an order was paid is not a payment: until
+        # 29.9.2026 it paid on Tranzila's test terminal, and the September
+        # register listed eight unpaid orders as issued receipts (14.10.2026).
         sale = self.store_sale(status='pending', branch=None, website_order_number='CG-260810-TEST')
+        report = self.report()
+        self.assertTrue(report.is_empty)
+        self.assertEqual([row.document_number for row in report.void_rows], [sale.invoice_number])
+        self.assertEqual(report.void_rows[0].void_reason, 'התשלום טרם הושלם')
+
+    def test_a_paid_website_order_counts(self):
+        sale = self.store_sale(status='completed', branch=None, website_order_number='CG-260810-PAID')
         report = self.report()
         self.assertIn(sale.invoice_number, self.rows(report))
         self.assertEqual(report.void_rows, [])

@@ -29,6 +29,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.core.revenue_service import (
     BRANCHES_BUSINESS_KEY,
@@ -65,10 +66,9 @@ SOURCE_LABELS = {
 SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_RENTALS, SOURCE_ORPHAN_CHARGES, SOURCE_PAYMENT_LINKS)
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
-# completed charges plus confirmed website orders whose stock was already taken.
-_STORE_PAID = Q(payment_status='completed') | Q(
-    website_order_number__isnull=False, payment_status='pending',
-)
+# a completed charge. A pending website order is not one — see register.py's
+# store_documents for why it stopped counting (14.10.2026).
+_STORE_PAID = Q(payment_status='completed')
 
 _PAYMENT_TYPE_LABELS = {
     'recurring': 'מנוי חוזר',
@@ -280,6 +280,19 @@ class UndocumentedIncome:
         return self.by_group(GROUP_BY_BRANCH)
 
 
+def _local_day(moment) -> date:
+    """
+    The Israeli calendar day of a stored moment.
+
+    A stored datetime comes back in UTC, so `.date()` filed a charge taken
+    between midnight and three in the morning under the day before — the
+    September register opened with three "31/08" rows (1.9 billing run, 00:20).
+    The period itself is filtered by the local day, so the date printed now
+    agrees with the period the row was counted in.
+    """
+    return timezone.localtime(moment).date()
+
+
 def _income_tags(course) -> dict:
     """The business and category a course is tagged with, or nothing."""
     if course is None:
@@ -342,7 +355,7 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
             source=SOURCE_LESSONS,
             customer=customer,
             reference=invoice.invoice_number,
-            row_date=invoice.invoice_date.date(),
+            row_date=_local_day(invoice.invoice_date),
             detail=_PAYMENT_TYPE_LABELS.get(invoice.payment_type, invoice.payment_type or ''),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -413,7 +426,7 @@ def _store_rows(branch_ids, start: date, end: date, delivery: dict) -> list:
             source=SOURCE_STORE,
             customer=customer,
             reference=invoice.invoice_number,
-            row_date=invoice.issue_date.date(),
+            row_date=_local_day(invoice.issue_date),
             detail=_STORE_METHOD_LABELS.get(invoice.payment_method, invoice.payment_method or ''),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -474,8 +487,22 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
         qs = qs.filter(Q(branch_id__in=branch_ids)
                        | Q(branch__isnull=True, family__branch_id__in=branch_ids))
 
+    payments = list(qs)
+    # One checkout receipt covers every child and lesson charged together, but
+    # its Invoice points at the first charge only; the others are named in the
+    # receipt's checkout_lines log. Without reading it, every other charge of a
+    # family checkout looked receipt-less and was counted a second time — the
+    # receipt's own sum already holds it (September 2026: 24 charges,
+    # ₪6,726.50, while the missing-receipts screen, which reads the log, rightly
+    # showed none). Same rule as missing_receipts.payments_without_invoice.
+    from apps.customers.checkout_invoice import payments_covered_by_checkout
+
+    covered = payments_covered_by_checkout(payment.id for payment in payments)
+
     rows = []
-    for payment in qs:
+    for payment in payments:
+        if str(payment.id) in covered:
+            continue
         when = payment.payment_date or payment.created_at
         customer = (
             (payment.child.full_name if payment.child_id and payment.child else '')
@@ -489,7 +516,7 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
             source=SOURCE_ORPHAN_CHARGES,
             customer=customer,
             reference=str(payment.id)[:8].upper(),
-            row_date=when.date(),
+            row_date=_local_day(when),
             detail=_CHARGE_TYPE_LABELS.get(payment.payment_type, payment.payment_type or ''),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -555,7 +582,7 @@ def _payment_link_rows(branch_ids, start: date, end: date) -> list:
             source=SOURCE_PAYMENT_LINKS,
             customer=payment.payer_name or 'ללא שם',
             reference=str(payment.id)[:8].upper(),
-            row_date=(payment.paid_at or payment.created_at).date(),
+            row_date=_local_day(payment.paid_at or payment.created_at),
             detail=f'{link.title} · {payment.option_label}'.strip(' ·'),
             branch_id=branch_id,
             branch_name=branch_name,

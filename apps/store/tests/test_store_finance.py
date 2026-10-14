@@ -49,7 +49,21 @@ class StoreFinanceAggregationTest(TestCase):
         self.assertEqual(agg['by_branch_id'][str(self.branch.id)], Decimal('100.00'))
         self.assertEqual(agg['by_month']['2026-06'], Decimal('100.00'))
 
-    def test_counts_pending_website_orders(self):
+    def test_counts_completed_website_orders(self):
+        self._sale(
+            amount=Decimal('50.00'),
+            sale_day='2026-06-20',
+            branch=None,
+            website_order='CG-260620-ABCD',
+            status='completed',
+        )
+        agg = aggregate_store_revenue(date(2026, 6, 1), date(2026, 6, 30))
+        self.assertEqual(agg['total'], Decimal('50.00'))
+        self.assertEqual(agg['by_branch_id']['__online__'], Decimal('50.00'))
+
+    def test_a_pending_website_order_is_not_revenue(self):
+        # Pending means Tranzila has not confirmed a charge. Until 29.9.2026 the
+        # site paid on the test terminal, which collected nothing (14.10.2026).
         self._sale(
             amount=Decimal('50.00'),
             sale_day='2026-06-20',
@@ -58,8 +72,7 @@ class StoreFinanceAggregationTest(TestCase):
             status='pending',
         )
         agg = aggregate_store_revenue(date(2026, 6, 1), date(2026, 6, 30))
-        self.assertEqual(agg['total'], Decimal('50.00'))
-        self.assertEqual(agg['by_branch_id']['__online__'], Decimal('50.00'))
+        self.assertEqual(agg['total'], Decimal('0.00'))
 
     def test_excludes_failed_in_store_charges(self):
         self._sale(amount=Decimal('75.00'), sale_day='2026-06-10', branch=self.branch, status='failed')

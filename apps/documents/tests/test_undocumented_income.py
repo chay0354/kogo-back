@@ -11,7 +11,8 @@ from decimal import Decimal
 from django.test import TestCase
 
 from apps.core.models import Branch, City, UserProfile
-from apps.customers.financial_models import Invoice
+from apps.customers.checkout_invoice import CHECKOUT_LINES_ACTION
+from apps.customers.financial_models import Invoice, InvoiceActivityLog
 from apps.customers.models import Child, Family, Payment
 from apps.documents.tests.test_period_report import make_user
 from apps.documents.undocumented_income import (
@@ -113,15 +114,19 @@ class UndocumentedIncomeTests(TestCase):
         self.assertEqual(result.total, Decimal('80.00'))
         self.assertEqual(result.sections[0].rows[0].reference, 'ST-NODOC')
 
-    def test_pending_store_order_from_the_website_counts(self):
+    def test_only_a_completed_store_order_counts_website_or_counter(self):
+        # A pending website order is not money in: until 29.9.2026 the site paid
+        # on Tranzila's test terminal (14.10.2026).
         invoice = make_store_invoice('ST-WEB', None, 6, '120.00', payment_status='pending')
         StoreInvoice.objects.filter(pk=invoice.pk).update(website_order_number='W-77')
         make_store_invoice('ST-PENDING', self.north, 7, '500.00', payment_status='pending')
+        paid = make_store_invoice('ST-WEB-PAID', None, 8, '90.00')
+        StoreInvoice.objects.filter(pk=paid.pk).update(website_order_number='W-78')
 
         result = collect_undocumented(self.manager, *AUG)
 
         self.assertEqual(result.count, 1)
-        self.assertEqual(result.total, Decimal('120.00'))
+        self.assertEqual(result.total, Decimal('90.00'))
 
     def test_partner_sees_only_their_branch(self):
         make_lesson_invoice('INV-N', self.fam_n, self.north, 5, '300.00')
@@ -228,6 +233,82 @@ class OrphanChargeTests(TestCase):
 
         self.assertEqual(result.total, Decimal('275.00'))
         self.assertEqual(result.sections[0].rows[0].row_date, date(2026, 8, 7))
+
+    def test_charge_inside_a_family_checkout_receipt_is_counted_once(self):
+        # One receipt for two children: the Invoice points at the first charge,
+        # the second is named only in the receipt's checkout_lines log. The
+        # receipt's sum already holds both (September 2026: ₪6,726.50 twice).
+        first = self.make_payment(5, '275.00')
+        second = self.make_payment(5, '250.00')
+        receipt = make_lesson_invoice('INV-CHECKOUT', self.fam, self.north, 5, '525.00')
+        Invoice.objects.filter(pk=receipt.pk).update(payment=first)
+        InvoiceActivityLog.objects.create(
+            invoice=receipt,
+            action=CHECKOUT_LINES_ACTION,
+            details={'lines': [], 'payment_ids': [str(first.id), str(second.id)]},
+        )
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual([s.source for s in result.sections], [SOURCE_LESSONS])
+        self.assertEqual(result.count, 1)
+        self.assertEqual(result.total, Decimal('525.00'))
+
+    def test_charge_named_in_no_checkout_log_is_still_reported(self):
+        first = self.make_payment(5, '275.00')
+        stray = self.make_payment(6, '250.00')
+        receipt = make_lesson_invoice('INV-CHECKOUT', self.fam, self.north, 5, '275.00')
+        Invoice.objects.filter(pk=receipt.pk).update(payment=first)
+        InvoiceActivityLog.objects.create(
+            invoice=receipt,
+            action=CHECKOUT_LINES_ACTION,
+            details={'lines': [], 'payment_ids': [str(first.id)]},
+        )
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        orphans = [s for s in result.sections if s.source == SOURCE_ORPHAN_CHARGES]
+        self.assertEqual(len(orphans), 1)
+        self.assertEqual([row.reference for row in orphans[0].rows], [str(stray.id)[:8].upper()])
+        self.assertEqual(result.total, Decimal('525.00'))
+
+
+class LocalDayTests(TestCase):
+    """
+    The period is filtered by the Israeli day, so the date printed beside a row
+    has to be that day too. It was the UTC day: the 1.9 run's first charges, at
+    00:20, were printed as 31/08 inside the September register.
+    """
+
+    def setUp(self):
+        self.city = City.objects.create(name='עיר בדיקה')
+        self.north = Branch.objects.create(name='סניף צפון', city=self.city)
+        self.fam = Family.objects.create(name='משפחה צפון', branch=self.north)
+        self.manager = make_user('manager-localday@test', role=UserProfile.ROLE_MANAGER)
+        self.manager = type(self.manager).objects.get(pk=self.manager.pk)
+
+    def test_a_charge_after_midnight_carries_the_israeli_day(self):
+        invoice = make_lesson_invoice('INV-NIGHT', self.fam, self.north, 4, '300.00')
+        # 4.8 21:20 UTC is 5.8 00:20 in Israel.
+        Invoice.objects.filter(pk=invoice.pk).update(
+            invoice_date=datetime(2026, 8, 4, 21, 20, tzinfo=dt_timezone.utc),
+        )
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.sections[0].rows[0].row_date, date(2026, 8, 5))
+
+    def test_the_first_night_of_a_month_is_not_printed_under_the_last_month(self):
+        invoice = make_lesson_invoice('INV-FIRST', self.fam, self.north, 4, '300.00')
+        # 31.7 21:20 UTC is 1.8 00:20 in Israel: in August, and dated in August.
+        Invoice.objects.filter(pk=invoice.pk).update(
+            invoice_date=datetime(2026, 7, 31, 21, 20, tzinfo=dt_timezone.utc),
+        )
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual(result.count, 1)
+        self.assertEqual(result.sections[0].rows[0].row_date, date(2026, 8, 1))
 
 
 class MergeAgainstDocumentsTests(TestCase):
@@ -420,7 +501,7 @@ class StoreAttributionTests(TestCase):
         self.manager = make_user('manager-store@test', role=UserProfile.ROLE_MANAGER)
         self.manager = type(self.manager).objects.get(pk=self.manager.pk)
         make_store_invoice('ST-PICKUP', self.north, 5, '80.00')
-        web = make_store_invoice('ST-WEB', None, 6, '120.00', payment_status='pending')
+        web = make_store_invoice('ST-WEB', None, 6, '120.00')
         StoreInvoice.objects.filter(pk=web.pk).update(website_order_number='W-1')
 
     def test_the_category_is_seeded_as_a_real_row(self):
