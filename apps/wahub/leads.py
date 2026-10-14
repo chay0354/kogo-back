@@ -23,8 +23,8 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 
 from apps.wahub import (
-    lead_ai, lead_followups, lead_openings, lead_stage, office_clock, optout, queries, search, serializers, state, waiting_list,
-    waiting_summary,
+    lead_ai, lead_followups, lead_openings, lead_stage, matching, office_clock, optout, queries, search, serializers, state,
+    waiting_list, waiting_summary,
 )
 from apps.wahub.models import (
     EVENT_CLOSED,
@@ -65,7 +65,6 @@ from apps.wahub.models import (
     NUDGE_TRIAL_FEEDBACK,
     NUDGE_TRIAL_NO_SHOW,
     NUDGE_WILL_CHECK,
-    OUTCOME_CHOICES,
     OUTCOME_TRIAL_ONLY,
     OUTCOME_TRIAL_UPCOMING,
     WAITING_FREED,
@@ -94,8 +93,6 @@ FOLLOWUPS_SHOWN = 30
 TIMELINE_EVENTS = 10
 NOTES_SHOWN = 10
 
-STAGE_LABELS = dict(LEAD_STAGE_CHOICES)
-OUTCOME_LABELS = dict(OUTCOME_CHOICES)
 EVENT_LABELS = dict(EVENT_KIND_CHOICES)
 CLOSE_REASONS = dict(LEAD_CLOSE_CHOICES)
 OPEN_STAGES = [stage for stage, _label in LEAD_STAGE_CHOICES if LEAD_STAGE_GROUPS[stage] != LEAD_GROUP_CLOSED]
@@ -121,6 +118,7 @@ NEXT_BY_KIND = {
 NEXT_BY_VARIANT = {
     lead_stage.VARIANT_EXTERNAL: 'הבוט יבדוק אם הסתדרו מול העירייה',
     lead_stage.VARIANT_SILENT: 'הבוט יציע שיעור ניסיון',
+    lead_stage.VARIANT_WALK_IN: 'הבוט יכתוב שראינו אותם בשיעור ויציע מקום קבוע',
 }
 # ... and where a later step of a round says something else than its first.
 NEXT_BY_STEP = {
@@ -479,7 +477,7 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         'phone_display': phone_display(contact.phone),
         'is_demo': contact.is_demo,
         'stage': stage,
-        'stage_label': STAGE_LABELS.get(stage, ''),
+        'stage_label': serializers.stage_label(contact, stage),
         'owner': contact.lead_owner,
         # The list the lead is shown under — one of four, "מחכים שיתפנה מקום" among them (the same contract, ח.3.1).
         'list': listed_under,
@@ -522,6 +520,8 @@ def trial_details(contact: Contact) -> dict | None:
         'course': facts.get('course') or '', 'branch': '', 'date': facts.get('on') or None, 'instructor': '',
         'child': '', 'child_id': None, 'attended': came,
     }
+    if facts.get('walk_in'):
+        return _walk_in_details(contact, facts, trial)
     if contact.kogo_child_ids and facts.get('on'):
         from apps.enrollments.models import LessonEnrollment
 
@@ -546,6 +546,40 @@ def trial_details(contact: Contact) -> dict | None:
     return trial
 
 
+def _walk_in_details(contact: Contact, facts: dict, trial: dict) -> dict:
+    """
+    A child who came to a lesson without being registered (matching: `walk_in`)
+    — the lesson of the last visit, read from its present mark: the class, the
+    branch, the instructor who taught it (and wrote the child down), the child.
+    `walk_in`, `visits` and `first_date` say it was no trial lesson.
+    """
+    from apps.enrollments.models import LessonAttendance
+
+    visits = facts.get('visits')
+    trial.update(
+        attended=True, walk_in=True, visits=visits if isinstance(visits, int) and not isinstance(visits, bool) else None,
+        first_date=facts.get('first_on') or facts.get('on') or None,
+    )
+    try:
+        on = date.fromisoformat(str(facts.get('on') or ''))
+    except ValueError:
+        return trial
+    row = (
+        LessonAttendance.objects.filter(child_id__in=contact.kogo_child_ids or [], occurrence_date=on, status='present')
+        .select_related('lesson__course__branch', 'lesson__instructor', 'child').order_by('-created_at').first()
+    )
+    if row is not None:
+        instructor = row.lesson.instructor
+        trial.update(
+            course=row.lesson.course.name,
+            branch=row.lesson.course.branch.name,
+            instructor=f'{instructor.first_name} {instructor.last_name}'.strip() if instructor is not None else '',
+            child=row.child.first_name,
+            child_id=str(row.child_id),
+        )
+    return trial
+
+
 def _in_system(contact: Contact) -> dict | None:
     if not contact.kogo_family_id:
         return None
@@ -554,7 +588,7 @@ def _in_system(contact: Contact) -> dict | None:
         'family_id': str(contact.kogo_family_id),
         'child_ids': children,
         'outcome': contact.kogo_outcome,
-        'outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, ''),
+        'outcome_label': matching.outcome_label(contact),
         'detail': contact.kogo_detail,
         # The customer's card, as the rest of the section links to it.
         'link': f'/customers?child={children[0]}' if children else '/customers',

@@ -10,6 +10,11 @@ The slice of background work one cron call does (every five minutes):
      the deploy (docs/WAHUB-CONTRACT-LEADS-V2.md, ו). By the keyword rules
      unless WAHUB_LEAD_BACKFILL_AI says the model may be asked — a call to
      Claude for every old conversation is money, and that is the owner's to decide;
+  1c. the walk-ins: a child who came to a lesson without being registered, whose
+     phone the instructor wrote down, is made a contact matched against the
+     registrations — opened when the phone never wrote to us — and gets its lead
+     stage at once (apps/wahub/walk_ins.py). Nothing is sent from here: the bot's
+     first message to them is a follow-up like any other (2c);
   2. the match against the registrations, for contacts never checked or last
      checked more than twelve hours ago;
   2a. the waiting lists: every row is held against the registration form's own
@@ -47,7 +52,7 @@ The slice of background work one cron call does (every five minutes):
      never asks ManyChat itself, shows a template within ten minutes of its being made
      there. A read of ManyChat's list; nothing is sent.
 
-Nothing in 1b, 2a, 2b, 3, 4, 4d or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
+Nothing in 1b, 1c, 2a, 2b, 3, 4, 4d or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
 a few fields on the contact, the shadow keeps proposals, the reviewer keeps
 proposals-to-approve, the look only marks.
 
@@ -66,7 +71,7 @@ from django.utils import timezone
 
 from apps.wahub import (
     analysis, holiday_flows, lead_followups, lead_openings, lead_stage, lead_templates, live_test, matching, reviewer, shadow,
-    unknowns, waiting_list,
+    unknowns, waiting_list, walk_ins,
 )
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
@@ -140,6 +145,7 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
         'followups_sent': 0, 'followups_due': 0, 'followups_skipped': 0, 'followups_failed': 0,
         'waiting_freed': 0, 'waiting_closed': 0, 'waiting_checked': 0,
         'unknowns_sorted': 0, 'unknown_topics_opened': 0, 'openings_checked': 0, 'openings_found': 0,
+        'walk_ins_seen': 0, 'walk_in_contacts_opened': 0, 'walk_in_contacts_matched': 0,
     }
 
     places = course_types = external_places = None
@@ -184,6 +190,13 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
             Contact.objects.filter(pk=contact.pk, lead_ai={}).update(lead_ai={'v': 0})
             continue
         counts['lead_understood'] += 1
+
+    # 1c. the walk-ins with a phone — before the matching and the stages, which then read them like any lead
+    if left() > 0:
+        try:
+            counts.update(walk_ins.find(now=now, deadline=time.monotonic() + min(walk_ins.CHECK_SECONDS, left())))
+        except Exception:
+            logger.exception('wahub cron: the walk-ins were not brought in')
 
     shadow_waiting = shadow.pending(now).exists()
     matching_until = budget_seconds * (MATCHING_FLOOR if shadow_waiting else LEAD_STAGE_FLOOR)

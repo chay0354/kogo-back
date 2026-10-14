@@ -40,6 +40,11 @@ from django.utils import timezone
 SOURCE_WHATSAPP = 'whatsapp'
 SOURCE_MANUAL = 'manual'
 SOURCE_DEMO = 'demo'
+# A phone an instructor wrote down for a child who came to a lesson without being registered (apps/wahub/walk_ins.py).
+SOURCE_WALK_IN = 'kogo_walk_in'
+# How such a child is named wherever the system speaks of them: the contact's source, and the answer of the
+# matching for them (a trial_only whose kogo_trial says walk_in — matching.py).
+WALK_IN_LABEL = 'הגיע לשיעור בלי להירשם'
 SOURCE_CHOICES = [
     (SOURCE_WHATSAPP, 'וואטסאפ'),
     ('ad', 'מודעה'),
@@ -49,6 +54,7 @@ SOURCE_CHOICES = [
     ('import', 'ייבוא'),
     (SOURCE_MANUAL, 'הוסף ידנית'),
     (SOURCE_DEMO, 'דמו'),
+    (SOURCE_WALK_IN, WALK_IN_LABEL),
 ]
 
 HANDLED_BOT = 'bot'

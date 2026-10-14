@@ -162,9 +162,14 @@ class WordsTests(LeadsCase):
                     for guess in ('תוכל ', 'תוכלי ', 'אתה ', '₪', 'הנחה', 'נשאר מקום'):       # no guessed gender, no price in a fixed text
                         self.assertNotIn(guess, filled)
                     # The owner's word (12.10): the way a person writes on WhatsApp — "היי" with no comma after
-                    # it, no "כאן קוגומלו", no sales talk, no formal punctuation.
+                    # it, no "כאן קוגומלו", no sales talk, no formal punctuation. One text is his own template word
+                    # for word (14.10): the first message to a walk-in, a parent who never wrote to us — it says who
+                    # writes (lead_followup_seed.WALK_IN_TEXT).
                     self.assertTrue(filled.startswith('היי'), filled)
+                    own_template = key == 'lead_trial_feedback_walk_in'
                     for formal in ('היי,', 'כאן קוגומלו', 'אשמח', 'נשמח', '—', ';'):
+                        if own_template and formal in ('היי,', 'כאן קוגומלו'):
+                            continue
                         self.assertNotIn(formal, filled)
 
     def test_the_drafts_are_filed_once_and_the_owners_edits_are_what_is_sent(self):

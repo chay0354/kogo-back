@@ -57,6 +57,9 @@ FLOW_NAMES = {
     'link_reminder_silent_1': 'kogo_lead_silent_1',
     'will_check_1': 'kogo_lead_check_1',
     'trial_feedback_1': 'kogo_lead_trial_1',
+    # The first message to a child who came to a lesson without being registered (walk_ins.py). Its next two are
+    # the trial's own (trial_feedback_2, trial_feedback_3).
+    'trial_feedback_walk_in_1': 'kogo_lead_walkin_1',
     'trial_feedback_2': 'kogo_lead_trial_2',
     'trial_feedback_3': 'kogo_lead_trial_3',
     'trial_no_show_1': 'kogo_lead_noshow_1',

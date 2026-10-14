@@ -450,7 +450,11 @@ class TemplatesKeptFreshTests(NoOneLostCase):
 
 class WordsTests(NoOneLostCase):
     def test_what_the_bot_will_do_by_the_variant_of_its_round(self):
-        self.assertEqual(leads.NEXT_BY_VARIANT, {'external': 'הבוט יבדוק אם הסתדרו מול העירייה', 'silent': 'הבוט יציע שיעור ניסיון'})
+        self.assertEqual(leads.NEXT_BY_VARIANT, {
+            'external': 'הבוט יבדוק אם הסתדרו מול העירייה', 'silent': 'הבוט יציע שיעור ניסיון',
+            # A child who came to a lesson without registering (tests/test_walk_in_leads.py).
+            'walk_in': 'הבוט יכתוב שראינו אותם בשיעור ויציע מקום קבוע',
+        })
         for variant, key in (('external', 'link_reminder_external_1'), ('silent', 'link_reminder_silent_1'),
                              ('', 'link_reminder_1'), ('signup', 'link_reminder_signup_1')):
             self.assertEqual(lead_followups.variant_of(LeadFollowUp(kind='link_reminder', template_key=key)), variant)
