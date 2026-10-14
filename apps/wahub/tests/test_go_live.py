@@ -450,13 +450,21 @@ class SomebodyElseAnsweredTests(GoLiveCase):
         def the_office_answers():
             self.assertEqual(self.post(f'contacts/{contact.id}/send/', {'text': 'עונה לך מהמשרד'}).data['message']['status'], 'sent')
 
-        with self.while_claude_thinks(the_office_answers), patch(REQUEST, return_value=OK) as request, self.assertLogs('apps.wahub.live_test', level='WARNING'):
+        with self.while_claude_thinks(the_office_answers), patch(REQUEST, return_value=OK) as request:
             response = self.reply(contact.id)
-        self.assertEqual(response.data['outcome'], 'answered_by_another')
+        # The office's message made the conversation a person's (the owner, 14.10.2026): the bot's answer stays home.
+        self.assertNotEqual(response.data['outcome'], 'sent')
         self.assertEqual(sends(request), [(5001, 'עונה לך מהמשרד')])
+        self.assertEqual(self.customer().handled_by, 'human')
         self.assertEqual(self.bot()['old_bot_replies'], 0)                # the office is not the old bot
-        # His next message is the new bot's again.
+        # His next message is the person's to answer, not the bot's — until "החזר לבוט".
         self.writes('תודה, ומה המחיר?')
+        with patch(REQUEST, return_value=OK) as request:
+            self.assertNotEqual(self.reply(contact.id).data['outcome'], 'sent')
+        self.assertEqual(sends(request), [])
+        with patch(REQUEST, return_value=OK):
+            self.assertEqual(self.post(f'contacts/{contact.id}/release/').status_code, 200)
+        self.writes('ומה עם יום שלישי?')
         with patch(REQUEST, return_value=OK) as request:
             self.assertEqual(self.reply(contact.id).data['outcome'], 'sent')
         self.assertEqual(len(sends(request)), 1)

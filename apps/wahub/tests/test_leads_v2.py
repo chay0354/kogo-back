@@ -840,6 +840,22 @@ class StageTests(LeadsCase):
         self.assertEqual(self.got(self.lead(HOUR, kogo_outcome='trial_upcoming', **link))[0], 'trial_booked')
         self.assertEqual(self.got(self.lead(40 * DAY, **link))[0], 'cold')
 
+    def test_a_customer_asking_for_a_younger_child_waits_for_the_childs_third_birthday(self):
+        # The owner, 14.10.2026: "ברגע שהוא אמר שהוא בן שנתיים וחצי… לא ראיתי שהוא נכנס ללידים בטיפול הבוט, עם תאריך".
+        # A registered family asking for a sibling who is too young is a lead like any other: it waits for the day.
+        in_march = date(2027, 4, 12)
+        sibling = {
+            'intent': 'add_class', 'blocker': 'too_young',
+            'come_back': {'kind': 'age', 'years': 2, 'months': 6, 'said_on': '2026-10-12'},
+            'come_back_on': '2027-04-12', 'come_back_why': 'הילד יהיה בן 3',
+        }
+        waiting = self.stage(self.lead(said=sibling, known_callback_on=in_march, kogo_outcome='customer_before'))
+        self.assertEqual((waiting['stage'], waiting['owner']), ('waiting_date', 'bot'))
+        self.assertEqual(waiting['come_back_on'], in_march)
+        self.assertEqual((waiting['follow']['kind'], waiting['follow']['variant']), ('date_arrived', 'age'))
+        # The same family asking a question of their own child is service, not a lead.
+        self.assertEqual(self.got(self.lead(said={'intent': 'existing_question'}, kogo_outcome='customer_before'))[0], 'customer')
+
     def test_a_day_to_come_back_is_the_bots_when_the_conversation_named_it_and_the_offices_when_it_set_it(self):
         in_march = date(2027, 3, 12)
         too_young = {

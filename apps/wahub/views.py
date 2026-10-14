@@ -38,6 +38,7 @@ from apps.wahub import (
     reviewer, sending, shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
 )
 from apps.wahub.models import (
+    DELIVERED_STATUSES,
     EVENT_CREATED,
     EVENT_FOLLOWUP,
     EVENT_NEEDS_HUMAN,
@@ -312,6 +313,9 @@ class ContactViewSet(viewsets.GenericViewSet):
             message = sending.send_text(contact, text, request.user)
         except sending.WindowClosed:
             return _error(sending.WINDOW_CLOSED_DETAIL, code='window_closed', http=status.HTTP_409_CONFLICT)
+        if message.status in DELIVERED_STATUSES:
+            # The office answered: from here on the conversation is a person's, and the bot keeps quiet in it.
+            handoff.office_answered(contact, request.user)
         lead_stage.refresh_quietly(contact.id)
         return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
 
@@ -336,6 +340,8 @@ class ContactViewSet(viewsets.GenericViewSet):
             return _error('לא נמצאה ב-ManyChat אוטומציה לתבנית הזו.')
         name = name or sending.flow_name(flow_ns)
         message = sending.send_flow(contact, flow_ns, name or automation_id, request.user)
+        if message.status in DELIVERED_STATUSES:
+            handoff.office_answered(contact, request.user)
         lead_stage.refresh_quietly(contact.id)
         return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
 
