@@ -12,6 +12,11 @@ remembers who was there. Three things happen here, in this order:
 * from two days on it stops being a message and becomes a line the office sees
   on the instructors screen.
 
+Alongside: five minutes before a lesson ends, its instructor is told which
+walk-ins on today's register still have no phone (owner, 14.10.2026), and the
+walk-ins nobody can reach are removed once their last lesson has passed
+(ghost_students.remove_expired_phoneless_ghosts).
+
 Nothing is sent until a ManyChat flow is configured for these two messages
 (MANYCHAT_REGISTER_LESSON_FLOW_NS / MANYCHAT_REGISTER_MORNING_FLOW_NS): the
 gate is deliberate, so the automation can be built and deployed before the
@@ -49,6 +54,13 @@ LESSON_REMINDER_MAX_PER_DAY = 10
 
 # The morning summary goes out at this local hour, whatever hour the cron ran.
 MORNING_SUMMARY_HOUR = 8
+
+# A walk-in on today's register still has no phone (owner, 14.10.2026): the
+# instructor is asked this long before the lesson ends — while the parents are
+# still at the door — and no later than this long after it, for a run of the
+# cron that came late or a walk-in added in the last minutes.
+WALK_IN_PHONE_BEFORE_END_MINUTES = 5
+WALK_IN_PHONE_LATEST_AFTER_END_MINUTES = 30
 
 # How far back the office view looks, and from which day a gap is "old".
 GAP_WINDOW_DAYS = 14
@@ -326,6 +338,56 @@ def _lesson_ended_at(lesson, day: date_cls) -> datetime:
     return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
+def _lesson_title(lesson) -> str:
+    course = getattr(lesson, 'course', None)
+    name = getattr(course, 'name', '') or 'שיעור'
+    return f'{name} {lesson.start_time.strftime("%H:%M")}'
+
+
+def _walk_in_phone_reminders(*, now, today, dry_run: bool, summary: dict) -> None:
+    """
+    Once per lesson and day: the walk-ins marked present today with no phone,
+    named to the lesson's instructor through the ManyChat automation
+    `kogo_instructor_walkin_phone` ({{1}} instructor, {{2}} lesson, {{3}} names).
+    Silent until that automation exists.
+    """
+    from apps.enrollments.ghost_students import phoneless_walk_ins_on
+
+    for lesson in lessons_meeting_on(today):
+        ends = _lesson_ended_at(lesson, today)
+        if now < ends - timedelta(minutes=WALK_IN_PHONE_BEFORE_END_MINUTES):
+            continue
+        if now > ends + timedelta(minutes=WALK_IN_PHONE_LATEST_AFTER_END_MINUTES):
+            continue
+        instructor = lesson.instructor
+        if instructor is None:
+            continue
+        if _already_sent(instructor=instructor, lesson=lesson, day=today, kind=RegisterReminder.KIND_WALK_IN_PHONE):
+            continue
+        children = phoneless_walk_ins_on(lesson, today)
+        if not children:
+            continue
+        if dry_run:
+            summary['walk_in_phone_sent'] += 1
+            continue
+        result = _send(
+            'MANYCHAT_WALK_IN_PHONE_FLOW_NS',
+            instructor=instructor,
+            fields={
+                'kogo_instructor_name': f'{instructor.first_name} {instructor.last_name}'.strip(),
+                'kogo_lesson_name': _lesson_title(lesson),
+                'kogo_lesson_branch': getattr(getattr(lesson.course, 'branch', None), 'name', '') or '',
+                'kogo_walkin_names': ', '.join(child.full_name for child in children),
+                'kogo_login_url': _login_url(),
+            },
+        )
+        if not result.get('sent'):
+            summary['skipped' if result.get('reason') in ('manychat_not_configured', 'flow_not_configured') else 'errors'] += 1
+            continue
+        if _record(instructor=instructor, lesson=lesson, day=today, kind=RegisterReminder.KIND_WALK_IN_PHONE, now=now):
+            summary['walk_in_phone_sent'] += 1
+
+
 def send_due_register_reminders(*, dry_run: bool = False, now=None) -> dict:
     """
     What the cron calls, every hour of the teaching day.
@@ -337,7 +399,22 @@ def send_due_register_reminders(*, dry_run: bool = False, now=None) -> dict:
     now = now or timezone.localtime()
     today = now.date()
     yesterday = today - timedelta(days=1)
-    summary = {'lesson_sent': 0, 'morning_sent': 0, 'skipped': 0, 'errors': 0}
+    summary = {
+        'lesson_sent': 0, 'morning_sent': 0, 'walk_in_phone_sent': 0, 'walk_ins_removed': 0,
+        'skipped': 0, 'errors': 0,
+    }
+
+    _walk_in_phone_reminders(now=now, today=today, dry_run=dry_run, summary=summary)
+
+    # Walk-ins nobody can reach, once the last lesson they were shown on has
+    # passed. Cheap when there is nothing to do, so every run may look.
+    if not dry_run:
+        from apps.enrollments.ghost_students import remove_expired_phoneless_ghosts
+
+        try:
+            summary['walk_ins_removed'] = remove_expired_phoneless_ghosts(today)
+        except Exception:  # the reminders must still go out
+            logger.exception('removing expired walk-ins failed')
 
     for row in missing_registers(today):
         instructor = row.instructor

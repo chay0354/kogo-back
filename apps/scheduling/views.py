@@ -294,7 +294,15 @@ class LessonViewSet(viewsets.ModelViewSet):
 
         # Filter enrollments to exclude invisible ghost children
         from datetime import timedelta
-        
+
+        from apps.enrollments.ghost_students import last_seen_on_lesson, register_facts
+
+        # When each walk-in last came, read once: the register says "הגיע בשיעור
+        # שעבר" and whether this is the last lesson it is shown on.
+        walk_in_seen = last_seen_on_lesson(
+            lesson, {e.child_id for e in enrollments if e.child.status == 'ghost'},
+        )
+
         visible_enrollments = []
         for e in enrollments:
             if not enrollment_visible_on_date(e, occ_date):
@@ -326,6 +334,11 @@ class LessonViewSet(viewsets.ModelViewSet):
                 # is their child_id, so nothing about these rows changes.
                 'attendee_kind': ATTENDEE_KIND_CHILD,
                 'attendee_id': str(e.child.id),
+                # Only on a walk-in the instructor added (ghost_students.register_facts).
+                'walk_in': (
+                    register_facts(e, occ_date, walk_in_seen.get(e.child_id))
+                    if e.child.status == 'ghost' and occ_date else None
+                ),
             })
 
         # Municipality children in an external branch. They are not Child rows,
@@ -833,6 +846,14 @@ class LessonViewSet(viewsets.ModelViewSet):
                     defaults={'status': attendance_status}
                 )
 
+                # A walk-in marked present again stays one lesson more; the
+                # mark taken back, it goes back to the lesson after the visit
+                # before (ghost_students.refresh_ghost_window).
+                if child.status == 'ghost':
+                    from apps.enrollments.ghost_students import refresh_ghost_window
+
+                    refresh_ghost_window(lesson, child)
+
                 if attendance_status == 'absent':
                     # Create ChildAbsence record
                     ChildAbsence.objects.get_or_create(
@@ -948,22 +969,39 @@ class LessonViewSet(viewsets.ModelViewSet):
         except ValueError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        child = enrollment.child
         return Response(
             {
-                'id': str(enrollment.id),
-                'child_id': str(child.id),
-                'child_name': child.full_name,
-                'child_status': child.status,
-                'child_phone': child_contact_phone(child),
-                'trial_lesson_date': None,
-                'is_trial': False,
-                'trial_number': None,
+                **self._walk_in_row(enrollment, occ_date),
                 'created': created,
                 'attendance_status': 'present',
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+    @staticmethod
+    def _walk_in_row(enrollment, occ_date):
+        """A walk-in as the register draws it, after the instructor changed it."""
+        from apps.enrollments.ghost_students import last_seen_on_lesson, register_facts
+
+        enrollment.refresh_from_db()
+        child = enrollment.child
+        child.refresh_from_db()
+        last_seen = last_seen_on_lesson(enrollment.lesson, [child.id]).get(child.id)
+        return {
+            'id': str(enrollment.id),
+            'child_id': str(child.id),
+            'child_name': child.full_name,
+            'child_status': child.status,
+            'child_phone': child_contact_phone(child),
+            'trial_lesson_date': None,
+            'is_trial': False,
+            'trial_number': None,
+            'register_kind': 'other',
+            'leaving': False,
+            'attendee_kind': ATTENDEE_KIND_CHILD,
+            'attendee_id': str(child.id),
+            'walk_in': register_facts(enrollment, occ_date, last_seen) if occ_date else None,
+        }
 
     @action(detail=True, methods=['delete'], url_path='walkin/(?P<enrollment_id>[^/.]+)')
     def remove_walkin(self, request, pk=None, enrollment_id=None):
@@ -1005,6 +1043,49 @@ class LessonViewSet(viewsets.ModelViewSet):
 
         delete_ghost_enrollment(enrollment=enrollment)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @remove_walkin.mapping.patch
+    def update_walkin(self, request, pk=None, enrollment_id=None):
+        """
+        Fill in what the instructor did not have when the walk-in was added — the
+        phone, mostly (owner, 14.10.2026), or a name spelt better. Walk-ins only,
+        on lessons this user can already open, the same as the removal above.
+        `date` is the occurrence the register is open on; the answer is the row
+        as that register draws it.
+        """
+        lesson = self.get_object()
+        try:
+            enrollment = (
+                LessonEnrollment.objects
+                .filter(lesson=lesson, id=enrollment_id)
+                .select_related('child', 'child__family', 'lesson')
+                .first()
+            )
+        except (ValueError, DjangoValidationError):
+            enrollment = None
+        if enrollment is None:
+            return Response({'error': 'התלמיד לא נמצא בשיעור הזה'}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.enrollments.ghost_students import is_ghost_enrollment, set_ghost_contact
+
+        if not is_ghost_enrollment(enrollment):
+            return Response(
+                {'error': 'אפשר לעדכן רק תלמיד שנוסף ידנית בשיעור'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        occ_date = self._parse_occurrence_date(request.data.get('date'))
+        if request.data.get('date') and not occ_date:
+            return Response({'error': 'תאריך לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            set_ghost_contact(
+                enrollment=enrollment,
+                phone=request.data.get('phone') if 'phone' in request.data else None,
+                first_name=request.data.get('first_name') if 'first_name' in request.data else None,
+                last_name=request.data.get('last_name') if 'last_name' in request.data else None,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self._walk_in_row(enrollment, occ_date or enrollment.start_date))
 
 
 class ScheduleEventViewSet(viewsets.ModelViewSet):

@@ -8,9 +8,16 @@ financial and messaging path already ignores.
 
 Two rules keep a ghost from lingering:
 
-* it is shown only for the next few occurrences of that lesson, and
+* it is shown on the lesson it came to and on the next one only — there with
+  "הגיע בשיעור שעבר", the last time unless the instructor marks it present
+  again, which keeps it one lesson more (owner, 14.10.2026: "בפעם השלישית הילד
+  הזה כבר לא יופיע"); and
 * it disappears the moment a real child exists with the same phone, or the same
   full name on that same lesson.
+
+A walk-in with no phone is nobody the office can reach, so once its last
+lesson has passed it is removed altogether (remove_expired_phoneless_ghosts).
+One with a phone stays: it is a lead.
 
 The second is resolved when the roster is read rather than by a background job,
 so a ghost can never outlive the real record that replaced it. Matching is
@@ -28,8 +35,13 @@ from apps.enrollments.person_match import normalise_name, normalise_phone
 
 GHOST_STATUS = 'ghost'
 
-# How many future occurrences of the lesson a walk-in stays visible for.
-GHOST_OCCURRENCES = 3
+# After the lesson a walk-in came to, how many more of that lesson it is shown
+# on: the next one, and only that (owner, 14.10.2026). Coming again — the
+# instructor marks it present — counts from that lesson instead.
+GHOST_NEXT_LESSONS = 1
+
+# How far ahead a cancelled week is stepped over to find "the next lesson".
+_NEXT_LESSON_LOOKAHEAD_WEEKS = 4
 
 
 # The same rules the duplicate check uses, so a walk-in and a registration are
@@ -91,16 +103,164 @@ def is_ghost_enrollment(enrollment) -> bool:
     )
 
 
-def ghost_window_end(lesson, from_date: date) -> date:
+def next_lesson_after(lesson, day: date) -> date:
     """
-    Last date a walk-in on this lesson stays visible.
+    The next date this weekly lesson meets after `day`, stepping over a week the
+    office cancelled — otherwise a holiday would swallow the walk-in's last
+    appearance and it would vanish without the instructor being told.
+    """
+    from apps.scheduling.models import LessonCancellation
 
-    A recurring lesson meets weekly, so three more occurrences is three weeks.
-    A one-off has only the occurrence it was added on.
+    candidates = [day + timedelta(weeks=n) for n in range(1, _NEXT_LESSON_LOOKAHEAD_WEEKS + 1)]
+    cancelled = set(
+        LessonCancellation.objects
+        .filter(lesson=lesson, occurrence_date__in=candidates)
+        .values_list('occurrence_date', flat=True)
+    )
+    for candidate in candidates:
+        if candidate not in cancelled:
+            return candidate
+    return candidates[0]
+
+
+def ghost_window_end(lesson, last_seen: date) -> date:
+    """
+    Last date a walk-in on this lesson stays visible: the next lesson after the
+    one it last came to. A one-off lesson has only the occurrence it was added on.
     """
     if not getattr(lesson, 'is_recurring', False):
-        return from_date
-    return from_date + timedelta(weeks=GHOST_OCCURRENCES)
+        return last_seen
+    day = last_seen
+    for _ in range(GHOST_NEXT_LESSONS):
+        day = next_lesson_after(lesson, day)
+    return day
+
+
+def last_seen_on_lesson(lesson, child_ids) -> dict:
+    """{child_id: the last date each was marked present on this lesson}."""
+    from django.db.models import Max
+
+    from apps.enrollments.models import LessonAttendance
+
+    if not child_ids:
+        return {}
+    return dict(
+        LessonAttendance.objects
+        .filter(lesson=lesson, child_id__in=list(child_ids), status='present', occurrence_date__isnull=False)
+        .values('child_id')
+        .annotate(last=Max('occurrence_date'))
+        .values_list('child_id', 'last')
+    )
+
+
+def refresh_ghost_window(lesson, child) -> None:
+    """
+    Recount how long a walk-in stays on this lesson's register after a mark.
+
+    Marked present again → shown on the lesson after that one too. The mark
+    taken back → back to the lesson after the visit before it. Never before the
+    lesson it was added on.
+    """
+    from apps.enrollments.models import LessonEnrollment
+
+    if getattr(child, 'status', None) != GHOST_STATUS:
+        return
+    rows = list(
+        LessonEnrollment.objects
+        .filter(lesson=lesson, child=child, ghost_visible_until__isnull=False)
+        .only('id', 'start_date', 'ghost_visible_until')
+    )
+    if not rows:
+        return
+    last = last_seen_on_lesson(lesson, [child.id]).get(child.id)
+    for row in rows:
+        anchor = max(d for d in (last, row.start_date) if d is not None) if (last or row.start_date) else None
+        if anchor is None:
+            continue
+        window_end = ghost_window_end(lesson, anchor)
+        if row.ghost_visible_until != window_end:
+            LessonEnrollment.objects.filter(pk=row.pk).update(ghost_visible_until=window_end)
+
+
+def ghost_phone(child) -> str:
+    """The walk-in's phone, digits only — its own, or the family's. '' when none."""
+    return _normalise_phone(
+        (getattr(child, 'phone_number', '') or '')
+        or (getattr(getattr(child, 'family', None), 'phone', '') or '')
+    )
+
+
+def valid_phone(raw: str) -> str:
+    """
+    A phone an instructor typed, as stored: digits only, starting 0. '' for an
+    empty box. Raises ValueError for something that cannot be an Israeli number.
+    """
+    digits = _normalise_phone(raw)
+    if not digits:
+        return ''
+    if not digits.startswith('0') or not 9 <= len(digits) <= 10:
+        raise ValueError('מספר טלפון לא תקין')
+    return digits
+
+
+def register_facts(enrollment, occurrence_date: date, last_seen: date | None) -> dict:
+    """
+    What the instructor's register says about a walk-in on this date.
+
+    came_before   it came to an earlier lesson and has not been marked here yet
+                  ("הגיע בשיעור שעבר");
+    last_time     unless it is marked present on this date, this is the last
+                  lesson it is shown on;
+    phone_missing nobody has its phone yet — it is no lead without one.
+    """
+    child = enrollment.child
+    seen = last_seen or enrollment.start_date
+    window_end = enrollment.ghost_visible_until
+    return {
+        'added_on': enrollment.start_date.isoformat() if enrollment.start_date else None,
+        'last_seen': seen.isoformat() if seen else None,
+        'came_before': bool(seen and occurrence_date and seen < occurrence_date),
+        'last_time': bool(
+            seen and occurrence_date and window_end
+            and seen < occurrence_date and occurrence_date >= window_end
+        ),
+        'phone_missing': not ghost_phone(child),
+    }
+
+
+@transaction.atomic
+def set_ghost_contact(*, enrollment, phone=None, first_name=None, last_name=None) -> None:
+    """
+    Fill in what the instructor did not have when the walk-in was added: the
+    phone (owner, 14.10.2026: "יהיה לו אופציה להוסיף מספר טלפון"), or a name
+    spelt better. Only the fields given change. The phone is written to the
+    child and to the family the walk-in flow opened for it — the two places a
+    registration later looks for it.
+    """
+    child = enrollment.child
+    child_fields = []
+    if first_name is not None:
+        first_name = first_name.strip()
+        if not first_name:
+            raise ValueError('נדרש שם פרטי')
+        child.first_name = first_name
+        child_fields.append('first_name')
+    if last_name is not None:
+        last_name = last_name.strip()
+        if not last_name:
+            raise ValueError('נדרש שם משפחה')
+        child.last_name = last_name
+        child_fields.append('last_name')
+    if phone is not None:
+        digits = valid_phone(phone)
+        child.phone_number = digits
+        child_fields.append('phone_number')
+        family = child.family
+        if family is not None and family.name.endswith('(נוסף בשיעור)'):
+            family.phone = digits
+            family.save(update_fields=['phone'])
+    if child_fields:
+        child.save(update_fields=child_fields)
 
 
 @transaction.atomic
@@ -126,6 +286,7 @@ def create_ghost_enrollment(*, lesson, first_name: str, last_name: str, phone: s
     last_name = (last_name or '').strip()
     if not first_name or not last_name:
         raise ValueError('נדרשים שם פרטי ושם משפחה')
+    phone = valid_phone(phone or '')
 
     full = _normalise_name(f'{first_name} {last_name}')
 
@@ -138,11 +299,14 @@ def create_ghost_enrollment(*, lesson, first_name: str, last_name: str, phone: s
         child = enrollment.child
         if _normalise_name(f'{child.first_name} {child.last_name}') == full:
             _mark_present(lesson=lesson, child=child, occurrence_date=occurrence_date)
+            refresh_ghost_window(lesson, child)
+            if phone and not ghost_phone(child):
+                set_ghost_contact(enrollment=enrollment, phone=phone)
             return enrollment, False
 
     family = Family.objects.create(
         name=f'{last_name} (נוסף בשיעור)',
-        phone=(phone or '').strip(),
+        phone=phone,
     )
     child = Child.objects.create(
         family=family,
@@ -151,7 +315,7 @@ def create_ghost_enrollment(*, lesson, first_name: str, last_name: str, phone: s
         birth_date=occurrence_date,  # unknown; the real record will carry the truth
         gender='male',               # unknown; not used for a ghost
         status=GHOST_STATUS,
-        phone_number=(phone or '').strip(),
+        phone_number=phone,
         notes='נוסף על ידי המדריך ממסך הנוכחות',
     )
     enrollment = LessonEnrollment.objects.create(
@@ -413,3 +577,103 @@ def visible_ghost_enrollments(lesson, occurrence_date: date, real_enrollments: I
             continue
         visible.append(ghost)
     return visible
+
+
+def phoneless_walk_ins_on(lesson, day: date) -> list:
+    """
+    Walk-ins marked present on this lesson on this day with no phone yet — what
+    the instructor is asked to fill in before the lesson ends.
+    """
+    from apps.enrollments.models import LessonAttendance
+
+    children = [
+        row.child for row in (
+            LessonAttendance.objects
+            .filter(lesson=lesson, occurrence_date=day, status='present', child__status=GHOST_STATUS)
+            .select_related('child', 'child__family')
+            .order_by('child__first_name', 'child__last_name')
+        )
+    ]
+    return [child for child in children if not ghost_phone(child)]
+
+
+def remove_expired_phoneless_ghosts(today: date, *, limit: int = 50) -> int:
+    """
+    Take away the walk-ins nobody can reach once their last lesson has passed.
+
+    Owner, 14.10.2026: "אם אין מספר טלפון על הילד הזה, הוא נמחק... ולא קיים יותר
+    כי אין לנו פרטים עליו בכלל." Only a ghost with no phone, only after the
+    last lesson it was shown on, and only when no lesson still shows it. The
+    rows go the way an instructor's undo takes them (delete_ghost_enrollment):
+    the child and family follow only when nothing else points at them.
+    A ghost with a phone is never removed here — it is a lead.
+    """
+    from django.db.models import Q
+
+    from apps.enrollments.models import LessonEnrollment
+
+    no_own_phone = Q(child__phone_number__isnull=True) | Q(child__phone_number='')
+    no_family_phone = Q(child__family__isnull=True) | Q(child__family__phone__isnull=True) | Q(child__family__phone='')
+    rows = (
+        LessonEnrollment.objects
+        .filter(child__status=GHOST_STATUS, status='inactive', ghost_visible_until__lt=today)
+        .filter(no_own_phone & no_family_phone)
+        .select_related('child', 'child__family', 'lesson')
+        .order_by('ghost_visible_until')[:limit]
+    )
+    removed = 0
+    for enrollment in rows:
+        child = enrollment.child
+        if ghost_phone(child) or not is_ghost_enrollment(enrollment):
+            continue
+        if LessonEnrollment.objects.filter(child=child, ghost_visible_until__gte=today).exists():
+            continue
+        delete_ghost_enrollment(enrollment=enrollment)
+        removed += 1
+    return removed
+
+
+def walk_in_summary(child) -> dict | None:
+    """
+    What the office sees about a walk-in (owner, 14.10.2026: "שיהיה רשום באיזה
+    שיעור, איזה תאריך הוא הגיע"): every lesson it was added to, when it first and
+    last came, and until when the instructor still sees it.
+    """
+    from apps.enrollments.models import LessonAttendance, LessonEnrollment
+
+    if getattr(child, 'status', None) != GHOST_STATUS:
+        return None
+    rows = list(
+        LessonEnrollment.objects
+        .filter(child=child, ghost_visible_until__isnull=False)
+        .select_related('lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor')
+        .order_by('start_date')
+    )
+    visits: dict = {}
+    for lesson_id, day in (
+        LessonAttendance.objects
+        .filter(child=child, status='present', occurrence_date__isnull=False)
+        .values_list('lesson_id', 'occurrence_date')
+    ):
+        visits.setdefault(lesson_id, []).append(day)
+    lessons = []
+    for row in rows:
+        lesson = row.lesson
+        days = sorted(visits.get(lesson.id, [])) or ([row.start_date] if row.start_date else [])
+        course = lesson.course
+        lessons.append({
+            'lesson_id': str(lesson.id),
+            'course_name': course.name if course else '',
+            'branch_name': course.branch.name if course and course.branch_id else '',
+            'instructor_name': lesson.instructor.full_name if lesson.instructor_id else '',
+            'day_of_week': lesson.day_of_week,
+            'start_time': lesson.start_time.strftime('%H:%M') if lesson.start_time else '',
+            'first_seen': days[0].isoformat() if days else None,
+            'last_seen': days[-1].isoformat() if days else None,
+            'visits': len(days),
+            'shown_until': row.ghost_visible_until.isoformat() if row.ghost_visible_until else None,
+        })
+    return {
+        'lessons': lessons,
+        'phone_missing': not ghost_phone(child),
+    }
