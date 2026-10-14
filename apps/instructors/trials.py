@@ -126,7 +126,7 @@ def trials_for_lessons(lesson_ids, date_from: date, date_to: date, today: date |
             | Q(trial_held_on__isnull=True, trial_lesson_date__isnull=True,
                 status='active', child__status__in=('trial_signed', 'trial_completed'))
         )
-        .select_related('child', 'child__family', 'lesson', 'lesson__course')
+        .select_related('child', 'child__family', 'lesson', 'lesson__course', 'lesson__instructor')
         .order_by('-trial_held_on', '-trial_lesson_date')
     )
 
@@ -144,6 +144,8 @@ def trials_for_lessons(lesson_ids, date_from: date, date_to: date, today: date |
             'phone': _phone(row.child),
             'lesson_id': str(row.lesson_id),
             'course_name': row.lesson.course.name if row.lesson.course_id else '',
+            # Whose lesson — the overall summary lists several teachers' trials together.
+            'instructor_name': row.lesson.instructor.full_name if row.lesson.instructor_id else '',
             'day_of_week': row.lesson.day_of_week,
             'start_time': row.lesson.start_time.strftime('%H:%M') if row.lesson.start_time else '',
             'trial_date': held.isoformat() if held else None,
