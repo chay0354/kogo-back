@@ -301,6 +301,11 @@ class SharperChecksTests(SimpleTestCase):
         self.assertNotIn('short', self.failed('\n'.join(talk + [link]), **said))
         self.assertIn('short', self.failed('\n'.join(talk + ['ויש גם יום רביעי ב-16:00', link]), **said))
 
+    def test_the_old_bots_answers_are_not_read_as_silence(self):
+        # The owner, 14.10.2026, at the switch: the old bot answered for months and its words are not in Kogo.
+        for words in ('ענה ללקוחות בוט קודם', 'לא אומרת שלא ענו לו', 'לא מתנצלים על עיכוב', 'שואלים בקצרה למה הכוונה'):
+            self.assertIn(words, shadow.SYSTEM_TASK)
+
     def test_yes_to_this_or_that_chooses_neither(self):
         for words in ('לא בוחרים במקומו', 'נותנים בקצרה את שניהם'):
             self.assertIn(words, shadow.SYSTEM_TASK)
