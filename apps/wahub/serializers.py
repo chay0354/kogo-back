@@ -127,6 +127,29 @@ def note_payload(event: ContactEvent) -> dict:
 NOT_SEARCHED = object()
 
 
+def history_note(contact: Contact, now=None) -> dict | None:
+    """
+    A conversation that began before the switch from the old bot (14.10.2026): what the old bot answered, and
+    what the office wrote in ManyChat's inbox, never reached Kogo — only the customer's messages did. Said at
+    the head of the conversation, with the way to read all of it in ManyChat, so that nobody answers it blind
+    (the owner, that day: "שלא יהיה מצב… שאתחיל לענות לדברים בלי שאני יודע את ההיסטוריה"). None for a
+    conversation that began after it, a demo, or the live test (the new bot answered that one all along).
+    """
+    from django.conf import settings
+
+    from apps.wahub import lead_stage
+
+    if contact.is_demo or contact.live_test:
+        return None
+    switched = lead_stage.switched_at(now)
+    began = contact.first_inbound_at or contact.created_at
+    if switched is None or began is None or began >= switched:
+        return None
+    subscriber = (contact.manychat_subscriber_id or '').strip()
+    url = settings.WAHUB_MANYCHAT_CHAT_URL.format(subscriber_id=subscriber) if subscriber.isdigit() else ''
+    return {'switched_at': _iso(switched), 'manychat_url': url}
+
+
 def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEARCHED, clock=None) -> dict:
     """
     One contact as every list, the live update and every action answer it.
@@ -157,6 +180,8 @@ def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEAR
         'is_demo': contact.is_demo,
         # The owner's own number under the live test: the NEW bot answers it for real (docs/WAHUB-CONTRACT-LIVE-TEST.md).
         'live_test': contact.live_test,
+        # Began before the switch: the old bot's answers are not here, and where to read them (history_note).
+        'history': history_note(contact, now),
         'first_inbound_at': _iso(contact.first_inbound_at),
         'last_inbound_at': _iso(contact.last_inbound_at),
         'last_message_at': _iso(contact.last_message_at),

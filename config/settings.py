@@ -610,6 +610,9 @@ WAHUB_SIMULATE_SEND = config('WAHUB_SIMULATE_SEND', default=False, cast=bool) if
 # from the screen is kept as a failed message that says why, and "קח שיחה" is
 # refused. The copy of messages coming IN from ManyChat is not affected.
 WAHUB_SENDING_ENABLED = config('WAHUB_SENDING_ENABLED', default=False, cast=bool)
+# One customer's conversation in ManyChat's own inbox: where what the old bot and the office wrote before the switch
+# can be read (Kogo never got a copy of it).
+WAHUB_MANYCHAT_CHAT_URL = config('WAHUB_MANYCHAT_CHAT_URL', default='https://app.manychat.com/fb5259597/chat/{subscriber_id}')
 # How the existing bot is told that a person took a conversation over
 # (apps/wahub/handoff.py). The names are the bot vendor's, in ManyChat.
 WAHUB_HUMAN_START_TAG = config('WAHUB_HUMAN_START_TAG', default='התחיל טיפול: נציג אנושי')
