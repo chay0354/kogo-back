@@ -3,6 +3,7 @@ Dashboard API Views
 Provides aggregated analytics data for dashboard UI
 """
 import logging
+import uuid
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -928,6 +929,77 @@ class DashboardViewSet(viewsets.ViewSet):
             'no_show': sum(1 for r in rows if r['outcome'] == 'no_show'),
             'results': rows,
         })
+
+    @action(detail=False, methods=['get'], url_path='students-report')
+    def students_report(self, request):
+        """
+        The printable students report (owner, 14.10.2026) — everything in one answer.
+
+        GET /api/v1/core/dashboard/students-report/
+            ?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&branches=<id,id…>|all
+
+        `all` is every active branch the user may see, less the external
+        (municipality) ones — their children are not paying students. A partner
+        gets their own branches whatever ids are asked for: an id outside them
+        is dropped, never answered. Read only. See apps/core/students_report.py
+        for how each figure is counted.
+        """
+        from apps.core.students_report import build_students_report
+
+        def day(name):
+            raw = (request.query_params.get(name) or '').strip()
+            try:
+                return datetime.strptime(raw, '%Y-%m-%d').date()
+            except ValueError:
+                return None
+
+        date_from, date_to = day('date_from'), day('date_to')
+        if not date_from or not date_to:
+            return Response({'detail': 'יש לבחור תאריך התחלה ותאריך סיום.'}, status=status.HTTP_400_BAD_REQUEST)
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+        today = timezone.localdate()
+        if date_from > today:
+            return Response({'detail': 'התקופה עוד לא התחילה.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Ten years of daily history is more than anyone prints; it also bounds the work.
+        if (date_to - date_from).days > 3660:
+            return Response({'detail': 'אפשר להפיק דוח של עד עשר שנים.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        scoped, _c, scoped_branch_ids, _i = self._scope(request)
+        branches = Branch.objects.select_related('city')
+        if scoped:
+            branches = branches.filter(id__in=scoped_branch_ids)
+
+        wanted = (request.query_params.get('branches') or '').strip()
+        all_branches = wanted == 'all'
+        if all_branches:
+            branches = branches.filter(is_active=True, is_external=False)
+        else:
+            ids = [part.strip() for part in wanted.split(',') if part.strip()]
+            valid = []
+            for value in ids:
+                try:
+                    valid.append(str(uuid.UUID(value)))
+                except ValueError:
+                    continue
+            branches = branches.filter(id__in=valid)
+        branches = list(branches)
+        if not branches:
+            return Response({'detail': 'לא נבחרו סניפים.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        report = build_students_report(branches, date_from, date_to, today=today)
+        report['all_branches'] = all_branches
+        # The students tab counts "תלמידים פעילים" across all branches as every
+        # child who is פעיל or בעיה באשראי, place or no place. Said beside the
+        # report's own total, so a difference between the two reads as what it
+        # is rather than as an error. Only where the two can be compared: a
+        # manager, all branches, up to today.
+        report['students_tab_total'] = (
+            Child.objects.filter(status__in=ACTIVE_STUDENT_CHILD_STATUSES).count()
+            if all_branches and not scoped and report['date_to'] == today.isoformat()
+            else None
+        )
+        return Response(report)
 
     @action(detail=False, methods=['get'], url_path='courses')
     def courses_data(self, request):
