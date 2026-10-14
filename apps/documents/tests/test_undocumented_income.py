@@ -8,7 +8,7 @@ sum, and a partner still seeing only their own branches.
 from datetime import date, datetime, timezone as dt_timezone
 from decimal import Decimal
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from apps.core.models import Branch, City, UserProfile
 from apps.customers.checkout_invoice import CHECKOUT_LINES_ACTION
@@ -534,6 +534,7 @@ class StoreAttributionTests(TestCase):
         self.assertEqual(groups[1].key, BusinessCategory.objects.get(name='מרצנדייס משלוחים').id)
 
 
+@override_settings(REPORT_CALENDAR_RENTALS=True)
 class StudioRentalIncomeTests(TestCase):
     """
     Phase 6: a month of studio rent with no receipt behind it is income the
@@ -575,6 +576,17 @@ class StudioRentalIncomeTests(TestCase):
             branch or self.north, price=price, event_type='one_time', event_date=date(2026, 8, day),
             renter_name=renter_name, tenancy=tenancy, contract=(date(2026, 8, 1), date(2027, 7, 31)),
         )
+
+    @override_settings(REPORT_CALENDAR_RENTALS=False)
+    def test_left_out_while_the_rent_is_billed_in_another_system(self):
+        # The owner, 14.10.2026: the studio's rent lives in another system until
+        # the switch, so the calendar's estimate is not the period's money.
+        tenancy = self.tenancy()
+        self.rent(tenancy, day=5)
+
+        result = collect_undocumented(self.manager, *AUG)
+
+        self.assertEqual([s for s in result.sections if s.source == SOURCE_RENTALS], [])
 
     def test_a_month_of_rent_is_one_row_per_tenant_with_its_sessions(self):
         tenancy = self.tenancy()
