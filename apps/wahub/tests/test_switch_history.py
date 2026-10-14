@@ -5,8 +5,7 @@ after it: "המערכת לא מסונכרנת עם מה שהיה — זה מרא
 The old bot answered every customer's message, and its answers were never copied to Kogo.
 From the first moment the new bot answered everybody (bot_mode.first_live_at) every answer is
 Kogo's own; before it, nothing is read as unanswered: no wait, no "unanswered question" the
-summary read in a conversation it saw only half of, and no request for a person made a day and
-more before the switch that the office dealt with in ManyChat's own inbox.
+summary read in a conversation it saw only half of, and a request for a person stays the office's whenever it was made.
 """
 from datetime import timedelta
 
@@ -63,19 +62,10 @@ class BeforeTheSwitchTests(SwitchTestCase):
         call = self.contact_that_wrote(timedelta(days=2), phone='972505550304', lead_ai={'blocker': 'call_someone', 'blocker_text': 'ביקש שיתקשרו'})
         self.assertEqual(self.stage(call)['stage'], 'needs_reply')
 
-    def test_a_request_for_a_person_a_day_before_the_switch_was_the_offices_in_manychat(self):
+    def test_a_request_for_a_person_stays_the_offices_whenever_it_was_made(self):
+        # The owner, 14.10.2026: those who wait for a person are not to be missed — the office decides on each.
         old = self.contact_that_wrote(timedelta(days=3), needs_human=True, needs_human_at=self.now - timedelta(days=3))
-        self.assertNotEqual(self.stage(old)['stage'], 'needs_reply')
-        # Hours before the switch: it may still wait for somebody — it stays the office's.
-        recent = self.contact_that_wrote(
-            timedelta(hours=3), phone='972505550305', needs_human=True, needs_human_at=self.now - timedelta(hours=3),
-        )
-        self.assertEqual(self.stage(recent)['stage'], 'needs_reply')
-        # An old request from somebody who wrote again since the switch: the rules see them again.
-        again = self.contact_that_wrote(
-            timedelta(minutes=20), phone='972505550306', needs_human=True, needs_human_at=self.now - timedelta(days=3),
-        )
-        self.assertEqual(self.stage(again)['stage'], 'needs_reply')
+        self.assertEqual(self.stage(old)['stage'], 'needs_reply')
 
     def test_a_contact_kogo_answered_itself_is_measured_as_before(self):
         own = self.contact_that_wrote(timedelta(hours=3), live_test=True)
@@ -103,3 +93,41 @@ class FirstLiveTests(WahubTestCase):
     def test_never_live_is_no_moment(self):
         settings_store.put(settings_store.BOT_MODE, {'mode': 'test'})
         self.assertIsNone(bot_mode.first_live_at())
+
+
+class SettleBeforeTheSwitchTests(SwitchTestCase):
+    """The one-time cleanup of migration 0013: two false marks, and nothing else."""
+
+    def settle(self):
+        import importlib
+
+        from django.apps import apps
+
+        importlib.import_module('apps.wahub.migrations.0013_settle_before_the_switch').settle(apps, None)
+
+    def test_only_the_two_false_marks_of_what_came_before_are_cleared(self):
+        before = self.contact_that_wrote(
+            timedelta(days=2), unread_count=3, needs_human=True, needs_human_at=self.now - timedelta(days=2),
+            followup_status='later', followup_due=(self.now + timedelta(days=30)).date(), known_callback_on=(self.now + timedelta(days=60)).date(),
+        )
+        after = self.contact_that_wrote(timedelta(minutes=20), phone='972505550311', unread_count=1)
+        own = self.contact_that_wrote(timedelta(days=2), phone='972505550312', unread_count=2, live_test=True)
+        self.settle()
+        before, after, own = (Contact.objects.get(pk=row.pk) for row in (before, after, own))
+        self.assertEqual((before.waiting_since, before.unread_count), (None, 0))
+        # What the office would not want to miss is as it was.
+        self.assertTrue(before.needs_human)
+        self.assertEqual(before.followup_status, 'later')
+        self.assertIsNotNone(before.followup_due)
+        self.assertIsNotNone(before.known_callback_on)
+        # After the switch, and the owner's own number: untouched.
+        self.assertIsNotNone(after.waiting_since)
+        self.assertEqual(after.unread_count, 1)
+        self.assertEqual((own.unread_count, own.waiting_since is not None), (2, True))
+
+    def test_with_no_switch_on_record_nothing_happens(self):
+        settings_store.put(settings_store.BOT_MODE, {'mode': 'test'})
+        row = self.contact_that_wrote(timedelta(days=2), unread_count=3)
+        self.settle()
+        row = Contact.objects.get(pk=row.pk)
+        self.assertEqual((row.unread_count, row.waiting_since is not None), (3, True))
