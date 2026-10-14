@@ -34,8 +34,8 @@ from apps.core.permissions import IsManager
 from apps.customers.models import Family
 from apps.core.whatsapp_optout import OptOutListUnavailable
 from apps.wahub import (
-    analysis, cron, demo, future_leads, handoff, inbound, lead_stage, live_test, matching, media, office_clock, optout, queries,
-    reviewer, sending, shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
+    analysis, cron, demo, future_leads, handoff, history, inbound, lead_stage, live_test, matching, media, office_clock,
+    optout, queries, reviewer, sending, shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
 )
 from apps.wahub.models import (
     DELIVERED_STATUSES,
@@ -256,6 +256,9 @@ class ContactViewSet(viewsets.GenericViewSet):
         payload['kogo']['children'] = matching.children_of(contact)
         # What a person wrote about the customer while talking to them — shown inside the conversation and on the card.
         payload['notes'] = future_leads.notes(contact)
+        # What the old bot and the office wrote in ManyChat before the switch, once copied (history.py) — the
+        # screen puts each line in its place among the messages. [] and no query before a copy.
+        payload['history_lines'] = history.lines_for(contact)
         # For somebody on a waiting list: what they wanted and where, and what can be offered instead now
         # (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ח.3.2). None — and nothing read — for everybody else.
         payload['waiting_summary'] = waiting_summary.of(contact)
@@ -740,6 +743,35 @@ class SummaryView(APIView):
 
     def get(self, request):
         return Response(queries.summary())
+
+
+class HistoryImportView(APIView):
+    """
+    GET history/import/[?again=1] → {switched_at, subscribers}: ManyChat's numbers of the conversations to bring.
+    POST history/import/ {conversations: [{subscriber_id, messages: [{id, at, from, text, type}]}]} → the counts.
+    The conversations from before the switch, as the office's own session in ManyChat shows them, a small batch a
+    call (history.py). Lines already here are kept once; nothing is sent.
+    """
+    permission_classes = [IsAuthenticated, IsManager]
+
+    def get(self, request):
+        try:
+            return Response(history.still_to_copy(again=request.query_params.get('again') == '1'))
+        except history.NoSwitch:
+            return _error('הבוט החדש עוד לא עונה לכולם — אין עדיין "לפני המעבר" להעתיק.', code='no_switch')
+
+    def post(self, request):
+        conversations = request.data.get('conversations') if isinstance(request.data, dict) else None
+        if not isinstance(conversations, list) or not conversations:
+            return _error('אין שיחות להעתקה.', code='empty')
+        if len(conversations) > history.MAX_CONVERSATIONS:
+            return _error(f'עד {history.MAX_CONVERSATIONS} שיחות בכל פעם.', code='too_many')
+        try:
+            counts = history.import_conversations(conversations)
+        except history.NoSwitch:
+            return _error('הבוט החדש עוד לא עונה לכולם — אין עדיין "לפני המעבר" להעתיק.', code='no_switch')
+        logger.info('wahub history import: %s', counts)
+        return Response(counts)
 
 
 def _stored_inbound_key():

@@ -31,7 +31,7 @@ import requests
 from django.conf import settings
 from django.utils import timezone
 
-from apps.wahub import lead_ai, state
+from apps.wahub import history, lead_ai, state
 from apps.wahub.models import (
     ANALYSIS_AI,
     ANALYSIS_RULES,
@@ -640,7 +640,7 @@ def conversation_lines(contact: Contact) -> list[Line]:
         .values_list('direction', 'sender', 'text', 'sent_at', 'message_type')[:MAX_MESSAGES]
     )
     rows.reverse()
-    return [
+    own = [
         Line(
             who=SENDER_CUSTOMER if direction == DIRECTION_IN else sender,
             text=text or '',
@@ -649,6 +649,11 @@ def conversation_lines(contact: Contact) -> list[Line]:
         )
         for direction, sender, text, sent_at, message_type in rows
     ]
+    # What the old bot and the office wrote in ManyChat before the switch, once copied (history.py), in its place.
+    return history.read_beside(
+        contact, own, at=lambda line: line.sent_at, limit=MAX_MESSAGES, full=len(own) >= MAX_MESSAGES,
+        shape=lambda line: Line(who=line.sender, text=line.text, sent_at=line.sent_at, is_template=line.message_type == TYPE_TEMPLATE),
+    )
 
 
 def analyze_contact(

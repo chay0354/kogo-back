@@ -16,6 +16,7 @@ router.register(r'refine', views_bot.RefineViewSet, basename='wahub-refine')
 
 urlpatterns = [
     path('summary/', views.SummaryView.as_view(), name='wahub-summary'),
+    path('history/import/', views.HistoryImportView.as_view(), name='wahub-history-import'),
     path('status/', views.StatusView.as_view(), name='wahub-status'),
     path('settings/inbound-key/', views.InboundKeyView.as_view(), name='wahub-inbound-key'),
     path('settings/review/', views_bot.ReviewSettingsView.as_view(), name='wahub-settings-review'),

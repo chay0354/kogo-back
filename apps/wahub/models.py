@@ -477,6 +477,9 @@ class Contact(models.Model):
     # what: "נפתח: …" — the classes and the branch}; {} until the first look. Written by
     # lead_openings.py only; lead_stage.py reads it.
     lead_opened = models.JSONField(default=dict, blank=True)
+    # When the conversation from before the switch was copied from ManyChat (HistoryLine, history.py); None until
+    # then — and the screen asks for the copied lines only when it is set.
+    history_copied_at = models.DateTimeField(null=True, blank=True)
 
     # --- "הסר" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.1) ---
     # The customer asked not to get broadcast messages — {at, source: message | office, text, by,
@@ -580,6 +583,36 @@ class Message(models.Model):
 
     def __str__(self):
         return f'{self.get_direction_display()} · {self.text[:40]}'
+
+
+class HistoryLine(models.Model):
+    """
+    One message of a conversation from before the switch to the new bot (14.10.2026), as ManyChat's own inbox
+    kept it — the customer's, the old bot's or the office's — brought into Kogo once (history.py). Apart from
+    `Message`: the conversation there is ordered by id, and lines from months ago must not land after today's;
+    nothing here is sent, counted as waiting or unread, or read by the leads' clocks. Only what Kogo did not keep
+    itself is here; the screen, the new bot and the summary read these lines in their place among Kogo's own.
+    """
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name='history_lines')
+    sent_at = models.DateTimeField()
+    direction = models.CharField(max_length=3, choices=DIRECTION_CHOICES)
+    sender = models.CharField(max_length=10, choices=SENDER_CHOICES)
+    text = models.TextField(blank=True)
+    message_type = models.CharField(max_length=10, choices=MESSAGE_TYPE_CHOICES, default=TYPE_TEXT)
+    # ManyChat's own id of the event: the same line brought twice is kept once.
+    external_id = models.CharField(max_length=120)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'wahub_history_lines'
+        ordering = ['sent_at', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['contact', 'external_id'], name='wahub_history_line_once'),
+        ]
+        indexes = [models.Index(fields=['contact', 'sent_at'], name='wahub_history_contact_at')]
+
+    def __str__(self):
+        return f'{self.sender} · {self.text[:40]}'
 
 
 class ContactEvent(models.Model):
