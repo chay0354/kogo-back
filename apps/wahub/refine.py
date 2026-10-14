@@ -97,7 +97,7 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
-from apps.wahub import inbound, knowledge, reviewer, settings_store, shadow, state
+from apps.wahub import inbound, knowledge, reviewer, settings_store, shadow, state, system_look
 from apps.wahub.analysis import ANTHROPIC_URL, ANTHROPIC_VERSION
 from apps.wahub.models import (
     DIRECTION_IN,
@@ -513,6 +513,16 @@ preview_question היא אז שאלה כמו זו שהלקוח כתב שם, בנ
 בסיכום תחת "מה נראה לא טוב"; כשהוא מתקן — הולכים לפי מה שכתב, לא לפי הסיכום. הסיכום הוא השערה של המערכת ולא עובדה. \
 אם הוא אישר סיכום שלא נכתב בו מה נראה לא טוב, או שלא ברור מהתשובה שלו מה הבעיה — שואלים.
 
+מה יש במערכת:
+כשההסבר מדבר על חוג, קבוצה, מסלול, יום, שעה, סניף או גיל, מופיע למטה גם "מה יש במערכת Kogo עכשיו" — מה שהמערכת עצמה מחזיקה, \
+ומה החיפוש של הבוט מחזיר על אותה שאלה. את החוגים, הימים, השעות וקבוצות הגיל הבוט קורא רק משם, ולכן: \
+כשבעל העסק אומר שיש (או שאין) חוג, קבוצה, מסלול, יום או שעה: אם זה נמצא שם והחיפוש של הבוט מוצא אותו — אין מה לשנות בידע: changes ריק, וב-understood אומרים איפה זה במערכת \
+(השם כפי שהוא שם, הסניף והימים) ושהבוט כבר עונה משם. \
+אם זה נמצא שם והחיפוש של הבוט לא מוצא אותו — זו תקלה בחיפוש, וכלל בידע לא יתקן אותה: changes ריק, וב-understood כותבים מה מצאת \
+במערכת ושהבוט לא מוצא אותו, ושזה הועבר לתיקון. \
+אם זה מוסתר מטופס ההרשמה, או לא נמצא שם בכלל — changes ריק, וב-understood כותבים מה בדיוק צריך לתקן או להוסיף בכרטיס החוג ב-Kogo. \
+עובדה על אילו חוגים, קבוצות, ימים או שעות יש — לא כותבים בידע אף פעם.
+
 preview_question — הדוגמה:
 שאלה אחת, קצרה, כמו שהורה היה כותב בוואטסאפ, שהתשובה של הבוט עליה תשתנה בגלל השינוי ("כמה עולה חוג?"). \
 המערכת תראה לבעל העסק מה הבוט עונה עליה היום ומה יענה אחרי השינוי. בלי שם של לקוח ובלי פרטים שלא הופיעו בהסבר. \
@@ -826,6 +836,18 @@ def _user_text(thread: RefineThread, turns: list[RefineTurn], earlier: list[Know
 
 
 def _teach_user_text(thread: RefineThread, turns: list[RefineTurn], earlier: list[KnowledgeProposal]) -> str:
+    """
+    What the teach chat reads (`_teach_reading`), and — when his words speak of a
+    class, a place or an age — what Kogo holds there and what the bot's search
+    returns for it now (system_look.py; the owner, 14.10.2026: the chat wrote a rule
+    for a group the search itself could not find, and nobody looked at the system).
+    """
+    told = _teach_reading(thread, turns, earlier)
+    looked = system_look.section(system_look.look(turns[-1].text))
+    return f'{told}\n\n{looked}' if looked else told
+
+
+def _teach_reading(thread: RefineThread, turns: list[RefineTurn], earlier: list[KnowledgeProposal]) -> str:
     """
     "ללמד את הבוט": what the owner wrote, and what the thread has proposed so
     far. A thread that was opened from a conversation shows the excerpt too —

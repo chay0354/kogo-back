@@ -64,6 +64,15 @@ TRIAL_WHEN_ASKED = (
 REGISTRATION_FEE_NOTE = 'דמי רישום נגבים פעם אחת לכל ילד, בהרשמה הראשונה שלו; ילד שכבר משלם על חוג לא משלם אותם שוב'
 HIDDEN_NOTE = 'החוג לא מוצג בהרשמה באתר, ואי אפשר להירשם אליו משם. לא מציעים אותו; מפנים למשרד'
 NOT_OPEN = 'חוג זה אינו פתוח להרשמה'
+# A class open to the child only through a track (or a price of a day) with an age group of its own.
+JOIN_THROUGH_TRACK = (
+    'לגיל שנמסר החוג פתוח רק דרך המסלול שב-tracks: אומרים את שם המסלול, הימים והשעות שלו והמחיר החודשי שלו. '
+    'לא מציעים שיעור בודד של החוג ולא את המחיר של החוג, ולא אומרים את קבוצת הגיל של החוג (ages) — היא לא של הלקוח הזה'
+)
+JOIN_THROUGH_OPTION = (
+    'לגיל שנמסר החוג פתוח רק במחיר שב-lessons[].price_options (כותרת, מחיר חודשי): אומרים אותו בשמו ובמחיר שלו, '
+    'ולא את המחיר של החוג ולא את קבוצת הגיל של החוג'
+)
 
 # The one rule about trial dates, said with every answer that carries them.
 TRIAL_DATES_RULE = (
@@ -440,6 +449,57 @@ def trial_payload(course, lessons: list, offer=None, *, today: date | None = Non
     return payload
 
 
+def _instructors(course) -> bool:
+    """The instructors' class (kogo-front courseUtils.isInstructorsCourse): no single day of it is on the form."""
+    return course.min_age == age_groups.INSTRUCTORS and course.max_age == age_groups.INSTRUCTORS
+
+
+def _own_range_takes(row, course, codes) -> bool:
+    """A track or a price of a day with an age group of its own is read by it; with none, by the class's."""
+    if row.min_age is not None or row.max_age is not None:
+        return age_groups.fits(row.min_age, row.max_age, codes)
+    return age_groups.fits(course.min_age, course.max_age, codes)
+
+
+def age_offer(course, codes) -> dict | None:
+    """
+    How a class is open to a child at these places of the age scale — the way the
+    registration form decides it (kogo-front catalogRows.ts, buildCatalogRows), so that
+    the bot finds what a parent choosing that age finds there: {days, tracks, options}.
+
+      days     its own days, one at a time, when the class's own age group takes the
+               child — never the days of the instructors' class;
+      tracks   the ids of its tracks that take the child: a track with an age group of
+               its own is read by it, one without by the class's (the instructors' class
+               shows only its tracks of two days and more);
+      options  the ids of the prices of a day (מחיר נוסף לשיעור) that take the child the same way.
+
+    None when nothing of the class is open to the child. With no age at all, everything is.
+    The owner, 14.10.2026: the adults' group of מינץ is the track "קבוצת בוגרים" (its own
+    group: בוגרים) of the instructors' capoeira class, and the bot, which read only the
+    class's own group (מדריכים), said that there is none.
+    """
+    from apps.courses.bundles import catalog_bundles_for_course
+
+    instructors = _instructors(course)
+    if not codes:
+        days = not instructors
+        tracks = [str(row.id) for row in catalog_bundles_for_course(course) if not instructors or len(row.lessons.all()) >= 2]
+        return {'days': days, 'tracks': tracks, 'options': []}
+    days = not instructors and age_groups.fits(course.min_age, course.max_age, codes)
+    tracks = [
+        str(row.id) for row in catalog_bundles_for_course(course)
+        if (not instructors or len(row.lessons.all()) >= 2) and _own_range_takes(row, course, codes)
+    ]
+    options = [] if instructors else [
+        str(option.id) for lesson in course.lessons.all() for option in lesson.price_options.all()
+        if (option.min_age is not None or option.max_age is not None) and age_groups.fits(option.min_age, option.max_age, codes)
+    ]
+    if not (days or tracks or options):
+        return None
+    return {'days': days, 'tracks': tracks, 'options': options}
+
+
 def track_payloads(course, seats: Seats | None = None) -> list:
     """The combined tracks (twice a week and the like) the form offers for the class, with their monthly price."""
     from apps.core.payment_service import bundle_monthly_price
@@ -463,8 +523,13 @@ def track_payloads(course, seats: Seats | None = None) -> list:
     return tracks
 
 
-def course_payload(course, seats: Seats, *, detail: bool = False) -> dict:
-    """A class as the bot may describe it. `detail` adds what only the card of one class carries."""
+def course_payload(course, seats: Seats, *, detail: bool = False, codes=None) -> dict:
+    """
+    A class as the bot may describe it. `detail` adds what only the card of one class carries.
+    `codes` — the child's places on the age scale, when the search had them: the class is then
+    told only as it is open to that child (`age_offer`) — the tracks that take him, and, when
+    its own days do not, no price of the class and a note that says how he joins.
+    """
     from apps.core.payment_service import registration_fee_amount
 
     offer = trial_offer.for_course(course, seats)
@@ -491,6 +556,21 @@ def course_payload(course, seats: Seats, *, detail: bool = False) -> dict:
         'lessons': lessons,
         'tracks': track_payloads(course, seats),
     }
+    offer_for_age = age_offer(course, codes) if codes else None
+    if offer_for_age is not None:
+        payload['tracks'] = [row for row in payload['tracks'] if row['id'] in offer_for_age['tracks']]
+        if offer_for_age['options']:
+            for row, lesson in zip(payload['lessons'], course.lessons.all()):
+                mine = [option for option in lesson.price_options.all() if str(option.id) in offer_for_age['options']]
+                if mine:
+                    row['price_options'] = [
+                        {'id': str(option.id), 'title': option.display_title, 'price_monthly': _money(option.monthly_price),
+                         'ages': age_groups.range_label(option.min_age, option.max_age)}
+                        for option in mine
+                    ]
+        if not offer_for_age['days']:
+            payload['price_monthly'] = None
+            payload['join_note'] = JOIN_THROUGH_TRACK if payload['tracks'] else JOIN_THROUGH_OPTION
     if detail:
         payload['course_type_description'] = (course.course_type.description if course.course_type_id else '') or ''
         payload['registration_fee_note'] = REGISTRATION_FEE_NOTE
@@ -924,8 +1004,10 @@ def quote_registration(
     grade_codes = age_groups.codes_for_grade(grade)
     if grade_codes or child_age not in (None, ''):
         codes = grade_codes or age_groups.codes_for_age(child_age)
-        if not age_groups.fits(course.min_age, course.max_age, codes):
-            notes.append(f'החוג מיועד ל{age_groups.range_label(course.min_age, course.max_age)} — הגיל שנמסר לא בטווח')
+        owner = bundle if bundle is not None and (bundle.min_age is not None or bundle.max_age is not None) else course
+        if not age_groups.fits(owner.min_age, owner.max_age, codes):
+            what = 'המסלול' if owner is bundle else 'החוג'
+            notes.append(f'{what} מיועד ל{age_groups.range_label(owner.min_age, owner.max_age)} — הגיל שנמסר לא בטווח')
     if as_of != today:
         notes.append(f'החישוב הוא להרשמה ב-{_day(as_of)}; החלק היחסי וההנחות נקבעים לפי יום ההרשמה בפועל')
     if course.charge_standing_order_immediately:
