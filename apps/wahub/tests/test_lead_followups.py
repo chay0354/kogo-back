@@ -621,7 +621,9 @@ class SendingTests(EngineCase):
             lead_followups.run()
             lead_followups.run()
             cron.tick()
-        self.assertEqual(request.call_count, 1)
+        # One send. (The cron's read of ManyChat's list of automations — the follow-ups' templates, step 6b — sends nothing.)
+        sends = [call for call in request.call_args_list if call.args[:2] != ('GET', '/fb/page/getFlows')]
+        self.assertEqual(len(sends), 1)
         self.assertEqual(Message.objects.filter(contact=contact).count(), 1)
 
     @override_settings(**SENDING_ON)
