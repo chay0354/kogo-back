@@ -1000,7 +1000,7 @@ class KeepingTests(LeadsCase):
         events = ContactEvent.objects.filter(kind='lead_stage_changed').count()
         self.assertEqual(lead_stage.scan()['lead_checked'], 1)
         after = Contact.objects.get(pk=contact.pk)
-        self.assertEqual((after.lead_stage, after.lead_owner, after.lead_version), ('answered_silent', 'bot', 2))
+        self.assertEqual((after.lead_stage, after.lead_owner, after.lead_version), ('answered_silent', 'bot', lead_stage.RULES_VERSION))
         self.assertEqual(lead_stage.pending_count(), 0)
         self.assertEqual(ContactEvent.objects.filter(kind='lead_stage_changed').count(), events + 1)
 

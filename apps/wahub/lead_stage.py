@@ -63,10 +63,11 @@ the bot came back as many times as the round allows and nobody answered — a ho
 lead (a trial, a registration begun) and one who "will check" then wait for the
 office, any other goes dormant, GIVE_UP_AFTER later; a hot lead wrote (office:
 a person carries on from there); or the fact behind the round is too old to ask
-about (START_WITHIN). An external branch has a round of its own in place of
-the stage's — nobody can know from Kogo whether they registered, so the bot
-asks once, three days on, whether it worked out with the municipality
-(docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md). And there are leads the bot never
+about (START_WITHIN). An external branch that got a link or an answer and went
+quiet has a round of its own in place of the stage's — nobody can know from Kogo
+whether they registered, so the bot asks once, three days on, whether it worked
+out with the municipality (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md); in any
+other stage it follows the stage's round like any lead. And there are leads the bot never
 comes back to by itself: an open complaint (office), the price or the days
 (nothing new to say: the office calls), and whoever asked "הסר" — not to get
 messages the business starts (optout.py; a hot lead of theirs is the office's
@@ -191,8 +192,10 @@ COLD_AFTER = timedelta(days=30)
 
 # The rules as they stand. A contact whose stage an older version worked out is looked at
 # again, a batch at a time — which is how the stages and the owners of 12.10.2026 reach the
-# contacts that were already there.
-RULES_VERSION = 2
+# contacts that were already there. 3 (14.10.2026): the rounds of an external branch and of a
+# lead that went quiet, the price or the days to the office, a class that opened
+# (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md) — at once after the deploy, not at the next midnight.
+RULES_VERSION = 3
 
 # --- the bot's own follow-ups (docs/WAHUB-CONTRACT-LEADS-V2.md, ג and ח.10) ---
 DAY = timedelta(days=1)
@@ -224,6 +227,10 @@ VARIANT_EXTERNAL = 'external'
 VARIANT_SILENT = 'silent'
 EXTERNAL_DELAYS = (3 * DAY,)
 SILENT_DELAYS = (SILENT_AFTER,)
+# The stages in which an external branch gets its own round in place of the stage's: a link, or an
+# answer, and quiet since. Everywhere else — a day the customer named, "will check", a trial, a
+# registration begun — the stage's own round, as for any lead (the coordinator, 14.10.2026).
+EXTERNAL_ROUND_STAGES = (LEAD_LINK_SENT, LEAD_ANSWERED_SILENT)
 
 
 def delays_for(kind: str, variant: str = '') -> tuple:
@@ -858,10 +865,12 @@ def compute(contact: Contact, now=None) -> dict:
         # Leads the bot never comes back to by itself.
         if 'complaint' in (contact.known_flags or []):
             return office('יש תלונה פתוחה — הבוט לא חוזר אליו')
-        if said.external and variant != VARIANT_EXTERNAL:
-            # An external branch: the registration is the municipality's, and Kogo cannot see whether they
-            # registered. In place of the stage's own round the bot asks once whether it worked out over there
-            # — and that round goes through the rest of these rules itself, never through this one again.
+        if said.external and variant != VARIANT_EXTERNAL and stage in EXTERNAL_ROUND_STAGES:
+            # An external branch that got a link or an answer and went quiet: the registration is the
+            # municipality's, and Kogo cannot see whether they registered. In place of the stage's own round
+            # the bot asks once whether it worked out over there — and that round goes through the rest of
+            # these rules itself, never through this one again. In any other stage the stage's round stands:
+            # a day the customer named is kept, and a hot lead still goes to the office unanswered.
             key = f'{NUDGE_LINK_REMINDER}|{VARIANT_EXTERNAL}|{_stamp(contact.last_inbound_at)}|{_stamp(facts.marked_at)}'
             return by_the_bot(
                 stage, NUDGE_LINK_REMINDER, key, facts.last_activity, *parts, EXTERNAL_BRANCH, then=THEN_STAY,
@@ -1183,7 +1192,7 @@ def compute(contact: Contact, now=None) -> dict:
         )
 
     said_nothing = said.empty_opening and contact.last_inbound_at is not None
-    # (An external branch is told apart in by_the_bot: whatever the stage, it gets the round of its own.)
+    # (An external branch is told apart in by_the_bot: in "silent" it gets the round of its own.)
     afraid_to_commit = said.blocker == lead_ai.BLOCKER_COMMITMENT and not said.external
 
     # 21. still talking

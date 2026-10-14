@@ -162,7 +162,9 @@ class BoardsTests(WahubTestCase):
             cron.tick()
         self.assertEqual(counts['holiday_flows_found'], 2)
         self.assertEqual(asked_to_do(request), [])                                         # a read of the list, and nothing else
-        self.assertEqual(request.call_count, 1)
+        # Once for the boards — and once for the templates of the bot's follow-ups to leads, which the cron keeps fresh
+        # the same way (cron 6b): two reads in ten minutes, however many calls.
+        self.assertEqual(request.call_count, 2)
         with patch.object(holiday_flows, 'found', side_effect=RuntimeError('boom')), self.assertLogs('apps.wahub.cron', level='ERROR'):
             self.assertIn('seconds', cron.tick())
         # With no time left the list is not asked for.

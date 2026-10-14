@@ -41,7 +41,11 @@ The slice of background work one cron call does (every five minutes):
      claim as every live answer, so nobody is answered twice;
   6. the holidays boards: which of their automations ManyChat has, by name —
      asked once in ten minutes and kept, because the bot's tool only reads what
-     is kept (apps/wahub/holiday_flows.py). A read of ManyChat's list; nothing is sent.
+     is kept (apps/wahub/holiday_flows.py). A read of ManyChat's list; nothing is sent;
+  6b. the follow-ups' templates: the same for the automations the bot's follow-ups to
+     leads leave through (apps/wahub/lead_templates.py) — so that the leads list, which
+     never asks ManyChat itself, shows a template within ten minutes of its being made
+     there. A read of ManyChat's list; nothing is sent.
 
 Nothing in 1b, 2a, 2b, 3, 4, 4d or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
 a few fields on the contact, the shadow keeps proposals, the reviewer keeps
@@ -61,8 +65,8 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.wahub import (
-    analysis, holiday_flows, lead_followups, lead_openings, lead_stage, live_test, matching, reviewer, shadow, unknowns,
-    waiting_list,
+    analysis, holiday_flows, lead_followups, lead_openings, lead_stage, lead_templates, live_test, matching, reviewer, shadow,
+    unknowns, waiting_list,
 )
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
@@ -290,6 +294,14 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
             counts['holiday_flows_found'] = len(holiday_flows.found())
         except Exception:
             logger.exception('wahub cron: the holidays boards were not looked up in ManyChat')
+
+    # 6b. the follow-ups' templates: what ManyChat has under their names (a read, kept for the engine and the leads list;
+    #     asked when the last answer is ten minutes old, and only when some follow-up is still to be found by name)
+    if left() > HOLIDAY_FLOWS_FLOOR:
+        try:
+            counts['lead_templates_connected'] = len(lead_templates.connections(timezone.now()))
+        except Exception:
+            logger.exception('wahub cron: the templates of the follow-ups were not looked up in ManyChat')
 
     now = timezone.now()
     counts['pending_analysis'] = _to_analyze(now).count()

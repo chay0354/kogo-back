@@ -156,6 +156,24 @@ class ExternalRoundTests(NoOneLostCase):
         self.assertEqual((after.lead_stage, after.lead_owner), ('link_sent', 'bot'))
         self.assertEqual(self.next_of(after)['what'], 'הבוט חזר אליו — מחכים לתשובה')
 
+    def test_in_any_other_stage_an_external_branch_follows_the_stages_own_round(self):
+        # A day the customer named is kept: the bot comes back on it, and asks nothing about the municipality before.
+        later = lead_stage.compute(self.lead(said=EXTERNAL, known_callback_on=TODAY + timedelta(days=20)))
+        self.assertEqual((later['stage'], later['owner']), ('waiting_date', 'bot'))
+        self.assertEqual((later['follow']['kind'], later['follow']['variant']), ('date_arrived', ''))
+        # "Will check": the stage's one question, and then the office calls whoever decides.
+        checking = lead_stage.compute(self.lead(said={**EXTERNAL, 'blocker': 'will_check', 'blocker_text': 'נבדוק'}))
+        self.assertEqual((checking['stage'], checking['follow']['kind'], checking['follow']['hot']), ('will_check', 'will_check', True))
+        # A hot lead keeps its round — and with no answer, it is still the office's.
+        trial = dict(kogo_outcome='trial_only', kogo_trial={'on': (TODAY - timedelta(days=1)).isoformat(), 'outcome': 'attended', 'course': ''})
+        hot = self.staged(self.lead(4 * DAY, said=EXTERNAL, **trial))
+        result = lead_stage.compute(hot)
+        self.assertEqual((result['stage'], result['follow']['kind'], result['follow']['hot']), ('trial_done', 'trial_feedback', True))
+        self.assertEqual([row.template_key for row in self.rows(hot)], ['trial_feedback_1'])
+        self.play(at(2026, 11, 5))                                       # nothing leaves (sending is off); the round runs out
+        self.assertEqual((self.fresh(hot).lead_stage, self.fresh(hot).lead_owner), ('trial_done', 'office'))
+        self.assertFalse(LeadFollowUp.objects.filter(contact=hot, template_key='link_reminder_external_1').exists())
+
     def test_a_price_or_the_days_of_an_external_branch_is_a_call_of_the_office(self):
         contact = self.staged(self.lead(5 * DAY, said={**EXTERNAL, 'blocker': 'price', 'blocker_text': 'יקר לה'}))
         self.assertEqual((contact.lead_owner, contact.lead_next_step), ('office', 'להתקשר — יקר לה'))
@@ -404,6 +422,28 @@ class OpeningsTests(NoOneLostCase):
         self.assertEqual(self.fresh(contact).lead_owner, 'office')
         with override_settings(ANTHROPIC_API_KEY=''):
             self.assertEqual(cron.tick()['openings_checked'], 0)
+
+
+# --- the templates found by name, kept fresh by the cron for the leads list ---------------------------------
+
+@override_settings(**SENDING_ON)
+class TemplatesKeptFreshTests(NoOneLostCase):
+    def test_a_template_made_in_manychat_reaches_the_leads_list_through_the_cron(self):
+        contact = self.link_lead(3 * HOUR)
+        Contact.objects.update(kogo_checked_at=self.clock())             # matched a moment ago
+        self.assertEqual(self.listed_next(contact)['hold'], 'חסרה תבנית')
+        self.manychat.named('link_reminder_1')                            # made in ManyChat under its fixed name
+        self.assertEqual(self.listed_next(contact)['hold'], 'חסרה תבנית')
+        self.assertEqual(self.manychat.lists, 0)                         # the list itself never asks ManyChat
+        with patch.object(lead_templates, 'manychat_flows', wraps=lead_templates.manychat_flows) as asked, \
+                override_settings(ANTHROPIC_API_KEY=''):
+            self.assertEqual(cron.tick()['lead_templates_connected'], 1)
+            self.assertEqual(self.listed_next(contact)['hold'], '')
+            cron.tick()
+            self.assertEqual(asked.call_count, 1)                        # not again within ten minutes
+            self.clock.forward(minutes=11)
+            cron.tick()
+            self.assertEqual(asked.call_count, 2)
 
 
 # --- the words of the leads screen --------------------------------------------------------------------------
