@@ -5,7 +5,8 @@ to a lead — close it, open it again, put it off to a day, take it or hand it
 back to the bot.
 
 Everything a row shows is already on the contact (lead_stage.py keeps it); the
-one extra read is the bot's open follow-up, for "what happens next and when".
+one extra read is the bot's open follow-up, for "what happens next and when" —
+and, once for a whole list, whether it will really leave (lead_automation.Gate).
 What a person decides here is kept in `lead_manual` — and a put-off is the
 office's own "בזמן אחר" mark with its day, so the two screens agree — and is a
 line in the contact's journal with who and when. Nothing here sends anything.
