@@ -234,7 +234,7 @@ class PerChildFormUnchangedTests(_Base):
             set(row),
             {
                 'id', 'kind', 'status', 'child_id', 'lesson_id', 'bundle_id', 'lesson_label',
-                'include_registration_fee', 'amount', 'description', 'branch_id', 'business_id',
+                'include_registration_fee', 'special_monthly_price', 'amount', 'description', 'branch_id', 'business_id',
                 'business_category_id', 'public_url', 'attempts', 'last_error', 'review_reason',
                 'payment_id', 'recurring_payment_id', 'sent_at', 'sent_result', 'completed_at',
                 'created_at',

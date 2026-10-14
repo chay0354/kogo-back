@@ -256,6 +256,12 @@ class CardLink(models.Model):
     # on, and every other day is enrolled alongside it.
     bundle = models.ForeignKey('courses.LessonBundle', on_delete=models.SET_NULL, null=True, blank=True, related_name='card_links')
     include_registration_fee = models.BooleanField(default=True)
+    # A monthly price for this child alone, typed by the office: the standing
+    # order opens at it instead of the catalogue price, and nothing else comes
+    # off it. A single lesson only — a track keeps its combined price. The
+    # catalogue is not touched, so the lesson stays closed to anyone else on its
+    # own (owner, 14.10.2026: one pupil, once a week on a twice-a-week course).
+    special_monthly_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     # one_time
     amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     description = models.CharField(max_length=200, blank=True)
