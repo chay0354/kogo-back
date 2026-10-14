@@ -37,7 +37,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.wahub import analysis, grounding, inbound, knowledge, media, optout, shadow_tools, state, transcribe, unknowns
+from apps.wahub import analysis, grounding, history, inbound, knowledge, media, optout, shadow_tools, state, transcribe, unknowns
 from apps.wahub.analysis import ANTHROPIC_URL, ANTHROPIC_VERSION, P_CLASS, P_COLD, P_INFO, P_REG, P_TRIAL, Line
 from apps.wahub.models import (
     DIRECTION_IN,
@@ -342,7 +342,7 @@ def _conversation(contact: Contact, before_id: int | None = None) -> list[dict]:
         rows = rows.filter(id__lte=before_id)
     rows = list(rows.order_by('-id').values('id', 'direction', 'sender', 'text', 'sent_at', 'message_type', 'transcript', 'new_bot')[:MAX_CONTEXT_MESSAGES])
     rows.reverse()
-    return [{
+    own = [{
         'id': row['id'],
         'who': SENDER_CUSTOMER if row['direction'] == DIRECTION_IN else row['sender'],
         # The new bot's own earlier answer (a demo conversation, the live test), not the old bot's.
@@ -353,6 +353,19 @@ def _conversation(contact: Contact, before_id: int | None = None) -> list[dict]:
         'message_type': row['message_type'],
         'is_template': row['message_type'] == TYPE_TEMPLATE,
     } for row in rows]
+    # What the old bot and the office wrote in ManyChat before the switch, once copied (history.py), in its place.
+    return history.read_beside(
+        contact, own, shape=_copied_row, at=lambda row: row['sent_at'], limit=MAX_CONTEXT_MESSAGES,
+        full=len(own) >= MAX_CONTEXT_MESSAGES, until=own[-1]['sent_at'] if before_id and own else None,
+    )
+
+
+def _copied_row(line) -> dict:
+    """A line copied from ManyChat (HistoryLine), as the conversation's rows read: it has no id of Kogo's."""
+    return {
+        'id': None, 'who': line.sender, 'new_bot': False, 'text': line.text, 'sent_at': line.sent_at,
+        'message_type': line.message_type, 'is_template': line.message_type == TYPE_TEMPLATE,
+    }
 
 
 def _last_system_outbound(contact: Contact, before_id: int | None, now) -> dict | None:

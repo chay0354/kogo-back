@@ -26,6 +26,8 @@ TABLES = {
     'wahub_waiting_list',
     # "what the bot did not know" (0011): the single answers, and the topics they are gathered under
     'wahub_bot_unknowns', 'wahub_bot_unknown_topics',
+    # the conversation from before the switch, copied from ManyChat (0014)
+    'wahub_history_lines',
 }
 
 

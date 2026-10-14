@@ -147,7 +147,8 @@ def history_note(contact: Contact, now=None) -> dict | None:
         return None
     subscriber = (contact.manychat_subscriber_id or '').strip()
     url = settings.WAHUB_MANYCHAT_CHAT_URL.format(subscriber_id=subscriber) if subscriber.isdigit() else ''
-    return {'switched_at': _iso(switched), 'manychat_url': url}
+    # Once the conversation from before the switch was copied, the screen asks for its lines (history.py).
+    return {'switched_at': _iso(switched), 'manychat_url': url, 'copied_at': _iso(contact.history_copied_at)}
 
 
 def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEARCHED, clock=None) -> dict:
