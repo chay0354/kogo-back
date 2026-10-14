@@ -131,3 +131,34 @@ class SettleBeforeTheSwitchTests(SwitchTestCase):
         self.settle()
         row = Contact.objects.get(pk=row.pk)
         self.assertEqual((row.unread_count, row.waiting_since is not None), (3, True))
+
+
+class HistoryNoteTests(SwitchTestCase):
+    """A conversation that began before the switch says so at its head, with the way to read all of it in ManyChat."""
+
+    def test_a_conversation_from_before_the_switch_points_to_manychat(self):
+        from apps.wahub import serializers
+
+        old = self.contact_that_wrote(timedelta(days=2), manychat_subscriber_id='987654321')
+        note = serializers.history_note(old, self.now)
+        self.assertEqual(note['manychat_url'], 'https://app.manychat.com/fb5259597/chat/987654321')
+        self.assertTrue(note['switched_at'])
+        # No subscriber on record: the note stands, with no link.
+        bare = self.contact_that_wrote(timedelta(days=2), phone='972505550321', manychat_subscriber_id='')
+        self.assertEqual(serializers.history_note(bare, self.now)['manychat_url'], '')
+        # It travels with the conversation.
+        response = self.get(f'contacts/{old.id}/')
+        self.assertEqual(response.data['history']['manychat_url'], 'https://app.manychat.com/fb5259597/chat/987654321')
+
+    def test_after_the_switch_a_demo_and_the_live_test_have_none(self):
+        from apps.wahub import serializers
+
+        new = Contact.objects.get(pk=self.contact_that_wrote(timedelta(minutes=10), phone='972505550322').pk)
+        Contact.objects.filter(pk=new.pk).update(first_inbound_at=self.now - timedelta(minutes=10))
+        self.assertIsNone(serializers.history_note(Contact.objects.get(pk=new.pk), self.now))
+        for phone, fields in (('972505550331', {'is_demo': True}), ('972505550332', {'live_test': True})):
+            row = self.contact_that_wrote(timedelta(days=2), phone=phone, **fields)
+            self.assertIsNone(serializers.history_note(row, self.now))
+        settings_store.put(settings_store.BOT_MODE, {'mode': 'test'})
+        lead_stage._switch_seen.update(at=None, since=None)
+        self.assertIsNone(serializers.history_note(self.contact_that_wrote(timedelta(days=2), phone='972505550340'), self.now))
