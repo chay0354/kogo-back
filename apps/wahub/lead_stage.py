@@ -195,7 +195,7 @@ COLD_AFTER = timedelta(days=30)
 # contacts that were already there. 3 (14.10.2026): the rounds of an external branch and of a
 # lead that went quiet, the price or the days to the office, a class that opened
 # (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md) — at once after the deploy, not at the next midnight.
-RULES_VERSION = 4
+RULES_VERSION = 5
 
 # --- the bot's own follow-ups (docs/WAHUB-CONTRACT-LEADS-V2.md, ג and ח.10) ---
 DAY = timedelta(days=1)
@@ -531,10 +531,6 @@ def old_bot_replies_seen(now=None) -> bool:
 
 # The switch from the old bot (bot_mode.first_live_at), read at most once a minute, whoever asks.
 _switch_seen = {'at': None, 'since': None}
-# A request for a person older than this, at the switch, was the office's in ManyChat's own inbox.
-OLD_REQUEST_FOR = timedelta(hours=24)
-
-
 def switched_at(now=None):
     """The first moment the new bot answered everybody; None before it ever did."""
     now = now or timezone.now()
@@ -1013,16 +1009,9 @@ def compute(contact: Contact, now=None) -> dict:
             since=contact.last_inbound_at,
         )
 
-    # 6. asks for a person — not a request made a day and more before the switch: that one the office dealt
-    #    with in ManyChat's own inbox, where Kogo cannot see it
-    old_request = bool(
-        contact.needs_human
-        and answered_by_the_old_bot(contact, contact.needs_human_at, now)
-        and switched_at(now) - contact.needs_human_at >= OLD_REQUEST_FOR
-        # ...and the customer has not written since the switch: then the new bot, and the rules, see them again
-        and answered_by_the_old_bot(contact, contact.last_inbound_at, now)
-    )
-    if contact.needs_human and not old_request:
+    # 6. asks for a person — whenever it was asked: the office decides on each request, including those from
+    #    before the switch (the owner, 14.10.2026: "כאלה שבאמת תקופה מחכים לנציג… שלא רוצה לפספס")
+    if contact.needs_human:
         return needs_reply()
 
     # 7. said, in words of their own, that they are not interested — and nobody goes on writing to them
