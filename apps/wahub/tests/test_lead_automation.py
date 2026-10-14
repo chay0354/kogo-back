@@ -388,7 +388,7 @@ class AutomationCardTests(AutomationCase):
         card = self.card()
         self.assertIs(card['ready'], True)
         self.assertTrue(all(line['ok'] and line['how'] == '' for line in card['lines']))
-        self.assertEqual(self.line('templates')['detail'], '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 1 מתוך 15')
+        self.assertEqual(self.line('templates')['detail'], '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 1 מתוך 16')
         self.assertEqual(self.line('sending')['detail'], 'דולקת — הודעות יוצאות ללקוחות, בשעות המשרד בלבד')
         # One of the five taken off: not ready any more.
         settings_store.set_lead_template('trial_feedback_1', '', user=self.manager)
@@ -1155,7 +1155,7 @@ class ByNameTests(AutomationCase):
         # One automation serves the two last reminders.
         self.assertEqual(rows['link_reminder_3']['target'], rows['date_arrived_3']['target'])
         templates = self.line('templates')
-        self.assertEqual((templates['ok'], templates['detail']), (True, '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 15 מתוך 15'))
+        self.assertEqual((templates['ok'], templates['detail']), (True, '5 מתוך 5 של שלב 1 מחוברות · שלב 2: 16 מתוך 16'))
         self.assertEqual(settings_store.lead_templates(), {})        # nothing was written as a person's decision
 
     def test_only_some_are_there_yet(self):

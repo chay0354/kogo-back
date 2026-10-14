@@ -15,14 +15,27 @@ The answer, first rule that fits:
     registered_after  a paying child, registered after the contact first wrote
     customer_before   a paying child, registered before that
     trial_upcoming    a trial lesson is still ahead
-    trial_only        a trial took place and nobody registered
+    trial_only        a trial took place and nobody registered — or the child came to a
+                      lesson without being registered, newer than any trial (a walk-in, below)
     signup_declined   tried to register and the charge failed (problem_flags)
     pending           filled in details and never paid
+    trial_only        came to a lesson without being registered (a walk-in, below)
     in_system         a family is there, with none of the above
 
 Phones in the customers' tables are stored as they were typed, so they are
-compared digit for digit (apps/customers/phone_search.py). A walk-in the
-instructor added ("רפאים") is nobody's registration and is ignored.
+compared digit for digit (apps/customers/phone_search.py).
+
+A walk-in the instructor added on the attendance screen ("רפאים",
+apps/enrollments/ghost_students.py) is nobody's registration: it never makes a
+family a customer, never counts as one of its children, and a walk-in with no
+present mark is ignored altogether. One that was marked present is a fact of its
+own (the owner, 14.10.2026): the child came to a lesson without being registered
+— the phone is the one the instructor typed for them. It is read beside the
+trials, like one (`kogo_trial` with `walk_in`, the day of the last visit, the
+first, how many): below a paying child, a trial ahead, a trial at least as new,
+a failed charge and a registration begun; above "in the system". The sentence
+says it in words of its own ("הגיע לשיעור … בלי להירשם · נוסף על ידי המדריך"),
+and so does `outcome_label`.
 """
 from __future__ import annotations
 
@@ -59,6 +72,7 @@ from apps.wahub.models import (
     OUTCOME_SIGNUP_DECLINED,
     OUTCOME_TRIAL_ONLY,
     OUTCOME_TRIAL_UPCOMING,
+    WALK_IN_LABEL,
     Contact,
 )
 from apps.wahub.phones import normalize_phone
@@ -68,6 +82,8 @@ logger = logging.getLogger(__name__)
 OUTCOME_LABELS = dict(OUTCOME_CHOICES)
 PAYING_STATUSES = (STATUS_ACTIVE, STATUS_PAYMENT_PROBLEM)
 TRIAL_OUTCOME_LABELS = {'attended': 'הגיע', 'no_show': 'לא הגיע', 'unmarked': 'לא סומן', '': 'לא סומן'}
+# Who wrote a walk-in down, said at the end of its sentence.
+WALK_IN_BY = 'נוסף על ידי המדריך'
 
 # A charge that registered a child: the registration fee, a month of a course.
 # A paid trial carries trial_lesson_date and is not one.
@@ -172,6 +188,82 @@ def contacts_of_family(family) -> tuple[list[str], list[Contact]]:
     return phones, contacts
 
 
+def _phone_variants(phone: str) -> list[str]:
+    """The spellings a phone in the customers' tables is compared in, digit for digit; [] for a non-Israeli number."""
+    if not phone.startswith('972'):
+        return []
+    return ['0' + phone[3:], phone, phone[3:]]
+
+
+def walk_ins_of_phone(phone: str, today=None) -> list[dict]:
+    """
+    Every day a walk-in behind this phone was marked present, the newest first —
+    [{day, child_id, name, family_id, course}]. A walk-in is a Child in status
+    `ghost`; its phone is the one the instructor typed, kept on the child and on
+    its family. A mark of a day still ahead is no visit. Reads only.
+    """
+    variants = _phone_variants(phone)
+    if not variants:
+        return []
+    from apps.enrollments.models import LessonAttendance
+
+    today = today or state.now_israel_date()
+    rows = (
+        LessonAttendance.objects
+        .filter(status='present', child__status=STATUS_GHOST, occurrence_date__isnull=False, occurrence_date__lte=today)
+        .annotate(_own=_digits_only('child__phone_number'), _family=_digits_only('child__family__phone'))
+        .filter(Q(_own__in=variants) | Q(_family__in=variants))
+        .order_by('-occurrence_date', '-created_at')
+        .values_list(
+            'occurrence_date', 'child_id', 'child__first_name', 'child__last_name', 'child__family_id', 'lesson__course__name',
+        )
+    )
+    return [
+        {
+            'day': day, 'child_id': child_id, 'name': f'{first or ""} {last or ""}'.strip(), 'family_id': family_id,
+            'course': (course or '').strip(),
+        }
+        for day, child_id, first, last, family_id, course in rows
+    ]
+
+
+def _walk_in(visits: list[dict], also: list[str]) -> Match:
+    """
+    The answer for a walk-in: the newest visit names the class and the day, the
+    family and the child behind it. `also` — the ids of the family's real
+    children, kept after the walk-ins' own.
+    """
+    latest = visits[0]
+    days = sorted({row['day'] for row in visits})
+    where = f'לשיעור {latest["course"]}' if latest['course'] else 'לשיעור'
+    if len(days) > 1:
+        came = f'הגיע {len(days)} פעמים {where} (האחרונה ב-{_day(latest["day"])}) בלי להירשם'
+    else:
+        came = f'הגיע {where} ב-{_day(latest["day"])} בלי להירשם'
+    names = ', '.join(dict.fromkeys(row['name'] for row in visits if row['name']))
+    detail = ' · '.join(part for part in (came, names, WALK_IN_BY) if part)
+    walk_ins = [str(child_id) for child_id in dict.fromkeys(row['child_id'] for row in visits)]
+    return Match(
+        OUTCOME_TRIAL_ONLY, detail[:300], latest['family_id'], list(dict.fromkeys([*walk_ins, *also])),
+        {
+            'on': latest['day'].isoformat(), 'outcome': 'attended', 'course': latest['course'][:200],
+            'walk_in': True, 'first_on': days[0].isoformat(), 'visits': len(days),
+        },
+    )
+
+
+def is_walk_in(contact: Contact) -> bool:
+    """The matching found that the child behind this contact came to a lesson without being registered."""
+    return contact.kogo_outcome == OUTCOME_TRIAL_ONLY and bool((contact.kogo_trial or {}).get('walk_in'))
+
+
+def outcome_label(contact: Contact, unchecked: str = '') -> str:
+    """The answer in the screens' words — a walk-in in its own, not as a trial nobody registered after."""
+    if is_walk_in(contact):
+        return WALK_IN_LABEL
+    return OUTCOME_LABELS.get(contact.kogo_outcome, unchecked)
+
+
 def _registered_at(children) -> dict:
     """
     {child id: when the child registered} for paying children.
@@ -217,8 +309,17 @@ def _ever_registered(child_ids) -> set:
 def match_phone(phone: str, *, first_message_at=None) -> Match:
     """The answer for one phone. Reads only."""
     family_ids = family_ids_for_phone(phone)
+    # The walk-ins behind the phone, read only when a rule gets to them (a paying child never does).
+    seen: list = []
+
+    def walk_ins() -> list[dict]:
+        if not seen:
+            seen.append(walk_ins_of_phone(phone))
+        return seen[0]
+
     if not family_ids:
-        return Match(OUTCOME_NOT_FOUND)
+        # The phone of a walk-in may be on the child alone, with none on its family's card.
+        return _walk_in(walk_ins(), []) if walk_ins() else Match(OUTCOME_NOT_FOUND)
 
     by_family: dict = {family_id: [] for family_id in family_ids}
     for child in Child.objects.filter(family_id__in=family_ids).only(
@@ -232,7 +333,7 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
         if not children or any(child.status != STATUS_GHOST for child in children)
     }
     if not families:
-        return Match(OUTCOME_NOT_FOUND)
+        return _walk_in(walk_ins(), []) if walk_ins() else Match(OUTCOME_NOT_FOUND)
 
     def status_of(child) -> str:
         return canonical_status(child.status) or child.status
@@ -306,7 +407,10 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
         key=lambda row: row[0], reverse=True,
     )
     completed = [child for child in children if status_of(child) == STATUS_TRIAL_COMPLETED]
-    if past:
+    # A walk-in newer than every trial is the newer fact: the child came again, unregistered, since.
+    # It waits below a failed charge and a registration begun (6w).
+    newest_walk_in = walk_ins()[0]['day'] if walk_ins() else None
+    if past and (newest_walk_in is None or past[0][0] >= newest_walk_in):
         when, outcome, child_id, course, asked_how, told_missed = past[0]
         child = by_id[child_id]
         return answer(
@@ -315,7 +419,7 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
             child,
             trial=_trial_facts(when, outcome, course, asked_how=asked_how, told_missed=told_missed),
         )
-    if completed:
+    if completed and newest_walk_in is None:
         return answer(OUTCOME_TRIAL_ONLY, f'עשה שיעור ניסיון, לא סומן · {_names(completed)}', completed[0])
 
     # 5. tried to register and the charge failed
@@ -329,6 +433,10 @@ def match_phone(phone: str, *, first_message_at=None) -> Match:
     if pending:
         first = min(pending, key=lambda child: child.created_at)
         return answer(OUTCOME_PENDING, f'התחיל רישום ב-{_day(first.created_at)} · {_names(pending)}', first)
+
+    # 6w. came to a lesson without being registered
+    if walk_ins():
+        return _walk_in(walk_ins(), child_ids)
 
     # 7. known, with nothing running
     if children:
@@ -387,11 +495,11 @@ def recheck_contact(contact: Contact) -> bool:
         kogo_checked_at=now,
     )
     if contact.kogo_outcome and contact.kogo_outcome != match.outcome:
+        before_label = outcome_label(contact, contact.kogo_outcome)
+        after_label = WALK_IN_LABEL if match.trial.get('walk_in') else OUTCOME_LABELS.get(match.outcome, match.outcome)
         state.log_event(
             contact.pk, EVENT_OUTCOME,
-            f'{OUTCOME_LABELS.get(contact.kogo_outcome, contact.kogo_outcome)} ← '
-            f'{OUTCOME_LABELS.get(match.outcome, match.outcome)}'
-            + (f' ({match.detail})' if match.detail else ''),
+            f'{before_label} ← {after_label}' + (f' ({match.detail})' if match.detail else ''),
         )
     contact.kogo_outcome, contact.kogo_detail = match.outcome, match.detail
     contact.kogo_family_id, contact.kogo_child_ids = match.family_id, match.child_ids
@@ -419,6 +527,7 @@ def children_of(contact: Contact) -> list[dict]:
             'id': str(child.id),
             'name': f'{child.first_name} {child.last_name}'.strip(),
             'status': status,
-            'status_label': status_label(status),
+            # "רפאים" is the staff's word; the bot and the conversation's card say what it means.
+            'status_label': WALK_IN_LABEL if status == STATUS_GHOST else status_label(status),
         })
     return result

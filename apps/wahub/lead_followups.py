@@ -80,6 +80,7 @@ from apps.wahub.models import (
     NUDGE_TRIAL_NO_SHOW,
     SCOPE_BUSINESS,
     SPECIAL_OPEN,
+    WALK_IN_LABEL,
     Contact,
     KnowledgeItem,
     LeadFollowUp,
@@ -320,6 +321,20 @@ def variant_of(row: LeadFollowUp) -> str:
     """The variant of the round a follow-up belongs to, out of its template key ("link_reminder_external_1" → "external")."""
     rest = row.template_key[len(row.kind) + 1:] if row.template_key.startswith(f'{row.kind}_') else ''
     return rest.rsplit('_', 1)[0] if '_' in rest else ''
+
+
+def walk_in_round(row: LeadFollowUp) -> bool:
+    """
+    The follow-up belongs to a walk-in's round — the trial's round with a first
+    step of its own, whose key carries the variant (lead_stage:
+    "trial_feedback|walk_in|…") in all three steps, the trial's own two included.
+    """
+    return row.kind == NUDGE_TRIAL_FEEDBACK and row.episode.split('|')[1:2] == [lead_stage.VARIANT_WALK_IN]
+
+
+def kind_label(row: LeadFollowUp) -> str:
+    """What a follow-up is about, in a few words — a walk-in's round in its own."""
+    return WALK_IN_LABEL if walk_in_round(row) else KIND_LABELS.get(row.kind, row.kind)
 
 
 def words_now(row: LeadFollowUp, contact: Contact) -> str:
@@ -838,7 +853,7 @@ def payload(row: LeadFollowUp) -> dict:
     return {
         'id': row.id,
         'kind': row.kind,
-        'kind_label': KIND_LABELS.get(row.kind, row.kind),
+        'kind_label': kind_label(row),
         'step': row.step,
         'status': row.status,
         'status_label': dict(NUDGE_STATUS_CHOICES).get(row.status, row.status),

@@ -40,6 +40,9 @@ The rules, in order:
     13. trial_booked      a trial lesson is still ahead
     14. trial_no_show     the trial was marked "לא הגיע"                                 bot
     15. trial_done        a trial took place (came, or not marked), nobody registered    bot
+                          — or the child came to a lesson without being registered and
+                          the instructor wrote the phone down (a walk-in, walk_ins.py):
+                          the same round, with a first message of its own
     16. callback_due      the day the conversation named has come                        bot
     17. waiting_date      a day the conversation named, still ahead                      bot
    17w. waiting_list      on the waiting list of a lesson that is full (waiting_list.py). While it
@@ -173,6 +176,7 @@ from apps.wahub.models import (
     OUTCOME_TRIAL_UPCOMING,
     SENDER_BOT,
     SENDER_OFFICE,
+    SOURCE_WALK_IN,
     WAITING_FREED,
     WAITING_WAITING,
 )
@@ -225,6 +229,11 @@ VARIANT_SIGNUP = 'signup'
 # makes them "silent".
 VARIANT_EXTERNAL = 'external'
 VARIANT_SILENT = 'silent'
+# A child who came to a lesson without being registered, whose phone the instructor wrote down (walk_ins.py; the
+# owner, 14.10.2026): the round of a trial nobody registered after, whose first message is its own ("שמחנו לראות
+# אתכם אצלנו בשיעור!") and whose next ones are the trial's. One round for the walk-in, keyed by its first visit,
+# however many times the child comes again.
+VARIANT_WALK_IN = 'walk_in'
 EXTERNAL_DELAYS = (3 * DAY,)
 SILENT_DELAYS = (SILENT_AFTER,)
 # The stages in which an external branch gets its own round in place of the stage's: a link, or an
@@ -1128,6 +1137,15 @@ def compute(contact: Contact, now=None) -> dict:
         # (apps/enrollments; the matching keeps it beside the trial): nobody is asked the same thing
         # twice. The bot's round then begins from its second step, on the second step's own day.
         told = contact.kogo_trial if isinstance(contact.kogo_trial, dict) else {}
+        if matching.is_walk_in(contact):
+            # Came to a lesson unregistered (walk_ins.py). The system's own automations never write to a walk-in,
+            # so the bot's round begins at its first step; the matching's sentence already says all of it.
+            first = str(told.get('first_on') or on)
+            return by_the_bot(
+                LEAD_TRIAL_DONE, NUDGE_TRIAL_FEEDBACK, f'{NUDGE_TRIAL_FEEDBACK}|{VARIANT_WALK_IN}|{first}', held,
+                contact.kogo_detail or matching.WALK_IN_BY, then=THEN_OFFICE, variant=VARIANT_WALK_IN, since=held,
+                in_touch=in_touch,
+            )
         if _did_not_come(contact):
             return by_the_bot(
                 LEAD_TRIAL_NO_SHOW, NUDGE_TRIAL_NO_SHOW, f'{NUDGE_TRIAL_NO_SHOW}|{on}', held,
@@ -1246,6 +1264,10 @@ def compute(contact: Contact, now=None) -> dict:
             return asked_what_they_look_for(LEAD_ANSWERED_SILENT, *words, **silent)
         if afraid_to_commit:
             return hesitant(LEAD_ANSWERED_SILENT, *words, **silent)
+        if contact.source == SOURCE_WALK_IN and contact.last_inbound_at is None:
+            # Opened for a walk-in who never wrote, and the walk-in is no longer on the register (the tap was undone,
+            # or it was folded into a registered child): nothing they said to ask about — the bot starts nothing.
+            return done(LEAD_ANSWERED_SILENT, _sentences(*words), owner='', **silent)
         return quiet_since(LEAD_ANSWERED_SILENT, *words, **silent)
 
     # 23. dormant

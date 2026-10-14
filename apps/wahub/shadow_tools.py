@@ -832,7 +832,7 @@ def customer_card(ctx: ToolContext) -> dict:
     contact = ctx.contact
     if contact is None:
         return ctx.scripted_customer or {'known': False, 'note': 'אין איש קשר — שאלת ניסיון בלי לקוח.'}
-    from apps.wahub.serializers import OUTCOME_LABELS, UNCHECKED_LABEL
+    from apps.wahub.serializers import UNCHECKED_LABEL
 
     children = matching.children_of(contact)
     classes = _classes_of([child['id'] for child in children]) if children else {}
@@ -842,7 +842,7 @@ def customer_card(ctx: ToolContext) -> dict:
         'known': True,
         'name': contact.name,
         'outcome': contact.kogo_outcome,
-        'outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, UNCHECKED_LABEL),
+        'outcome_label': matching.outcome_label(contact, UNCHECKED_LABEL),
         'detail': contact.kogo_detail,
         'children': children,
         # The trial lesson the matching found for this phone: the day, the class, whether the child came.

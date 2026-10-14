@@ -138,6 +138,7 @@ _AFTER = {
     (NUDGE_LINK_REMINDER, lead_stage.VARIANT_SILENT): 'שקיבל תשובה ושתק, בלי קישור ובלי סיבה ידועה',
     (NUDGE_WILL_CHECK, ''): 'שאמר שיבדוק ויחזור',
     (NUDGE_TRIAL_FEEDBACK, ''): 'שיעור ניסיון שלא הסתיים בהרשמה',
+    (NUDGE_TRIAL_FEEDBACK, lead_stage.VARIANT_WALK_IN): 'שהילד הגיע לשיעור בלי להירשם והמדריך רשם את הטלפון',
     (NUDGE_TRIAL_NO_SHOW, ''): 'שיעור ניסיון שלא הגיעו אליו',
     (NUDGE_DATE_ARRIVED, ''): 'היום שהלקוח אמר',
     (NUDGE_DATE_ARRIVED, lead_stage.VARIANT_AGE): f'שמלאו לילד {AGE}',
@@ -196,7 +197,8 @@ def when_label(kind: str, variant: str, step: int) -> str:
         notes.append(LAST_TIME_WORDS)
     if kind == NUDGE_OPENING:
         notes.append(OPENING_WORDS)
-    if (kind, step) in _UNLESS_SAID:
+    if (kind, step) in _UNLESS_SAID and variant != lead_stage.VARIANT_WALK_IN:
+        # (A walk-in gets none of the system's own automations: its first step always goes out.)
         notes.append(_UNLESS_SAID[(kind, step)])
     return '. '.join([words, *notes]) if notes else words
 
@@ -382,7 +384,11 @@ def _ahead(row: LeadFollowUp, now, mapped: set, labels: dict, reachable: bool, s
         'phone_display': phone_display(contact.phone),
         'is_demo': contact.is_demo,
         'kind': row.kind,
-        'kind_label': labels.get(row.template_key) or lead_followups.KIND_LABELS.get(row.kind, row.kind),
+        # A walk-in's round says so in all its steps; any other is named by the text it sends.
+        'kind_label': (
+            lead_followups.kind_label(row) if lead_followups.walk_in_round(row)
+            else labels.get(row.template_key) or lead_followups.KIND_LABELS.get(row.kind, row.kind)
+        ),
         'step': row.step,
         'text': row.text,
         'when': row.due_at.isoformat(),

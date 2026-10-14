@@ -19,12 +19,14 @@ from apps.wahub.models import (
     INTEREST_CHOICES,
     LEAD_STAGE_CHOICES,
     LEAD_STAGE_GROUPS,
+    LEAD_TRIAL_DONE,
     LEGACY_LEAD_STAGES,
     OUTCOME_CHOICES,
     SENDER_CHOICES,
     SENDER_OFFICE,
     SOURCE_CHOICES,
     TOPIC_CHOICES,
+    WALK_IN_LABEL,
     Contact,
     ContactEvent,
     Message,
@@ -45,6 +47,25 @@ SENDER_LABELS = dict(SENDER_CHOICES)
 EVENT_LABELS = dict(EVENT_KIND_CHOICES)
 LEAD_STAGE_LABELS = dict(LEAD_STAGE_CHOICES)
 UNCHECKED_LABEL = 'עוד לא נבדק'
+
+
+def outcome_label(contact: Contact, unchecked: str = '') -> str:
+    """What the registrations say about the contact, in words — a walk-in in its own (matching.outcome_label)."""
+    from apps.wahub import matching
+
+    return matching.outcome_label(contact, unchecked)
+
+
+def stage_label(contact: Contact, stage: str) -> str:
+    """
+    The stage in words. A walk-in is in the stage of a trial nobody registered
+    after — its round is that one — but it was no trial lesson, and is said so.
+    """
+    from apps.wahub import matching
+
+    if stage == LEAD_TRIAL_DONE and matching.is_walk_in(contact):
+        return WALK_IN_LABEL
+    return LEAD_STAGE_LABELS.get(stage, '')
 # "What they asked" on the list of those who did not register: a line, not a conversation.
 ASKED_CHARS = 160
 
@@ -76,7 +97,7 @@ def lead_payload(contact: Contact, *, today) -> dict:
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     return {
         'stage': stage,
-        'stage_label': LEAD_STAGE_LABELS.get(stage, ''),
+        'stage_label': stage_label(contact, stage),
         'group': LEAD_STAGE_GROUPS.get(stage, ''),
         'since': _iso(contact.lead_stage_since),
         'days': days_since(contact.lead_stage_since, today),
@@ -234,7 +255,7 @@ def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEAR
         },
         'kogo': {
             'outcome': contact.kogo_outcome,
-            'outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, UNCHECKED_LABEL),
+            'outcome_label': outcome_label(contact, UNCHECKED_LABEL),
             'family_id': str(contact.kogo_family_id) if contact.kogo_family_id else None,
             'child_ids': [str(child_id) for child_id in (contact.kogo_child_ids or [])],
             'detail': contact.kogo_detail,
@@ -335,7 +356,7 @@ def unregistered_lead_payload(contact: Contact, *, today) -> dict:
         'known_branch_name': contact.known_branch_name,
         'known_course_type': contact.known_course_type,
         'kogo_outcome': contact.kogo_outcome,
-        'kogo_outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, UNCHECKED_LABEL),
+        'kogo_outcome_label': outcome_label(contact, UNCHECKED_LABEL),
         'kogo_detail': contact.kogo_detail,
         'followup_status': contact.followup_status,
         'followup_status_label': FOLLOWUP_LABELS.get(contact.followup_status, ''),
@@ -377,7 +398,7 @@ def _for_customer_contact(contact: Contact, family_id) -> dict:
         'followup_status_label': FOLLOWUP_LABELS.get(contact.followup_status, ''),
         'followup_due': contact.followup_due.isoformat() if contact.followup_due else None,
         'kogo_outcome': contact.kogo_outcome,
-        'kogo_outcome_label': OUTCOME_LABELS.get(contact.kogo_outcome, UNCHECKED_LABEL),
+        'kogo_outcome_label': outcome_label(contact, UNCHECKED_LABEL),
         # The matching put THIS family on the contact (two families may share a phone).
         'linked': contact.kogo_family_id == family_id,
         'link': f'/wahub?tab=chats&contact={contact.id}',

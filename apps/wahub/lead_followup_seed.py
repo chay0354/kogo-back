@@ -35,6 +35,15 @@ These phrasings are never read out to the bot that answers customers
 (knowledge.relevant_items leaves them out): they are what the system sends by
 itself, not what an answer may be built from.
 
+One phrasing here breaks the rule of "no כאן קוגומלו" on purpose: the first
+message to a child who came to a lesson without being registered (the variant
+`walk_in` of the trial's round; apps/wahub/walk_ins.py). The parent never wrote
+to us — the phone is the one the instructor wrote down — so the message says
+who writes. For the same reason it always leaves as its template (there are no
+24 hours to write freely in), and its words here are the template's own, word
+for word ("kogo_lead_walkin_1", as the owner made it on 14.10.2026, with no
+variables): what the conversation shows is what the parent got.
+
 One phrasing here is no round of the bot's at all (BY_HAND): the message that
 tells a customer on a waiting list that a seat came free. It leaves only when
 a person presses for one row of the list (waiting_notify.py), and it is filed
@@ -75,6 +84,13 @@ BY_HAND = (SEAT_FREED,)
 VARIABLES_NOTES = {
     SEAT_FREED: 'משתנים (של השיעור שחיכו לו): {חוג} {יום} {שעה} {סניף}. קטע בסוגריים מרובעים נשמט כשחסר בו פרט.',
 }
+# The first message to a walk-in (the docstring): the template's words, which a change here does not change.
+WALK_IN = 'walk_in'
+WALK_IN_TEXT = 'היי, כאן קוגומלו 😊\nשמחנו לראות אתכם אצלנו בשיעור!\nרוצים לשריין מקום קבוע בקבוצה? אפשר לענות כאן ונעזור בהרשמה'
+WALK_IN_NOTE = (
+    'זה הנוסח של התבנית kogo_lead_walkin_1, מילה במילה. הורה שהמדריך רשם את הטלפון שלו מעולם לא כתב לנו, '
+    'ולכן הוא מקבל תמיד את התבנית — שינוי כאן משנה רק את מה שמוצג בשיחה, לא את מה שנשלח.'
+)
 # Why the texts changed after they were first filed (the evening of 11.10). A row still as the filing left it is
 # brought to the text below, as a new version with this reason in its history; a row a person has edited is left as
 # they wrote it. `REVISED_BEFORE` holds the reasons of earlier rewrites, so a row only this file has rewritten still
@@ -145,6 +161,14 @@ PHRASINGS = [
         True,
     ),
     (
+        NUDGE_TRIAL_FEEDBACK, WALK_IN, 'חזרה לליד: הגיע לשיעור בלי להירשם',
+        'יום אחרי שהילד הגיע לשיעור בלי להירשם והמדריך רשם את הטלפון במסך הנוכחות '
+        '(הפניות הבאות — כמו אחרי שיעור ניסיון)',
+        WALK_IN_TEXT,
+        [],
+        True,
+    ),
+    (
         NUDGE_TRIAL_NO_SHOW, '', 'חזרה לליד: נרשם לניסיון ולא הגיע',
         'יום ושלושה ימים אחרי שיעור ניסיון שלא הגיעו אליו',
         'היי ראיתי שלא יצא לכם להגיע לשיעור הניסיון, קורה 🙂 רוצים שנקבע מועד אחר?',
@@ -207,6 +231,13 @@ def _source_note(key: str) -> str:
     return f'{SEED_TAG} · {key}'
 
 
+def _note(kind: str, variant: str) -> str:
+    """What the owner reads under a phrasing on the "הבוט" screen: the variables it may use — or why it has none."""
+    if kind == NUDGE_TRIAL_FEEDBACK and variant == WALK_IN:
+        return WALK_IN_NOTE
+    return VARIABLES_NOTES.get(kind, VARIABLES_NOTE)
+
+
 def records() -> list[dict]:
     """The drafts as knowledge records; `source_note` is what makes the filing happen once."""
     return [
@@ -214,7 +245,7 @@ def records() -> list[dict]:
             'kind': KIND_PHRASING, 'key': phrasing_key(kind, variant), 'title': title, 'body': body,
             'is_active': active, 'when_to_say': WHEN_INTERNAL, 'scope_level': SCOPE_BUSINESS,
             'source_note': _source_note(phrasing_key(kind, variant)),
-            'data': {'variants': list(later), 'verbatim': True, 'when': f'{when}. {VARIABLES_NOTES.get(kind, VARIABLES_NOTE)}'},
+            'data': {'variants': list(later), 'verbatim': True, 'when': f'{when}. {_note(kind, variant)}'},
         }
         for kind, variant, title, when, body, later, active in PHRASINGS
     ]
