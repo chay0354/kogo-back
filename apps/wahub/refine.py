@@ -258,8 +258,16 @@ TEACH_STILL_WAITS = 'מה שהצעתי קודם עדיין מחכה לאישור
 TEACH_MOVED = 'מה שהשינוי הזה נוגע בו נערך בינתיים, אז הוא כבר לא מתאים למה שכתוב היום. שום דבר לא השתנה — כדאי להסביר שוב'
 TEACH_NOT_UNDONE = 'לא הצלחתי לבטל את השינוי כרגע, ושום דבר לא זז. אפשר לנסות שוב'
 EXAMPLE_AFTER_ONLY = 'השינוי אושר לפני שהדוגמה הוכנה, אז מוצג רק מה שהבוט עונה עכשיו'
+# The example is judged before he approves: an answer after the change that still does not do what he taught is said.
+EXAMPLE_FOLLOWS = 'בדקתי את הדוגמה לפני שתאשר: עם השינוי הבוט עונה כמו שלימדת'
+EXAMPLE_FAILS = (
+    'בדקתי את הדוגמה לפני שתאשר, וזה לא מסתדר: {line}. השינוי הזה לא יפתור את זה — עדיף לא לאשר. '
+    'כנראה הבעיה במערכת עצמה ולא במה שהבוט יודע'
+)
 TEACH_NOTE_GONE = 'אחד הדברים שרציתי לשנות כבר לא בשימוש, אז לא נגעתי בו'
-TEACH_APPROVED = 'אישרת — השינוי נשמר, והבוט כבר עונה לפיו'
+# Saved is not working: whether the bot answers by it is said by the check that follows, never before it
+# (the owner, 14.10.2026: "שלא יגיד עשיתי ובסוף זה לא עובד").
+TEACH_APPROVED = 'אישרת — השינוי נשמר. עכשיו אני שואל את הבוט שוב, כדי לוודא שהוא באמת עונה לפיו'
 TEACH_NOTHING_WAITS = 'אין כאן שינוי שמחכה לאישור.'
 TEACH_ONLY = 'האישור הזה הוא רק למה שנכתב ב"ללמד את הבוט".'
 TEACH_NOT_SAVED = 'לא הצלחתי לשמור את השינוי, ושום דבר לא השתנה. אפשר לנסות שוב'
@@ -2030,6 +2038,7 @@ def preview(thread: RefineThread, *, deadline: float | None = None) -> dict | No
         # He approved before the example was made: what the bot answered before the change can no longer be asked.
         tries['before'], kept['note'] = MAX_TRIES, EXAMPLE_AFTER_ONLY
     part = next((name for name in ('before', 'after') if missing(name)), None)
+    budget = deadline or time_module.monotonic() + PREVIEW_SECONDS
     if part == 'after' and not waiting:
         # The change is in the knowledge, and the check after the approval has just asked the bot this very question.
         kept['after'] = _answer_in_check(turns, kept['question'])
@@ -2043,8 +2052,25 @@ def preview(thread: RefineThread, *, deadline: float | None = None) -> dict | No
         except shadow.ShadowModelError as exc:
             logger.warning('wahub teach: no example answer (%s) for thread %s: %s', part, thread.pk, exc)
             tries[part] = tries.get(part, 0) + 1
+    # The answer after the change is judged before he approves, as the check after an approval judges it.
+    def unjudged() -> bool:
+        return bool(waiting and kept.get('after')) and 'verdict' not in kept and tries.get('verdict', 0) < MAX_TRIES \
+            and shadow.shadow_configured()
+
+    if unjudged() and budget - time_module.monotonic() >= VERDICT_NEEDS_SECONDS:
+        row = {'question': kept['question'], 'before': kept.get('before'), 'answer': kept['after']}
+        try:
+            follows, line = _verdict(_taught(turns, waiting), row, budget)
+        except (RefineUnavailable, shadow.ShadowModelError) as exc:
+            logger.warning('wahub teach: the example of thread %s was not judged: %s', thread.pk, exc)
+            tries['verdict'] = tries.get('verdict', 0) + 1
+        else:
+            kept['verdict'] = {'follows': follows, 'line': line}
+            kept['note'] = EXAMPLE_FOLLOWS if follows else EXAMPLE_FAILS.format(line=line)
+            if not follows:
+                logger.warning('wahub teach: with the change of thread %s the bot still does not answer as taught', thread.pk)
     kept['tries'] = tries
-    kept['pending'] = any(missing(name) for name in ('before', 'after'))
+    kept['pending'] = any(missing(name) for name in ('before', 'after')) or unjudged()
     if not kept['pending'] and 'note' not in kept and not (kept.get('before') and kept.get('after')):
         kept['note'] = 'לא הצלחתי להכין את הדוגמה במלואה' if kept.get('before') or kept.get('after') else 'לא הצלחתי להכין דוגמה כרגע'
     _keep_in_meta(turn, 'preview', kept)
