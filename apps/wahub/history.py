@@ -4,27 +4,31 @@ The conversation from before the switch, copied once from ManyChat (the owner, 1
 
 Until the switch (bot_mode.first_live_at) the old bot answered inside ManyChat, and the office wrote there too.
 Kogo kept every customer's message, and for a while the old bot's answers as ManyChat copied them — never the
-rest. What Kogo did not keep is brought here once, from the office's own session in ManyChat (the front's import
-page hands it over; nothing here asks ManyChat), and kept apart (HistoryLine). It is read in its place among
-Kogo's own messages: on the screen, by the bot that answers now, and by the summary that reads the lead.
+rest, and nothing at all from before it began keeping them. What Kogo did not keep is brought here once, from the
+office's own session in ManyChat (a file the owner makes there and hands to the front's import page; nothing here
+asks ManyChat), and kept apart (HistoryLine). It is read in its place among Kogo's own messages: on the screen, by
+the bot that answers now, and by the summary that reads the lead. "כל השיחות שהיו" (the owner, that day): a
+conversation of somebody Kogo never saw becomes a contact of its own (SOURCE_IMPORT), found by the phone.
 
-Nothing copied is sent, waits for an answer, counts as unread or moves a lead's clock.
+Nothing copied is sent, waits for an answer, counts as unread or moves a lead's clock. The summary reads each
+conversation again with its past a few at a time (cron, step 1c), behind every new message.
 """
 from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone as dt_timezone
 
-from django.db import transaction
-from django.db.models import F
+from django.db import IntegrityError, transaction
+from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from apps.wahub import bot_mode, state
 from apps.wahub.models import (
-    DIRECTION_IN, DIRECTION_OUT, MESSAGE_TYPE_CHOICES, SENDER_BOT, SENDER_CUSTOMER, SENDER_OFFICE, SENDER_SYSTEM,
-    STATUS_FAILED, TYPE_TEXT, Contact, HistoryLine, Message,
+    DIRECTION_IN, DIRECTION_OUT, EVENT_CREATED, MESSAGE_TYPE_CHOICES, SENDER_BOT, SENDER_CUSTOMER, SENDER_OFFICE,
+    SENDER_SYSTEM, SOURCE_IMPORT, STATUS_FAILED, TYPE_TEXT, Contact, HistoryLine, Message,
 )
+from apps.wahub.phones import normalize_phone
 
 # A call brings at most this much: the import page sends the conversations in small batches.
 MAX_CONVERSATIONS = 25
@@ -34,9 +38,7 @@ MAX_TEXT = 4000
 SAME_LINE_WITHIN = timedelta(minutes=3)
 # The copied lines the screen gets with a conversation — the latest of them.
 LINES_SHOWN = 400
-# A conversation that moved in this time is read again as a lead once its past is here
-# (cron.LEAD_BACKFILL_WITHIN: older ones are not read as leads at all).
-READ_AGAIN_WITHIN = timedelta(days=90)
+CREATED_NOTE = 'נוסף מהשיחות שהיו ב-ManyChat לפני המעבר'
 
 SENDERS = {SENDER_CUSTOMER, SENDER_BOT, SENDER_OFFICE, SENDER_SYSTEM}
 TYPES = {value for value, _label in MESSAGE_TYPE_CHOICES}
@@ -116,30 +118,72 @@ def _already_there(line: dict, kept: list[dict]) -> bool:
     return False
 
 
+def _contacts_for(batch: list[dict]) -> tuple[dict, dict]:
+    """The contacts Kogo has for a batch: by ManyChat's number for them, and by phone."""
+    ids = {str(row.get('subscriber_id') or '').strip() for row in batch} - {''}
+    phones = {normalize_phone(row.get('phone')) for row in batch} - {''}
+    by_id, by_phone = {}, {}
+    for contact in Contact.objects.filter(Q(manychat_subscriber_id__in=ids) | Q(phone__in=phones)):
+        if contact.manychat_subscriber_id:
+            by_id.setdefault(contact.manychat_subscriber_id, contact)
+        by_phone[contact.phone] = contact
+    return by_id, by_phone
+
+
+def _new_contact(phone: str, subscriber: str, name: str) -> tuple[Contact, bool]:
+    """Somebody Kogo never saw: a contact of its own, as quiet as the conversation was. Another door may have made it a moment ago."""
+    try:
+        with transaction.atomic():
+            contact = Contact.objects.create(phone=phone, name=name, source=SOURCE_IMPORT, manychat_subscriber_id=subscriber)
+            state.log_event(contact.pk, EVENT_CREATED, CREATED_NOTE)
+            return contact, True
+    except IntegrityError:
+        return Contact.objects.get(phone=phone), False
+
+
+def _moments(contact: Contact, lines: list[dict], own_messages: bool) -> dict:
+    """
+    What the lists read of a conversation, from the copied lines — only where Kogo has nothing of its own: the
+    first and last time the customer wrote, and, for a conversation with no message in Kogo at all, its last line.
+    """
+    fields = {}
+    theirs = [line['sent_at'] for line in lines if line['sender'] == SENDER_CUSTOMER]
+    if theirs and (contact.first_inbound_at is None or min(theirs) < contact.first_inbound_at):
+        fields['first_inbound_at'] = min(theirs)
+    if theirs and contact.last_inbound_at is None:
+        fields['last_inbound_at'] = max(theirs)
+    if lines and not own_messages and contact.last_message_at is None:
+        last = max(lines, key=lambda line: line['sent_at'])
+        fields.update(
+            last_message_at=last['sent_at'], last_message_text=state.preview(last['text']),
+            last_message_direction=last['direction'], last_message_sender=last['sender'],
+        )
+    return fields
+
+
 def import_conversations(conversations, *, now=None) -> dict:
     """
-    [{subscriber_id, messages: [{id, at, from: customer | bot | office | system, text, type}]}] → the counts.
+    [{subscriber_id, phone, name, messages: [{id, at, from: customer | bot | office | system, text, type}]}] → the
+    counts.
 
-    Only a contact Kogo already has (by ManyChat's number for them), only what came before the switch, and only
-    what Kogo did not keep itself. Brought twice, a line is kept once.
+    Only what came before the switch, and only what Kogo did not keep itself; brought twice, a line is kept once.
+    The contact is the one Kogo has by ManyChat's number, else by phone; somebody Kogo never saw becomes a contact
+    (an Israeli mobile only, like every contact), quiet: nothing waits, nothing is unread.
     """
     now = now or timezone.now()
     switched = bot_mode.first_live_at()
     if switched is None:
         raise NoSwitch()
-    counts = {'conversations': 0, 'contacts': 0, 'lines': 0, 'already_kept': 0, 'after_switch': 0, 'unknown': 0, 'bad': 0}
-    batch = [row for row in (conversations or [])[:MAX_CONVERSATIONS] if isinstance(row, dict)]
-    ids = {str(row.get('subscriber_id') or '').strip() for row in batch} - {''}
-    contacts = {
-        contact.manychat_subscriber_id: contact
-        for contact in Contact.objects.filter(manychat_subscriber_id__in=ids, is_demo=False)
+    counts = {
+        'conversations': 0, 'contacts': 0, 'created': 0, 'lines': 0, 'already_kept': 0, 'after_switch': 0,
+        'no_phone': 0, 'empty': 0, 'bad': 0,
     }
+    batch = [row for row in (conversations or [])[:MAX_CONVERSATIONS] if isinstance(row, dict)]
+    by_id, by_phone = _contacts_for(batch)
     for row in batch:
         counts['conversations'] += 1
-        contact = contacts.get(str(row.get('subscriber_id') or '').strip())
-        if contact is None:
-            counts['unknown'] += 1
-            continue
+        subscriber = str(row.get('subscriber_id') or '').strip()[:40]
+        phone = normalize_phone(row.get('phone'))
         lines = []
         for raw in (row.get('messages') or [])[:MAX_LINES]:
             line = _line(raw)
@@ -149,21 +193,37 @@ def import_conversations(conversations, *, now=None) -> dict:
                 counts['after_switch'] += 1
             else:
                 lines.append(line)
+        if not lines:
+            counts['empty'] += 1
+            continue
+        contact = by_id.get(subscriber) or by_phone.get(phone)
+        if contact is None:
+            if not phone:
+                counts['no_phone'] += 1
+                continue
+            contact, created = _new_contact(phone, subscriber, ' '.join(str(row.get('name') or '').split())[:200])
+            counts['created'] += int(created)
+            by_phone[phone] = contact
+        if contact.is_demo:
+            continue
         kept = _kept_by_kogo(contact, switched)
+        own_messages = Message.objects.filter(contact=contact).exists()
         fresh = []
         for line in sorted(lines, key=lambda line: line['sent_at']):
             if _already_there(line, kept):
                 counts['already_kept'] += 1
             else:
-                fresh.append(HistoryLine(contact=contact, **line))
+                fresh.append(line)
         with transaction.atomic():
             before = HistoryLine.objects.filter(contact=contact).count()
-            HistoryLine.objects.bulk_create(fresh, ignore_conflicts=True)
+            HistoryLine.objects.bulk_create([HistoryLine(contact=contact, **line) for line in fresh], ignore_conflicts=True)
             added = HistoryLine.objects.filter(contact=contact).count() - before
-            fields = {'history_copied_at': now}
-            # Its past is here: the summary reads the lead again, with what the old bot and the office said.
-            if added and contact.last_inbound_at and contact.last_inbound_at >= now - READ_AGAIN_WITHIN:
-                fields['needs_analysis'] = True
+            fields = {'history_copied_at': now, **_moments(contact, fresh, own_messages)}
+            if subscriber.isdigit() and not contact.manychat_subscriber_id:
+                fields['manychat_subscriber_id'] = subscriber
+            if added:
+                # Its past is here: the summary reads the conversation again with it, a few a call (cron 1c).
+                fields['history_read_at'] = None
             state.touch(contact.pk, **fields)
         counts['contacts'] += 1
         counts['lines'] += added
@@ -177,11 +237,13 @@ def still_to_copy(*, again: bool = False) -> dict:
     """
     switched = bot_mode.first_live_at()
     if switched is None:
-        raise NoSwitch()
+        # Before the switch there is nothing "before" yet: nothing to bring, nothing brought.
+        return {'switched_at': None, 'subscribers': [], 'copied': 0}
     rows = (
         Contact.objects.filter(is_demo=False, live_test=False, first_inbound_at__lt=switched)
         .exclude(manychat_subscriber_id='')
     )
+    copied = Contact.objects.filter(history_copied_at__isnull=False).count()
     if not again:
         rows = rows.filter(history_copied_at__isnull=True)
     ids = [
@@ -189,7 +251,7 @@ def still_to_copy(*, again: bool = False) -> dict:
         .values_list('manychat_subscriber_id', flat=True)
         if subscriber.strip().isdigit()
     ]
-    return {'switched_at': switched.isoformat(), 'subscribers': ids}
+    return {'switched_at': switched.isoformat(), 'subscribers': ids, 'copied': copied}
 
 
 def line_payload(line: HistoryLine) -> dict:

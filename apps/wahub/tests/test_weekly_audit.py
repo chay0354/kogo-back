@@ -127,6 +127,9 @@ class WeeklyAuditTests(WahubTestCase):
                 # the one read the audit itself makes; with no key, as here, nobody is asked).
                 'api/v1/wahub/leads/automation/': 200,
                 'api/v1/wahub/leads/templates/options/': 200,
+                # the copy of the conversations from before the switch: how many were copied, read only. A batch
+                # of them answers POST only.
+                'api/v1/wahub/history/import/': 200,
                 # the notes about a customer and the waiting lists: read only. Writing a note, and whatever is done
                 # to a row of a list, answers POST only.
                 f'api/v1/wahub/contacts/{contact.id}/notes/': 200,
