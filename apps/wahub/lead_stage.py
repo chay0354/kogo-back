@@ -210,6 +210,15 @@ VARIANT_AGE = 'age'
 VARIANT_NOT_READY = 'not_ready'
 VARIANT_COMMITMENT = 'commitment'
 VARIANT_SIGNUP = 'signup'
+# Two rounds of one step each, so that no lead is left with nobody coming back to it
+# (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ג): an external branch — did it work out with the
+# municipality? — three days after the conversation last moved; and whoever got an answer and went
+# quiet with no link and nothing known to hold them back — the trial lesson, as soon as the quiet
+# makes them "silent".
+VARIANT_EXTERNAL = 'external'
+VARIANT_SILENT = 'silent'
+EXTERNAL_DELAYS = (3 * DAY,)
+SILENT_DELAYS = (SILENT_AFTER,)
 
 
 def delays_for(kind: str, variant: str = '') -> tuple:
@@ -218,6 +227,10 @@ def delays_for(kind: str, variant: str = '') -> tuple:
         return DATE_ARRIVED_AGE
     if kind == NUDGE_DATE_ARRIVED and variant == VARIANT_NOT_READY:
         return DATE_ARRIVED_NOT_READY
+    if kind == NUDGE_LINK_REMINDER and variant == VARIANT_EXTERNAL:
+        return EXTERNAL_DELAYS
+    if kind == NUDGE_LINK_REMINDER and variant == VARIANT_SILENT:
+        return SILENT_DELAYS
     return NUDGE_DELAYS[kind]
 
 

@@ -334,6 +334,39 @@ def _blocked(row: LeadFollowUp, contact: Contact, at, mapped: set, reachable: bo
     return ''
 
 
+class Gate:
+    """
+    What the leaving of a follow-up hangs on beyond its own row — the templates
+    connected, a ManyChat to send through, the follow-ups' own switch — read
+    once for a whole answer, and only once a row asks (docs/WAHUB-CONTRACT-
+    LEADS-NO-ONE-LOST.md, ב): a list of leads makes these reads once, however
+    many rows it has. The templates are the very connections the engine sends
+    through (lead_templates.flow_for), so the screen cannot say "חסרה תבנית"
+    of a follow-up that would leave.
+    """
+
+    def __init__(self, now=None):
+        self.now = now
+        self._reads = None
+
+    def reads(self) -> tuple:
+        """(the template keys that have an automation, ManyChat reachable, the switch) — read on the first call only."""
+        if self._reads is None:
+            self._reads = (set(lead_templates.connections(self.now)), sending.manychat_reachable(), _switch())
+        return self._reads
+
+    def hold(self, row: LeadFollowUp, contact: Contact, now) -> str:
+        """
+        Why this open follow-up will not leave when its moment comes — at
+        `now` when that moment has passed — in the screen's words; '' when it
+        will. A demo contact's is written into the demo conversation, never sent.
+        """
+        if contact.is_demo:
+            return DEMO_WORDS
+        mapped, reachable, switch = self.reads()
+        return BLOCKED_WORDS.get(_blocked(row, contact, max(row.due_at, now), mapped, reachable, switch), '')
+
+
 def _ahead(row: LeadFollowUp, now, mapped: set, labels: dict, reachable: bool, switch: dict) -> dict:
     contact = row.contact
     at = max(row.due_at, now)
