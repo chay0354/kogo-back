@@ -702,20 +702,21 @@ class ExportTests(ArchiveApiMixin, APITestCase):
 
     def test_the_files_and_the_manifest(self):
         response, archive = self.export()
+        # A folder a series (14.10.2026): IR/ holds the lesson receipts.
         self.assertEqual(sorted(archive.namelist()), [
-            'IR-2026-000001.pdf', 'IR-2026-000002.pdf', 'IR-2026-000003.pdf', 'manifest.csv',
+            'IR/IR-2026-000001.pdf', 'IR/IR-2026-000002.pdf', 'IR/IR-2026-000003.pdf', 'manifest.csv',
         ])
         for row in self.rows:
-            data = archive.read(f'{row.number}.pdf')
+            data = archive.read(f'IR/{row.number}.pdf')
             self.assertEqual(data, bytes(row.pdf))
             self.assertEqual(hashlib.sha256(data).hexdigest(), row.sha256)
         manifest = archive.read('manifest.csv').decode('utf-8-sig')
         lines = list(csv.reader(io.StringIO(manifest)))
-        self.assertEqual(lines[0], ['number', 'purpose', 'kind', 'document_type_label', 'customer_name',
-                                    'document_date', 'total', 'sha256', 'signed_at'])
+        self.assertEqual(lines[0], ['מספר מסמך', 'מקור או העתק', 'תיקייה', 'סוג מסמך', 'לקוח',
+                                    'תאריך המסמך', 'סה"כ', 'SHA-256', 'מועד החתימה'])
         first = lines[1]
-        self.assertEqual(first[:4], ['IR-2026-000001', 'archive', 'ir', self.rows[0].document_type_label])
-        self.assertEqual((first[5], first[6], first[7]), ('2026-08-01', '236.00', self.rows[0].sha256))
+        self.assertEqual(first[:4], ['IR-2026-000001', 'העתק לארכיון', 'IR', self.rows[0].document_type_label])
+        self.assertEqual((first[5], first[6], first[7]), ('01/08/2026', '236.00', self.rows[0].sha256))
         self.assertEqual((response['X-Export-Total'], response['X-Export-Next-Offset']), ('3', ''))
         accesses = SignedFileAccess.objects.filter(action='export')
         self.assertEqual(accesses.count(), 3)
@@ -723,10 +724,10 @@ class ExportTests(ArchiveApiMixin, APITestCase):
 
     def test_pages(self):
         first, archive = self.export(limit=2)
-        self.assertEqual(sorted(archive.namelist()), ['IR-2026-000001.pdf', 'IR-2026-000002.pdf', 'manifest.csv'])
+        self.assertEqual(sorted(archive.namelist()), ['IR/IR-2026-000001.pdf', 'IR/IR-2026-000002.pdf', 'manifest.csv'])
         self.assertEqual((first['X-Export-Total'], first['X-Export-Next-Offset']), ('3', '2'))
         second, archive = self.export(limit=2, offset=2)
-        self.assertEqual(sorted(archive.namelist()), ['IR-2026-000003.pdf', 'manifest.csv'])
+        self.assertEqual(sorted(archive.namelist()), ['IR/IR-2026-000003.pdf', 'manifest.csv'])
         self.assertEqual(second['X-Export-Next-Offset'], '')
 
     def test_the_page_is_capped_and_the_filters_apply(self):
@@ -735,7 +736,7 @@ class ExportTests(ArchiveApiMixin, APITestCase):
         self.assertEqual(len(archive.namelist()), 2)
         self.assertEqual(response['X-Export-Next-Offset'], '1')
         _response, archive = self.export(q='000002')
-        self.assertEqual(sorted(archive.namelist()), ['IR-2026-000002.pdf', 'manifest.csv'])
+        self.assertEqual(sorted(archive.namelist()), ['IR/IR-2026-000002.pdf', 'manifest.csv'])
         _response, archive = self.export(purpose='original')
         self.assertEqual(archive.namelist(), ['manifest.csv'])
         self.assertEqual(self.client.get(EXPORT, {'kind': 'nope'}).status_code, 400)

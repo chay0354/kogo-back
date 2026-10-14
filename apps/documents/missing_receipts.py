@@ -329,6 +329,11 @@ def missing_receipts_csv(report: dict) -> bytes:
             _text(row['payment_id']),
             _text(f"{manual['number']} ({_day_text(manual['date'])})") if manual else '',
         ])
+    # Said in the file, not left to an empty sheet: an accountant who opens a
+    # header and nothing under it cannot tell "none missing" from "failed".
+    if not report['rows']:
+        writer.writerow([f"אין חיובים ללא קבלה בשנת {report['year']}"])
+    writer.writerow(['סה"כ', f"{report['count']} חיובים", '', '', report['total'], '', '', '', ''])
     return buffer.getvalue().encode('utf-8-sig')
 
 

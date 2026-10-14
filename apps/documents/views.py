@@ -338,6 +338,20 @@ class FormalDocumentViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception('Register export: undocumented income failed')
             failed = True
 
+        # 'output', not 'format': DRF reads ?format= as a renderer and answers 404.
+        if (request.query_params.get('output') or '').strip() == 'xlsx':
+            # The Excel workbook the office opens (register_xlsx); the CSV stays
+            # the default for anything that imports it.
+            from apps.documents.register import register_xlsx
+            from apps.documents.xlsx import XLSX_CONTENT_TYPE
+
+            response = HttpResponse(register_xlsx(report, undocumented_failed=failed),
+                                    content_type=XLSX_CONTENT_TYPE)
+            response['Content-Disposition'] = (
+                f'attachment; filename="documents-{start.isoformat()}-{end.isoformat()}.xlsx"'
+            )
+            return response
+
         response = HttpResponse(register_csv(report, undocumented_failed=failed),
                                 content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = (

@@ -29,6 +29,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.core.revenue_service import (
     BRANCHES_BUSINESS_KEY,
@@ -65,10 +66,9 @@ SOURCE_LABELS = {
 SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_RENTALS, SOURCE_ORPHAN_CHARGES, SOURCE_PAYMENT_LINKS)
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
-# completed charges plus confirmed website orders whose stock was already taken.
-_STORE_PAID = Q(payment_status='completed') | Q(
-    website_order_number__isnull=False, payment_status='pending',
-)
+# a completed charge. A pending website order is not one — see register.py's
+# store_documents for why it stopped counting (14.10.2026).
+_STORE_PAID = Q(payment_status='completed')
 
 _PAYMENT_TYPE_LABELS = {
     'recurring': 'מנוי חוזר',
@@ -233,6 +233,23 @@ def _group_key(row: UndocumentedRow, group_by: str) -> tuple:
 @dataclass
 class UndocumentedIncome:
     sections: list = field(default_factory=list)
+    # Card refunds in the period with no credit note behind them — money that
+    # went back out (uncredited_refund_rows). Kept apart from the sections: they
+    # are not income, and they come off the period's take, not onto it.
+    refunds: list = field(default_factory=list)
+
+    @property
+    def refunds_total(self) -> Decimal:
+        return sum((row.amount for row in self.refunds), Decimal('0.00'))
+
+    def refunds_by_group(self, group_by: str = GROUP_BY_BRANCH) -> dict:
+        """group key -> (title, refunded amount), filed like the charges."""
+        out: dict = {}
+        for row in self.refunds:
+            key, title, _rank = _group_key(row, group_by)
+            name, amount = out.get(key, (title, Decimal('0.00')))
+            out[key] = (name, amount + row.amount)
+        return out
 
     @property
     def count(self) -> int:
@@ -252,7 +269,7 @@ class UndocumentedIncome:
 
     @property
     def is_empty(self) -> bool:
-        return self.count == 0 and self.merged_count == 0
+        return self.count == 0 and self.merged_count == 0 and not self.refunds
 
     def grouped(self, group_by: str = GROUP_BY_BRANCH) -> list:
         """
@@ -278,6 +295,19 @@ class UndocumentedIncome:
 
     def by_branch(self) -> dict:
         return self.by_group(GROUP_BY_BRANCH)
+
+
+def _local_day(moment) -> date:
+    """
+    The Israeli calendar day of a stored moment.
+
+    A stored datetime comes back in UTC, so `.date()` filed a charge taken
+    between midnight and three in the morning under the day before — the
+    September register opened with three "31/08" rows (1.9 billing run, 00:20).
+    The period itself is filtered by the local day, so the date printed now
+    agrees with the period the row was counted in.
+    """
+    return timezone.localtime(moment).date()
 
 
 def _income_tags(course) -> dict:
@@ -342,7 +372,7 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
             source=SOURCE_LESSONS,
             customer=customer,
             reference=invoice.invoice_number,
-            row_date=invoice.invoice_date.date(),
+            row_date=_local_day(invoice.invoice_date),
             detail=_PAYMENT_TYPE_LABELS.get(invoice.payment_type, invoice.payment_type or ''),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -413,7 +443,7 @@ def _store_rows(branch_ids, start: date, end: date, delivery: dict) -> list:
             source=SOURCE_STORE,
             customer=customer,
             reference=invoice.invoice_number,
-            row_date=invoice.issue_date.date(),
+            row_date=_local_day(invoice.issue_date),
             detail=_STORE_METHOD_LABELS.get(invoice.payment_method, invoice.payment_method or ''),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -474,8 +504,22 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
         qs = qs.filter(Q(branch_id__in=branch_ids)
                        | Q(branch__isnull=True, family__branch_id__in=branch_ids))
 
+    payments = list(qs)
+    # One checkout receipt covers every child and lesson charged together, but
+    # its Invoice points at the first charge only; the others are named in the
+    # receipt's checkout_lines log. Without reading it, every other charge of a
+    # family checkout looked receipt-less and was counted a second time — the
+    # receipt's own sum already holds it (September 2026: 24 charges,
+    # ₪6,726.50, while the missing-receipts screen, which reads the log, rightly
+    # showed none). Same rule as missing_receipts.payments_without_invoice.
+    from apps.customers.checkout_invoice import payments_covered_by_checkout
+
+    covered = payments_covered_by_checkout(payment.id for payment in payments)
+
     rows = []
-    for payment in qs:
+    for payment in payments:
+        if str(payment.id) in covered:
+            continue
         when = payment.payment_date or payment.created_at
         customer = (
             (payment.child.full_name if payment.child_id and payment.child else '')
@@ -489,7 +533,7 @@ def _orphan_charge_rows(branch_ids, start: date, end: date) -> list:
             source=SOURCE_ORPHAN_CHARGES,
             customer=customer,
             reference=str(payment.id)[:8].upper(),
-            row_date=when.date(),
+            row_date=_local_day(when),
             detail=_CHARGE_TYPE_LABELS.get(payment.payment_type, payment.payment_type or ''),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -555,7 +599,7 @@ def _payment_link_rows(branch_ids, start: date, end: date) -> list:
             source=SOURCE_PAYMENT_LINKS,
             customer=payment.payer_name or 'ללא שם',
             reference=str(payment.id)[:8].upper(),
-            row_date=(payment.paid_at or payment.created_at).date(),
+            row_date=_local_day(payment.paid_at or payment.created_at),
             detail=f'{link.title} · {payment.option_label}'.strip(' ·'),
             branch_id=branch_id,
             branch_name=branch_name,
@@ -615,6 +659,116 @@ def merge_against_documents(income: UndocumentedIncome, start: date, end: date) 
                     break
 
 
+SOURCE_UNCREDITED_REFUNDS = 'uncredited_refunds'
+UNCREDITED_REFUNDS_LABEL = 'זיכויים בכרטיס שלא הופקה להם חשבונית זיכוי'
+
+
+def uncredited_refund_rows(branch_ids, start: date, end: date) -> list:
+    """
+    Card refunds Tranzila confirmed in the period that no credit note covers.
+
+    A refund is money going back to the customer, and a report of the period's
+    take that leaves it out says more came in than stayed. Since 16.9.2026 every
+    refund issues its חשבונית מס זיכוי (issue_refund_credit_note), linked to the
+    receipt it credits; before that the CR run did not exist, and September's
+    first refunds — and a same-day cancel — have no document at all.
+
+    One row per refund: the refund's own record (the claim row payment_service
+    writes), dated by Tranzila's answer, for the sum that was sent. "Covered"
+    means a credit note links to the receipt the refunded charge belongs to —
+    its own Invoice, or the family-checkout receipt that named it. A refund made
+    in Tranzila's own screen, outside the system, is not here: nothing recorded it.
+    """
+    from apps.core.card_payouts import PAYMENT_REFUND_KEYS, STORE_REFUND_KEYS, _keyed_id, _money
+    from apps.customers.checkout_invoice import payments_covered_by_checkout
+    from apps.customers.financial_models import Invoice
+    from apps.customers.models import Payment, TranzilaTransaction
+    from apps.documents.models import FormalDocument
+    from apps.store.models import StoreInvoice
+
+    by_key = Q()
+    for prefix in PAYMENT_REFUND_KEYS + STORE_REFUND_KEYS:
+        by_key |= Q(idempotency_key__startswith=prefix)
+    dated = (
+        Q(response_timestamp__date__gte=start, response_timestamp__date__lte=end)
+        | Q(response_timestamp__isnull=True, created_at__date__gte=start, created_at__date__lte=end)
+    )
+    refunds = list(
+        TranzilaTransaction.objects
+        .filter(by_key, dated, transaction_type='refund', is_successful=True)
+        .order_by('response_timestamp', 'created_at')
+    )
+    if not refunds:
+        return []
+
+    targets = []
+    for refund in refunds:
+        payment_id = _keyed_id(refund.idempotency_key, PAYMENT_REFUND_KEYS)
+        store_id = None if payment_id else _keyed_id(refund.idempotency_key, STORE_REFUND_KEYS)
+        targets.append((refund, payment_id, store_id))
+
+    payments = {
+        str(p.id): p for p in Payment.objects.filter(id__in=[t[1] for t in targets if t[1]])
+        .select_related('child', 'family', 'family__branch', 'branch',
+                        'lesson__course__business', 'lesson__course__business_category')
+    }
+    sales = {
+        str(s.id): s for s in StoreInvoice.objects.filter(id__in=[t[2] for t in targets if t[2]])
+        .select_related('branch', 'child')
+    }
+    numbers_of: dict = {}
+    for invoice_number, payment_id in Invoice.objects.filter(payment_id__in=list(payments)).values_list(
+        'invoice_number', 'payment_id',
+    ):
+        numbers_of.setdefault(str(payment_id), []).append(invoice_number)
+    for payment_id, number in payments_covered_by_checkout(list(payments)).items():
+        numbers_of.setdefault(payment_id, []).append(number)
+    for sale_id, sale in sales.items():
+        numbers_of.setdefault(sale_id, []).append(sale.invoice_number)
+    credited = set(
+        FormalDocument.objects.filter(document_type='credit_invoice')
+        .filter(linked_document_number__in=[n for numbers in numbers_of.values() for n in numbers])
+        .values_list('linked_document_number', flat=True)
+    )
+
+    rows = []
+    for refund, payment_id, store_id in targets:
+        target = payment_id or store_id
+        # A charge is both its Invoice's and named in that receipt's checkout log: one number, once.
+        numbers = list(dict.fromkeys(numbers_of.get(target or '', [])))
+        if any(number in credited for number in numbers):
+            continue
+        payment = payments.get(payment_id) if payment_id else None
+        sale = sales.get(store_id) if store_id else None
+        if payment is None and sale is None:
+            continue
+        if payment is not None:
+            branch_id, branch_name = _branch_of(payment.branch, payment.family.branch if payment.family_id else None)
+            customer = (payment.child.full_name if payment.child_id and payment.child else '') or payment.family.name
+            tags = _income_tags(payment.lesson.course if payment.lesson_id else None)
+            fallback = payment.final_amount
+        else:
+            branch_id, branch_name = _branch_of(sale.branch)
+            customer = (sale.child.full_name if sale.child_id and sale.child else '') or sale.customer_name or 'לקוח מזדמן'
+            tags = {}
+            fallback = sale.total_amount
+        if branch_ids is not None and (branch_id is None or str(branch_id) not in {str(b) for b in branch_ids}):
+            continue
+        amount = _money((refund.request_data or {}).get('amount'))
+        rows.append(UndocumentedRow(
+            source=SOURCE_UNCREDITED_REFUNDS,
+            customer=customer,
+            reference=', '.join(numbers),
+            row_date=_local_day(refund.response_timestamp or refund.created_at),
+            detail=refund.transaction_id or '',
+            branch_id=branch_id,
+            branch_name=branch_name,
+            amount=amount if amount is not None and amount > 0 else fallback,
+            **tags,
+        ))
+    return rows
+
+
 def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
     """
     Paid income in the period with no FormalDocument behind it.
@@ -640,6 +794,6 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
         if rows:
             sections.append(SourceSection(source=source, label=SOURCE_LABELS[source], rows=rows))
 
-    income = UndocumentedIncome(sections=sections)
+    income = UndocumentedIncome(sections=sections, refunds=uncredited_refund_rows(branch_ids, start, end))
     merge_against_documents(income, start, end)
     return income

@@ -417,16 +417,22 @@ class PeriodReport:
                 'credits': group.totals.credits_total,
                 'undocumented': Decimal('0.00'),
             }
+        def entry_for(key, name):
+            entry = rows.get(key)
+            if entry is None:
+                # A branch that took money in but issued no document at all
+                # has no group above; it still belongs in this table.
+                entry = {'title': name, 'documented': Decimal('0.00'),
+                         'credits': Decimal('0.00'), 'undocumented': Decimal('0.00')}
+                rows[key] = entry
+            return entry
+
         if self.undocumented is not None:
             for key, (name, amount) in self.undocumented.by_group(self.group_by).items():
-                entry = rows.get(key)
-                if entry is None:
-                    # A branch that took money in but issued no document at all
-                    # has no group above; it still belongs in this table.
-                    entry = {'title': name, 'documented': Decimal('0.00'),
-                             'credits': Decimal('0.00'), 'undocumented': Decimal('0.00')}
-                    rows[key] = entry
-                entry['undocumented'] += amount
+                entry_for(key, name)['undocumented'] += amount
+            # A card refund with no credit note went back out like one that has it.
+            for key, (name, amount) in self.undocumented.refunds_by_group(self.group_by).items():
+                entry_for(key, name)['credits'] += amount
         for entry in rows.values():
             entry['total'] = entry['documented'] + entry['undocumented'] - entry['credits']
         return sorted(
@@ -442,6 +448,13 @@ class PeriodReport:
         return self.undocumented.total
 
     @property
+    def uncredited_refunds_total(self) -> Decimal:
+        """Card refunds in the period no credit note covers — 0 when not collected."""
+        if self.undocumented is None:
+            return Decimal('0.00')
+        return self.undocumented.refunds_total
+
+    @property
     def all_income_total(self) -> Decimal:
         """
         Everything that came in: documented collection plus undocumented charges.
@@ -451,7 +464,8 @@ class PeriodReport:
         for. Credits come off, since a period's take is not what was charged
         but what stayed.
         """
-        return self.collected_total + self.undocumented_total - self.totals.credits_total
+        return (self.collected_total + self.undocumented_total
+                - self.totals.credits_total - self.uncredited_refunds_total)
 
 
 def _row_from(doc) -> ReportRow:

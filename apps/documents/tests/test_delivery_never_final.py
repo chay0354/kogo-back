@@ -482,7 +482,8 @@ class OfficeFileIsACopyTests(DeliveryMixin, APITestCase):
         import zipfile
 
         archive = zipfile.ZipFile(io.BytesIO(response.content))
-        self.assertEqual(archive.read(f'{row.number}.pdf'), bytes(row.pdf))
+        # Filed under its series' folder (14.10.2026).
+        self.assertEqual(archive.read(f'RC/{row.number}.pdf'), bytes(row.pdf))
 
 
 # ── the 'none' rows of before ────────────────────────────────────────────────

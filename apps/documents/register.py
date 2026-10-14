@@ -187,13 +187,20 @@ def store_documents(branch_ids, start, end, document_type: str = '') -> list[Cha
         else:
             net, vat, gross = split_vat_inclusive(invoice.total_amount)
         # A receipt says the money came in. A sale whose payment failed, or was
-        # never completed at the counter, holds its number and nothing else. A
-        # confirmed website order counts, as it does on the dashboard.
+        # never completed, holds its number and nothing else — a website order
+        # included. A website order used to count while still pending, on the
+        # site's word that it was paid; that word was never true: until 29.9.2026
+        # the site paid on Tranzila's test terminal (realtest), which collected
+        # nothing, and since then an order is completed only when Tranzila's own
+        # report confirms the charge (payment_followup). The September register
+        # listed eight such orders, ₪1,760, as issued receipts; none has a
+        # charge on any of the business's terminals, and none has a signed
+        # original (signing issues a store sale only once it is completed).
         void_reason = ''
         if not on_account:
             if invoice.payment_status == 'failed':
                 void_reason = 'התשלום נכשל'
-            elif invoice.payment_status == 'pending' and not invoice.website_order_number:
+            elif invoice.payment_status == 'pending':
                 void_reason = 'התשלום טרם הושלם'
         customer = (
             (invoice.child.full_name if invoice.child_id and invoice.child else '')
@@ -342,6 +349,8 @@ def register_csv(report, *, undocumented_failed: bool = False) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator='\r\n')
     writer.writerow(CSV_COLUMNS)
+    sums = [Decimal('0.00')] * 3
+    issued = 0
     for row in register_rows(report):
         if row.void:
             net = vat = total = '0.00'
@@ -351,6 +360,8 @@ def register_csv(report, *, undocumented_failed: bool = False) -> bytes:
             vat = _signed(row.vat_amount, row.is_credit)
             total = _signed(row.total_amount, row.is_credit)
             state = 'זיכוי' if row.is_credit else 'הופק'
+            sums = [sums[0] + Decimal(net), sums[1] + Decimal(vat), sums[2] + Decimal(total)]
+            issued += 1
         writer.writerow([
             row.document_date.strftime('%d/%m/%Y'),
             _text(row.document_number),
@@ -372,8 +383,16 @@ def register_csv(report, *, undocumented_failed: bool = False) -> bytes:
             _text(row.duplicate_of),
             state,
         ])
-    if undocumented_failed or getattr(report, 'undocumented', None) is not None:
-        _write_undocumented(writer, None if undocumented_failed else report.undocumented)
+    # The column sums, in the columns they sum: the sheet's total is on the
+    # sheet, and it is the period report's "סה"כ כולל מע"מ" (14.10.2026).
+    writer.writerow(['סה"כ מסמכים', f'{issued} מסמכים', '', '', '', '', '', '', '',
+                     f'{sums[0]:.2f}', f'{sums[1]:.2f}', f'{sums[2]:.2f}', '', '', '', '', '', '', ''])
+    undocumented = None if undocumented_failed else getattr(report, 'undocumented', None)
+    if undocumented_failed or undocumented is not None:
+        _write_undocumented(writer, undocumented)
+    if undocumented is not None and undocumented.refunds:
+        _write_uncredited_refunds(writer, undocumented)
+    _write_summary(writer, report)
     return buffer.getvalue().encode('utf-8-sig')
 
 
@@ -385,21 +404,215 @@ def _write_undocumented(writer, income) -> None:
         writer.writerow([UNDOCUMENTED_FAILED])
         return
     writer.writerow(UNDOCUMENTED_COLUMNS)
-    rows = [(section, row) for section in income.sections for row in section.rows]
-    for section, row in sorted(rows, key=lambda pair: (pair[1].row_date, pair[1].reference)):
+    # Source by source, each with its subtotal, in the order the report reads
+    # them; by date inside a source. Mixed by date, 546 lesson charges buried
+    # the store's and the rentals' rows (September 2026).
+    from apps.documents.undocumented_income import SOURCE_ORDER
+
+    rank = {code: index for index, code in enumerate(SOURCE_ORDER)}
+    for section in sorted(income.sections, key=lambda sec: rank.get(sec.source, len(rank))):
+        for row in sorted(section.rows, key=lambda r: (r.row_date, r.reference)):
+            writer.writerow([
+                row.row_date.strftime('%d/%m/%Y'),
+                section.label,
+                _text(row.customer),
+                _text(row.reference),
+                _text(row.detail),
+                _text(row.branch_name),
+                _text(row.business_name),
+                _text(row.category_name),
+                f'{row.amount:.2f}',
+                # Folded into a document issued by hand for the same child and sum: shown, not counted.
+                f'לא נספר — נכלל במסמך {row.merged_document}' if row.merged_document else 'נספר',
+            ])
+        writer.writerow(['', f'סה"כ {section.label} ({section.count})', '', '', '', '', '', '',
+                         f'{section.total:.2f}', ''])
+    if not income.sections:
+        writer.writerow(['אין הכנסה ללא מסמך בתקופה'])
+    writer.writerow(['סה"כ ללא מסמך', '', '', '', '', '', '', '', f'{income.total:.2f}', ''])
+
+
+UNCREDITED_REFUNDS_COLUMNS = ('תאריך', 'לקוח', 'המסמך שזוכה', 'מספר בטרנזילה', 'סניף', 'סכום')
+
+
+def _write_uncredited_refunds(writer, income) -> None:
+    """Card refunds no credit note covers: negative, like a credit note, and their total."""
+    from apps.documents.undocumented_income import UNCREDITED_REFUNDS_LABEL
+
+    writer.writerow([])
+    writer.writerow([UNCREDITED_REFUNDS_LABEL])
+    writer.writerow(UNCREDITED_REFUNDS_COLUMNS)
+    for row in income.refunds:
         writer.writerow([
             row.row_date.strftime('%d/%m/%Y'),
-            section.label,
             _text(row.customer),
             _text(row.reference),
             _text(row.detail),
             _text(row.branch_name),
-            _text(row.business_name),
-            _text(row.category_name),
-            f'{row.amount:.2f}',
-            # Folded into a document issued by hand for the same child and sum: shown, not counted.
-            f'לא נספר — נכלל במסמך {row.merged_document}' if row.merged_document else 'נספר',
+            f'{-row.amount:.2f}',
         ])
-    if not rows:
-        writer.writerow(['אין הכנסה ללא מסמך בתקופה'])
-    writer.writerow(['סה"כ ללא מסמך', '', '', '', '', '', '', '', f'{income.total:.2f}', ''])
+    writer.writerow(['סה"כ זיכויים ללא חשבונית זיכוי', '', '', '', '', f'{-income.refunds_total:.2f}'])
+
+
+def _write_summary(writer, report) -> None:
+    """
+    The period on one screen, at the bottom of the sheet: each document type,
+    then the money in — the same lines, in the same order, as the period
+    report's summary, so the two files can be checked against each other.
+    """
+    from apps.documents.period_report import DOCUMENT_TYPE_LABELS, TYPE_ORDER
+
+    writer.writerow([])
+    writer.writerow(['סיכום התקופה'])
+    writer.writerow(['סוג מסמך', 'כמות', 'לפני מע"מ', 'מע"מ', 'סה"כ'])
+    rank = {code: index for index, code in enumerate(TYPE_ORDER)}
+    for code in sorted(report.type_totals, key=lambda c: rank.get(c, len(rank))):
+        bucket = report.type_totals[code]
+        writer.writerow([DOCUMENT_TYPE_LABELS.get(code, code), bucket.count,
+                         f'{bucket.net_amount:.2f}', f'{bucket.vat_amount:.2f}', f'{bucket.total_amount:.2f}'])
+    writer.writerow([])
+    lines = [('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', report.collected_total)]
+    if report.undocumented is not None:
+        lines.append(('תקבולים ללא מסמך', report.undocumented_total))
+    lines.append(('זיכויים — חשבוניות זיכוי', -report.totals.credits_total))
+    if report.uncredited_refunds_total:
+        lines.append(('זיכויים בכרטיס ללא חשבונית זיכוי', -report.uncredited_refunds_total))
+    total = report.all_income_total if report.undocumented is not None else (
+        report.collected_total - report.totals.credits_total
+    )
+    lines.append(('סה"כ כסף שנכנס בתקופה', total))
+    for label, amount in lines:
+        writer.writerow([label, f'{amount:.2f}'])
+
+
+# ---------------------------------------------------------------- the Excel file
+
+def _money_lines(report) -> list:
+    """The period's money, line by line — the PDF's summary and the CSV's, in one place."""
+    lines = [('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', report.collected_total)]
+    if report.undocumented is not None:
+        lines.append(('תקבולים ללא מסמך', report.undocumented_total))
+    lines.append(('זיכויים — חשבוניות זיכוי', -report.totals.credits_total))
+    if report.uncredited_refunds_total:
+        lines.append(('זיכויים בכרטיס ללא חשבונית זיכוי', -report.uncredited_refunds_total))
+    return lines
+
+
+def register_xlsx(report, *, undocumented_failed: bool = False) -> bytes:
+    """
+    The register as an Excel workbook the accountant can read as it opens.
+
+    The owner asked for the file to be comfortable in Excel rather than full of
+    information (14.10.2026): a summary sheet first, then the documents with
+    only the columns a reader uses — right to left, header frozen, filters,
+    sums in shekels and one total row — then the income without a document,
+    source by source, and the refunds no credit note covers. The CSV stays as
+    it was for a program that imports it; the numbers are the same report's.
+    """
+    from apps.documents.period_report import DOCUMENT_TYPE_LABELS, TYPE_ORDER
+    from apps.documents.undocumented_income import SOURCE_ORDER
+    from apps.documents.xlsx import (
+        CREDIT, HEADER, MUTED, NOTE, SECTION, SUBTOTAL, TITLE, TOTAL, Sheet, workbook,
+    )
+
+    undocumented = None if undocumented_failed else getattr(report, 'undocumented', None)
+    sheets = []
+
+    # 1. The summary.
+    summary = Sheet('סיכום', [46, 16, 16, 16, 18], gridlines=False)
+    summary.add(['דוח מסמכים לרואה החשבון'], TITLE, merge_to=5)
+    summary.add([f'קוגומלו · {report.period_label} · {report.scope_label}'.strip(' ·')], NOTE, merge_to=5)
+    summary.blank()
+    summary.add(['כמה כסף נכנס'], SECTION, merge_to=5)
+    for label, amount in _money_lines(report):
+        summary.add([label, amount])
+    total = report.all_income_total if undocumented is not None else (
+        report.collected_total - report.totals.credits_total
+    )
+    summary.add(['סה"כ כסף שנכנס בתקופה', total], TOTAL)
+    if undocumented_failed:
+        summary.add([UNDOCUMENTED_FAILED], NOTE, merge_to=5)
+    summary.blank()
+    summary.add(['לפי סוג מסמך'], SECTION, merge_to=5)
+    summary.add(['סוג מסמך', 'כמות', 'לפני מע"מ', 'מע"מ', 'סה"כ'], HEADER)
+    rank = {code: index for index, code in enumerate(TYPE_ORDER)}
+    for code in sorted(report.type_totals, key=lambda c: rank.get(c, len(rank))):
+        bucket = report.type_totals[code]
+        summary.add([DOCUMENT_TYPE_LABELS.get(code, code), bucket.count,
+                     bucket.net_amount, bucket.vat_amount, bucket.total_amount])
+    entries = report.income_by_group()
+    if entries:
+        summary.blank()
+        summary.add(['לפי סניף — כמה כסף נכנס'], SECTION, merge_to=5)
+        summary.add(['סניף', 'עם מסמך', 'ללא מסמך', 'זיכויים', 'סה"כ נכנס'], HEADER)
+        for entry in entries:
+            summary.add([entry['title'], entry['documented'], entry['undocumented'],
+                         -entry['credits'], entry['total']])
+        summary.add(['סה"כ', sum(e['documented'] for e in entries), sum(e['undocumented'] for e in entries),
+                     -sum(e['credits'] for e in entries), sum(e['total'] for e in entries)], TOTAL)
+    summary.blank()
+    summary.add(['"עם מסמך" — קבלות וחשבוניות מס/קבלה בלבד. חשבונית מס שטרם נגבתה אינה כאן, '
+                 'כדי שלא ייספר אותו כסף פעמיים.'], NOTE, merge_to=5)
+    sheets.append(summary)
+
+    # 2. The documents: the columns a reader uses; the technical ones stay in the CSV.
+    rows = register_rows(report)
+    # A column nobody filled in this period is left out rather than shown empty.
+    extra = [
+        (title, attr) for title, attr in (('מספר הקצאה', 'allocation_number'),
+                                          ('מסמך מקושר / אסמכתא', 'reference'),
+                                          ('עסק', 'business_name'), ('קטגוריה', 'category_name'),
+                                          ('ייתכן כפל עם', 'duplicate_of'))
+        if any(getattr(row, attr) for row in rows)
+    ]
+    headers = ['תאריך', 'מספר מסמך', 'סוג מסמך', 'לקוח', 'סניף', 'לפני מע"מ', 'מע"מ', 'סה"כ',
+               'אמצעי תשלום', 'מצב'] + [title for title, _ in extra]
+    documents = Sheet('מסמכים', [12, 17, 18, 26, 24, 13, 12, 13, 13, 30] + [22] * len(extra))
+    documents.add(headers, HEADER, header=True)
+    sums = [Decimal('0.00')] * 3
+    issued = 0
+    for row in rows:
+        sign = -1 if row.is_credit else 1
+        if row.void:
+            amounts = [None, None, None]
+            state, look = f'לא הפך למסמך — {row.void_reason} (₪{row.total_amount:,.2f})', MUTED
+        else:
+            amounts = [sign * row.net_amount, sign * row.vat_amount, sign * row.total_amount]
+            sums = [a + b for a, b in zip(sums, amounts)]
+            issued += 1
+            state, look = ('זיכוי', CREDIT) if row.is_credit else ('הופק', 'plain')
+        documents.add([
+            row.document_date, row.document_number, row.document_type_label, row.customer, row.branch_name,
+            *amounts, PAYMENT_METHOD_LABELS.get(row.payment_method, row.payment_method), state,
+        ] + [getattr(row, attr) for _, attr in extra], look)
+    # A blank row first: Excel's filter and sort stop there, so the total is never sorted in among the rows.
+    documents.blank()
+    documents.add(['סה"כ', f'{issued} מסמכים', '', '', '', *sums], TOTAL)
+    sheets.append(documents)
+
+    # 3. Income with no document, source by source.
+    if undocumented is not None and undocumented.sections:
+        sheet = Sheet('ללא מסמך', [12, 26, 30, 16, 24, 14, 26], filterable=False)
+        sheet.add(['תאריך', 'לקוח', 'אסמכתא', 'פירוט', 'סניף', 'סכום', 'מצב'], HEADER, header=True)
+        order = {code: index for index, code in enumerate(SOURCE_ORDER)}
+        for section in sorted(undocumented.sections, key=lambda sec: order.get(sec.source, len(order))):
+            sheet.add([section.label], SECTION, merge_to=7)
+            for row in sorted(section.rows, key=lambda r: (r.row_date, r.reference)):
+                merged = row.merged_document
+                sheet.add([row.row_date, row.customer, row.reference, row.detail, row.branch_name, row.amount,
+                           f'לא נספר — נכלל במסמך {merged}' if merged else ''], MUTED if merged else 'plain')
+            sheet.add([f'סה"כ — {section.count} חיובים', '', '', '', '', section.total], SUBTOTAL)
+        sheet.add(['סה"כ ללא מסמך', '', '', '', '', undocumented.total], TOTAL)
+        sheets.append(sheet)
+
+    # 4. Refunds no credit note covers.
+    if undocumented is not None and undocumented.refunds:
+        sheet = Sheet('זיכויים ללא חשבונית', [12, 26, 34, 16, 24, 14])
+        sheet.add(['תאריך', 'לקוח', 'המסמך שזוכה', 'מספר בטרנזילה', 'סניף', 'סכום'], HEADER, header=True)
+        for row in undocumented.refunds:
+            sheet.add([row.row_date, row.customer, row.reference, row.detail, row.branch_name, -row.amount], CREDIT)
+        sheet.blank()
+        sheet.add(['סה"כ', f'{len(undocumented.refunds)} זיכויים', '', '', '', -undocumented.refunds_total], TOTAL)
+        sheets.append(sheet)
+
+    return workbook(sheets)

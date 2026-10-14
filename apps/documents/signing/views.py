@@ -350,10 +350,27 @@ def original_file(request, original_id):
     return response
 
 
+# In Hebrew: the accountant opens it, not a program (14.10.2026). The SHA-256
+# column is what proves a file in the zip is the one that was signed.
 MANIFEST_COLUMNS = (
-    'number', 'purpose', 'kind', 'document_type_label', 'customer_name', 'document_date', 'total',
-    'sha256', 'signed_at',
+    'מספר מסמך', 'מקור או העתק', 'תיקייה', 'סוג מסמך', 'לקוח', 'תאריך המסמך', 'סה"כ',
+    'SHA-256', 'מועד החתימה',
 )
+PURPOSE_LABELS = {'archive': 'העתק לארכיון', 'original': 'מקור'}
+
+
+def _folder(number: str) -> str:
+    """
+    The series a document's file is filed under in the zip — IR/, ST/, CR/…
+
+    One flat folder of hundreds of PDFs sorted by when they were signed mixed
+    receipts with credit notes; a folder a series puts each run in order on
+    its own. The closed shared run of the previous years has no prefix.
+    """
+    from apps.documents.register import series_of
+
+    series = series_of(number)
+    return series if series and series.isascii() else 'OLD-SHARED'
 
 
 @api_view(['GET'])
@@ -393,12 +410,14 @@ def originals_export(request):
                 logger.error('Signing: %s — the stored file does not match its SHA-256; left out of the export',
                              row.number)
                 continue
-            archive.writestr(_file_name(row.number), bytes(row.pdf))
+            folder = _folder(row.number)
+            archive.writestr(f'{folder}/{_file_name(row.number)}', bytes(row.pdf))
             writer.writerow([
-                _text(row.number), _purpose(row), row.kind, _text(row.document_type_label),
-                _text(row.customer_name), row.document_date.isoformat() if row.document_date else '',
+                _text(row.number), PURPOSE_LABELS.get(_purpose(row), _purpose(row)), folder,
+                _text(row.document_type_label), _text(row.customer_name),
+                row.document_date.strftime('%d/%m/%Y') if row.document_date else '',
                 f'{row.total:.2f}' if row.total is not None else '', row.sha256,
-                timezone.localtime(row.signed_at).isoformat() if row.signed_at else '',
+                timezone.localtime(row.signed_at).strftime('%d/%m/%Y %H:%M') if row.signed_at else '',
             ])
             included.append(row)
         # UTF-8 with a byte-order mark: how Excel knows the Hebrew is UTF-8 (register.register_csv).

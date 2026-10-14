@@ -44,6 +44,8 @@ class RegisterCsvTests(RegisterFixture, APITestCase):
         lines = list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
         split = lines.index([])
         header, *body = lines[:split]
+        # The documents' own total row closes the section (14.10.2026).
+        body = [line for line in body if line[:1] != ['סה"כ מסמכים']]
         return header, [dict(zip(header, line)) for line in body], lines[split + 1:]
 
     def invoice(self, number='TI-2026-000001', allocation='123456789'):
@@ -82,8 +84,10 @@ class RegisterCsvTests(RegisterFixture, APITestCase):
         self.assertEqual(columns[0], 'תאריך')
         (charge,) = [dict(zip(columns, line)) for line in lines if 'INV-20260809-A1B2C3D4' in line]
         self.assertEqual((charge['סכום'], charge['מצב']), ('120.00', 'נספר'))
-        self.assertEqual(lines[-1][0], 'סה"כ ללא מסמך')
-        self.assertEqual(lines[-1][8], '120.00')
+        # The section ends at its total; the period's summary follows a blank line.
+        section = lines[:lines.index([])]
+        self.assertEqual(section[-1][0], 'סה"כ ללא מסמך')
+        self.assertEqual(section[-1][8], '120.00')
 
     def test_a_failure_to_gather_it_is_said_in_the_file(self):
         self.lesson_receipt('IR-2026-000001', child=self.kid)
@@ -93,7 +97,8 @@ class RegisterCsvTests(RegisterFixture, APITestCase):
         self.assertEqual(res.status_code, 200)
         _header, rows, rest = self.sections(res)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rest, [[UNDOCUMENTED_TITLE], [UNDOCUMENTED_FAILED]])
+        self.assertEqual(rest[:3], [[UNDOCUMENTED_TITLE], [UNDOCUMENTED_FAILED], []])
+        self.assertEqual(rest[3], ['סיכום התקופה'])
 
 
 class UniformFileNumberTests(RegisterFixture, APITestCase):
