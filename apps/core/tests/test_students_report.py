@@ -252,6 +252,30 @@ class GroupsAgainstCapacity(_Report):
         self.assertEqual(occupancy['missing'], 35)
         self.assertEqual(occupancy['weak_groups'], 2)
 
+    def test_listed_by_field_and_weakest_first_within_it(self):
+        """Owner, 14.10.2026: the groups are listed by field (תחום)."""
+        acro = TestDataFactory.create_course(
+            name='אקרו מתקדמים', branch=self.branch, course_type=TestDataFactory.create_course_type('אקרובטיקה'),
+        )
+        full = TestDataFactory.create_lesson(course=acro, room=self.room, instructor=self.instructor, day_of_week=1)
+        for _ in range(10):
+            self.enroll(self.child('active'), lesson=full)
+        empty_acro = TestDataFactory.create_lesson(course=acro, room=self.room, instructor=self.instructor, day_of_week=3)
+        for _ in range(4):
+            self.enroll(self.child('active'))  # Sunday, the other field
+
+        groups = self.page(self.report(), self.branch)['groups']
+
+        self.assertEqual(
+            [(g['field_name'], g['lesson_id']) for g in groups],
+            [
+                ('אקרובטיקה', str(empty_acro.id)),
+                ('אקרובטיקה', str(full.id)),
+                (self.course.course_type.name, str(self.tuesday.id)),
+                (self.course.course_type.name, str(self.sunday.id)),
+            ],
+        )
+
     def test_a_cancelled_or_one_off_lesson_with_nobody_is_not_listed(self):
         TestDataFactory.create_lesson(course=self.course, day_of_week=5, status='cancelled')
         TestDataFactory.create_lesson(course=self.course, day_of_week=6, is_recurring=False, lesson_date=TODAY)

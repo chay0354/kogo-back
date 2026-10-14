@@ -53,6 +53,9 @@ MAX_POINTS = 400
 
 DAY_LABELS = dict(Lesson.DAY_OF_WEEK_CHOICES)
 
+# The field heading of a course with no field set.
+NO_FIELD = 'ללא תחום'
+
 # A group this full or more is "strong"; under half is "weak". Used only to
 # order and colour — every group is listed with its own figures.
 WEAK_SHARE = 0.5
@@ -266,9 +269,13 @@ def _breakdowns(lessons: list, students_in: dict, include_branch: bool) -> dict:
         children = students_in.get(str(lesson.id), set())
         capacity = resolve_lesson_capacity(lesson)
         count = len(children)
+        course_type = lesson.course.course_type if lesson.course.course_type_id else None
         group = {
             'lesson_id': str(lesson.id),
             'course_name': lesson.course.name,
+            # The field (תחום) the groups are listed under (owner, 14.10.2026).
+            'field_id': str(course_type.id) if course_type else None,
+            'field_name': course_type.name if course_type else NO_FIELD,
             'day': lesson.day_of_week,
             'day_label': DAY_LABELS.get(lesson.day_of_week, ''),
             'start_time': _hhmm(lesson.start_time),
@@ -317,9 +324,13 @@ def _breakdowns(lessons: list, students_in: dict, include_branch: bool) -> dict:
         (roll(t, {'instructor_id': t['instructor_id'], 'name': t['name']}) for t in instructors.values()),
         key=lambda row: (-row['students'], row['name']),
     )
-    # Weakest first: the emptiest share of its capacity, then the most places
-    # missing; a group with no capacity set cannot be weighed and goes last.
+    # By field (owner, 14.10.2026: "הקבוצות בדוח יהיו מסודרות לפי תחום"), and
+    # within a field the weakest first: the emptiest share of its capacity, then
+    # the most places missing; a group with no capacity set cannot be weighed
+    # and goes last in its field.
     groups.sort(key=lambda g: (
+        g['field_name'] == NO_FIELD,
+        g['field_name'],
         g['capacity'] is None,
         (g['students'] / g['capacity']) if g['capacity'] else 0,
         -(g['missing'] or 0),
@@ -402,7 +413,7 @@ def build_students_report(branches: list, date_from: date, date_to: date, *, tod
     lessons = list(
         Lesson.objects
         .filter(course__branch_id__in=branch_ids)
-        .select_related('course', 'course__branch', 'room', 'instructor')
+        .select_related('course', 'course__branch', 'course__course_type', 'room', 'instructor')
     )
     listed = [l for l in lessons if students_in_lesson.get(str(l.id)) or _on_offer(l, hi)]
 
