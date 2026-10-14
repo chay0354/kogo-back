@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
@@ -784,10 +785,18 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
 
     sections = []
     delivery = _delivery_tags()
+    # The studio's rent is billed and receipted in another system until it
+    # moves here (owner, 14.10.2026): "תוציא כי זה ממערכת אחרת עד שנחליף".
+    # Read off the calendar, it put ₪13,800 of September in the report as money
+    # that came in, with nothing in Tranzila or in Kogo behind it. Once the
+    # rentals move, apps/rental_billing issues an RT receipt for every month it
+    # charges, and the report counts that as a document; the calendar estimate
+    # comes back only if REPORT_CALENDAR_RENTALS is set.
+    rentals = _rental_rows(branch_ids, start, end) if getattr(settings, 'REPORT_CALENDAR_RENTALS', False) else []
     for source, rows in (
         (SOURCE_LESSONS, _lesson_rows(branch_ids, start, end)),
         (SOURCE_STORE, _store_rows(branch_ids, start, end, delivery)),
-        (SOURCE_RENTALS, _rental_rows(branch_ids, start, end)),
+        (SOURCE_RENTALS, rentals),
         (SOURCE_ORPHAN_CHARGES, _orphan_charge_rows(branch_ids, start, end)),
         (SOURCE_PAYMENT_LINKS, _payment_link_rows(branch_ids, start, end)),
     ):
