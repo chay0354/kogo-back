@@ -45,13 +45,15 @@ The rules, in order:
    17w. waiting_list      on the waiting list of a lesson that is full (waiting_list.py). While it
                           lasts, rules 3, 4 and "no stage" do not close the lead: somebody who
                           waits for a seat is a lead, whatever else they are
-    18. nothing_to_offer  no branch nearby, no class that fits, or the class is full
+    18. nothing_to_offer  no branch nearby, no class that fits, or the class is full — looked at
+                          every day (lead_openings.py); once a class that fits opens       office
     19. will_check        said they would check and come back                            bot
     20. link_sent         got a registration link and has not registered                 bot
     21. in_conversation   the last message (or mark) is younger than IN_CONVERSATION_FOR
     22. answered_silent   answered, quiet for SILENT_AFTER or more                       bot
         (in 21 and 22 the bot comes back, once, to two kinds of lead: one who wrote nothing
-        of their own — two hours later — and one afraid to commit who got no link — a day later)
+        of their own — two hours later — and one afraid to commit who got no link — a day later;
+        in 22 also, once, to everybody else: the trial lesson, as soon as they are "silent")
     23. cold              quiet for COLD_AFTER or more — "רדום"
 
 "bot" is where a round of follow-ups starts (lead_followups.py): how many times
@@ -61,11 +63,15 @@ the bot came back as many times as the round allows and nobody answered — a ho
 lead (a trial, a registration begun) and one who "will check" then wait for the
 office, any other goes dormant, GIVE_UP_AFTER later; a hot lead wrote (office:
 a person carries on from there); or the fact behind the round is too old to ask
-about (START_WITHIN). And there are leads the bot never comes back to by
-itself: an open complaint (office), an external branch (nobody can know from
-Kogo whether they registered), the price or the days (nothing new to say), and
-whoever asked "הסר" — not to get messages the business starts (optout.py; a hot
-lead of theirs is the office's to call, any other is nobody's move).
+about (START_WITHIN). An external branch that got a link or an answer and went
+quiet has a round of its own in place of the stage's — nobody can know from Kogo
+whether they registered, so the bot asks once, three days on, whether it worked
+out with the municipality (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md); in any
+other stage it follows the stage's round like any lead. And there are leads the bot never
+comes back to by itself: an open complaint (office), the price or the days
+(nothing new to say: the office calls), and whoever asked "הסר" — not to get
+messages the business starts (optout.py; a hot lead of theirs is the office's
+to call, any other is nobody's move).
 
 What the contracts leave open is settled here, and said in the sentence the
 screen shows:
@@ -186,8 +192,10 @@ COLD_AFTER = timedelta(days=30)
 
 # The rules as they stand. A contact whose stage an older version worked out is looked at
 # again, a batch at a time — which is how the stages and the owners of 12.10.2026 reach the
-# contacts that were already there.
-RULES_VERSION = 2
+# contacts that were already there. 3 (14.10.2026): the rounds of an external branch and of a
+# lead that went quiet, the price or the days to the office, a class that opened
+# (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md) — at once after the deploy, not at the next midnight.
+RULES_VERSION = 3
 
 # --- the bot's own follow-ups (docs/WAHUB-CONTRACT-LEADS-V2.md, ג and ח.10) ---
 DAY = timedelta(days=1)
@@ -210,6 +218,19 @@ VARIANT_AGE = 'age'
 VARIANT_NOT_READY = 'not_ready'
 VARIANT_COMMITMENT = 'commitment'
 VARIANT_SIGNUP = 'signup'
+# Two rounds of one step each, so that no lead is left with nobody coming back to it
+# (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ג): an external branch — did it work out with the
+# municipality? — three days after the conversation last moved; and whoever got an answer and went
+# quiet with no link and nothing known to hold them back — the trial lesson, as soon as the quiet
+# makes them "silent".
+VARIANT_EXTERNAL = 'external'
+VARIANT_SILENT = 'silent'
+EXTERNAL_DELAYS = (3 * DAY,)
+SILENT_DELAYS = (SILENT_AFTER,)
+# The stages in which an external branch gets its own round in place of the stage's: a link, or an
+# answer, and quiet since. Everywhere else — a day the customer named, "will check", a trial, a
+# registration begun — the stage's own round, as for any lead (the coordinator, 14.10.2026).
+EXTERNAL_ROUND_STAGES = (LEAD_LINK_SENT, LEAD_ANSWERED_SILENT)
 
 
 def delays_for(kind: str, variant: str = '') -> tuple:
@@ -218,6 +239,10 @@ def delays_for(kind: str, variant: str = '') -> tuple:
         return DATE_ARRIVED_AGE
     if kind == NUDGE_DATE_ARRIVED and variant == VARIANT_NOT_READY:
         return DATE_ARRIVED_NOT_READY
+    if kind == NUDGE_LINK_REMINDER and variant == VARIANT_EXTERNAL:
+        return EXTERNAL_DELAYS
+    if kind == NUDGE_LINK_REMINDER and variant == VARIANT_SILENT:
+        return SILENT_DELAYS
     return NUDGE_DELAYS[kind]
 
 
@@ -723,6 +748,31 @@ class _Round:
         return f'הבוט לא חזר אליו ({self.note})' if self.note else 'הבוט לא חזר אליו'
 
 
+# --- a class that opened for a lead with nothing to offer --------------------------------------
+
+def opening_found(contact: Contact) -> dict | None:
+    """
+    What the daily look found open for this lead (`lead_opened`, lead_openings.py)
+    while it still stands: found since the lead came to "nothing to offer", and
+    neither did the customer write nor did a person mark the contact after it
+    — from either of those the ordinary rules decide again. None otherwise.
+    """
+    kept = contact.lead_opened if isinstance(contact.lead_opened, dict) else {}
+    found_at = _moment(kept.get('found_at'))
+    what = str(kept.get('what') or '').strip()
+    if found_at is None or not what:
+        return None
+    began = contact.lead_stage_since if contact.lead_stage == LEAD_NOTHING_TO_OFFER else None
+    if began is None or found_at < began:
+        return None
+    wrote = contact.last_inbound_at is not None and contact.last_inbound_at > found_at
+    # A mark that was cleared is no mark (as in _Facts).
+    marked = bool(contact.followup_status) and contact.followup_at is not None and contact.followup_at > found_at
+    if wrote or marked:
+        return None
+    return {'found_at': found_at, 'what': what}
+
+
 # --- the rules --------------------------------------------------------------------
 
 def compute(contact: Contact, now=None) -> dict:
@@ -809,17 +859,29 @@ def compute(contact: Contact, now=None) -> dict:
         def plain(*more: str, owner=None, step=next_step, **extra):
             return done(stage, _sentences(*parts, *more), owner=owner, next_step=step, **{**common, **extra})
 
-        def office(*more: str):
-            return plain(*more, owner=LEAD_OWNER_OFFICE, step=office_step or next_step)
+        def office(*more: str, step=None):
+            return plain(*more, owner=LEAD_OWNER_OFFICE, step=step or office_step or next_step)
 
         # Leads the bot never comes back to by itself.
         if 'complaint' in (contact.known_flags or []):
             return office('יש תלונה פתוחה — הבוט לא חוזר אליו')
-        if said.external:
-            return plain(EXTERNAL_BRANCH, owner='')
+        if said.external and variant != VARIANT_EXTERNAL and stage in EXTERNAL_ROUND_STAGES:
+            # An external branch that got a link or an answer and went quiet: the registration is the
+            # municipality's, and Kogo cannot see whether they registered. In place of the stage's own round
+            # the bot asks once whether it worked out over there — and that round goes through the rest of
+            # these rules itself, never through this one again. In any other stage the stage's round stands:
+            # a day the customer named is kept, and a hot lead still goes to the office unanswered.
+            key = f'{NUDGE_LINK_REMINDER}|{VARIANT_EXTERNAL}|{_stamp(contact.last_inbound_at)}|{_stamp(facts.marked_at)}'
+            return by_the_bot(
+                stage, NUDGE_LINK_REMINDER, key, facts.last_activity, *parts, EXTERNAL_BRANCH, then=THEN_STAY,
+                delays=EXTERNAL_DELAYS, variant=VARIANT_EXTERNAL, since=since, next_step=next_step,
+                office_step=office_step, recheck_at=recheck_at,
+            )
         if said.blocker in lead_ai.NO_NUDGE_BLOCKERS:
+            # The price or the days: the bot has nothing new to tell them, and a person may — so it is never
+            # nobody's. A hot lead keeps the step of its stage; any other is a call about what stopped them.
             hold = f'{said.blocker_text} — הבוט לא חוזר אליו לבד'
-            return office(hold) if hot else plain(hold, owner='')
+            return office(hold) if hot else office(hold, step=f'להתקשר — {said.blocker_text}')
         if facts.opted_out:
             # Asked "הסר": nothing the bot starts by itself goes out to them. A hot lead is the office's to
             # call, as every hot lead the bot cannot come back to is; the others are nobody's move.
@@ -1062,8 +1124,15 @@ def compute(contact: Contact, now=None) -> dict:
             since=_moment(waits.get('since')),
         )
 
-    # 18. nothing the business has fits them today — kept, for the day something opens
+    # 18. nothing the business has fits them today — kept, and looked at every day (lead_openings.py): once a
+    #     class that fits them opens, the office offers it to them
     if said.blocker in lead_ai.NOTHING_TO_OFFER_BLOCKERS:
+        opened = opening_found(contact)
+        if opened is not None:
+            return done(
+                LEAD_NOTHING_TO_OFFER, _sentences(facts.opening(absolute=True), said.blocker_text, opened['what']),
+                next_step=f'{opened["what"]} — להציע לו', owner=LEAD_OWNER_OFFICE,
+            )
         return done(LEAD_NOTHING_TO_OFFER, _sentences(facts.opening(absolute=True), said.blocker_text))
 
     # 19. said they would check and come back: the bot asks once, and then it is a phone call
@@ -1110,8 +1179,20 @@ def compute(contact: Contact, now=None) -> dict:
             then=THEN_STAY, variant=VARIANT_COMMITMENT, delays=(DAY,), **common,
         )
 
+    def quiet_since(stage: str, *parts: str, **common):
+        """
+        Got an answer and went quiet, with no link and nothing known to hold them
+        back: the bot offers the trial lesson once, as soon as the quiet makes
+        them "silent". An external branch gets its own round instead (by_the_bot).
+        """
+        key = f'{NUDGE_LINK_REMINDER}|{VARIANT_SILENT}|{_stamp(contact.last_inbound_at)}|{_stamp(facts.marked_at)}'
+        return by_the_bot(
+            stage, NUDGE_LINK_REMINDER, key, facts.last_activity, *parts,
+            then=THEN_STAY, variant=VARIANT_SILENT, delays=SILENT_DELAYS, **common,
+        )
+
     said_nothing = said.empty_opening and contact.last_inbound_at is not None
-    # (An external branch is told apart in the sentences of these two stages themselves.)
+    # (An external branch is told apart in by_the_bot: in "silent" it gets the round of its own.)
     afraid_to_commit = said.blocker == lead_ai.BLOCKER_COMMITMENT and not said.external
 
     # 21. still talking
@@ -1137,14 +1218,7 @@ def compute(contact: Contact, now=None) -> dict:
             return asked_what_they_look_for(LEAD_ANSWERED_SILENT, *words, **silent)
         if afraid_to_commit:
             return hesitant(LEAD_ANSWERED_SILENT, *words, **silent)
-        return done(
-            LEAD_ANSWERED_SILENT,
-            _sentences(
-                facts.opening(), facts.who_answered(), said.blocker_text, EXTERNAL_BRANCH if said.external else '', 'לא נרשם',
-            ),
-            next_step=next_step, since=facts.last_activity, recheck_at=facts.last_activity + COLD_AFTER,
-            owner='' if said.external else None,
-        )
+        return quiet_since(LEAD_ANSWERED_SILENT, *words, **silent)
 
     # 23. dormant
     if facts.quiet >= COLD_AFTER:

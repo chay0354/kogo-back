@@ -28,6 +28,10 @@ The slice of background work one cron call does (every five minutes):
      are filed under topics for the owner to teach (apps/wahub/unknowns.py) —
      one question to Claude a day, the quick model, and only with time left;
      with no key, by their words. It changes nothing the bot knows;
+  4d. "אין כרגע מה להציע": once a day every such lead is held against the
+     classes open today, by the bot's own search (it only reads); one that a
+     class with a free seat now fits goes to the office (apps/wahub/lead_openings.py).
+     Only with time left, and never longer than its own short slice;
   5. a look at the live test: a message of a live-test contact that nobody
      answered is marked on the contact (apps/wahub/live_test.py);
   5b. the safety net of the live answers: a message of a contact the new bot
@@ -37,9 +41,13 @@ The slice of background work one cron call does (every five minutes):
      claim as every live answer, so nobody is answered twice;
   6. the holidays boards: which of their automations ManyChat has, by name —
      asked once in ten minutes and kept, because the bot's tool only reads what
-     is kept (apps/wahub/holiday_flows.py). A read of ManyChat's list; nothing is sent.
+     is kept (apps/wahub/holiday_flows.py). A read of ManyChat's list; nothing is sent;
+  6b. the follow-ups' templates: the same for the automations the bot's follow-ups to
+     leads leave through (apps/wahub/lead_templates.py) — so that the leads list, which
+     never asks ManyChat itself, shows a template within ten minutes of its being made
+     there. A read of ManyChat's list; nothing is sent.
 
-Nothing in 1b, 2a, 2b, 3, 4 or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
+Nothing in 1b, 2a, 2b, 3, 4, 4d or 5 sends a message; only 4 may change the knowledge, under the owner's standing approval (reviewer.py): the stage is
 a few fields on the contact, the shadow keeps proposals, the reviewer keeps
 proposals-to-approve, the look only marks.
 
@@ -57,7 +65,8 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from apps.wahub import (
-    analysis, holiday_flows, lead_followups, lead_stage, live_test, matching, reviewer, shadow, unknowns, waiting_list,
+    analysis, holiday_flows, lead_followups, lead_openings, lead_stage, lead_templates, live_test, matching, reviewer, shadow,
+    unknowns, waiting_list,
 )
 from apps.wahub.models import ANALYSIS_AI, CUSTOMER_OUTCOMES, SHADOW_MODEL_STUB, Contact
 
@@ -130,7 +139,7 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
         'lead_checked': 0, 'lead_changed': 0, 'lead_understood': 0,
         'followups_sent': 0, 'followups_due': 0, 'followups_skipped': 0, 'followups_failed': 0,
         'waiting_freed': 0, 'waiting_closed': 0, 'waiting_checked': 0,
-        'unknowns_sorted': 0, 'unknown_topics_opened': 0,
+        'unknowns_sorted': 0, 'unknown_topics_opened': 0, 'openings_checked': 0, 'openings_found': 0,
     }
 
     places = course_types = external_places = None
@@ -257,6 +266,16 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
     except Exception:
         logger.exception('wahub cron: what the bot did not know was not filed under topics')
 
+    # 4d. the leads with nothing to offer, once a day each: has a class that fits them opened? (lead_openings.py — a read
+    #     of the classes; a lead it fits goes to the office, and nothing is sent to anybody)
+    if left() > 0:
+        try:
+            counts.update(lead_openings.check(
+                now=timezone.now(), deadline=time.monotonic() + min(lead_openings.CHECK_SECONDS, left()),
+            ))
+        except Exception:
+            logger.exception('wahub cron: the leads with nothing to offer were not looked at')
+
     # 5. the live test: a message nobody answered is said on the contact (nothing is sent from here)
     try:
         counts['live_test_unanswered'] = live_test.flag_unanswered()
@@ -275,6 +294,14 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
             counts['holiday_flows_found'] = len(holiday_flows.found())
         except Exception:
             logger.exception('wahub cron: the holidays boards were not looked up in ManyChat')
+
+    # 6b. the follow-ups' templates: what ManyChat has under their names (a read, kept for the engine and the leads list;
+    #     asked when the last answer is ten minutes old, and only when some follow-up is still to be found by name)
+    if left() > HOLIDAY_FLOWS_FLOOR:
+        try:
+            counts['lead_templates_connected'] = len(lead_templates.connections(timezone.now()))
+        except Exception:
+            logger.exception('wahub cron: the templates of the follow-ups were not looked up in ManyChat')
 
     now = timezone.now()
     counts['pending_analysis'] = _to_analyze(now).count()

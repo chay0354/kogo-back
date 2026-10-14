@@ -134,6 +134,8 @@ _AFTER = {
     (NUDGE_LINK_REMINDER, ''): 'שקיבל קישור להרשמה ולא נרשם',
     (NUDGE_LINK_REMINDER, lead_stage.VARIANT_SIGNUP): 'שהתחיל הרשמה באתר ולא שילם',
     (NUDGE_LINK_REMINDER, lead_stage.VARIANT_COMMITMENT): 'ששאל מה קורה אם החוג לא יתאים',
+    (NUDGE_LINK_REMINDER, lead_stage.VARIANT_EXTERNAL): 'השיחה האחרונה, למי שפנה על סניף חיצוני (ההרשמה מול העירייה)',
+    (NUDGE_LINK_REMINDER, lead_stage.VARIANT_SILENT): 'שקיבל תשובה ושתק, בלי קישור ובלי סיבה ידועה',
     (NUDGE_WILL_CHECK, ''): 'שאמר שיבדוק ויחזור',
     (NUDGE_TRIAL_FEEDBACK, ''): 'שיעור ניסיון שלא הסתיים בהרשמה',
     (NUDGE_TRIAL_NO_SHOW, ''): 'שיעור ניסיון שלא הגיעו אליו',
@@ -332,6 +334,40 @@ def _blocked(row: LeadFollowUp, contact: Contact, at, mapped: set, reachable: bo
     if not sending.can_free_text(contact, at) and row.template_key not in mapped:
         return BLOCKED_TEMPLATE
     return ''
+
+
+class Gate:
+    """
+    What the leaving of a follow-up hangs on beyond its own row — the templates
+    connected, a ManyChat to send through, the follow-ups' own switch — read
+    once for a whole answer, and only once a row asks (docs/WAHUB-CONTRACT-
+    LEADS-NO-ONE-LOST.md, ב): a list of leads makes these reads once, however
+    many rows it has. The templates are the connections the engine sends
+    through (lead_templates.flow_for) as they were last found: a list the
+    screen polls never waits for ManyChat itself — the settings card and the
+    engine ask it, and keep what it said.
+    """
+
+    def __init__(self, now=None):
+        self.now = now
+        self._reads = None
+
+    def reads(self) -> tuple:
+        """(the template keys that have an automation, ManyChat reachable, the switch) — read on the first call only."""
+        if self._reads is None:
+            self._reads = (set(lead_templates.connections(self.now, ask=False)), sending.manychat_reachable(), _switch())
+        return self._reads
+
+    def hold(self, row: LeadFollowUp, contact: Contact, now) -> str:
+        """
+        Why this open follow-up will not leave when its moment comes — at
+        `now` when that moment has passed — in the screen's words; '' when it
+        will. A demo contact's is written into the demo conversation, never sent.
+        """
+        if contact.is_demo:
+            return DEMO_WORDS
+        mapped, reachable, switch = self.reads()
+        return BLOCKED_WORDS.get(_blocked(row, contact, max(row.due_at, now), mapped, reachable, switch), '')
 
 
 def _ahead(row: LeadFollowUp, now, mapped: set, labels: dict, reachable: bool, switch: dict) -> dict:

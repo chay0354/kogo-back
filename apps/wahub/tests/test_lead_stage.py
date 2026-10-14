@@ -638,7 +638,8 @@ class RefreshTests(LeadStageTestCase):
             4 * DAY, followup_status='no_answer', followup_note='לא ענתה', followup_by=self.manager,
             followup_at=self.now - 3 * DAY, known_summary='שאלה על קפוארה', kogo_detail='x', unread_count=2,
         )
-        moved = set(LEAD_FIELDS) | {'touched_at', 'updated_at'}
+        # ... and the bot's round, which lead_followups.py keeps beside them: quiet four days, the bot asks once.
+        moved = set(LEAD_FIELDS) | {'touched_at', 'updated_at', 'lead_bot'}
         before = {name: value for name, value in Contact.objects.values().get(pk=contact.pk).items() if name not in moved}
         self.assertTrue(lead_stage.refresh(contact, now=self.now))
         after = {name: value for name, value in Contact.objects.values().get(pk=contact.pk).items() if name not in moved}
@@ -1440,6 +1441,7 @@ class SchemaTests(LeadStageTestCase):
                 ('lead_link_sent_at', 'YES', None),
                 ('lead_manual', 'NO', "'{}'::jsonb"),
                 ('lead_next_step', 'NO', "''::character varying"),
+                ('lead_opened', 'NO', "'{}'::jsonb"),
                 ('lead_owner', 'NO', "''::character varying"),
                 ('lead_reason', 'NO', "''::character varying"),
                 ('lead_recheck_at', 'YES', None),
@@ -1462,7 +1464,7 @@ class SchemaTests(LeadStageTestCase):
         contact = Contact.objects.get(phone=PHONE)
         self.assertEqual((contact.lead_stage, contact.lead_reason, contact.lead_next_step), ('', '', ''))
         self.assertEqual((contact.lead_human_touched, contact.kogo_trial), (False, {}))
-        self.assertEqual((contact.lead_ai, contact.lead_bot, contact.lead_manual), ({}, {}, {}))
+        self.assertEqual((contact.lead_ai, contact.lead_bot, contact.lead_manual, contact.lead_opened), ({}, {}, {}, {}))
         self.assertEqual((contact.lead_owner, contact.lead_course_type, contact.lead_version), ('', '', 0))
         # ... and the new code picks such a contact up on its next look.
         self.assertEqual(lead_stage.scan()['lead_checked'], 1)

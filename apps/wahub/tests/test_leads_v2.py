@@ -701,8 +701,9 @@ class StageTests(LeadsCase):
                 self.assertEqual(self.got(self.lead(said={'blocker': blocker, 'blocker_text': 'כך נאמר'})), expected)
         for blocker, expected in (
             ('', ('link_sent', 'bot')), ('commitment', ('link_sent', 'bot')), ('group', ('link_sent', 'bot')),
-            # The price or the days: nothing new to tell them — the bot does not come back by itself.
-            ('price', ('link_sent', '')), ('schedule', ('link_sent', '')),
+            # The price or the days: nothing new to tell them — the bot does not come back by itself, and a person
+            # calls (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ה).
+            ('price', ('link_sent', 'office')), ('schedule', ('link_sent', 'office')),
             ('will_check', ('will_check', 'bot')), ('full', ('nothing_to_offer', '')), ('site_problem', ('signup_stuck', 'office')),
         ):
             with self.subTest(blocker=blocker, link=True):
@@ -923,13 +924,16 @@ class StageTests(LeadsCase):
         complaint = self.stage(self.lead(known_flags=['complaint'], **link))
         self.assertEqual((complaint['stage'], complaint['owner'], complaint['follow']), ('link_sent', 'office', None))
         self.assertIn('יש תלונה פתוחה', complaint['reason'])
+        # An external branch is asked once whether it worked out with the municipality, in place of the stage's own
+        # round (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ג; test_leads_no_one_lost.py).
         external = self.stage(self.lead(said={'external': True, 'branch_name': 'שוהם'}, **link))
-        self.assertEqual((external['stage'], external['owner'], external['follow']), ('link_sent', '', None))
+        self.assertEqual((external['stage'], external['owner'], external['follow']['variant']), ('link_sent', 'bot', 'external'))
         self.assertIn('סניף חיצוני — ההרשמה מול העירייה', external['reason'])
         silent = self.stage(self.lead(5 * DAY, said={'external': True}))
-        self.assertEqual((silent['stage'], silent['owner']), ('answered_silent', ''))
+        self.assertEqual((silent['stage'], silent['owner'], silent['follow']['variant']), ('answered_silent', 'bot', 'external'))
+        # The price or the days: the bot does not write, a person calls (the same contract, ה).
         price = self.stage(self.lead(said={'blocker': 'price', 'blocker_text': 'יקר לה'}, **link))
-        self.assertEqual((price['owner'], price['follow']), ('', None))
+        self.assertEqual((price['owner'], price['follow'], price['next_step']), ('office', None, 'להתקשר — יקר לה'))
         self.assertIn('יקר לה — הבוט לא חוזר אליו לבד', price['reason'])
         # A hot lead the bot will not write to is not left with nobody.
         trial = dict(kogo_outcome='trial_only', kogo_trial={'on': (TODAY - timedelta(days=1)).isoformat(), 'outcome': 'attended', 'course': ''})
@@ -996,7 +1000,7 @@ class KeepingTests(LeadsCase):
         events = ContactEvent.objects.filter(kind='lead_stage_changed').count()
         self.assertEqual(lead_stage.scan()['lead_checked'], 1)
         after = Contact.objects.get(pk=contact.pk)
-        self.assertEqual((after.lead_stage, after.lead_owner, after.lead_version), ('answered_silent', 'bot', 2))
+        self.assertEqual((after.lead_stage, after.lead_owner, after.lead_version), ('answered_silent', 'bot', lead_stage.RULES_VERSION))
         self.assertEqual(lead_stage.pending_count(), 0)
         self.assertEqual(ContactEvent.objects.filter(kind='lead_stage_changed').count(), events + 1)
 
@@ -1092,7 +1096,7 @@ class LeadsApiTests(LeadsCase):
         # Tomorrow, when the office opens.
         tomorrow = timezone.make_aware(datetime.combine(TODAY + timedelta(days=1), time(10, 30)), ZONE)
         self.assertEqual(datetime.fromisoformat(row['next'].pop('when')), tomorrow)
-        self.assertEqual(row['next'], {'who': 'bot', 'what': 'הבוט יזכיר את ההרשמה', 'state': 'planned', 'note': ''})
+        self.assertEqual(row['next'], {'who': 'bot', 'what': 'הבוט יזכיר את ההרשמה', 'state': 'planned', 'note': '', 'hold': 'השליחה כבויה'})
         self.assertEqual(datetime.fromisoformat(row['last_message_at']), self.clock() - HOUR + MINUTE)
 
     def test_the_summary_falls_back_to_the_rules_own_sentence_and_the_chips_to_the_card(self):
@@ -1100,7 +1104,7 @@ class LeadsApiTests(LeadsCase):
         row = self.rows(owner='office')['results'][0]
         self.assertEqual(row['summary'], 'שאל על קפוארה בראש העין (גיל 5) היום ב-10:00. עוד לא קיבל תשובה.')
         self.assertEqual(row['chips'], {'branch': 'ראש העין', 'course_type': 'קפוארה', 'child': 'גיל 5'})
-        self.assertEqual(row['next'], {'who': 'office', 'what': 'לענות לו', 'when': None, 'state': 'none', 'note': ''})
+        self.assertEqual(row['next'], {'who': 'office', 'what': 'לענות לו', 'when': None, 'state': 'none', 'note': '', 'hold': ''})
 
     def test_what_happens_next_in_every_kind_of_row(self):
         def next_of(contact):
@@ -1109,25 +1113,27 @@ class LeadsApiTests(LeadsCase):
         # No step for anybody right now — and the row says why, in words.
         booked = self.placed(HOUR, kogo_outcome='trial_upcoming', kogo_trial={'on': '2026-10-13', 'outcome': '', 'course': ''})
         self.assertEqual(next_of(booked), {
-            'who': 'none', 'what': 'מחכים לשיעור הניסיון ביום שלישי, 13.10', 'when': None, 'state': 'none', 'note': '',
+            'who': 'none', 'what': 'מחכים לשיעור הניסיון ביום שלישי, 13.10', 'when': None, 'state': 'none', 'note': '', 'hold': '',
         })
         self.assertEqual(next_of(self.placed(HOUR, kogo_outcome='trial_upcoming'))['what'], 'מחכים לשיעור הניסיון')
-        kept = self.placed(HOUR, said={'blocker': 'full', 'blocker_text': 'הקבוצה מלאה'})
-        self.assertEqual((next_of(kept)['who'], next_of(kept)['what']), ('none', 'נשמר: נודיע כשנפתח'))
+        # Nothing to offer: looked at every day (the lead's field, age and place are known — capoeira, 5, Rosh HaAyin).
+        kept = self.placed(HOUR, known_child_age='5', said={'blocker': 'full', 'blocker_text': 'הקבוצה מלאה'})
+        self.assertEqual((next_of(kept)['who'], next_of(kept)['what']), ('none', 'נבדק כל יום — כשייפתח חוג שמתאים, יעבור אליך'))
         self.assertEqual(next_of(self.placed(HOUR))['what'], 'בשיחה עכשיו')
-        outside = self.placed(5 * DAY, said={'external': True})
+        # An external branch whose one round could not begin (it went quiet too long ago): it says why.
+        outside = self.placed(20 * DAY, said={'external': True})
         self.assertEqual((next_of(outside)['who'], next_of(outside)['what']), ('none', 'סניף חיצוני — ההרשמה מול העירייה'))
         price = self.placed(HOUR, lead_link_sent_at=self.clock() - HOUR, said={'blocker': 'price', 'blocker_text': 'יקר לה'})
-        self.assertEqual(next_of(price)['what'], 'הבוט לא חוזר לבד: המחיר עצר אותו')
-        silent = self.placed(5 * DAY)                                      # the bot's by the table, with nothing to send
+        self.assertEqual((next_of(price)['who'], next_of(price)['what']), ('office', 'להתקשר — יקר לה'))
+        silent = self.placed(20 * DAY)                                     # the bot's by the table, too long ago to ask
         self.assertEqual((next_of(silent)['who'], next_of(silent)['what']), ('none', 'אין חזרה מתוכננת'))
         put_off = self.placed(HOUR, followup_status='later', followup_due=TODAY + timedelta(days=4), followup_at=self.clock())
         self.assertEqual(next_of(put_off), {
-            'who': 'office', 'what': 'לחזור אליו', 'state': 'planned', 'note': '',
+            'who': 'office', 'what': 'לחזור אליו', 'state': 'planned', 'note': '', 'hold': '',
             'when': timezone.make_aware(datetime.combine(TODAY + timedelta(days=4), time(12)), ZONE).isoformat(),
         })
         closed = self.placed(HOUR, kogo_outcome='registered_after')
-        self.assertEqual(next_of(closed), {'who': 'none', 'what': '', 'when': None, 'state': 'none', 'note': ''})
+        self.assertEqual(next_of(closed), {'who': 'none', 'what': '', 'when': None, 'state': 'none', 'note': '', 'hold': ''})
         # A follow-up whose moment came and that did not leave: "the bot would have sent this now".
         link = self.placed(HOUR, lead_link_sent_at=self.clock() - HOUR)
         LeadFollowUp.objects.filter(contact=link).update(status='due', outcome_note='השליחה ללקוחות כבויה')
@@ -1179,7 +1185,9 @@ class LeadsApiTests(LeadsCase):
         for index in range(6):
             self.placed(HOUR, lead_link_sent_at=self.clock() - HOUR)
         office_clock.calendar()             # the office's hours: read once a minute, whoever asks (test_overdue holds that)
-        with self.assertNumQueries(6):      # the user, the profile; the counts, the stages, the page, its open follow-ups
+        # the user, the profile; the counts, the stages, the page, its open follow-ups; and, once for the page, whether the
+        # bot's follow-ups will really leave — the templates a person connected, those found by name, the follow-ups' switch
+        with self.assertNumQueries(9):
             self.rows(owner='bot')
 
     def test_one_lead_in_full(self):
@@ -1316,7 +1324,9 @@ class LeadsApiTests(LeadsCase):
         contact = self.placed(HOUR, lead_link_sent_at=self.clock() - HOUR)
         taken = self.post(f'leads/{contact.id}/owner/', {'owner': 'office'})
         self.assertEqual((taken.data['stage'], taken.data['owner']), ('link_sent', 'office'))
-        self.assertEqual(taken.data['next'], {'who': 'office', 'what': 'להתקשר ולעזור להשלים את ההרשמה', 'when': None, 'state': 'none', 'note': ''})
+        self.assertEqual(taken.data['next'], {
+            'who': 'office', 'what': 'להתקשר ולעזור להשלים את ההרשמה', 'when': None, 'state': 'none', 'note': '', 'hold': '',
+        })
         self.assertEqual(taken.data['details']['taken']['by_name'], 'דנה מנהלת')
         self.assertEqual(LeadFollowUp.objects.get(contact=contact).outcome_note, 'עבר לטיפול המשרד')
         self.assertEqual(self.rows(owner='office')['counts'], {'office': 1, 'bot': 0, 'closed': 0, 'waiting': 0, 'waiting_act': 0})

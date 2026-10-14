@@ -316,6 +316,12 @@ def values_for(contact: Contact) -> dict:
     }
 
 
+def variant_of(row: LeadFollowUp) -> str:
+    """The variant of the round a follow-up belongs to, out of its template key ("link_reminder_external_1" → "external")."""
+    rest = row.template_key[len(row.kind) + 1:] if row.template_key.startswith(f'{row.kind}_') else ''
+    return rest.rsplit('_', 1)[0] if '_' in rest else ''
+
+
 def words_now(row: LeadFollowUp, contact: Contact) -> str:
     """
     The row's words as its phrasing stands this minute: the owner — or a
@@ -324,9 +330,7 @@ def words_now(row: LeadFollowUp, contact: Contact) -> str:
     known about the lead; no model is asked. When the phrasing has no live
     words any more, what was planned stands.
     """
-    rest = row.template_key[len(row.kind) + 1:] if row.template_key.startswith(f'{row.kind}_') else ''
-    variant = rest.rsplit('_', 1)[0] if '_' in rest else ''
-    body, _template_key = phrasing(row.kind, row.step, variant)
+    body, _template_key = phrasing(row.kind, row.step, variant_of(row))
     return (render(body, values_for(contact)) if body else '') or row.text
 
 

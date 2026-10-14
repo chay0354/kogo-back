@@ -236,7 +236,8 @@ class RoundTests(EngineCase):
         self.assertEqual(Message.objects.count(), 0)
 
     def test_a_stage_with_nothing_for_the_bot_to_say_plans_nothing(self):
-        for fields in (dict(wrote=5 * DAY), dict(wrote=HOUR), dict(kogo_outcome='trial_upcoming'), dict(kogo_outcome='registered_after')):
+        # (Quiet five days is asked once now — test_leads_no_one_lost.py; quiet twenty days is too long ago to ask.)
+        for fields in (dict(wrote=20 * DAY), dict(wrote=HOUR), dict(kogo_outcome='trial_upcoming'), dict(kogo_outcome='registered_after')):
             contact = self.staged(self.lead(**fields))
             self.assertEqual(self.rows(contact), [])
             self.assertEqual(contact.lead_bot, {})
@@ -620,7 +621,9 @@ class SendingTests(EngineCase):
             lead_followups.run()
             lead_followups.run()
             cron.tick()
-        self.assertEqual(request.call_count, 1)
+        # One send. (The cron's read of ManyChat's list of automations — the follow-ups' templates, step 6b — sends nothing.)
+        sends = [call for call in request.call_args_list if call.args[:2] != ('GET', '/fb/page/getFlows')]
+        self.assertEqual(len(sends), 1)
         self.assertEqual(Message.objects.filter(contact=contact).count(), 1)
 
     @override_settings(**SENDING_ON)

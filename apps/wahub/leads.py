@@ -5,7 +5,8 @@ to a lead — close it, open it again, put it off to a day, take it or hand it
 back to the bot.
 
 Everything a row shows is already on the contact (lead_stage.py keeps it); the
-one extra read is the bot's open follow-up, for "what happens next and when".
+one extra read is the bot's open follow-up, for "what happens next and when" —
+and, once for a whole list, whether it will really leave (lead_automation.Gate).
 What a person decides here is kept in `lead_manual` — and a put-off is the
 office's own "בזמן אחר" mark with its day, so the two screens agree — and is a
 line in the contact's journal with who and when. Nothing here sends anything.
@@ -22,7 +23,8 @@ from django.db.models.functions import Cast
 from django.utils import timezone
 
 from apps.wahub import (
-    lead_ai, lead_followups, lead_stage, office_clock, optout, queries, search, serializers, state, waiting_list, waiting_summary,
+    lead_ai, lead_followups, lead_openings, lead_stage, office_clock, optout, queries, search, serializers, state, waiting_list,
+    waiting_summary,
 )
 from apps.wahub.models import (
     EVENT_CLOSED,
@@ -114,6 +116,12 @@ NEXT_BY_KIND = {
     NUDGE_OPENING: 'הבוט ישאל מה הם מחפשים',
     NUDGE_DORMANT: 'הבוט יודיע שנפתחה הרשמה',
 }
+# ... and where a round of one kind asks something else than the kind's own (`variant`, read from the
+# follow-up's template key — lead_followups.variant_of).
+NEXT_BY_VARIANT = {
+    lead_stage.VARIANT_EXTERNAL: 'הבוט יבדוק אם הסתדרו מול העירייה',
+    lead_stage.VARIANT_SILENT: 'הבוט יציע שיעור ניסיון',
+}
 # ... and where a later step of a round says something else than its first.
 NEXT_BY_STEP = {
     (NUDGE_TRIAL_FEEDBACK, 2): 'הבוט ישלח את הקישור להרשמה',
@@ -122,7 +130,9 @@ NEXT_BY_STEP = {
 }
 NOTHING_PLANNED = 'אין חזרה מתוכננת'
 WAITING_FOR_AN_ANSWER = 'הבוט חזר אליו — מחכים לתשובה'
-KEPT_FOR_LATER = 'נשמר: נודיע כשנפתח'
+# A lead with nothing to offer is looked at every day (lead_openings.py) — when its field, age and place are known.
+KEPT_FOR_LATER = 'נבדק כל יום — כשייפתח חוג שמתאים, יעבור אליך'
+NOTHING_TO_LOOK_FOR = 'אין כרגע מה להציע — חסר תחום, גיל או מקום כדי לבדוק כל יום'
 ON_A_WAITING_LIST = 'ברשימת המתנה — נתריע כשיתפנה מקום'
 TALKING_NOW = 'בשיחה עכשיו'
 WEEKDAYS = ('שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת', 'ראשון')        # Python's weekday(): Monday is 0
@@ -289,9 +299,13 @@ def listed(params) -> dict:
     follows = open_followups(contact.pk for contact in page)
     queues_ = waiting_queues(page)
     why = found.found_by(page) if found else None
+    # Whether the bot's follow-ups will really leave: the switches and the templates, read once for the page.
+    from apps.wahub import lead_automation
+
+    gate = lead_automation.Gate(now)
     results = []
     for contact in page:
-        row = row_payload(contact, now=now, follow=follows.get(contact.pk), queue=queues_, clock=clock)
+        row = row_payload(contact, now=now, follow=follows.get(contact.pk), queue=queues_, clock=clock, gate=gate)
         if why is not None:
             row['found_by'] = why.get(contact.pk)
         results.append(row)
@@ -369,24 +383,38 @@ def chips(contact: Contact) -> dict:
     return result
 
 
-def next_move(contact: Contact, follow: LeadFollowUp | None) -> dict:
+def next_move(contact: Contact, follow: LeadFollowUp | None, *, gate=None, now=None) -> dict:
     """
     "הצעד הבא": who, what, when — and whether the bot's step is planned or was
     due and did not leave (`state`: planned / due / none; `note` says why).
+    `hold` says whether the bot's step will really leave when its moment comes:
+    '' when it will, else what stops it — the follow-ups switched off, sending
+    off, no template (lead_automation.Gate) — so that a planned step is never
+    shown as one that is about to go out when it is not. Always there; '' for
+    every step that is not the bot's. `gate` is the one read of the switches
+    and the templates for a whole list; without one it is read here.
     """
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
-    nothing = {'who': 'none', 'what': '', 'when': None, 'state': 'none', 'note': ''}
+    nothing = {'who': 'none', 'what': '', 'when': None, 'state': 'none', 'note': '', 'hold': ''}
     if not stage or LEAD_STAGE_GROUPS.get(stage) == LEAD_GROUP_CLOSED:
         return nothing
     if contact.lead_owner == LEAD_OWNER_OFFICE:
         return {**nothing, 'who': 'office', 'what': contact.lead_next_step}
     if follow is not None:
+        if gate is None:
+            from apps.wahub import lead_automation
+
+            gate = lead_automation.Gate(now)
         return {
             'who': 'bot',
-            'what': NEXT_BY_STEP.get((follow.kind, follow.step)) or NEXT_BY_KIND.get(follow.kind, ''),
+            'what': (
+                NEXT_BY_STEP.get((follow.kind, follow.step)) or NEXT_BY_VARIANT.get(lead_followups.variant_of(follow))
+                or NEXT_BY_KIND.get(follow.kind, '')
+            ),
             'when': _iso(follow.due_at),
             'state': 'due' if follow.status == NUDGE_DUE else 'planned',
             'note': follow.outcome_note if follow.status == NUDGE_DUE else '',
+            'hold': gate.hold(follow, contact, now or timezone.now()),
         }
     if stage == LEAD_WAITING_DATE and contact.followup_status == FOLLOWUP_LATER and contact.followup_due:
         # A day the office set: when it comes, the lead is theirs again.
@@ -400,8 +428,14 @@ def no_step_because(contact: Contact, stage: str) -> str:
     if optout.is_marked(contact):
         # Asked "הסר": whatever the stage, the bot starts nothing with them.
         return optout.HOLD
+    round_ = contact.lead_bot if isinstance(contact.lead_bot, dict) else {}
+    came_back = contact.lead_owner == LEAD_OWNER_BOT and round_.get('done') and round_.get('attempts')
     if said.get('external'):
-        return lead_stage.EXTERNAL_BRANCH
+        # Once the bot has asked whether it worked out with the municipality, and nobody answered it, the lead
+        # waits for that answer.
+        last_at = lead_stage._moment(round_.get('last_at'))
+        unanswered = last_at is not None and (contact.last_inbound_at is None or last_at > contact.last_inbound_at)
+        return WAITING_FOR_AN_ANSWER if came_back and unanswered else lead_stage.EXTERNAL_BRANCH
     if stage == LEAD_TRIAL_BOOKED:
         try:
             on = date.fromisoformat(str((contact.kogo_trial or {}).get('on') or ''))
@@ -411,19 +445,18 @@ def no_step_because(contact: Contact, stage: str) -> str:
     if stage == LEAD_WAITING_LIST:
         return ON_A_WAITING_LIST
     if stage == LEAD_NOTHING_TO_OFFER:
-        return KEPT_FOR_LATER
+        return KEPT_FOR_LATER if lead_openings.search_terms(contact) is not None else NOTHING_TO_LOOK_FOR
     if stage == LEAD_IN_CONVERSATION:
         return TALKING_NOW
     if said.get('blocker') in lead_ai.NO_NUDGE_BLOCKERS:
         return f'הבוט לא חוזר לבד: {lead_ai.BLOCKER_LABELS[said["blocker"]]}'
-    round_ = contact.lead_bot if isinstance(contact.lead_bot, dict) else {}
-    if contact.lead_owner == LEAD_OWNER_BOT and round_.get('done') and round_.get('attempts'):
+    if came_back:
         return WAITING_FOR_AN_ANSWER
     return NOTHING_PLANNED
 
 
 def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = None, queue: dict | None = None,
-                clock=None) -> dict:
+                clock=None, gate=None) -> dict:
     now = now or timezone.now()
     today = timezone.localtime(now).date()
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
@@ -455,7 +488,7 @@ def row_payload(contact: Contact, *, now=None, follow: LeadFollowUp | None = Non
         'summary': contact.lead_reason if seat_free else ((said.get('summary') or '').strip() or contact.lead_reason),
         'chips': chips(contact),
         'since': _iso(contact.lead_stage_since),
-        'next': next_move(contact, follow),
+        'next': next_move(contact, follow, gate=gate, now=now),
         'last_message_at': _iso(contact.last_message_at),
         # The lesson the lead waits for a seat in, and the future lead a person set — the very blocks the
         # conversations carry (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1); null when there is none.
