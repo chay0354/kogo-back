@@ -42,6 +42,7 @@ from apps.core.payment_service import (
     subscription_tranzila_items,
 )
 from apps.core.tranzila_service import TranzilaService, extract_card_token, is_tranzila_uncertain_gateway_error
+from apps.customers.discount_service import ApplicableDiscount, DiscountCalculation
 from apps.customers.models import Payment, PaymentDiscountSnapshot, RecurringPayment, TranzilaTransaction
 from apps.customers.widget_views import _ensure_recurring_payment_for_widget_charge
 from apps.payment_links.models import CardLink, money, new_card_link_token
@@ -173,6 +174,41 @@ def unit_label(*, lesson, bundle) -> str:
 # Quote — what the parent will be charged, computed like a widget signup
 # ---------------------------------------------------------------------------
 
+SPECIAL_PRICE_NAME = 'מחיר מיוחד'
+
+
+def special_price_calculation(catalogue_price, special) -> DiscountCalculation:
+    """
+    The month at a price the office set for this one child.
+
+    That figure is the whole of it: no sibling, early-signup or another-class
+    discount comes off it. Below the catalogue price it is written the way a
+    fixed final price is (base, and the difference as one discount line), so
+    the standing order records it among the signup discounts — a later lesson
+    move keeps it, and the price-drift report does not call it a mistake.
+    """
+    special = money(special)
+    catalogue = money(catalogue_price or 0)
+    if special >= catalogue:
+        return DiscountCalculation(
+            applicable_discounts=[], total_discount_amount=Decimal('0.00'),
+            final_price=special, base_price=special,
+        )
+    off = catalogue - special
+    return DiscountCalculation(
+        applicable_discounts=[ApplicableDiscount(
+            discount_id='',
+            name=SPECIAL_PRICE_NAME,
+            discount_type='fixed_final_price',
+            value=off,
+            reason=f'{SPECIAL_PRICE_NAME}: ₪{special} (במקום ₪{catalogue})',
+        )],
+        total_discount_amount=off,
+        final_price=special,
+        base_price=catalogue,
+    )
+
+
 def quote_standing_order(link: CardLink, today: date | None = None) -> dict:
     """
     Pure: mirrors the pricing block of PaymentService.charge_subscription_with_card
@@ -194,15 +230,18 @@ def quote_standing_order(link: CardLink, today: date | None = None) -> dict:
         )
     except ValueError as exc:
         raise CardLinkError(str(exc)) from exc
-    if not base_price:
-        raise CardLinkError('לשיעור אין מחיר מוגדר')
-    discount = PaymentService().discount_service.evaluate_discounts_for_payment(
-        family_id=str(child.family_id),
-        child_id=str(child.id),
-        payment_date=today,
-        base_price=base_price,
-        lesson_id=None if used_lesson_tier else str(lesson.id),
-    )
+    if link.special_monthly_price is not None and bundle is None:
+        discount = special_price_calculation(base_price, link.special_monthly_price)
+    else:
+        if not base_price:
+            raise CardLinkError('לשיעור אין מחיר מוגדר')
+        discount = PaymentService().discount_service.evaluate_discounts_for_payment(
+            family_id=str(child.family_id),
+            child_id=str(child.id),
+            payment_date=today,
+            base_price=base_price,
+            lesson_id=None if used_lesson_tier else str(lesson.id),
+        )
     monthly = money(discount.final_price)
     factor, _, _, _ = _compute_prorate(today, lesson.day_of_week)
     charge_fee = resolve_include_registration_fee(child, lesson, link.include_registration_fee)

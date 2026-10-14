@@ -65,6 +65,9 @@ def _serialize(link: CardLink, request=None) -> dict:
         'bundle_id': str(link.bundle_id) if link.bundle_id else None,
         'lesson_label': unit_label(lesson=lesson, bundle=link.bundle) if lesson else '',
         'include_registration_fee': link.include_registration_fee,
+        'special_monthly_price': (
+            str(money(link.special_monthly_price)) if link.special_monthly_price is not None else None
+        ),
         'amount': str(money(link.amount)) if link.amount is not None else None,
         'description': link.description,
         'branch_id': str(link.branch_id) if link.branch_id else None,
@@ -85,6 +88,9 @@ def _serialize(link: CardLink, request=None) -> dict:
         'created_at': link.created_at.isoformat(),
     }
 
+
+# A monthly figure, so a typo with an extra zero is refused rather than billed.
+MAX_SPECIAL_MONTHLY_PRICE = Decimal('5000')
 
 KIND_CARD_UPDATE = 'card_update'
 KIND_LABELS = {
@@ -352,6 +358,18 @@ class CardLinkListCreateView(APIView):
             covered = lessons_covered_by_selection(lesson=lesson, bundle=bundle)
             if child_has_standing_order_for_lessons(child, covered):
                 return Response({'error': 'לילד כבר יש הוראת קבע פעילה לשיעור הזה'}, status=status.HTTP_400_BAD_REQUEST)
+            raw_special = data.get('special_monthly_price')
+            if raw_special not in (None, ''):
+                # One child's own price on one lesson; a track is sold at its combined price.
+                if bundle is not None:
+                    return Response({'error': 'מחיר מיוחד אפשר לקבוע רק לשיעור יחיד'}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    special = money(Decimal(str(raw_special)))
+                except (InvalidOperation, ValueError):
+                    return Response({'error': 'מחיר מיוחד לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+                if special < Decimal('1.00') or special > MAX_SPECIAL_MONTHLY_PRICE:
+                    return Response({'error': 'מחיר מיוחד לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
+                link.special_monthly_price = special
             link.lesson = lesson
             link.bundle = bundle
             link.include_registration_fee = bool(data.get('include_registration_fee', True))
