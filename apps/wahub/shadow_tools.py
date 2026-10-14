@@ -66,6 +66,17 @@ NEED_LABELS = {
     NEED_CITY: 'עיר או סניף', NEED_BRANCH: 'סניף', NEED_FIELD: 'תחום', NEED_AGE: 'גיל או כיתה', NEED_GRADE: 'כיתה או גן',
 }
 ASK_FIRST = 'קודם שואלים את הלקוח את השאלה שב-ask, ורק אותה. לא מציעים חוג, יום, שעה או מחיר לפני שהיא נענתה.'
+# Every branch of ours is looked at when the field and the age are known and no place is (the owner, 14.10.2026:
+# "לסרוק את כל השיעורים במערכת ולבדוק איפה יש"), and when the place asked about has nothing that fits.
+MAX_SCAN_BRANCHES = 4
+SCAN_NOWHERE = 'נסרקו כל הסניפים שלנו: באף אחד מהם אין כרגע חוג בתחום ולגיל שנמסרו. אומרים את זה בפשטות; לא שואלים באיזו עיר.'
+SCAN_FEW = 'נסרקו כל הסניפים שלנו: רק בסניפים שב-branches יש חוג שמתאים. אומרים ללקוח איפה יש (סניף ועיר), ושואלים מה נוח לו.'
+SCAN_MANY = 'נסרקו כל הסניפים שלנו: יש חוג שמתאים בכמה ערים (cities). שואלים באיזו עיר נוח; אפשר לומר שיש בכמה ערים.'
+SCAN_ONE = 'נסרקו כל הסניפים שלנו: רק בסניף הזה יש חוג שמתאים — אומרים איפה הוא (סניף ועיר).'
+ELSEWHERE = (
+    'במקום שנשאל אין, אבל בסניפים שב-elsewhere יש חוג בתחום ולגיל שנמסרו: אומרים שכאן אין ושם יש (סניף ועיר), '
+    'ושואלים אם זה מתאים. פרטים של חוג משם (ימים, שעות, מחיר) — רק אחרי find_courses על הסניף הזה.'
+)
 
 TOOLS = [
     {
@@ -75,7 +86,11 @@ TOOLS = [
             'כמות רשומים, מקומות פנויים והתאריכים שאפשר להירשם בהם עכשיו לשיעור ניסיון. מסננים לפי עיר, סניף, גיל הילד בשנים או כיתה, ותחום. '
             'הכלי שומר על סדר השיחה — עיר או סניף, אחר כך תחום, אחר כך גיל או כיתה — ומפרט חוגים רק כשכל אלה ידועים. '
             'כשחסר פרט הוא מחזיר need ו-ask ואת מה שיש לבחור ממנו (cities, branches, course_types, between), בלי חוגים: '
-            '(בלי עיר ובלי סניף חוזרת רשימת הערים שיש לנו בהן סניף — cities.) '
+            '(בלי עיר ובלי סניף חוזרת רשימת הערים שיש לנו בהן סניף — cities. אבל כשהתחום והגיל ידועים, הכלי סורק את כל הסניפים שלנו '
+            '(scanned_all): חוזר החוג מהסניף היחיד שיש בו, או need=branch עם הסניפים שיש בהם, או need=city עם הערים שיש בהן, '
+            'ובאף סניף — אומרים שאין, בלי לשאול עיר. לכן כשהלקוח לא אמר מקום ושאל על תחום וגיל — קוראים עם תחום וגיל בלי עיר.) '
+            '(כשבמקום שנשאל אין, elsewhere אומר באילו סניפים אחרים יש — אומרים את זה ללקוח.) '
+            '(חוג שפתוח לגיל הזה רק דרך מסלול — join_note: אומרים את המסלול, שמו, ימיו ומחירו.) '
             'שואלים את הלקוח את השאלה הזאת בלבד, ולא מציעים חוג, יום, שעה או מחיר. בכל קריאה מעבירים את כל מה שהלקוח כבר אמר. '
             'show_all=true רק כשהלקוח ביקש במפורש לראות את כל מה שיש ("פשוט תגידו מה יש") — לא כדי לדלג על שאלה. '
             'חוגים חוזרים רק לגיל ולתחום שנמסרו, ורק עליהם עונים: לא מזכירים קבוצות גיל אחרות או תחומים אחרים. '
@@ -494,6 +509,49 @@ def _branch_brief(branch) -> dict:
     }
 
 
+def _our_branches() -> list:
+    """Every active branch of ours (not one run by a municipality), as `resolve_branches` returns branches."""
+    from apps.core.models import Branch
+
+    return list(Branch.objects.filter(is_active=True, is_external=False).select_related('city').order_by('name'))
+
+
+def _elsewhere(ctx: ToolContext, *, skip: set, codes: set, course_type: str) -> list:
+    """
+    The other branches of ours that hold a class of this field open to a child of this
+    age, the way the form shows it: [{branch, city, classes}], by city, at most
+    MAX_SCAN_BRANCHES + 2. What they hold is named, never spelled out: details come
+    from a search of that branch.
+    """
+    from django.db.models import Q
+
+    from apps.customers.widget_views import _widget_catalog_courses
+
+    others = [row for row in _our_branches() if row.id not in skip]
+    if not others:
+        return []
+    found = {}
+    rows = course_tools.with_lessons(
+        _widget_catalog_courses()
+        .filter(branch_id__in=[row.id for row in others])
+        .filter(Q(course_type__is_active=True) | Q(course_type__isnull=True))
+    ).order_by('branch__name', 'name')
+    for course in rows:
+        if not trial_offer.selections(course) or not _course_type_matches(course, course_type, ctx):
+            continue
+        offer = course_tools.age_offer(course, codes)
+        if offer is None:
+            continue
+        names = found.setdefault(course.branch_id, (course.branch, []))[1]
+        tracks = [row.name for row in course.lesson_bundles.all() if str(row.id) in offer['tracks'] and row.name]
+        names.append(f'{course.name} — {tracks[0]}' if tracks and not offer['days'] else course.name)
+    listed = sorted(found.values(), key=lambda pair: ((pair[0].city.name if pair[0].city_id else ''), pair[0].name))
+    return [
+        {'branch': branch.name, 'city': branch.city.name if branch.city_id else '', 'classes': list(dict.fromkeys(names))[:4]}
+        for branch, names in listed[:MAX_SCAN_BRANCHES + 2]
+    ]
+
+
 def _ask(need: str, branches: list, *, hint: str = '', ask: str = '', **choice) -> dict:
     """The answer of `find_courses` while something is still missing: the question, what to choose from, no class."""
     return {
@@ -522,14 +580,6 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
     from apps.customers.widget_views import _widget_catalog_courses
 
     registration_fee = getattr(settings, 'REGISTRATION_FEE_ILS', None)
-    branches = resolve_branches(ctx, city=city, branch=branch)
-    if not branches:
-        cities = _cities()
-        if not (city or branch):
-            return {**_ask(NEED_CITY, [], cities=cities), 'registration_fee': registration_fee}
-        hint = f'אין לנו סניף ב{city}.' if city and not branch else 'לא נמצא סניף כזה במערכת.'
-        return {'branches': [], 'need': '', 'courses': [], 'hint': hint, 'cities': cities, 'registration_fee': registration_fee}
-
     try:
         age_value = float(age) if age not in (None, '') else None
     except (TypeError, ValueError):
@@ -538,6 +588,17 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
     grade_codes = age_groups.codes_for_grade(grade)
     age_codes = grade_codes or (age_groups.codes_for_age(age_value) if age_value is not None else set())
     by_age = bool(grade_codes) or age_value is not None
+
+    branches = resolve_branches(ctx, city=city, branch=branch)
+    scanned = False
+    if not branches and not (city or branch) and course_type.strip() and age_codes and not show_all:
+        branches, scanned = _our_branches(), True
+    if not branches:
+        cities = _cities()
+        if not (city or branch):
+            return {**_ask(NEED_CITY, [], cities=cities), 'registration_fee': registration_fee}
+        hint = f'אין לנו סניף ב{city}.' if city and not branch else 'לא נמצא סניף כזה במערכת.'
+        return {'branches': [], 'need': '', 'courses': [], 'hint': hint, 'cities': cities, 'registration_fee': registration_fee}
 
     internal = [row for row in branches if not row.is_external]
     everything = list(
@@ -549,10 +610,24 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
     ) if internal else []
     # A class with nothing to choose on the form — no lesson, or every day required and no track — is not on the form.
     everything = [course for course in everything if trial_offer.selections(course)]
-    for_age = [course for course in everything if age_groups.fits(course.min_age, course.max_age, age_codes)] if by_age else everything
+    # Open to the child the way the form opens it: the class's own days, or a track or a price of a day of his age.
+    for_age = [course for course in everything if age_codes and course_tools.age_offer(course, age_codes)] if by_age else everything
     courses = [course for course in for_age if _course_type_matches(course, course_type, ctx)]
 
     hints = []
+    if scanned:
+        holding = [row for row in internal if any(course.branch_id == row.id for course in courses)]
+        if not holding:
+            return {'branches': [], 'need': '', 'courses': [], 'more_courses': [], 'scanned_all': True, 'cities': _cities(),
+                    'hint': SCAN_NOWHERE, 'registration_fee': registration_fee}
+        if len(holding) > MAX_SCAN_BRANCHES:
+            cities = sorted({row.city.name for row in holding if row.city_id and row.city.name})
+            return {**_ask(NEED_CITY, [], cities=cities, hint=SCAN_MANY), 'scanned_all': True, 'registration_fee': registration_fee}
+        if len(holding) > 1:
+            rows = [{**_branch_brief(row), 'course_types': _fields(course for course in courses if course.branch_id == row.id)} for row in holding]
+            return {**_ask(NEED_BRANCH, rows, hint=SCAN_FEW), 'scanned_all': True}
+        branches = internal = holding
+        hints.append(SCAN_ONE)
     if courses and not show_all:
         # Where: several branches of ours still hold a class that fits — the customer chooses one.
         holding = {course.branch_id for course in courses}
@@ -584,7 +659,7 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
 
     shown, rest = courses[:MAX_COURSES], courses[MAX_COURSES:]
     seats = course_tools.Seats(shown, now=ctx.now)
-    result_courses = [course_tools.course_payload(course, seats) for course in shown]
+    result_courses = [course_tools.course_payload(course, seats, codes=age_codes if by_age else None) for course in shown]
 
     result = {
         'branches': [_branch_payload(row, ctx) for row in branches],
@@ -597,12 +672,20 @@ def find_courses(ctx: ToolContext, *, city: str = '', branch: str = '', age=None
         # The general fee; each class carries the fee it will actually charge (courses[].registration_fee).
         'registration_fee': registration_fee,
     }
+    if scanned:
+        result['scanned_all'] = True
     if result_courses:
         result['trial_dates_rule'] = course_tools.TRIAL_DATES_RULE
     if internal and not result_courses:
         hints.append('בסניפים האלה אין חוג שמתאים לסינון (גיל/תחום). אפשר להציע תחום אחר מאותו סניף, או להפנות למשרד.')
         # What the branch does have for this child, so that another field is offered from the system and not from memory.
         result['course_types'] = _fields(for_age)
+        # And where else this very field is held for this very age: the customer is not asked for another city blindly.
+        if course_type.strip() and age_codes and not show_all:
+            others = _elsewhere(ctx, skip={row.id for row in internal}, codes=age_codes, course_type=course_type)
+            if others:
+                result['elsewhere'] = others
+                hints.append(ELSEWHERE)
     if by_age and not age_codes:
         hints.append('אין קבוצת גיל לגיל הזה: החוגים מגיל 3.')
     if grade_codes and age_value is not None and not (age_groups.codes_for_age(age_value) & grade_codes):
