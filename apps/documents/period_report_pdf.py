@@ -51,11 +51,25 @@ from apps.store.invoice_pdf import (
     BRAND_PURPLE,
     PANEL_BG,
     _ensure_fonts_registered,
-    _money,
     _rtl,
 )
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
+# The smallest a cell may shrink to so that a long number stays on one line.
+MIN_FONT_SIZE = 6.0
+
+
+def _money(amount) -> str:
+    """
+    ₪41,353.00 — thousands separated, and the minus before the shekel sign.
+
+    The store's invoice format (invoice_pdf._money) prints ₪41353.00 and, for a
+    negative subtotal, ₪-72.03 beside a row that reads -₪72.03. A forty-page
+    report is read by its totals, so they get the separators an accountant's
+    eye expects and one way of writing a minus.
+    """
+    value = Decimal(str(amount))
+    return f'{"-" if value < 0 else ""}₪{abs(value):,.2f}'
 
 # A 20-page table cannot afford the 5.2cm letterhead the single-page invoices
 # use, so the report keeps the logo and the brand palette but reclaims the rest
@@ -75,15 +89,16 @@ GROUP_BY_TITLES = {
     GROUP_BY_CATEGORY: 'לפי קטגוריה',
 }
 
-# Column widths sum to the printable width (A4 minus both margins).
+# Column widths sum to the printable width (A4 minus both margins): 18cm.
+# They summed to 19 until 14.10.2026, and every table ran 1cm into the left margin.
 COL_WIDTHS = [
-    5.9 * cm,   # customer
-    2.3 * cm,   # document number
-    2.5 * cm,   # document type
-    2.0 * cm,   # date
-    2.1 * cm,   # net (before VAT)
-    1.9 * cm,   # VAT
-    2.3 * cm,   # total
+    4.3 * cm,   # customer
+    3.1 * cm,   # document number — IR-2026-000123 on one line
+    2.8 * cm,   # document type — חשבונית מס/קבלה on one line
+    1.9 * cm,   # date
+    2.0 * cm,   # net (before VAT)
+    1.7 * cm,   # VAT
+    2.2 * cm,   # total
 ]
 
 COLUMN_HEADERS = [
@@ -158,17 +173,28 @@ def _styles() -> dict:
     }
 
 
-def _rtl_cell(text: str, style: ParagraphStyle, width: float) -> Paragraph:
+def _rtl_cell(text: str, style: ParagraphStyle, width: float, pad: float = 5) -> Paragraph:
     """
     Wrap to `width` first, then bidi-reorder each line on its own.
 
     Reordering the whole string and letting Paragraph wrap it afterwards would
     wrap visually-ordered text at logical word boundaries and scramble a long
-    Hebrew name. Padding of 8pt matches the table's cell padding.
+    Hebrew name. `pad` is the cell's padding on each side: the lines must fit
+    the width the Paragraph really gets, or it wraps them a second time and
+    the first word of a line drops to the next ("…זיכויים) / סה"כ"). Tables
+    here pad by 4–5pt, the totals panels by 10, a note outside a table by 0.
     """
     text = str(text or '')
-    usable = max(width - 8, 10)
+    usable = max(width - 2 * pad - 2, 10)
     words = text.split(' ')
+    # A number, a reference or a sum is one word, and broken over two lines it
+    # reads as two (IR-2026-00000 / 2). Such a word shrinks the cell's font
+    # until it fits instead; Hebrew words still wrap between themselves.
+    widest = max((pdfmetrics.stringWidth(word, style.fontName, style.fontSize) for word in words), default=0)
+    if widest > usable:
+        size = max(style.fontSize * usable / widest, MIN_FONT_SIZE)
+        style = ParagraphStyle(f'{style.name}-fit', parent=style, fontSize=size,
+                               leading=min(style.leading, size * 1.25))
     lines: list[str] = []
     current: list[str] = []
     for word in words:
@@ -181,6 +207,12 @@ def _rtl_cell(text: str, style: ParagraphStyle, width: float) -> Paragraph:
     if current:
         lines.append(' '.join(current))
     return Paragraph('<br/>'.join(_rtl(line) for line in lines), style)
+
+
+def _note(text: str, styles: dict) -> Paragraph:
+    """A note under a table, wrapped line by line like a cell so its words stay in order."""
+    # A paragraph outside a table sits in the page frame, which pads it by 6pt a side.
+    return _rtl_cell(text, styles['note'], PAGE_WIDTH - 2 * SIDE_MARGIN, pad=7)
 
 
 def _signed_money(amount: Decimal, is_credit: bool) -> str:
@@ -312,11 +344,13 @@ def _group_header(group: ReportGroup, styles: dict) -> Table:
 
 
 def _summary_row(label: str, totals, styles: dict, style_key: str = 'sub') -> list:
+    # The label spans the first three columns (the table SPANs them), so a
+    # long branch name stays on one line beside its totals.
     st = styles[style_key]
     return [
-        _rtl_cell(label, st, COL_WIDTHS[0]),
-        _rtl_cell('', st, COL_WIDTHS[1]),
-        _rtl_cell('', st, COL_WIDTHS[2]),
+        _rtl_cell(label, st, sum(COL_WIDTHS[:3])),
+        '',
+        '',
         _rtl_cell(f'{totals.count} שורות', st, COL_WIDTHS[3]),
         _rtl_cell(_money(totals.net_amount), st, COL_WIDTHS[4]),
         _rtl_cell(_money(totals.vat_amount), st, COL_WIDTHS[5]),
@@ -372,10 +406,14 @@ def _group_table(group: ReportGroup, styles: dict) -> Table:
         ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
     ]
+    style.append(('SPAN', (0, -1), (2, -1)))
     for index in band_rows:
         style.append(('SPAN', (0, index), (-1, index)))
         style.append(('BACKGROUND', (0, index), (-1, index), SECTION_BG))
+        # A section's title never ends a page alone: it moves with its first row.
+        style.append(('NOSPLIT', (0, index), (-1, min(index + 1, len(data) - 1))))
     for index in subtotal_rows:
+        style.append(('SPAN', (0, index), (2, index)))
         style.append(('BACKGROUND', (0, index), (-1, index), colors.HexColor('#f6f4fc')))
         style.append(('LINEABOVE', (0, index), (-1, index), 0.6, BRAND_PURPLE))
     for index in credit_rows:
@@ -403,14 +441,14 @@ def _totals_panel(report: PeriodReport, styles: dict):
         rows.append(['חשבונות עסקה (אינם מסמכי מס)', _money(report.non_fiscal_total)])
 
     data = [
-        [_rtl_cell(label, styles['label'], 8.0 * cm),
-         _rtl_cell(value, styles['value'], 4.5 * cm)]
+        [_rtl_cell(label, styles['label'], 8.0 * cm, pad=10),
+         _rtl_cell(value, styles['value'], 4.5 * cm, pad=10)]
         for label, value in rows
     ]
     net_label = 'סה"כ נטו לתקופה (חיובים בניכוי זיכויים)' if totals.credits_total > 0 else 'סה"כ לתקופה'
     data.append([
-        _rtl_cell(net_label, ParagraphStyle('GrandL', parent=styles['grand']), 8.0 * cm),
-        _rtl_cell(_money(totals.net_of_credits), styles['grand'], 4.5 * cm),
+        _rtl_cell(net_label, ParagraphStyle('GrandL', parent=styles['grand']), 8.0 * cm, pad=10),
+        _rtl_cell(_money(totals.net_of_credits), styles['grand'], 4.5 * cm, pad=10),
     ])
 
     table = Table(data, colWidths=[8.0 * cm, 4.5 * cm], hAlign='RIGHT')
@@ -420,6 +458,52 @@ def _totals_panel(report: PeriodReport, styles: dict):
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
     ], padding=(6, 6, 10, 10)))
     return table
+
+
+def _overview_panel(report: PeriodReport, styles: dict) -> list:
+    """
+    The period's money in five lines, on the first page.
+
+    The same figures close the report, after forty pages of rows; the owner
+    asked for the important thing first (14.10.2026). Nothing here is computed
+    afresh — each line is a total the sections below print in full.
+    """
+    rows = [('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', _money(report.collected_total))]
+    if report.undocumented is not None:
+        rows.append(('תקבולים ללא מסמך', _money(report.undocumented_total)))
+    if report.totals.credits_total:
+        rows.append(('זיכויים — חשבוניות זיכוי', _money(-report.totals.credits_total)))
+    if report.uncredited_refunds_total:
+        rows.append(('זיכויים בכרטיס ללא חשבונית זיכוי', _money(-report.uncredited_refunds_total)))
+    data = [
+        [_rtl_cell(label, styles['label'], 8.0 * cm, pad=10), _rtl_cell(value, styles['value'], 4.5 * cm, pad=10)]
+        for label, value in rows
+    ]
+    grand = report.all_income_total if report.undocumented is not None else (
+        report.collected_total - report.totals.credits_total
+    )
+    data.append([
+        _rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('OverviewL', parent=styles['grand']), 8.0 * cm, pad=10),
+        _rtl_cell(_money(grand), styles['grand'], 4.5 * cm, pad=10),
+    ])
+    table = Table(data, colWidths=[8.0 * cm, 4.5 * cm], hAlign='RIGHT')
+    table.setStyle(_card([
+        ('BACKGROUND', (0, 0), (-1, -2), PANEL_BG),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
+    ], padding=(6, 6, 10, 10)))
+    counts = [f'{report.totals.count} מסמכים']
+    if report.undocumented is not None and report.undocumented.count:
+        counts.append(f'{report.undocumented.count} חיובים ללא מסמך')
+    if report.void_rows:
+        counts.append(f'{len(report.void_rows)} מספרים שלא הפכו למסמך')
+    return [KeepTogether([
+        Paragraph(_rtl('תמונת מצב'), styles['label']),
+        Spacer(1, 0.15 * cm),
+        table,
+        Spacer(1, 0.1 * cm),
+        _note(' · '.join(counts) + ' — הפירוט המלא בהמשך.', styles),
+    ]), Spacer(1, 0.6 * cm)]
 
 
 def _type_breakdown(report: PeriodReport, styles: dict):
@@ -527,11 +611,8 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
 
     if not recon.get('reachable'):
         reason = recon.get('error') or 'לא התקבלה תשובה'
-        out.append(Paragraph(
-            _rtl(f'לא בוצע אימות: טרנזילה לא הייתה זמינה בעת הפקת הדוח ({reason}). '
-                 f'המספרים בדוח הם של המערכת בלבד.'),
-            styles['note'],
-        ))
+        out.append(_note(f'לא בוצע אימות: טרנזילה לא הייתה זמינה בעת הפקת הדוח ({reason}). '
+                 f'המספרים בדוח הם של המערכת בלבד.', styles))
         return out
 
     tz = recon.get('tranzila') or {}
@@ -548,21 +629,23 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
         styles['subtitle'],
     ))
 
+    if not tz.get('count') and not local.get('count') and not report.is_empty:
+        # The period's documents were issued here, not in Tranzila's documents
+        # module, so neither side has anything to hold against the other. Said
+        # in one line: the 0 beside a list of twenty "missing" documents read
+        # to the accountant as a gap (September 2026).
+        return out[:-1] + [_note('המסמכים בתקופה הופקו במערכת ולא במודול המסמכים של טרנזילה, '
+                 'ולכן אין מסמכים להשוות מולה.', styles)]
+
     if recon.get('agrees'):
         # Two empty sides agree, and saying only that would read as an all-clear
         # on a period that took money in and issued nothing for it.
         if not tz.get('count') and not local.get('count') and report.undocumented_total:
-            out.append(Paragraph(
-                _rtl(f'לא הופק ולו מסמך אחד בתקופה — לא במערכת ולא בטרנזילה — '
+            out.append(_note(f'לא הופק ולו מסמך אחד בתקופה — לא במערכת ולא בטרנזילה — '
                      f'בעוד שנכנסו {_money(report.undocumented_total)}. '
-                     f'שני הצדדים ריקים ולכן הם מסכימים, אך אין כאן אישור לדבר.'),
-                styles['note'],
-            ))
+                     f'שני הצדדים ריקים ולכן הם מסכימים, אך אין כאן אישור לדבר.', styles))
             return out
-        out.append(Paragraph(
-            _rtl('כל מסמך שטרנזילה מכירה נמצא גם במערכת, ולהפך. אין פער.'),
-            styles['note'],
-        ))
+        out.append(_note('כל מסמך שטרנזילה מכירה נמצא גם במערכת, ולהפך. אין פער.', styles))
         return out
 
     def _listing(title, rows):
@@ -571,7 +654,7 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
             for row in rows[:12]
         )
         more = f' (ועוד {len(rows) - 12})' if len(rows) > 12 else ''
-        return Paragraph(_rtl(f'{title}: {listed}{more}'), styles['note'])
+        return _note(f'{title}: {listed}{more}', styles)
 
     if only_tz:
         out.append(_listing(f'קיימים בטרנזילה ולא במערכת ({len(only_tz)})', only_tz))
@@ -587,7 +670,7 @@ def _reconciliation_block(report: PeriodReport, styles) -> list:
 
 # Six columns: the fifth names the branch when the report is grouped by
 # something else, and the kind of charge when the branch is already the header.
-UNDOC_WIDTHS = [4.6 * cm, 4.2 * cm, 2.0 * cm, 2.6 * cm, 3.2 * cm, 2.4 * cm]
+UNDOC_WIDTHS = [4.0 * cm, 4.6 * cm, 2.1 * cm, 2.5 * cm, 2.5 * cm, 2.3 * cm]
 
 SHORT_SOURCE_LABELS = {
     'lessons': 'חוג',
@@ -684,6 +767,7 @@ def _undocumented_group_table(group, group_by: str, styles: dict) -> Table:
     for index in band_rows:
         style.append(('SPAN', (0, index), (-1, index)))
         style.append(('BACKGROUND', (0, index), (-1, index), SECTION_BG))
+        style.append(('NOSPLIT', (0, index), (-1, min(index + 1, len(data) - 1))))
     for index in subtotal_rows:
         style.append(('SPAN', (0, index), (4, index)))
         style.append(('BACKGROUND', (0, index), (-1, index), colors.HexColor('#f6f4fc')))
@@ -692,6 +776,58 @@ def _undocumented_group_table(group, group_by: str, styles: dict) -> Table:
         style.append(('TEXTCOLOR', (0, index), (-1, index), MUTED))
     table.setStyle(_card(style, padding=(5, 5, 5, 5)))
     return table
+
+
+REFUND_WIDTHS = [2.1 * cm, 3.4 * cm, 4.5 * cm, 2.2 * cm, 3.6 * cm, 2.2 * cm]
+
+
+def _uncredited_refunds_block(undoc, styles: dict) -> list:
+    """
+    Card refunds no credit note covers, one row each, and their total.
+
+    They come off the period's take in the panel below, so each one is named
+    here with what it refunded and Tranzila's own number for it — the reader
+    can find it in the terminal's report and decide what document it still owes.
+    """
+    refunds = getattr(undoc, 'refunds', None) or []
+    if not refunds:
+        return []
+    headers = ['תאריך', 'שם לקוח', 'המסמך שזוכה', 'מספר בטרנזילה', 'סניף', 'סכום']
+    data = [[_rtl_cell(h, styles['th'], w) for h, w in zip(headers, REFUND_WIDTHS)]]
+    for row in refunds:
+        data.append([
+            _rtl_cell(row.row_date.strftime('%d/%m/%Y'), styles['td_num'], REFUND_WIDTHS[0]),
+            _rtl_cell(row.customer, styles['td'], REFUND_WIDTHS[1]),
+            _rtl_cell(row.reference or '—', styles['td_num'], REFUND_WIDTHS[2]),
+            _rtl_cell(row.detail or '—', styles['td_num'], REFUND_WIDTHS[3]),
+            _rtl_cell(row.branch_name, styles['td'], REFUND_WIDTHS[4]),
+            _rtl_cell(_money(-row.amount), styles['td_credit'], REFUND_WIDTHS[5]),
+        ])
+    data.append([
+        _rtl_cell(f'סה"כ זיכויים ללא חשבונית זיכוי ({len(refunds)})', styles['sub'], sum(REFUND_WIDTHS[:5])),
+        '', '', '', '',
+        _rtl_cell(_money(-undoc.refunds_total), styles['sub'], REFUND_WIDTHS[5]),
+    ])
+    table = Table(data, colWidths=REFUND_WIDTHS, hAlign='RIGHT', repeatRows=1)
+    table.setStyle(_card([
+        ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, CREDIT_BG]),
+        ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
+        ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
+        ('SPAN', (0, -1), (4, -1)),
+    ], padding=(5, 5, 5, 5)))
+    return [
+        KeepTogether([
+            Paragraph(_rtl('זיכויים בכרטיס שלא הופקה להם חשבונית זיכוי'), styles['label']),
+            Spacer(1, 0.15 * cm),
+            _note('כסף שהוחזר ללקוחות בתקופה, ושום חשבונית זיכוי אינה מקושרת למסמך שזוכה. '
+                  'הוא יורד מסה"כ הכסף שנכנס. רק זיכויים שבוצעו דרך המערכת — זיכוי שבוצע '
+                  'במסך של טרנזילה עצמו אינו רשום כאן.', styles),
+            Spacer(1, 0.15 * cm),
+        ]),
+        table,
+        Spacer(1, 0.5 * cm),
+    ]
 
 
 def _undocumented_block(report: PeriodReport, styles: dict) -> list:
@@ -715,26 +851,17 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
         Spacer(1, 0.7 * cm),
         Paragraph(_rtl(f'תקבולים ללא מסמך פורמלי — לפי {group_word}'), styles['label']),
         Spacer(1, 0.15 * cm),
-        Paragraph(
-            _rtl('הסכומים הבאים נגבו בתקופה ולא הופק עבורם מסמך במערכת. '
-                 'הם אינם מחוברים לסכומי המסמכים שלמעלה.'),
-            styles['note'],
-        ),
+        _note('הסכומים הבאים נגבו בתקופה ולא הופק עבורם מסמך במערכת. '
+                 'הם אינם מחוברים לסכומי המסמכים שלמעלה.', styles),
         Spacer(1, 0.35 * cm),
     ]
 
     for group in groups:
         note = []
         if group.is_unassigned:
-            note = [Paragraph(
-                _rtl(f'חיובים שלא ניתן לשייך ל{group_word} — חסר שיוך ברשומה שלהם.'),
-                styles['note'],
-            )]
+            note = [_note(f'חיובים שלא ניתן לשייך ל{group_word} — חסר שיוך ברשומה שלהם.', styles)]
         elif group.rank == 1:
-            note = [Paragraph(
-                _rtl('הזמנות מהאתר שנשלחו ללקוח — אינן שייכות לסניף, ונרשמות תחת המותג.'),
-                styles['note'],
-            )]
+            note = [_note('הזמנות מהאתר שנשלחו ללקוח — אינן שייכות לסניף, ונרשמות תחת המותג.', styles)]
         out.append(KeepTogether([_undocumented_group_header(group, styles), *note]))
         out.append(Spacer(1, 0.15 * cm))
         out.append(_undocumented_group_table(group, report.group_by, styles))
@@ -742,56 +869,62 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
             count = len(group.merged)
             opening = 'שורה אחת בסוגריים אוחדה' if count == 1 else f'{count} שורות בסוגריים אוחדו'
             out.append(Spacer(1, 0.12 * cm))
-            out.append(Paragraph(
-                _rtl(f'{opening} עם מסמך שהופק לאותו לקוח ולאותו סכום '
-                     f'({_money(group.merged_total)}) ואינן נספרות בסיכום.'),
-                styles['note'],
-            ))
+            out.append(_note(f'{opening} עם מסמך שהופק לאותו לקוח ולאותו סכום '
+                     f'({_money(group.merged_total)}) ואינן נספרות בסיכום.', styles))
         out.append(Spacer(1, 0.55 * cm))
 
     # Per-group totals in one place, then the two halves of the period side by side.
     summary = [[
         _rtl_cell(group_word, styles['th'], 9.0 * cm),
         _rtl_cell('חיובים', styles['th'], 3.0 * cm),
-        _rtl_cell('סה"כ', styles['th'], 6.8 * cm),
+        _rtl_cell('סה"כ', styles['th'], 6.0 * cm),
     ]]
     for group in groups:
         summary.append([
             _rtl_cell(group.title, styles['td'], 9.0 * cm),
             _rtl_cell(str(group.count), styles['td_num'], 3.0 * cm),
-            _rtl_cell(_money(group.total), styles['td_num'], 6.8 * cm),
+            _rtl_cell(_money(group.total), styles['td_num'], 6.0 * cm),
         ])
     summary.append([
         _rtl_cell('סה"כ ללא מסמך', styles['sub'], 9.0 * cm),
         _rtl_cell(str(undoc.count), styles['sub'], 3.0 * cm),
-        _rtl_cell(_money(undoc.total), styles['sub'], 6.8 * cm),
+        _rtl_cell(_money(undoc.total), styles['sub'], 6.0 * cm),
     ])
-    summary_table = Table(summary, colWidths=[9.0 * cm, 3.0 * cm, 6.8 * cm], hAlign='RIGHT', repeatRows=1)
+    summary_table = Table(summary, colWidths=[9.0 * cm, 3.0 * cm, 6.0 * cm], hAlign='RIGHT', repeatRows=1)
     summary_table.setStyle(_card([
         ('BACKGROUND', (0, 0), (-1, 0), BRAND_PURPLE),
         ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, PANEL_BG]),
         ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
     ], padding=(5, 5, 5, 5)))
-    out.append(Paragraph(_rtl(f'סיכום ללא מסמך לפי {group_word}'), styles['label']))
-    out.append(Spacer(1, 0.15 * cm))
-    out.append(summary_table)
+    out.append(KeepTogether([
+        Paragraph(_rtl(f'סיכום ללא מסמך לפי {group_word}'), styles['label']),
+        Spacer(1, 0.15 * cm),
+        summary_table,
+    ]))
     out.append(Spacer(1, 0.5 * cm))
 
+    out.extend(_uncredited_refunds_block(undoc, styles))
+
     grand = [
-        [_rtl_cell('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', styles['label'], 8.0 * cm),
-         _rtl_cell(_money(report.collected_total), styles['value'], 4.5 * cm)],
-        [_rtl_cell('תקבולים ללא מסמך', styles['label'], 8.0 * cm),
-         _rtl_cell(_money(undoc.total), styles['value'], 4.5 * cm)],
+        [_rtl_cell('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', styles['label'], 8.0 * cm, pad=10),
+         _rtl_cell(_money(report.collected_total), styles['value'], 4.5 * cm, pad=10)],
+        [_rtl_cell('תקבולים ללא מסמך', styles['label'], 8.0 * cm, pad=10),
+         _rtl_cell(_money(undoc.total), styles['value'], 4.5 * cm, pad=10)],
     ]
     if report.totals.credits_total:
         grand.append([
-            _rtl_cell('זיכויים', styles['label'], 8.0 * cm),
-            _rtl_cell(f'-{_money(report.totals.credits_total)}', styles['value'], 4.5 * cm),
+            _rtl_cell('זיכויים', styles['label'], 8.0 * cm, pad=10),
+            _rtl_cell(f'-{_money(report.totals.credits_total)}', styles['value'], 4.5 * cm, pad=10),
+        ])
+    if report.uncredited_refunds_total:
+        grand.append([
+            _rtl_cell('זיכויים בכרטיס ללא חשבונית זיכוי', styles['label'], 8.0 * cm, pad=10),
+            _rtl_cell(_money(-report.uncredited_refunds_total), styles['value'], 4.5 * cm, pad=10),
         ])
     grand.append([
-        _rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('AllInc', parent=styles['grand']), 8.0 * cm),
-        _rtl_cell(_money(report.all_income_total), styles['grand'], 4.5 * cm),
+        _rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('AllInc', parent=styles['grand']), 8.0 * cm, pad=10),
+        _rtl_cell(_money(report.all_income_total), styles['grand'], 4.5 * cm, pad=10),
     ])
     panel = Table(grand, colWidths=[8.0 * cm, 4.5 * cm], hAlign='RIGHT')
     panel.setStyle(_card([
@@ -799,17 +932,16 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
         ('BACKGROUND', (0, -1), (-1, -1), SUBTOTAL_BG),
         ('LINEABOVE', (0, -1), (-1, -1), 1, BRAND_PURPLE),
     ], padding=(6, 6, 10, 10)))
-    out.append(panel)
-    out.append(Spacer(1, 0.2 * cm))
-    out.append(Paragraph(
-        _rtl('שים לב: אם הופק ידנית מסמך עבור חיוב שמופיע גם כאן ולא זוהה כמיזוג, '
-             'הוא נספר פעמיים בשורה האחרונה — אין במערכת קישור בין חיוב למסמך שהופק עבורו.'),
-        styles['note'],
-    ))
+    out.append(KeepTogether([
+        panel,
+        Spacer(1, 0.2 * cm),
+        _note('שים לב: אם הופק ידנית מסמך עבור חיוב שמופיע גם כאן ולא זוהה כמיזוג, '
+                 'הוא נספר פעמיים בשורה האחרונה — אין במערכת קישור בין חיוב למסמך שהופק עבורו.', styles),
+    ]))
     return out
 
 
-INCOME_WIDTHS = [5.2 * cm, 3.5 * cm, 3.5 * cm, 3.3 * cm, 3.5 * cm]
+INCOME_WIDTHS = [5.0 * cm, 3.3 * cm, 3.3 * cm, 3.0 * cm, 3.4 * cm]
 
 
 def _income_by_group_block(report: PeriodReport, styles: dict) -> list:
@@ -867,11 +999,8 @@ def _income_by_group_block(report: PeriodReport, styles: dict) -> list:
             Spacer(1, 0.15 * cm),
             table,
             Spacer(1, 0.2 * cm),
-            Paragraph(
-                _rtl('"עם מסמך" — קבלות וחשבוניות מס/קבלה בלבד, בניכוי זיכויים. '
-                     'חשבונית מס שטרם נגבתה אינה כאן, כדי שלא ייספר אותו כסף פעמיים.'),
-                styles['note'],
-            ),
+            _note('"עם מסמך" — קבלות וחשבוניות מס/קבלה בלבד, בניכוי זיכויים. '
+                     'חשבונית מס שטרם נגבתה אינה כאן, כדי שלא ייספר אותו כסף פעמיים.', styles),
         ]),
     ]
 
@@ -1012,6 +1141,9 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
 
     story.append(Spacer(1, 0.5 * cm))
 
+    if not report.is_empty and not report.document_type:
+        story.extend(_overview_panel(report, styles))
+
     if report.is_empty:
         # An empty period is a valid answer, not an error. Say so on the page
         # rather than handing back a blank sheet or a failure.
@@ -1038,7 +1170,7 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
                     GROUP_BY_UNIT: 'מסמכים שלא שויכו לעסק.',
                     GROUP_BY_CATEGORY: 'מסמכים שלא שויכו לקטגוריה.',
                 }.get(report.group_by, 'מסמכים שהופקו ללקוחות רשומים ולא ללקוח עסקי.')
-                note = [Spacer(1, 0.1 * cm), Paragraph(_rtl(explanation), styles['note'])]
+                note = [Spacer(1, 0.1 * cm), _note(explanation, styles)]
             # Keep a group's bar attached to its header row; the table itself is
             # free to break across pages and carries its headers with it.
             story.append(KeepTogether([_group_header(group, styles), *note]))
@@ -1051,9 +1183,11 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
         story.append(Spacer(1, 0.5 * cm))
         story.extend(_type_breakdown(report, styles))
         story.append(Spacer(1, 0.5 * cm))
-        story.append(Paragraph(_rtl('סיכום סופי'), styles['label']))
-        story.append(Spacer(1, 0.15 * cm))
-        story.append(_totals_panel(report, styles))
+        story.append(KeepTogether([
+            Paragraph(_rtl('סיכום סופי'), styles['label']),
+            Spacer(1, 0.15 * cm),
+            _totals_panel(report, styles),
+        ]))
 
         if len(report.currencies) > 1:
             # Mixed currencies would make a single sum meaningless; flag it
@@ -1061,11 +1195,8 @@ def generate_period_report_pdf(report: PeriodReport) -> bytes:
             listed = ', '.join(sorted(report.currencies))
             story.extend([
                 Spacer(1, 0.3 * cm),
-                Paragraph(
-                    _rtl(f'שים לב: הדוח כולל יותר ממטבע אחד ({listed}). '
-                         f'הסכומים חוברו כפי שהם ואינם מומרים.'),
-                    styles['note'],
-                ),
+                _note(f'שים לב: הדוח כולל יותר ממטבע אחד ({listed}). '
+                         f'הסכומים חוברו כפי שהם ואינם מומרים.', styles),
             ])
 
     story.extend(_integrity_block(report, styles))

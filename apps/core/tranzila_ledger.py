@@ -751,7 +751,14 @@ def reconcile_period(start_date: date, end_date: date) -> dict:
     presenting a local-only count as a reconciliation.
     """
     start, end = _default_range(start_date, end_date)
-    local_rows = _local_formal_rows(start, end)
+    # Only a document issued through Tranzila can be in Tranzila. Since the
+    # switch to Kogo's own numbering (IR, ST, TI, RC, CR…) the office's
+    # documents are issued here, and comparing all of them listed every one as
+    # "missing in Tranzila" (September 2026: twenty, beside a Tranzila count of 0).
+    local_rows = [
+        row for row in _local_formal_rows(start, end)
+        if row.get('tranzila_issued') or row.get('tranzila_doc_id')
+    ]
     tranzila_rows: list[dict] = []
     reachable = False
     error = None
