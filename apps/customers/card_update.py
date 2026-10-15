@@ -502,6 +502,11 @@ def send_card_update_whatsapp(recurring: RecurringPayment, *, created_by=None) -
         return {'sent': False, 'reason': 'missing_lesson_or_child'}
 
     ctx = build_enrollment_whatsapp_context(child=recurring.child, lesson=lesson)
+    if recurring.split_share_id:
+        # A payer of a split: the card that was declined is theirs, so is the message.
+        from apps.customers.payment_split import payer_message_context
+
+        ctx = payer_message_context(recurring.split_share, ctx)
     if not ctx:
         return {'sent': False, 'reason': 'no_parent_phone'}
 
@@ -882,10 +887,13 @@ def apply_new_card(
             registration_fee=Decimal('0'),
             prorated=False,
         )
+        share = recurring.split_share if recurring.split_share_id else None
         payment = Payment.objects.create(
             child=child,
             family=family,
-            parent=family.parents.filter(is_primary=True).first() if family else None,
+            parent=(share.payer_parent if share is not None
+                    else (family.parents.filter(is_primary=True).first() if family else None)),
+            split_share=share,
             branch=lesson.course.branch,
             lesson=lesson,
             bundle=recurring.initial_payment.bundle if recurring.initial_payment else None,

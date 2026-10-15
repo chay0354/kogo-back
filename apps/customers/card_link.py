@@ -253,7 +253,7 @@ def quote_standing_order(link: CardLink, today: date | None = None) -> dict:
         prorated = max(Decimal('1.00'), money(monthly * factor))
     # A paid trial already settled in this branch comes off the first charge, once.
     credit = credit_for_lesson(child, lesson, first_charge=prorated + fee, today=today)
-    return {
+    quote = {
         'monthly_amount': monthly,
         'base_amount': money(discount.base_price),
         'discount_amount': money(discount.total_discount_amount),
@@ -271,7 +271,17 @@ def quote_standing_order(link: CardLink, today: date | None = None) -> dict:
         'discounts': discount.applicable_discounts,
         'bundle': bundle,
         'price_option': price_option,
+        'split_share': None,
     }
+    if link.split_share_id:
+        # One payer of a split: their part, fixed when the office made it.
+        from apps.customers.payment_split import SplitError, share_quote
+
+        try:
+            return share_quote(link.split_share, quote, today)
+        except SplitError as exc:
+            raise CardLinkError(str(exc)) from exc
+    return quote
 
 
 def preview_payload(link: CardLink, *, already_done: bool = False) -> dict:
@@ -297,6 +307,16 @@ def preview_payload(link: CardLink, *, already_done: bool = False) -> dict:
             'start_time': first.get('start_time', ''),
             'end_time': first.get('end_time', ''),
         })
+        if link.split_share_id:
+            # The parent pays a part: say so, and of what.
+            share = link.split_share
+            out['split'] = {
+                'position': share.position,
+                'parts': share.split.shares.count(),
+                'payer_name': share.payer_name,
+                'monthly_total': str(share.split.monthly_total),
+                'joins_existing': share.split.mode == 'existing',
+            }
         if not already_done:
             try:
                 q = quote_standing_order(link)
@@ -374,6 +394,18 @@ def _prevalidate(link: CardLink, today: date) -> dict:
     if link.kind == CardLink.KIND_STANDING_ORDER:
         if link.lesson is None:
             raise CardLinkError('להוראת קבע נדרש שיעור. פנו למשרד.')
+        if link.split_share_id:
+            # One payer of a split: the other payers' standing orders on this
+            # class are the point, not a duplicate. This payer must not have one.
+            from apps.customers.payment_split import share_has_live_order
+            from apps.customers.split_models import PaymentSplit
+
+            share = link.split_share
+            if share.split.status != PaymentSplit.STATUS_ACTIVE:
+                raise CardLinkError('חלוקת התשלום הזאת בוטלה. פנו למשרד.')
+            if share_has_live_order(share):
+                raise CardLinkError('הכרטיס שלך כבר שמור להוראת הקבע. פנו למשרד.')
+            return quote_standing_order(link, today)
         covered = lessons_covered_by_selection(lesson=link.lesson, bundle=link.bundle)
         if child_has_standing_order_for_lessons(link.child, covered):
             raise CardLinkError('לילד כבר יש הוראת קבע לשיעור הזה. פנו למשרד.')
@@ -474,13 +506,20 @@ def _apply_standing_order(link: CardLink, card: dict[str, Any], quote: dict, tod
     child = link.child
     lesson = link.lesson
     family = child.family
+    share = quote.get('split_share')
+    # A payer of a split is the parent on their payment — or nobody, when the
+    # office typed a payer who is not a parent of the family.
+    payer_parent = share.payer_parent if share is not None else (
+        family.parents.filter(is_primary=True).first() if family else None
+    )
 
     # The payment row exists — and is committed — before the gateway is called.
     with transaction.atomic():
         payment = Payment.objects.create(
             child=child,
             family=family,
-            parent=family.parents.filter(is_primary=True).first() if family else None,
+            parent=payer_parent,
+            split_share=share,
             branch=lesson.course.branch,
             lesson=lesson,
             bundle=quote['bundle'],
@@ -555,11 +594,23 @@ def _apply_standing_order(link: CardLink, card: dict[str, Any], quote: dict, tod
     # 2. Standing order + enrollment. A failure here is a review, never a release.
     with transaction.atomic():
         locked = CardLink.objects.select_for_update(of=('self',)).get(id=link.id)
-        created = _ensure_recurring_payment_for_widget_charge(
-            payment=payment, child=child, lesson=lesson, token=token,
-            expiry_month=card['expiry_month'], expiry_year=card['expiry_year'],
-            enrollment_date=today, next_billing_date=quote['next_billing_date'],
-        )
+        if share is not None:
+            # One payer of a split: their own standing order at their part.
+            from apps.customers.payment_split import after_share_activated, create_share_recurring
+
+            create_share_recurring(
+                payment=payment, share=share, token=token,
+                expiry_month=card['expiry_month'], expiry_year=card['expiry_year'],
+                enrollment_date=today, next_billing_date=quote['next_billing_date'],
+            )
+            after_share_activated(share)
+            created = True
+        else:
+            created = _ensure_recurring_payment_for_widget_charge(
+                payment=payment, child=child, lesson=lesson, token=token,
+                expiry_month=card['expiry_month'], expiry_year=card['expiry_year'],
+                enrollment_date=today, next_billing_date=quote['next_billing_date'],
+            )
         recurring = RecurringPayment.objects.filter(initial_payment=payment).first()
         if not created and recurring is None and not RecurringPayment.objects.filter(child=child, status='active').exists():
             locked.status = CardLink.STATUS_REVIEW
@@ -571,17 +622,21 @@ def _apply_standing_order(link: CardLink, card: dict[str, Any], quote: dict, tod
             return {'success': True, 'review': True, 'charged': str(quote['first_charge']),
                     'message': 'החיוב עבר, אך הוראת הקבע לא נפתחה. המשרד יטפל.'}
 
-        child.status = 'active'
-        deferred = quote['deferred_first_charge_date']
-        if deferred:
-            child.subscription_start_date = deferred
-            child.paid_until_date = None
-        else:
-            child.subscription_start_date = today
-            _, _, _, next_bill = _compute_prorate(today, lesson.day_of_week)
-            child.paid_until_date = next_bill - timedelta(days=1)
-        child.save(update_fields=['status', 'subscription_start_date', 'paid_until_date', 'updated_at'])
-        enroll_child_in_paid_lessons(child=child, lesson=lesson, bundle=quote['bundle'])
+        joins_paid_month = share is not None and share.split.mode == 'existing'
+        if not joins_paid_month:
+            # A payer joining an order already paying this month changes nothing
+            # about the child: their status and paid-until date stay as they are.
+            child.status = 'active'
+            deferred = quote['deferred_first_charge_date']
+            if deferred:
+                child.subscription_start_date = deferred
+                child.paid_until_date = None
+            else:
+                child.subscription_start_date = today
+                _, _, _, next_bill = _compute_prorate(today, lesson.day_of_week)
+                child.paid_until_date = next_bill - timedelta(days=1)
+            child.save(update_fields=['status', 'subscription_start_date', 'paid_until_date', 'updated_at'])
+            enroll_child_in_paid_lessons(child=child, lesson=lesson, bundle=quote['bundle'])
 
         locked.status = CardLink.STATUS_COMPLETED
         locked.recurring_payment = recurring
@@ -641,6 +696,20 @@ def _apply_one_time(link: CardLink, card: dict[str, Any], plan: dict, _unused=No
     return {'success': True, 'charged': str(amount)}
 
 
+def _later_payer_of_split(payment: Payment) -> bool:
+    """
+    A payer of a split who is not the one that signed the child up: an existing
+    order's new payer, or a second payer after the first. The family got its
+    "you are registered" message once; it is not sent again for each card.
+    """
+    if not payment.split_share_id:
+        return False
+    split = payment.split_share.split
+    if split.mode == 'existing':
+        return True
+    return RecurringPayment.objects.filter(split_share__split=split).exclude(initial_payment=payment).exists()
+
+
 def _after_success(payment: Payment, txn: TranzilaTransaction, *, invoice: bool) -> None:
     """Receipt and WhatsApp after the money is safely recorded; neither may undo it."""
     service = PaymentService()
@@ -649,7 +718,7 @@ def _after_success(payment: Payment, txn: TranzilaTransaction, *, invoice: bool)
             service._create_invoice_from_payment(payment, txn)
         except Exception:
             logger.exception('card link: invoice for payment %s failed', payment.id)
-    if payment.payment_type == 'recurring_subscription':
+    if payment.payment_type == 'recurring_subscription' and not _later_payer_of_split(payment):
         try:
             service._send_registration_whatsapp(payment)
         except Exception:
@@ -664,6 +733,11 @@ def send_card_link_whatsapp(link: CardLink, base: str | None = None) -> dict:
     """Same field names as the card-update flow, so the owner can point one ManyChat flow at both."""
     child = link.child
     ctx = build_enrollment_whatsapp_context(child=child, lesson=link.lesson)
+    if link.split_share_id:
+        # Each payer of a split gets their own link, on their own phone.
+        from apps.customers.payment_split import payer_message_context
+
+        ctx = payer_message_context(link.split_share, ctx)
     if not ctx:
         return {'sent': False, 'reason': 'no_parent_phone'}
     token = build_card_link_token(link)
@@ -742,6 +816,12 @@ def _standing_order_payload(recurring) -> dict:
         'months_label': months_label(months),
         'renew_amount': str(quote['amount']),
         'can_renew': bool(months),
+        # One payer of a payment split between cards — the popup does not offer to split it again.
+        'split': (
+            {'position': recurring.split_share.position, 'parts': recurring.split_share.split.shares.count(),
+             'payer_name': recurring.split_share.payer_name}
+            if recurring.split_share_id else None
+        ),
     }
 
 

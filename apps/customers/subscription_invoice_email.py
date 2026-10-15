@@ -81,6 +81,10 @@ def invoice_recipients(invoice: Invoice, *, email: str = '') -> list[str]:
     from apps.customers.customer_details import extra_invoice_emails
 
     payer = (email or invoice.payer_email or '').strip()
+    if invoice.payment_id and invoice.payment.split_share_id:
+        # A payer of a split: their own receipt, to them alone — not to the
+        # family's address or its extra contacts, which may be the other payer.
+        return [payer] if payer else []
     if not payer and invoice.family_id:
         payer = (invoice.family.email or '').strip()
     family = invoice.family if invoice.family_id else None

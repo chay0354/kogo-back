@@ -316,6 +316,27 @@ def quote_unit_change(
     if enrollment.trial_lesson_date:
         quote['blocked'] = 'שיעור ניסיון — אין תמחור'
         return quote
+    split_ids = {order.split_share.split_id for order in stos if order.split_share_id}
+    if stos and len(split_ids) == 1 and all(order.split_share_id for order in stos):
+        # The payers of one split (apps/customers/split_models): a move at the
+        # same price is only a move, and every payer keeps their part. A move
+        # to another price would have to share the new figure out between them,
+        # which is not built — the office does it by hand.
+        new_price = unit_price(child, old_rows, target_lessons, target_bundle)[0]
+        sits_on = current_unit(old_rows)
+        old_price = unit_price(child, old_rows, *sits_on)[0] if sits_on else None
+        total = sum((money(order.amount) for order in stos), Decimal('0.00'))
+        quote.update({
+            'current_amount': str(total), 'new_amount': str(total), 'new_base_price': str(new_price),
+            'direction': 'same',
+        })
+        if old_price is None or new_price != old_price:
+            quote['direction'] = 'up' if (old_price is None or new_price > old_price) else 'down'
+            quote['blocked'] = (
+                'התשלום על החוג מחולק בין כמה משלמים, וההחלפה משנה את המחיר. '
+                'מעבר כזה עוד לא נתמך — יש לבטל את החלוקה, להחליף, ולחלק מחדש.'
+            )
+        return quote
     if len(stos) > 1:
         quote['blocked'] = 'לילד יותר מהוראת קבע אחת לחוג הזה — יש לטפל בהוראות הקבע ידנית'
         return quote

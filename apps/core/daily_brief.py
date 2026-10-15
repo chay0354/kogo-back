@@ -1105,7 +1105,9 @@ def check_duplicate_charges(today: date) -> BriefItem:
     groups = (
         Payment.objects
         .filter(status='completed', created_at__gte=since, child__isnull=False)
-        .values('child_id', 'final_amount', 'created_at__date', 'lesson_id')
+        # The payers of a split are charged the same on the same day by design:
+        # each share is its own group, so only one payer charged twice shows.
+        .values('child_id', 'final_amount', 'created_at__date', 'lesson_id', 'split_share_id')
         .annotate(times=Count('id'))
         .filter(times__gt=1)
         .order_by('-created_at__date')

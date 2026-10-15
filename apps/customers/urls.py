@@ -11,6 +11,12 @@ from .card_link_views import (
     CardLinkOptionsView,
     CardLinkPreviewView,
 )
+from .payment_split_views import (
+    PaymentSplitCancelView,
+    PaymentSplitFromStandingOrderView,
+    PaymentSplitListCreateView,
+    PaymentSplitPreviewView,
+)
 from .card_replacement_views import (
     ChildFamilyCardQuoteView,
     ChildrenWithoutStandingOrderView,
@@ -71,6 +77,10 @@ urlpatterns = [
     path('card-update/<str:token>/charge/', CardUpdateChargeView.as_view(), name='card-update-charge'),
     path('card-links/', CardLinkListCreateView.as_view(), name='card-links'),
     path('card-links/options/', CardLinkOptionsView.as_view(), name='card-link-options'),
+    path('payment-splits/', PaymentSplitListCreateView.as_view(), name='payment-splits'),
+    path('payment-splits/preview/', PaymentSplitPreviewView.as_view(), name='payment-split-preview'),
+    path('payment-splits/from-standing-order/', PaymentSplitFromStandingOrderView.as_view(), name='payment-split-from-standing-order'),
+    path('payment-splits/<uuid:split_id>/cancel/', PaymentSplitCancelView.as_view(), name='payment-split-cancel'),
     path('invoices/<uuid:invoice_id>/pdf/', InvoicePdfView.as_view(), name='invoice-pdf'),
     path('card-links/<uuid:link_id>/<str:action>/', CardLinkActionView.as_view(), name='card-link-action'),
     path('card-link/<str:token>/', CardLinkPreviewView.as_view(), name='card-link-preview'),

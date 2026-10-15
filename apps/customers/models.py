@@ -425,6 +425,17 @@ class Payment(models.Model):
     # Failure tracking
     failure_reason = models.TextField(blank=True, verbose_name="סיבת כישלון")
     failure_code = models.CharField(max_length=50, blank=True, verbose_name="קוד שגיאה")
+    # The payer of a payment split between cards whose charge this is
+    # (apps/customers/split_models). Two shares charged in one month are not a
+    # double charge; one share charged twice is.
+    split_share = models.ForeignKey(
+        'customers.PaymentSplitShare',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+        verbose_name="חלק בחלוקת תשלום",
+    )
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="תאריך יצירה")
@@ -612,6 +623,16 @@ class RecurringPayment(models.Model):
         null=True,
         blank=True,
         verbose_name="תזכורת אחרונה",
+    )
+    # One payer of a payment split between cards (apps/customers/split_models).
+    # Empty on every standing order that bills the whole.
+    split_share = models.ForeignKey(
+        'customers.PaymentSplitShare',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='recurring_payments',
+        verbose_name="חלק בחלוקת תשלום",
     )
 
     # Timestamps

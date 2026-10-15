@@ -990,6 +990,21 @@ class RecurringPaymentInitialPaymentSlimSerializer(serializers.ModelSerializer):
         fields = ['id', 'description', 'lesson_name', 'lesson_course_display_id', 'branch_name']
 
 
+def _split_share_summary(order) -> dict | None:
+    """'חלק 1 מתוך 2 · דנה לוי · ₪130 מתוך ₪260' — or None for an order that bills the whole."""
+    if not order.split_share_id:
+        return None
+    share = order.split_share
+    split = share.split
+    return {
+        'split_id': str(split.id),
+        'position': share.position,
+        'parts': split.shares.count(),
+        'payer_name': share.payer_name,
+        'monthly_total': str(split.monthly_total),
+    }
+
+
 class RecurringPaymentSerializer(serializers.ModelSerializer):
     """מנוי חוזר - Recurring subscription details"""
     child_name = serializers.CharField(source='child.full_name', read_only=True)
@@ -1045,6 +1060,8 @@ class RecurringPaymentSerializer(serializers.ModelSerializer):
             # The branch the order was signed up in, by id: the invoices page
             # filters on it, and two branches may share a name.
             'branch_id': str(payment.branch_id) if payment is not None and payment.branch_id else None,
+            # One payer of a payment split between cards (apps/customers/split_models).
+            'split': _split_share_summary(obj),
         }
 
     class Meta:
