@@ -99,8 +99,11 @@ SHADOW_BATCH = 10
 # time its customer writes).
 LEAD_BACKFILL_PER_TICK = 3
 LEAD_BACKFILL_WITHIN = timedelta(days=90)
-# Conversations read again once their past was copied from ManyChat — after everything else the summary has to read.
+# Conversations read again once their past was copied from ManyChat — after everything else the summary has to read —
+# and only those that moved in the last 30 days (the owner, 15.10.2026: "30 יום ושיהיה עם לידים"; each read is a
+# call to Claude). Older ones are read by the rules like every old conversation (1b) and come out as dormant leads.
 HISTORY_READ_PER_TICK = 3
+HISTORY_READ_WITHIN = timedelta(days=30)
 QUIET_BEFORE_ANALYSIS = timedelta(minutes=5)
 # ManyChat is asked for its automations only with this much of the call still left (the asking waits up to eight seconds).
 HOLIDAY_FLOWS_FLOOR = 9
@@ -131,13 +134,13 @@ def _backfill_per_tick() -> int:
 
 def _history_to_read(now):
     """
-    Conversations whose past was copied from ManyChat (history.py) and not read since: recent, matched with Kogo
-    first, not a customer's — read again by the summary with the old bot's and the office's lines in them.
+    Conversations whose past was copied from ManyChat (history.py) and not read since: the last 30 days, matched
+    with Kogo first, not a customer's — read again by the summary with the old bot's and the office's lines in them.
     """
     return (
         Contact.objects.filter(
             history_copied_at__isnull=False, history_read_at__isnull=True, is_demo=False,
-            kogo_checked_at__isnull=False, last_inbound_at__gte=now - LEAD_BACKFILL_WITHIN,
+            kogo_checked_at__isnull=False, last_inbound_at__gte=now - HISTORY_READ_WITHIN,
         )
         .exclude(kogo_outcome__in=CUSTOMER_OUTCOMES)
     )
