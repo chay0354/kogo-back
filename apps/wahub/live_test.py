@@ -61,7 +61,7 @@ from django.db import transaction
 from django.db.models import Max, Q
 from django.utils import timezone
 
-from apps.wahub import bot_mode, knowledge, sending, shadow, state, waiting_list
+from apps.wahub import birthday, bot_mode, knowledge, sending, shadow, state, waiting_list
 from apps.wahub.models import (
     DELIVERED_STATUSES,
     DIRECTION_IN,
@@ -864,6 +864,8 @@ def _answer(contact: Contact, held: dict, *, late: bool = False) -> dict:
     if delivered:
         # The answer told the customer they are on a waiting list: now they are (the tool itself only marked it).
         waiting_list.apply_bot_marks(contact, proposal.tools_used)
+        # And the tags a topic ends with ("ברכת יום הולדת" — the office's box of who waits for the greeting).
+        birthday.apply_tag_marks(contact, proposal.tools_used)
 
     # What the answer said follows it (the holidays board): only after a text that left.
     flows = _send_flows(contact, proposal) if delivered else []

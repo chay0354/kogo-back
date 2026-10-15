@@ -49,6 +49,10 @@ from apps.wahub.models import (
 VIEW_CHATS = 'chats'
 VIEW_LEADS = 'leads'
 
+# Waits for Kogo's birthday greeting, which a person sends (birthday.py) — a column of the contact, so the box is
+# counted in the same aggregate as the others: a condition on the tags (many to many) would multiply every count.
+BIRTHDAY = Q(birthday_wait_since__isnull=False)
+
 BOXES = {
     'all': Q(),
     'waiting': Q(waiting_since__isnull=False),
@@ -56,6 +60,7 @@ BOXES = {
     'unread': Q(unread_count__gt=0),
     'human': Q(handled_by=HANDLED_HUMAN),
     'bot': Q(handled_by=HANDLED_BOT),
+    'birthday': BIRTHDAY,
 }
 
 # --- future leads, and what is "open" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג) -------------------
@@ -69,11 +74,13 @@ FUTURE_WROTE = 'wrote'
 FUTURE_LABEL = 'ליד עתידי'
 
 OPEN_NEEDS_HUMAN = 'needs_human'
+OPEN_BIRTHDAY = 'birthday'
 OPEN_FUTURE_DUE = 'future_due'
 OPEN_FUTURE_WROTE = 'future_wrote'
 OPEN_HUMAN = 'human'
 OPEN_LABELS = {
     OPEN_NEEDS_HUMAN: 'מבקש נציג',
+    OPEN_BIRTHDAY: 'מחכה לברכה ליום הולדת',
     OPEN_FUTURE_DUE: 'ליד עתידי — הגיע היום',
     OPEN_FUTURE_WROTE: 'ליד עתידי — הלקוח כתב',
     OPEN_HUMAN: 'בטיפול נציג',
@@ -93,11 +100,13 @@ def parked_q(today) -> Q:
 def open_q(today) -> Q:
     """
     "פתוחות": the conversations a person has to deal with now — the customer asks
-    for one, a future lead whose day has come or whose customer wrote, or a
-    conversation a person holds that is not parked for a later day.
+    for one, waits for the birthday greeting a person sends, a future lead whose
+    day has come or whose customer wrote, or a conversation a person holds that
+    is not parked for a later day.
     """
     return (
         Q(needs_human=True)
+        | BIRTHDAY
         | (FUTURE & (Q(followup_due__lte=today) | _wrote_since_mark()))
         | (Q(handled_by=HANDLED_HUMAN) & ~parked_q(today))
     )
@@ -220,6 +229,8 @@ def open_reason(contact: Contact, today) -> str:
     """Why the conversation is open for a person now; '' when it is not. The first that holds decides."""
     if contact.needs_human:
         return OPEN_NEEDS_HUMAN
+    if contact.birthday_wait_since is not None:
+        return OPEN_BIRTHDAY
     future = future_state(contact, today)
     if future == FUTURE_DUE:
         return OPEN_FUTURE_DUE
@@ -238,6 +249,8 @@ def box_of(contact: Contact, today) -> tuple:
     """(the most telling box the conversation is in, that in words) — the first that holds."""
     if contact.needs_human:
         return 'needs_human', OPEN_LABELS[OPEN_NEEDS_HUMAN]
+    if contact.birthday_wait_since is not None:
+        return 'birthday', OPEN_LABELS[OPEN_BIRTHDAY]
     future = future_state(contact, today)
     if future == FUTURE_DUE:
         return 'open', OPEN_LABELS[OPEN_FUTURE_DUE]

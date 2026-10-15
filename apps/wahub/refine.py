@@ -1118,7 +1118,7 @@ def _evidence(thread: RefineThread, text: str, door: str = 'דיוק') -> list:
 
 def _propose(thread: RefineThread, turn: RefineTurn, entry: dict, index: int, *, text: str, understood: str, user,
              pattern: str = '', teach: bool = False) -> KnowledgeProposal:
-    who = state.user_display_name(user) if getattr(user, 'is_authenticated', False) else 'המפעילה'
+    who = (state.user_display_name(user) if getattr(user, 'is_authenticated', False) else '') or 'המפעילה'
     change = entry['change']
     # The door it came through: a "דיוק" on messages or on a proposal, or the owner's own words in "ללמד את הבוט".
     door = 'ללמד' if teach else 'דיוק'
@@ -1184,7 +1184,7 @@ def _rewrite(pressed: KnowledgeProposal, entry: dict, *, text: str, understood: 
     card she was looking at is the card that changes; what she wrote is added
     to its explanation and to its evidence.
     """
-    who = state.user_display_name(user) if getattr(user, 'is_authenticated', False) else 'המפעילה'
+    who = (state.user_display_name(user) if getattr(user, 'is_authenticated', False) else '') or 'המפעילה'
     change = entry['change']
     pressed.change = change
     pressed.title = f'{WOULD[change["action"]]} {KIND_LABELS.get(change["kind"], "")} — {entry["title"]}'[:200]

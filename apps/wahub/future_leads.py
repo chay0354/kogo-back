@@ -135,7 +135,8 @@ def close(contact: Contact, user) -> Contact:
     with transaction.atomic():
         row = Contact.objects.select_for_update().get(pk=contact.pk)
         was_future = bool(queries.future_state(row, timezone.localtime(now).date()))
-        fields = {**_held_marks(row, user, now), 'unread_count': 0}
+        # Closing also ends the wait for the birthday greeting: the person who pressed ✓ dealt with it (birthday.py).
+        fields = {**_held_marks(row, user, now), 'unread_count': 0, 'birthday_wait_since': None}
         manual = _without_pin(row)
         if manual is not None:
             fields['lead_manual'] = manual

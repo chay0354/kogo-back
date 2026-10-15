@@ -106,6 +106,8 @@ class ListTests(WahubTestCase):
             'all': 9, 'waiting': 1, 'needs_human': 1, 'unread': 1, 'human': 1, 'bot': 8, 'open': 2, 'future': 1,
             # Nobody here has waited for a person three office hours (test_overdue holds who does).
             'overdue': 0,
+            # Nor for the birthday greeting (test_birthday holds who does).
+            'birthday': 0,
         })
         self.assertEqual(data['queues'], {
             'all': 6, 'due': 1, 'none': 3, 'no_answer': 0, 'answered': 1, 'later': 2, 'registered': 0,

@@ -498,6 +498,14 @@ class Contact(models.Model):
     # apps/wahub/optout.py only. A demo contact carries the mark without being on the list.
     opted_out = models.JSONField(default=dict, blank=True)
 
+    # --- "מחכים לברכה ליום הולדת" (the owner, 15.10.2026) ---
+    # Since when the customer waits for Kogo's birthday greeting or video — a person sends it. Set once, when the
+    # bot's tag "ברכת יום הולדת" is kept on an answer that left or a customer's message asks for one
+    # (apps/wahub/birthday.py); cleared by ✓ (future_leads.close). None for everybody else. A column, not the
+    # tag: the box and its count read it in the one aggregate of the counts, where a condition on the tags
+    # (many to many) would multiply every other count.
+    birthday_wait_since = models.DateTimeField(null=True, blank=True)
+
     tags = models.ManyToManyField(Tag, blank=True, related_name='contacts', db_table='wahub_contact_tags')
 
     # Moved forward by every change the screen has to see; the live update

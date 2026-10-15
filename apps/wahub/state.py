@@ -57,7 +57,11 @@ def preview(text: str) -> str:
 
 
 def user_display_name(user) -> str:
+    """
+    A person's first and last name — or '' when the account has none. Never the email or the username: the
+    office's messages and every "by whom" line show this, and a login address is nobody's name (the owner,
+    15.10.2026). Where a name is missing the screens say "משרד" or leave it out.
+    """
     if user is None:
         return ''
-    full = f'{user.first_name} {user.last_name}'.strip()
-    return full or (user.email or user.username or '')
+    return f'{user.first_name or ""} {user.last_name or ""}'.strip()

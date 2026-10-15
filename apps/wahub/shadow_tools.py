@@ -878,7 +878,9 @@ def tag_conversation(ctx: ToolContext, *, tag: str = '', details: str = '') -> d
     """
     The owner's decisions 6–7 (10.10.2026): both birthday paths end tagged, with
     the details kept. Here it is a mark on the draft, as `request_human` is —
-    the shadow writes nothing on a contact.
+    the shadow writes nothing on a contact. The tag is kept on the contact where
+    the answer really leaves (birthday.apply_tag_marks), and "ברכת יום הולדת"
+    then puts the customer in the office's box of who waits for the greeting.
     """
     wanted = ' '.join(str(tag or '').split())
     allowed = _topic_tags(ctx)
