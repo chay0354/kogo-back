@@ -35,7 +35,8 @@ from apps.customers.models import Family
 from apps.core.whatsapp_optout import OptOutListUnavailable
 from apps.wahub import (
     analysis, cron, demo, future_leads, handoff, history, inbound, lead_stage, live_test, matching, media, office_clock,
-    optout, queries, reviewer, sending, shadow, state, transcribe, waiting_list, waiting_notify, waiting_summary,
+    office_templates, optout, queries, reviewer, sending, shadow, state, transcribe, waiting_list, waiting_notify,
+    waiting_summary,
 )
 from apps.wahub.models import (
     DELIVERED_STATUSES,
@@ -339,7 +340,8 @@ class ContactViewSet(viewsets.GenericViewSet):
         name = name or ManyChatService.AUTOMATION_LABELS.get(automation_id, '')
         if contact.is_demo:
             # An invented contact: ManyChat is not asked for the flow or its name; sending.py refuses the send.
-            message = sending.send_flow(contact, automation_id, name or automation_id, request.user)
+            said = office_templates.words_for_flow(automation_id, contact)
+            message = sending.send_flow(contact, automation_id, said or name or automation_id, request.user)
             lead_stage.refresh_quietly(contact.id)
             return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
         try:
@@ -348,8 +350,107 @@ class ContactViewSet(viewsets.GenericViewSet):
             flow_ns = ''
         if not flow_ns:
             return _error('לא נמצאה ב-ManyChat אוטומציה לתבנית הזו.')
-        name = name or sending.flow_name(flow_ns)
+        # A template Kogo knows the words of (an opener, a follow-up's template) is kept as what it says, not as its
+        # name (owner, 15.10.2026): the conversation shows the message the customer got.
+        said = office_templates.words_for_flow(flow_ns, contact)
+        name = said or name or sending.flow_name(flow_ns)
         message = sending.send_flow(contact, flow_ns, name or automation_id, request.user)
+        if message.status in DELIVERED_STATUSES:
+            handoff.office_answered(contact, request.user)
+        lead_stage.refresh_quietly(contact.id)
+        return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
+
+    @action(detail=True, methods=['post'], url_path='send-opening')
+    def send_opening(self, request, pk=None):
+        """
+        POST contacts/{id}/send-opening/ {kind: open | continue} — "פתיחת שיחה" /
+        "המשך שיחה": the template under the fixed name `open chat` / `chat continue`
+        (office_templates.py), sent at once, also outside the 24 hours. Kept as
+        its words with the customer's first name, as a template. 409
+        `template_missing` when ManyChat has no automation under that name.
+        """
+        contact = self.get_object()
+        opener = office_templates.BY_KIND.get(str(request.data.get('kind') or '').strip())
+        if opener is None:
+            return _error('kind: open (פתיחת שיחה) או continue (המשך שיחה).')
+        said = office_templates.words(opener, contact)
+        if contact.is_demo or sending.simulate_send() or not sending.sending_enabled(contact):
+            # Nothing can leave (a demo contact, a developer's machine, the switch off): ManyChat is not asked for
+            # the automation, and sending.py keeps the line as refused or only recorded — as send-flow does.
+            message = sending.send_flow(contact, opener.flow, said, request.user)
+        else:
+            flow_ns, why = office_templates.flow_for(opener)
+            if not flow_ns:
+                missing = why in (office_templates.MISSING, office_templates.TWICE)
+                return _error(
+                    office_templates.missing_detail(opener, why),
+                    code='template_missing' if missing else 'manychat_unreachable',
+                    http=status.HTTP_409_CONFLICT if missing else status.HTTP_502_BAD_GATEWAY,
+                    template_name=opener.flow,
+                )
+            message = sending.send_flow(contact, flow_ns, said, request.user)
+        if message.status in DELIVERED_STATUSES:
+            handoff.office_answered(contact, request.user)
+        lead_stage.refresh_quietly(contact.id)
+        return Response({'message': message_payload(message), 'contact': self._payload(contact.id)})
+
+    @action(detail=True, methods=['post'])
+    def attachments(self, request, pk=None):
+        """
+        POST contacts/{id}/attachments/ {name, content_type, size} — step one of
+        sending a file (media.office_upload): the file is checked and a signed
+        address to upload it to is handed out → {path, kind, content_type,
+        upload_url}. The browser PUTs the file there, then calls send-media/.
+        The same 24 hours as free text; nothing is sent here.
+        """
+        contact = self.get_object()
+        if not sending.can_free_text(contact):
+            return _error(sending.WINDOW_CLOSED_DETAIL, code='window_closed', http=status.HTTP_409_CONFLICT)
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            prepared = media.office_upload(contact.id, data.get('name'), data.get('content_type'), data.get('size'))
+        except media.MediaRefused as exc:
+            return _error(str(exc), code='bad_file')
+        except media.MediaNotConfigured as exc:
+            return _error(str(exc), code='storage_not_configured', http=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except media.MediaError as exc:
+            return _error(str(exc), code='storage_failed', http=status.HTTP_502_BAD_GATEWAY)
+        return Response(prepared)
+
+    @action(detail=True, methods=['post'], url_path='send-media')
+    def send_media(self, request, pk=None):
+        """
+        POST contacts/{id}/send-media/ {path, kind, caption?, name?} — step three:
+        the file uploaded to `path` leaves through ManyChat (sending.send_media),
+        the caption after it. → {message, contact}, like send/.
+        """
+        contact = self.get_object()
+        data = request.data if isinstance(request.data, dict) else {}
+        path = str(data.get('path') or '').strip()
+        caption = str(data.get('caption') or '').strip()
+        if len(caption) > sending.MAX_TEXT_CHARS:
+            return _error('הכיתוב ארוך מדי (עד 4,096 תווים).')
+        try:
+            kind = media.office_kind(contact.id, path)
+        except media.MediaError as exc:
+            return _error(str(exc), code='bad_path')
+        asked = str(data.get('kind') or '').strip()
+        if asked and asked != kind:
+            return _error('סוג הקובץ לא מתאים לקובץ שהועלה.', code='bad_path')
+        if not sending.can_free_text(contact):
+            return _error(sending.WINDOW_CLOSED_DETAIL, code='window_closed', http=status.HTTP_409_CONFLICT)
+        name = ' '.join(str(data.get('name') or '').split())[:120]
+        try:
+            # Also the proof that the file is there: the storage signs no object it does not hold.
+            url = media.signed_url(path, expires_in=media.OFFICE_READ_SECONDS)
+        except media.MediaNotConfigured as exc:
+            return _error(str(exc), code='storage_not_configured', http=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except media.MediaError as exc:
+            return _error(f'{exc} צרפו את הקובץ שוב.', code='storage_failed', http=status.HTTP_502_BAD_GATEWAY)
+        try:
+            message = sending.send_media(contact, path=path, kind=kind, url=url, caption=caption, name=name, user=request.user)
+        except sending.WindowClosed:
+            return _error(sending.WINDOW_CLOSED_DETAIL, code='window_closed', http=status.HTTP_409_CONFLICT)
         if message.status in DELIVERED_STATUSES:
             handoff.office_answered(contact, request.user)
         lead_stage.refresh_quietly(contact.id)
@@ -381,14 +482,21 @@ class ContactViewSet(viewsets.GenericViewSet):
         POST contacts/{id}/close/ — "השיחה נסגרה" (✓): nobody is asked for any more,
         a future lead ends, the mark becomes "ענה", and the conversation goes
         back to the bot. 502 with nothing changed when a person holds it and
-        ManyChat did not take it back.
+        ManyChat did not take it back. Before all that, the ready-made reply
+        "סגירת שיחה" is sent to the customer when it can be (owner, 15.10.2026):
+        the answer is the contact with `goodbye` (sent | skipped | failed) and
+        `goodbye_reason` — the 502 too, since a goodbye that went out is not
+        taken back (a second ✓ does not say it again: office_templates._already_said).
         """
         contact = self.get_object()
+        # The ready-made reply "סגירת שיחה" goes first, when it can (office_templates.say_goodbye); the conversation
+        # is closed whatever became of it. `goodbye` says what: sent, skipped or failed — and `goodbye_reason` why.
+        goodbye, why = office_templates.say_goodbye(contact, request.user)
         try:
             future_leads.close(contact, request.user)
         except handoff.HandoffError as exc:
-            return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY)
-        return Response(self._payload(contact.id))
+            return _error(str(exc), http=status.HTTP_502_BAD_GATEWAY, goodbye=goodbye, goodbye_reason=why)
+        return Response({**self._payload(contact.id), 'goodbye': goodbye, 'goodbye_reason': why})
 
     @action(detail=True, methods=['post'], url_path='hand-to-bot')
     def hand_to_bot(self, request, pk=None):

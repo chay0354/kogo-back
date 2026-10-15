@@ -40,6 +40,8 @@ from apps.wahub.models import (
     STATUS_FAILED,
     STATUS_SENT,
     STATUS_SIMULATED,
+    TYPE_IMAGE,
+    TYPE_OTHER,
     TYPE_TEMPLATE,
     TYPE_TEXT,
     Contact,
@@ -187,6 +189,61 @@ def send_flow(contact: Contact, flow_ns: str, name: str, user, *,
     )
 
 
+# What the list shows for a file the office sent without words (the inbound side says it the same way).
+MEDIA_WORDS = {'image': '🖼️ תמונה', 'video': '🎬 סרטון', 'file': '📎 קובץ'}
+
+
+def _refused(exc: ManyChatError) -> bool:
+    """
+    ManyChat answered, and said no (4xx): nothing was sent, so another shape
+    of the same message cannot make a second copy. A timeout, no connection, a
+    5xx and a contact ManyChat no longer has are not this.
+    """
+    status = getattr(exc, 'status_code', None)
+    return isinstance(status, int) and 400 <= status < 500 and not _contact_gone(exc)
+
+
+def media_link_text(kind: str, url: str, name: str = '') -> str:
+    """The file as a link, for what WhatsApp takes no other way through ManyChat."""
+    head = MEDIA_WORDS.get(kind, MEDIA_WORDS['file'])
+    return f'{head}: {name}\n{url}' if name else f'{head}\n{url}'
+
+
+def send_media(contact: Contact, *, path: str, kind: str, url: str, caption: str, user, name: str = '') -> Message:
+    """
+    A picture, a video or a document the office attached (docs/WAHUB-CONTRACT.md,
+    "צירוף קבצים"): the file is already in the bucket at `path` (media.office_kind),
+    and `url` is a signed address of it that ManyChat — and the customer — can open.
+
+    ManyChat's reference says WhatsApp takes no video and no file through
+    sendContent, and documents no caption on a picture. So: a picture leaves as
+    a picture, and the words as a text message right after it, in the same call;
+    a video or a document leaves as its link, with the words after it. A picture
+    ManyChat refuses outright (4xx — nothing went out) leaves once more as its
+    link. Same 24-hour rule as free text, same doors as every send (_deliver).
+    Kept as one line: the caption as its text, the file as its media.
+    """
+    if not can_free_text(contact):
+        raise WindowClosed()
+    caption = (caption or '').strip()[:MAX_TEXT_CHARS]
+    words = [{'type': 'text', 'text': caption}] if caption else []
+
+    def call(service, subscriber_id):
+        if kind == 'image':
+            try:
+                return service.send_whatsapp_messages(subscriber_id, [{'type': 'image', 'url': url}, *words])
+            except ManyChatError as exc:
+                if not _refused(exc):
+                    raise
+                logger.warning('wahub media to contact %s: ManyChat refused the picture (%s); sending its link', contact.pk, exc)
+        return service.send_whatsapp_messages(subscriber_id, [{'type': 'text', 'text': media_link_text(kind, url, name)}, *words])
+
+    return _deliver(
+        contact, user, text=caption, message_type=TYPE_IMAGE if kind == 'image' else TYPE_OTHER, call=call,
+        media_url=path, preview=caption or MEDIA_WORDS.get(kind, MEDIA_WORDS['file']),
+    )
+
+
 def flow_for(automation_id: str) -> str:
     """The flow behind what the screen sent: a flow id as it is, or the flow of one of Kogo's own kinds."""
     automation_id = (automation_id or '').strip()
@@ -213,7 +270,7 @@ def flow_name(flow_ns: str) -> str:
 
 
 def _deliver(contact: Contact, user, *, text: str, message_type: str, call,
-             sender: str = SENDER_OFFICE, new_bot: bool = False) -> Message:
+             sender: str = SENDER_OFFICE, new_bot: bool = False, media_url: str = '', preview: str | None = None) -> Message:
     status, error = STATUS_SENT, ''
     if contact.is_demo:
         # An invented contact: the message is kept so the screen shows it, nothing leaves.
@@ -235,7 +292,9 @@ def _deliver(contact: Contact, user, *, text: str, message_type: str, call,
         except Exception:  # a send is reported under the message, never thrown at the screen
             logger.exception('wahub send to contact %s failed unexpectedly', contact.pk)
             status, error = STATUS_FAILED, 'תקלה לא צפויה בשליחה. לא ידוע אם ההודעה נשלחה.'
-    return _keep_outbound(contact, user, text, message_type, status, error, sender=sender, new_bot=new_bot)
+    return _keep_outbound(
+        contact, user, text, message_type, status, error, sender=sender, new_bot=new_bot, media_url=media_url, preview=preview,
+    )
 
 
 def new_bot_answers(contact: Contact) -> bool:
@@ -343,8 +402,28 @@ def keep_new_bot_reply(contact: Contact, text: str) -> Message:
     return _keep_outbound(contact, None, text, TYPE_TEXT, STATUS_SIMULATED, '', sender=SENDER_BOT, new_bot=True)
 
 
+def _without_quote(text: str) -> str:
+    """
+    A reply's own words, without the "> " lines it starts with (the screen's "השב"
+    quotes the message it answers that way, as WhatsApp shows a quote): what the
+    list's one-line preview shows. The text as it is when it is all quote.
+    """
+    lines = (text or '').split('\n')
+    count = 0
+    while count < len(lines) and (lines[count] == '>' or lines[count].startswith('> ')):
+        count += 1
+    rest = '\n'.join(lines[count:]).strip()
+    return rest if count and rest else text
+
+
 def _keep_outbound(contact: Contact, user, text: str, message_type: str, status: str, error: str,
-                   *, sender: str = SENDER_OFFICE, new_bot: bool = False) -> Message:
+                   *, sender: str = SENDER_OFFICE, new_bot: bool = False, media_url: str = '',
+                   preview: str | None = None) -> Message:
+    """
+    The line in the conversation. `media_url` is the path of a file the office
+    attached (media.office_kind); `preview` is what the list shows for it when
+    it carries no words of its own.
+    """
     now = timezone.now()
     with transaction.atomic():
         message = Message.objects.create(
@@ -355,6 +434,7 @@ def _keep_outbound(contact: Contact, user, text: str, message_type: str, status:
             sent_by=user if getattr(user, 'is_authenticated', False) else None,
             text=text,
             message_type=message_type,
+            media_url=media_url,
             new_bot=new_bot,
             status=status,
             error=error[:300],
@@ -366,7 +446,7 @@ def _keep_outbound(contact: Contact, user, text: str, message_type: str, status:
             # Somebody answered: nobody is waiting.
             changes.update(
                 last_message_at=now,
-                last_message_text=state.preview(text),
+                last_message_text=state.preview(_without_quote(text) if preview is None else preview),
                 last_message_direction=DIRECTION_OUT,
                 last_message_sender=sender,
                 waiting_since=None,

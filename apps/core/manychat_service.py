@@ -428,6 +428,24 @@ class ManyChatService:
         }
         return self._request('POST', '/fb/sending/sendContent', json_body=payload)
 
+    def send_whatsapp_messages(self, subscriber_id: int | str, messages: list[dict]) -> dict:
+        """
+        Several messages in one sendContent, in order — a picture and the words
+        after it (the office's attachment, apps/wahub/sending.py). ManyChat's
+        Dynamic Block v2 takes up to ten. Its own reference (manychat.github.io/
+        dynamic_block_docs/channels) says WhatsApp takes no video and no file
+        this way, and documents no caption on a picture: the words go as a text
+        message of their own after it.
+        """
+        payload = {
+            'subscriber_id': int(subscriber_id),
+            'data': {
+                'version': 'v2',
+                'content': {'type': 'whatsapp', 'messages': list(messages)[:10]},
+            },
+        }
+        return self._request('POST', '/fb/sending/sendContent', json_body=payload)
+
     def list_custom_fields(self) -> list[dict]:
         """Page User Field definitions (id + name), cached on this client."""
         if self._custom_field_defs is None:
