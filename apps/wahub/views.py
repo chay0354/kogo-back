@@ -747,18 +747,17 @@ class SummaryView(APIView):
 
 class HistoryImportView(APIView):
     """
-    GET history/import/[?again=1] → {switched_at, subscribers}: ManyChat's numbers of the conversations to bring.
-    POST history/import/ {conversations: [{subscriber_id, messages: [{id, at, from, text, type}]}]} → the counts.
+    GET history/import/[?again=1] → {switched_at, subscribers, copied}: the conversations Kogo knows and has not
+    copied yet, and how many were copied.
+    POST history/import/ {conversations: [{subscriber_id, phone, name, messages: [{id, at, from, text, type}]}]}
+    → the counts.
     The conversations from before the switch, as the office's own session in ManyChat shows them, a small batch a
     call (history.py). Lines already here are kept once; nothing is sent.
     """
     permission_classes = [IsAuthenticated, IsManager]
 
     def get(self, request):
-        try:
-            return Response(history.still_to_copy(again=request.query_params.get('again') == '1'))
-        except history.NoSwitch:
-            return _error('הבוט החדש עוד לא עונה לכולם — אין עדיין "לפני המעבר" להעתיק.', code='no_switch')
+        return Response(history.still_to_copy(again=request.query_params.get('again') == '1'))
 
     def post(self, request):
         conversations = request.data.get('conversations') if isinstance(request.data, dict) else None

@@ -99,6 +99,8 @@ SHADOW_BATCH = 10
 # time its customer writes).
 LEAD_BACKFILL_PER_TICK = 3
 LEAD_BACKFILL_WITHIN = timedelta(days=90)
+# Conversations read again once their past was copied from ManyChat — after everything else the summary has to read.
+HISTORY_READ_PER_TICK = 3
 QUIET_BEFORE_ANALYSIS = timedelta(minutes=5)
 # ManyChat is asked for its automations only with this much of the call still left (the asking waits up to eight seconds).
 HOLIDAY_FLOWS_FLOOR = 9
@@ -127,6 +129,27 @@ def _backfill_per_tick() -> int:
         return LEAD_BACKFILL_PER_TICK
 
 
+def _history_to_read(now):
+    """
+    Conversations whose past was copied from ManyChat (history.py) and not read since: recent, matched with Kogo
+    first, not a customer's — read again by the summary with the old bot's and the office's lines in them.
+    """
+    return (
+        Contact.objects.filter(
+            history_copied_at__isnull=False, history_read_at__isnull=True, is_demo=False,
+            kogo_checked_at__isnull=False, last_inbound_at__gte=now - LEAD_BACKFILL_WITHIN,
+        )
+        .exclude(kogo_outcome__in=CUSTOMER_OUTCOMES)
+    )
+
+
+def _history_per_tick() -> int:
+    try:
+        return max(0, int(getattr(settings, 'WAHUB_HISTORY_READ_PER_TICK', HISTORY_READ_PER_TICK)))
+    except (TypeError, ValueError):
+        return HISTORY_READ_PER_TICK
+
+
 def _to_match(now):
     return Contact.objects.filter(Q(kogo_checked_at__isnull=True) | Q(kogo_checked_at__lte=now - RECHECK_AFTER))
 
@@ -141,7 +164,7 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
     counts = {
         'analyzed': 0, 'analyzed_ai': 0, 'analyzed_rules': 0, 'matched': 0, 'outcomes_changed': 0,
         'shadow_proposed': 0, 'shadow_ai': 0, 'shadow_stub': 0, 'review_proposals': 0,
-        'lead_checked': 0, 'lead_changed': 0, 'lead_understood': 0,
+        'lead_checked': 0, 'lead_changed': 0, 'lead_understood': 0, 'history_read': 0,
         'followups_sent': 0, 'followups_due': 0, 'followups_skipped': 0, 'followups_failed': 0,
         'waiting_freed': 0, 'waiting_closed': 0, 'waiting_checked': 0,
         'unknowns_sorted': 0, 'unknown_topics_opened': 0, 'openings_checked': 0, 'openings_found': 0,
@@ -197,6 +220,24 @@ def tick(*, budget_seconds: float = BUDGET_SECONDS, reply_url: str = '') -> dict
             counts.update(walk_ins.find(now=now, deadline=time.monotonic() + min(walk_ins.CHECK_SECONDS, left())))
         except Exception:
             logger.exception('wahub cron: the walk-ins were not brought in')
+
+    # 1d. a conversation whose past was copied from ManyChat, read again with it (history.py) — the latest first
+    for contact in _history_to_read(now).order_by('-last_inbound_at', 'id')[:_history_per_tick()]:
+        if left() <= analysis_until:
+            break
+        if places is None:
+            places, course_types = analysis.load_places(), analysis.load_course_types()
+            external_places = analysis.load_external_places()
+        try:
+            analysis.analyze_contact(
+                contact, places=places, course_types=course_types, external_places=external_places,
+                timeout=max(2.0, left() - analysis_until),
+            )
+        except Exception:
+            logger.exception('wahub cron: contact %s was not read again with its past', contact.pk)
+        # Read, or failed: either way not picked again on every call.
+        Contact.objects.filter(pk=contact.pk).update(history_read_at=timezone.now())
+        counts['history_read'] += 1
 
     shadow_waiting = shadow.pending(now).exists()
     matching_until = budget_seconds * (MATCHING_FLOOR if shadow_waiting else LEAD_STAGE_FLOOR)

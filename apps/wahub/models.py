@@ -45,13 +45,15 @@ SOURCE_WALK_IN = 'kogo_walk_in'
 # How such a child is named wherever the system speaks of them: the contact's source, and the answer of the
 # matching for them (a trial_only whose kogo_trial says walk_in — matching.py).
 WALK_IN_LABEL = 'הגיע לשיעור בלי להירשם'
+# Brought in from somewhere else at once — among them the conversations from before the switch (history.py).
+SOURCE_IMPORT = 'import'
 SOURCE_CHOICES = [
     (SOURCE_WHATSAPP, 'וואטסאפ'),
     ('ad', 'מודעה'),
     ('broadcast_reply', 'תשובה לתפוצה'),
     ('kogo_trial', 'נרשם לניסיון במערכת'),
     ('kogo_signup', 'נרשם במערכת'),
-    ('import', 'ייבוא'),
+    (SOURCE_IMPORT, 'ייבוא'),
     (SOURCE_MANUAL, 'הוסף ידנית'),
     (SOURCE_DEMO, 'דמו'),
     (SOURCE_WALK_IN, WALK_IN_LABEL),
@@ -486,6 +488,8 @@ class Contact(models.Model):
     # When the conversation from before the switch was copied from ManyChat (HistoryLine, history.py); None until
     # then — and the screen asks for the copied lines only when it is set.
     history_copied_at = models.DateTimeField(null=True, blank=True)
+    # When the summary read the conversation again with that past in it (cron, a few a call); None until then.
+    history_read_at = models.DateTimeField(null=True, blank=True)
 
     # --- "הסר" (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ט.1) ---
     # The customer asked not to get broadcast messages — {at, source: message | office, text, by,

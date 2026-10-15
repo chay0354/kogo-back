@@ -40,6 +40,7 @@ from apps.wahub.models import (
     OUTCOME_TRIAL_ONLY,
     OUTCOME_TRIAL_UPCOMING,
     SENDER_OFFICE,
+    SOURCE_IMPORT,
     STATUS_FAILED,
     Contact,
     Message,
@@ -603,7 +604,8 @@ def summary() -> dict:
         if row['day'] in days:
             days[row['day']]['inbound' if row['direction'] == DIRECTION_IN else 'outbound'] += row['total']
     for row in (
-        Contact.objects.filter(created_at__gte=since)
+        # Brought in at once (the conversations from before the switch, history.py) is not somebody new.
+        Contact.objects.filter(created_at__gte=since).exclude(source=SOURCE_IMPORT)
         .annotate(day=TruncDate('created_at', tzinfo=zone)).values('day').annotate(total=Count('id'))
     ):
         if row['day'] in days:

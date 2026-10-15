@@ -585,6 +585,8 @@ WAHUB_AI_TIMEOUT_SECONDS = config('WAHUB_AI_TIMEOUT_SECONDS', default=12, cast=i
 # conversation, which is why it is off until the owner says otherwise.
 WAHUB_LEAD_BACKFILL_PER_TICK = config('WAHUB_LEAD_BACKFILL_PER_TICK', default=3, cast=int)
 WAHUB_LEAD_BACKFILL_AI = config('WAHUB_LEAD_BACKFILL_AI', default=False, cast=bool)
+# How many conversations whose past was copied from ManyChat the summary reads again in one cron call (with Claude).
+WAHUB_HISTORY_READ_PER_TICK = config('WAHUB_HISTORY_READ_PER_TICK', default=3, cast=int)
 # The shadow bot (apps/wahub/shadow.py): the model that drafts what the new bot
 # would answer, how hard it thinks, and how long one request may take. Without
 # ANTHROPIC_API_KEY a rule-built stub answers instead (model "stub").
