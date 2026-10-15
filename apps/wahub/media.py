@@ -5,7 +5,9 @@ The file lives in Supabase Storage, in the PRIVATE bucket `wahub-media`, under
 `demo/<contact_id>/<uuid>.<ext>` (a demo contact's upload from the screen) or
 `manychat/<contact_id>/<hash of the address>.<ext>` (a real customer's file,
 fetched from the address ManyChat passed — `archive`; until it is fetched, and
-if the fetch fails, `media_url` is that address): the same storage and the same service-role
+if the fetch fails, `media_url` is that address), or `office/<contact_id>/<uuid>.<ext>`
+(a picture, a video or a document the office attached, uploaded by the browser
+itself — `office_upload`): the same storage and the same service-role
 credentials as the instructors' photos (apps/instructors/views.py), but nothing
 here is public. `Message.media_url` holds the object's path; the screen gets a
 short-lived signed URL from messages/{id}/media/, and the shadow bot reads the
@@ -61,6 +63,10 @@ class MediaError(Exception):
 
 class MediaNotConfigured(MediaError):
     pass
+
+
+class MediaRefused(MediaError):
+    """A file the office may not attach (its kind or its size): the person's to fix, not the storage's."""
 
 
 # --- what is accepted -------------------------------------------------------------------------------
@@ -362,8 +368,9 @@ def is_external(path: str) -> bool:
     return (path or '').strip().lower().startswith(('http://', 'https://'))
 
 
-# The objects this module writes: demo/<contact>/<uuid>.<ext> and manychat/<contact>/<hash>.<ext>.
-_KEPT_PATH = re.compile(r'^(demo|manychat)/\d+/[A-Za-z0-9_-]{1,64}\.[a-z0-9]{2,5}$')
+# The objects this module writes: demo/<contact>/<uuid>.<ext>, manychat/<contact>/<hash>.<ext>, and
+# office/<contact>/<uuid>.<ext> (a file the office attached, uploaded by the browser itself — `office_upload`).
+_KEPT_PATH = re.compile(r'^(demo|manychat|office)/\d+/[A-Za-z0-9_-]{1,64}\.[a-z0-9]{2,5}$')
 
 
 def _kept(path: str) -> str:
@@ -407,3 +414,107 @@ def download(path: str) -> bytes:
         logger.error('wahub media: storage refused to read %s: %s', path, response.status_code)
         raise MediaError('הקובץ לא נמצא באחסון.' if response.status_code == 404 else 'לא ניתן לקרוא את הקובץ מהאחסון.')
     return response.content
+
+
+# --- a file the office attaches (docs/WAHUB-CONTRACT.md, "צירוף קבצים") -----------------------------
+#
+# The browser uploads it straight to the bucket: Vercel takes no request body over 4.5MB, and a video
+# is more. In three steps — `office_upload` checks the file's name, type and size and hands out a
+# signed address to upload to; the browser PUTs the file there; `office_kind` checks the path the
+# screen sends back before anything is sent. Nothing here sends anything.
+
+# kind → (extension → media type, the largest file, the word for it). WhatsApp's own ceilings are
+# 5MB for a picture and 16MB for a video; a document is held to 25MB.
+OFFICE_KINDS = {
+    'image': ({'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}, 5 * MB, 'תמונה'),
+    'video': ({'mp4': 'video/mp4', '3gp': 'video/3gpp'}, 16 * MB, 'סרטון'),
+    'file': ({
+        'pdf': 'application/pdf',
+        'doc': 'application/msword',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'xls': 'application/vnd.ms-excel',
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }, 25 * MB, 'מסמך'),
+}
+_OFFICE_EXTENSIONS = {ext: kind for kind, (types, _limit, _word) in OFFICE_KINDS.items() for ext in types}
+_OFFICE_BY_TYPE = {
+    media_type: ext for kind, (types, _limit, _word) in OFFICE_KINDS.items() for ext, media_type in reversed(list(types.items()))
+}
+# The address ManyChat and the customer open: long enough for WhatsApp to fetch the file, and for a
+# link (a video, a document) to still open a few days later.
+OFFICE_READ_SECONDS = 7 * 24 * 3600
+OFFICE_NOT_SUPPORTED = 'סוג הקובץ לא נתמך. אפשר לשלוח תמונה (jpg, png, webp), סרטון (mp4, 3gp) או מסמך (pdf, doc, docx, xls, xlsx).'
+
+
+def check_office_file(name, content_type, size) -> tuple[str, str, str]:
+    """(kind, extension, media type) of a file the office may attach; raises MediaRefused with the reason otherwise."""
+    parts = str(name or '').strip().rsplit('.', 1)
+    ext = parts[1].lower() if len(parts) == 2 else ''
+    if ext == 'jpeg':
+        ext = 'jpg'
+    if ext not in _OFFICE_EXTENSIONS:
+        declared = str(content_type or '').split(';', 1)[0].strip().lower()
+        ext = _OFFICE_BY_TYPE.get(declared, '')
+    if ext not in _OFFICE_EXTENSIONS:
+        raise MediaRefused(OFFICE_NOT_SUPPORTED)
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        raise MediaRefused('נדרש גודל הקובץ (size, בבתים).')
+    kind = _OFFICE_EXTENSIONS[ext]
+    types, limit, word = OFFICE_KINDS[kind]
+    if size <= 0:
+        raise MediaRefused('הקובץ ריק.')
+    if size > limit:
+        raise MediaRefused(f'הקובץ גדול מדי. {word} עד {limit // MB}MB.')
+    return kind, ext, types[ext]
+
+
+def office_path(contact_id: int, ext: str) -> str:
+    return f'office/{contact_id}/{uuid.uuid4()}.{ext}'
+
+
+def office_kind(contact_id: int, path: str) -> str:
+    """
+    The kind of a file the office uploaded for this contact, by its path. A
+    path that is not plainly one this server handed out for this very contact
+    is refused (MediaError): the service-role key signs whatever it is pointed at.
+    """
+    match = re.fullmatch(rf'office/{int(contact_id)}/[A-Za-z0-9_-]{{1,64}}\.([a-z0-9]{{2,5}})', str(path or ''))
+    kind = _OFFICE_EXTENSIONS.get(match.group(1)) if match else None
+    if kind is None:
+        raise MediaError('הקובץ לא נמצא. צרפו אותו שוב.')
+    return kind
+
+
+def office_upload(contact_id: int, name, content_type, size) -> dict:
+    """
+    Step one: {path, kind, content_type, upload_url} for a file the office may
+    attach. `upload_url` is the storage's signed address for uploading this one
+    object (`object/upload/sign/…?token=…`): the browser PUTs the file there,
+    with no key of ours. The bucket is made when it is missing. Raises MediaError.
+    """
+    kind, ext, media_type = check_office_file(name, content_type, size)
+    _require()
+    path = office_path(contact_id, ext)
+    url = f'{_base()}/object/upload/sign/{BUCKET}/{_kept(path)}'
+    response = _call('POST', url, json={}, failure='אין חיבור לאחסון המדיה.')
+    if _bucket_missing(response):
+        ensure_bucket()
+        response = _call('POST', url, json={}, failure='אין חיבור לאחסון המדיה.')
+    if response.status_code >= 300:
+        logger.error('wahub media: storage refused an upload address for contact %s: %s %s', contact_id, response.status_code, _storage_error(response))
+        raise MediaError('אחסון המדיה לא נתן כתובת להעלאה.')
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    signed = str(body.get('url') or body.get('signedURL') or '').strip()
+    if not signed:
+        raise MediaError('אחסון המדיה לא נתן כתובת להעלאה.')
+    upload_url = signed if signed.startswith('http') else f'{_base()}/{signed.lstrip("/")}'
+    token = str(body.get('token') or '').strip()
+    if token and 'token=' not in upload_url:
+        upload_url += ('&' if '?' in upload_url else '?') + f'token={token}'
+    return {'path': path, 'kind': kind, 'content_type': media_type, 'upload_url': upload_url}

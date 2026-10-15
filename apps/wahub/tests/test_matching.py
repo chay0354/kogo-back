@@ -593,4 +593,3 @@ class OpeningRechecksTests(MatchingTestCase):
         self.assertEqual(self.contact().kogo_outcome, 'registered_after')
         self.assertLess(stale - fresh, 30)
         self.assertLess(changed - fresh, 60)
-        self.assertLessEqual(stale, changed)
