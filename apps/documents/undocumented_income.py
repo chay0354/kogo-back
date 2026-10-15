@@ -54,6 +54,10 @@ SOURCE_STORE = 'store'
 SOURCE_RENTALS = 'rentals'
 SOURCE_ORPHAN_CHARGES = 'orphan_charges'
 SOURCE_PAYMENT_LINKS = 'payment_links'
+# Money of the period whose receipt was issued late, after the period ended
+# (missing_receipts): it came in now and is counted now; its document is dated
+# in a later period, which does not count it again (PeriodReport.earlier_money_total).
+SOURCE_LATE_RECEIPTS = 'late_receipts'
 
 SOURCE_LABELS = {
     SOURCE_LESSONS: 'חיובי חוגים במספור הישן — נשלח מייל, לא מסמך במספר עוקב',
@@ -61,10 +65,12 @@ SOURCE_LABELS = {
     SOURCE_RENTALS: 'שכירויות סטודיו לפי היומן — לא הופקה להן קבלה',
     SOURCE_ORPHAN_CHARGES: 'חיובים שנגבו ואין להם אפילו רשומת חשבונית',
     SOURCE_PAYMENT_LINKS: 'תשלומים בקישור — לא הופק מסמך',
+    SOURCE_LATE_RECEIPTS: 'חיובים שהקבלה שלהם הופקה באיחור, אחרי התקופה',
 }
 # The order the sources read in inside a group: the regular thing first, the
 # store next, the oddity last.
-SOURCE_ORDER = (SOURCE_LESSONS, SOURCE_STORE, SOURCE_RENTALS, SOURCE_ORPHAN_CHARGES, SOURCE_PAYMENT_LINKS)
+SOURCE_ORDER = (SOURCE_LATE_RECEIPTS, SOURCE_LESSONS, SOURCE_STORE, SOURCE_RENTALS, SOURCE_ORPHAN_CHARGES,
+                SOURCE_PAYMENT_LINKS)
 
 # Same predicate the dashboard uses for store revenue, so the two never disagree:
 # a completed charge. A pending website order is not one — see register.py's
@@ -240,6 +246,15 @@ class UndocumentedIncome:
     refunds: list = field(default_factory=list)
 
     @property
+    def late_total(self) -> Decimal:
+        """The part whose receipt was issued after the period — it has a document, dated later."""
+        return sum((s.total for s in self.sections if s.source == SOURCE_LATE_RECEIPTS), Decimal('0.00'))
+
+    @property
+    def no_document_total(self) -> Decimal:
+        return self.total - self.late_total
+
+    @property
     def refunds_total(self) -> Decimal:
         return sum((row.amount for row in self.refunds), Decimal('0.00'))
 
@@ -354,8 +369,19 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
         qs = qs.filter(Q(branch_id__in=branch_ids)
                        | Q(branch__isnull=True, family__branch_id__in=branch_ids))
 
+    invoices = list(qs)
+    receipted = _receipted_charges(invoices)
+
     rows = []
-    for invoice in qs:
+    for invoice in invoices:
+        amount = invoice.amount
+        covered = receipted.get(invoice.id)
+        if covered:
+            # Its charges were receipted late (an IR receipt each): that money
+            # is listed under SOURCE_LATE_RECEIPTS with its receipt, not twice.
+            amount -= sum(covered.values(), Decimal('0.00'))
+            if amount <= 0:
+                continue
         links = list(invoice.children.all())
         names = [link.child.full_name for link in links if link.child_id and link.child]
         customer = ', '.join(names) or (invoice.payer_name or invoice.family.name)
@@ -377,12 +403,115 @@ def _lesson_rows(branch_ids, start: date, end: date) -> list:
             detail=_PAYMENT_TYPE_LABELS.get(invoice.payment_type, invoice.payment_type or ''),
             branch_id=branch_id,
             branch_name=branch_name,
-            amount=invoice.amount,
+            amount=amount,
             child_ids=[link.child_id for link in links if link.child_id],
             **tags,
         )
         rows.append(row)
     return rows
+
+
+def _receipted_charges(invoices) -> dict:
+    """
+    Old-numbering invoice id → {payment id: amount} of its charges that now have
+    a numbered receipt of their own (missing_receipts.receipts_of: from 1.9.2026
+    only an IR receipt counts; before it the 'INV-…' itself does, so nothing is
+    taken off an older one).
+    """
+    from apps.customers.checkout_invoice import CHECKOUT_LINES_ACTION, checkout_log_payment_ids
+    from apps.customers.financial_models import InvoiceActivityLog
+    from apps.customers.models import Payment
+    from apps.documents.missing_receipts import _NUMBERED, receipts_of
+
+    if not invoices:
+        return {}
+    payments_of: dict = {invoice.id: {str(invoice.payment_id)} if invoice.payment_id else set()
+                         for invoice in invoices}
+    for invoice_id, details in InvoiceActivityLog.objects.filter(
+        invoice_id__in=list(payments_of), action=CHECKOUT_LINES_ACTION,
+    ).values_list('invoice_id', 'details'):
+        payments_of[invoice_id].update(checkout_log_payment_ids(details))
+    all_ids = {pid for ids in payments_of.values() for pid in ids}
+    payments = {str(p.id): p for p in Payment.objects.filter(id__in=all_ids)}
+    numbered = {
+        pid for pid, numbers in receipts_of(payments.values()).items()
+        if any(_NUMBERED.match(number) for number in numbers)
+    }
+    out = {}
+    for invoice_id, ids in payments_of.items():
+        covered = {pid: payments[pid].final_amount for pid in ids if pid in numbered and pid in payments}
+        if covered:
+            out[invoice_id] = covered
+    return out
+
+
+def _late_receipt_rows(branch_ids, start: date, end: date) -> list:
+    """
+    Receipts issued late, after the period, for money that came in during it.
+
+    The money is the period's and is counted in it; the receipt is dated the
+    day it was issued (missing_receipts.issue_late_receipt), so the period's own
+    documents do not hold it. Each row names its receipt and when it was issued.
+    """
+    from apps.customers.financial_models import Invoice
+
+    qs = (
+        Invoice.objects
+        .filter(invoice_number__regex=LESSON_RUN_REGEX, status='paid',
+                invoice_date__date__gt=end, activity_logs__action='issued_late')
+        .distinct()
+        .select_related('family', 'family__branch', 'branch',
+                        'payment__card_link__business', 'payment__card_link__business_category')
+        .prefetch_related('children__child', 'children__course__business',
+                          'children__course__business_category', 'activity_logs')
+        .order_by('invoice_date', 'invoice_number')
+    )
+    if branch_ids is not None:
+        qs = qs.filter(Q(branch_id__in=branch_ids)
+                       | Q(branch__isnull=True, family__branch_id__in=branch_ids))
+    rows = []
+    for invoice in qs:
+        received = money_received_on(invoice)
+        if received is None or not (start <= received <= end):
+            continue
+        links = list(invoice.children.all())
+        names = [link.child.full_name for link in links if link.child_id and link.child]
+        customer = ', '.join(names) or (invoice.payer_name or invoice.family.name)
+        branch_id, branch_name = _branch_of(
+            invoice.branch, invoice.family.branch if invoice.family_id else None,
+        )
+        course = next((link.course for link in links if link.course_id), None)
+        tags = _income_tags(course) or _card_link_tags(invoice)
+        rows.append(UndocumentedRow(
+            source=SOURCE_LATE_RECEIPTS,
+            customer=customer,
+            reference=invoice.invoice_number,
+            row_date=received,
+            detail=f'הופקה {_local_day(invoice.invoice_date):%d/%m/%Y}',
+            branch_id=branch_id,
+            branch_name=branch_name,
+            amount=invoice.amount,
+            # Never merged by guess into a hand-made document: it is a receipt itself.
+            child_ids=[],
+            **tags,
+        ))
+    return rows
+
+
+def money_received_on(invoice):
+    """The day the money of a late receipt came in, from its 'issued_late' mark; None if it has none."""
+    from datetime import datetime
+
+    for log in invoice.activity_logs.all():
+        if log.action != 'issued_late':
+            continue
+        raw = (log.details or {}).get('money_received_at') or ''
+        try:
+            moment = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return timezone.localtime(moment).date() if timezone.is_aware(moment) else moment.date()
+    return None
 
 
 def _link_tags(link) -> dict:
@@ -794,6 +923,7 @@ def collect_undocumented(user, start: date, end: date) -> UndocumentedIncome:
     # comes back only if REPORT_CALENDAR_RENTALS is set.
     rentals = _rental_rows(branch_ids, start, end) if getattr(settings, 'REPORT_CALENDAR_RENTALS', False) else []
     for source, rows in (
+        (SOURCE_LATE_RECEIPTS, _late_receipt_rows(branch_ids, start, end)),
         (SOURCE_LESSONS, _lesson_rows(branch_ids, start, end)),
         (SOURCE_STORE, _store_rows(branch_ids, start, end, delivery)),
         (SOURCE_RENTALS, rentals),

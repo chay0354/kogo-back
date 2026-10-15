@@ -16,6 +16,7 @@ import calendar
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from typing import Optional
 
 from django.db.models import Q
 
@@ -267,6 +268,9 @@ class ReportRow:
     void_reason: str = ''
     # מספר הקצאה (חשבוניות ישראל), when one was entered on the document.
     allocation_number: str = ''
+    # A receipt issued late: the day its money came in (missing_receipts). Set
+    # only then; a period that starts after this day already counted the money.
+    money_received_on: Optional[date] = None
 
 
 @dataclass
@@ -335,6 +339,14 @@ class ReportGroup:
         return sum(
             (row.total_amount for row in self.rows
              if not row.is_credit and row.document_type in COLLECTION_TYPES),
+            Decimal('0.00'),
+        )
+
+    def earlier_money(self, start: date) -> Decimal:
+        """Receipts in this group issued late for money that came in before `start`."""
+        return sum(
+            (row.total_amount for row in self.rows
+             if not row.void and not row.is_credit and row.money_received_on and row.money_received_on < start),
             Decimal('0.00'),
         )
 
@@ -413,7 +425,8 @@ class PeriodReport:
             key = group.key if group.key is not None else group.title
             rows[key] = {
                 'title': group.title,
-                'documented': group.collected_total,
+                # A late receipt for money of an earlier period is that period's take.
+                'documented': group.collected_total - group.earlier_money(self.start),
                 'credits': group.totals.credits_total,
                 'undocumented': Decimal('0.00'),
             }
@@ -448,6 +461,18 @@ class PeriodReport:
         return self.undocumented.total
 
     @property
+    def earlier_money_total(self) -> Decimal:
+        """
+        Receipts dated in the period for money that came in before it.
+
+        A receipt issued late (missing_receipts) is dated the day it is issued;
+        the money it receipts was counted in the period it came in, where it is
+        listed with its receipt (undocumented_income, SOURCE_LATE_RECEIPTS). The
+        document stays on this period's list; its sum is not this period's take.
+        """
+        return sum((group.earlier_money(self.start) for group in self.groups), Decimal('0.00'))
+
+    @property
     def uncredited_refunds_total(self) -> Decimal:
         """Card refunds in the period no credit note covers — 0 when not collected."""
         if self.undocumented is None:
@@ -464,7 +489,7 @@ class PeriodReport:
         for. Credits come off, since a period's take is not what was charged
         but what stayed.
         """
-        return (self.collected_total + self.undocumented_total
+        return (self.collected_total - self.earlier_money_total + self.undocumented_total
                 - self.totals.credits_total - self.uncredited_refunds_total)
 
 
