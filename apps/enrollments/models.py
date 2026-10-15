@@ -116,6 +116,9 @@ class LessonEnrollment(models.Model):
     trial_evening_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת ערב נשלחה (לא בשימוש)")
     trial_10am_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="תזכורת 10:00 ביום הניסיון נשלחה")
     trial_followup_reminder_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="after-test נשלח")
+    # Owner, 15.10.2026: with the 10:00 "are you coming" message, a class with
+    # fewer than 15 registered also gets "חבר מביא חבר" (trial_reminders.py).
+    trial_bring_friend_sent_at = models.DateTimeField(null=True, blank=True, verbose_name="חבר מביא חבר נשלח")
     didnt_arrive_whatsapp_sent_at = models.DateTimeField(
         null=True,
         blank=True,

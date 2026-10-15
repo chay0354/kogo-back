@@ -313,10 +313,11 @@ def move_trial_enrollment(*, enrollment: LessonEnrollment, new_lesson: Lesson, t
         row.trial_10am_reminder_sent_at = None
         row.trial_followup_reminder_sent_at = None
         row.trial_evening_reminder_sent_at = None
+        row.trial_bring_friend_sent_at = None
         row.save(update_fields=[
             'trial_lesson_date', 'trial_outcome', 'start_date',
             'trial_10am_reminder_sent_at', 'trial_followup_reminder_sent_at',
-            'trial_evening_reminder_sent_at', 'updated_at',
+            'trial_evening_reminder_sent_at', 'trial_bring_friend_sent_at', 'updated_at',
         ])
         Payment.objects.filter(
             child=row.child,

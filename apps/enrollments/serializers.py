@@ -130,6 +130,7 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
             instance.trial_10am_reminder_sent_at = None
             instance.trial_followup_reminder_sent_at = None
             instance.trial_evening_reminder_sent_at = None
+            instance.trial_bring_friend_sent_at = None
         return super().update(instance, validated_data)
 
 
