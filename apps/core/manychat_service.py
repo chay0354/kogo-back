@@ -620,9 +620,6 @@ class ManyChatService:
         'MANYCHAT_CARD_LINK_FLOW_NS': ('card-link', 'card link', 'card_link'),
         'MANYCHAT_TRIAL_10AM_FLOW_NS': ('test-lesson-10am', 'test lesson 10am'),
         'MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS': ('after-test', 'after test'),
-        # Sent with the 10:00 trial-day message when the class is small
-        # (enrollments/bring_friend.py) — the office's own broadcast automation.
-        'MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS': ('חבר מביא חבר',),
         'MANYCHAT_DIDNT_ARRIVE_FLOW_NS': ('didnt_arrive', 'didnt arrive', "didn't arrive"),
         'MANYCHAT_REGISTER_LESSON_FLOW_NS': ('register-missing', 'register missing'),
         'MANYCHAT_REGISTER_MORNING_FLOW_NS': ('register-morning', 'register morning'),

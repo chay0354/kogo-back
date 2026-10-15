@@ -8,6 +8,12 @@ the one the office already sends by hand from ManyChat.
 
 The decision is taken next to the 10:00 message (trial_reminders.py), never on
 its own: a trial whose 10:00 message did not go out gets no invitation either.
+
+Off since the evening it went live (owner, 15.10.2026: "זה ישלח את הפרטים של
+ראש העין לכל שאר הסניפים אז תבטל את האוטומציה הזאת"): the ManyChat automation
+named "חבר מביא חבר" is a Rosh HaAyin broadcast, so it is no longer looked up by
+that name. It comes back with an automation of its own (an image, every branch's
+own details) set in MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS, and TRIAL_BRING_FRIEND_ENABLED.
 """
 from __future__ import annotations
 
@@ -33,6 +39,10 @@ NO_FLOW = 'no_flow'
 NO_PHONE = 'no_phone'
 OPTED_OUT = 'opted_out'
 FAILED = 'failed'
+
+
+def is_enabled() -> bool:
+    return bool(getattr(settings, 'TRIAL_BRING_FRIEND_ENABLED', False))
 
 
 def bring_friend_below() -> int:
@@ -115,7 +125,7 @@ def bring_friend_is_due(enrollment, *, ten_am_sent_now: bool = False) -> bool:
 
 
 def resolve_bring_friend_flow(svc) -> str:
-    """The ManyChat automation, by MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS or by its name."""
+    """The ManyChat automation set in MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS — never found by a name."""
     return svc.resolve_flow_ns('MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS')
 
 
