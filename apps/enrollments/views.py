@@ -250,11 +250,12 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         existing.trial_10am_reminder_sent_at = None
         existing.trial_followup_reminder_sent_at = None
         existing.trial_evening_reminder_sent_at = None
+        existing.trial_bring_friend_sent_at = None
         existing.didnt_arrive_whatsapp_sent_at = None
         existing.save(update_fields=[
             'trial_number', 'trial_lesson_date', 'start_date', 'end_date', 'status', 'bundle', 'trial_outcome',
             'trial_10am_reminder_sent_at', 'trial_followup_reminder_sent_at', 'trial_evening_reminder_sent_at',
-            'didnt_arrive_whatsapp_sent_at', 'updated_at',
+            'trial_bring_friend_sent_at', 'didnt_arrive_whatsapp_sent_at', 'updated_at',
         ])
         return self._finish_trial(existing, status.HTTP_200_OK)
 

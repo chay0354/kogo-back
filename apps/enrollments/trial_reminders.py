@@ -3,6 +3,8 @@ Trial-reminder scheduling for children in trial_signed status.
 
   • test-lesson-10am — 10:00 Israel time on the trial lesson date (cron)
   • after-test — 2 hours after the trial lesson ends (cron, configurable)
+  • "חבר מביא חבר" — with the 10:00 message, when the class has fewer than 15
+    registered (bring_friend.py)
 
 Instant signup uses test-lesson-register (see LessonEnrollmentViewSet.create).
 
@@ -383,11 +385,13 @@ def reschedule_blocked_trial_enrollments(*, dry_run: bool = False) -> list[dict]
             enrollment.trial_10am_reminder_sent_at = None
             enrollment.trial_followup_reminder_sent_at = None
             enrollment.trial_evening_reminder_sent_at = None
+            enrollment.trial_bring_friend_sent_at = None
             update_fields.extend([
                 'trial_outcome',
                 'trial_10am_reminder_sent_at',
                 'trial_followup_reminder_sent_at',
                 'trial_evening_reminder_sent_at',
+                'trial_bring_friend_sent_at',
             ])
             enrollment.save(update_fields=update_fields)
 
@@ -652,8 +656,16 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
         .filter(child__status__in=TRIAL_REMINDER_CHILD_STATUSES)
     )
 
+    from apps.enrollments import bring_friend
+
     svc = ManyChatService()
-    summary = {'ten_am_sent': 0, 'after_test_sent': 0, 'skipped': 0, 'errors': 0}
+    summary = {
+        'ten_am_sent': 0, 'after_test_sent': 0, 'skipped': 0, 'errors': 0,
+        'bring_friend_sent': 0, 'bring_friend_full': 0, 'bring_friend_skipped': 0, 'bring_friend_errors': 0,
+    }
+    # Looked up once a run, and only when a 10:00 message is going out.
+    bring_friend_flow = None
+    class_sizes: dict = {}
 
     for enr in qs:
         lesson = enr.lesson
@@ -663,6 +675,7 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
 
         ten_am_due = _trial_day_10am_send_at(enr.trial_lesson_date)
         after_test_due = _after_test_send_at(enr.trial_lesson_date, lesson.end_time)
+        ten_am_sent_now = False
 
         if not enr.trial_10am_reminder_sent_at and _reminder_is_fresh(now, ten_am_due):
             ctx = _build_send_kwargs(enr)
@@ -680,11 +693,36 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
                     enr.trial_10am_reminder_sent_at = timezone.now()
                     enr.save(update_fields=['trial_10am_reminder_sent_at', 'updated_at'])
                     summary['ten_am_sent'] += 1
+                    ten_am_sent_now = True
                 elif sent:
                     summary['ten_am_sent'] += 1
+                    ten_am_sent_now = True
                 else:
                     logger.warning("10am trial reminder NOT sent for %s: %s", enr.id, result)
                     summary['errors'] += 1
+
+        # Right behind the 10:00 message, and only after it went out: a class
+        # with fewer than 15 registered also gets "חבר מביא חבר" (owner, 15.10).
+        if bring_friend.bring_friend_is_due(enr, ten_am_sent_now=ten_am_sent_now):
+            ctx = _build_send_kwargs(enr)
+            if not ctx:
+                summary['bring_friend_skipped'] += 1
+            else:
+                if bring_friend_flow is None:
+                    bring_friend_flow = bring_friend.resolve_bring_friend_flow(svc)
+                outcome, detail = bring_friend.send_bring_friend(
+                    enr, ctx, svc=svc, flow_ns=bring_friend_flow, dry_run=dry_run, cache=class_sizes,
+                )
+                if outcome == bring_friend.SENT:
+                    summary['bring_friend_sent'] += 1
+                elif outcome == bring_friend.FULL:
+                    summary['bring_friend_full'] += 1
+                elif outcome == bring_friend.FAILED:
+                    summary['bring_friend_errors'] += 1
+                else:
+                    if outcome == bring_friend.NO_FLOW:
+                        logger.warning('bring-a-friend: no ManyChat automation named "חבר מביא חבר"')
+                    summary['bring_friend_skipped'] += 1
 
         if not enr.trial_followup_reminder_sent_at and _reminder_is_fresh(now, after_test_due):
             ctx = _build_send_kwargs(enr)

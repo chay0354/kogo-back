@@ -501,6 +501,11 @@ MANYCHAT_TRIAL_10AM_FLOW_NS = config('MANYCHAT_TRIAL_10AM_FLOW_NS', default='')
 # after-test automation — hours after trial lesson end (default 2).
 MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS = config('MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS', default='')
 TRIAL_AFTER_TEST_HOURS = int(config('TRIAL_AFTER_TEST_HOURS', default=2))
+# "חבר מביא חבר" — sent with the 10:00 trial-day message when the class has fewer
+# than TRIAL_BRING_FRIEND_BELOW registered (owner, 15.10.2026). Empty ns = found by
+# the automation's name in ManyChat.
+MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS = config('MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS', default='')
+TRIAL_BRING_FRIEND_BELOW = int(config('TRIAL_BRING_FRIEND_BELOW', default=15))
 # When Tranzila webhook returns Response != 000 for a subscription enrollment payment.
 MANYCHAT_PAYMENT_FAILED_FLOW_NS = config('MANYCHAT_PAYMENT_FAILED_FLOW_NS', default='')
 # Failed standing-order charge — WhatsApp template with a card-update link.
