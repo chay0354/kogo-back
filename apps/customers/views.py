@@ -269,8 +269,9 @@ class ChildViewSet(viewsets.ModelViewSet):
         Prefetch(
             'lesson_enrollments',
             queryset=LessonEnrollment.objects.select_related(
-                'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+                'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor', 'bundle__course'
             ).prefetch_related(
+                'bundle__lessons',
                 Prefetch(
                     'scheduled_changes',
                     queryset=ScheduledUnitChange.objects.filter(applied_at__isnull=True, cancelled_at__isnull=True),
@@ -283,8 +284,9 @@ class ChildViewSet(viewsets.ModelViewSet):
                 Prefetch(
                     'lesson_enrollments',
                     queryset=LessonEnrollment.objects.select_related(
-                        'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor'
+                        'lesson', 'lesson__course', 'lesson__course__branch', 'lesson__instructor', 'bundle__course'
                     ).prefetch_related(
+                        'bundle__lessons',
                         Prefetch(
                             'scheduled_changes',
                             queryset=ScheduledUnitChange.objects.filter(applied_at__isnull=True, cancelled_at__isnull=True),

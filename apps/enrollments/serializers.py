@@ -61,7 +61,12 @@ class LessonEnrollmentSerializer(serializers.ModelSerializer):
         if not lesson:
             return data
 
-        if bundle and not bundle.lessons.filter(pk=lesson.pk).exists():
+        # Asked only when the pair is being set. A row that stands in for a
+        # swapped track day (change_course.swap_day_targets) keeps its track's
+        # bundle on another lesson, and an edit of its notes or dates must not
+        # be refused for that.
+        pair_changes = self.instance is None or 'lesson' in data or 'bundle' in data
+        if pair_changes and bundle and not bundle.lessons.filter(pk=lesson.pk).exists():
             raise serializers.ValidationError({
                 'bundle': 'השיעור אינו חלק מהמסלול המשולב שנבחר'
             })

@@ -246,6 +246,8 @@ def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
     lessons = members or ([lesson] if lesson is not None else [])
     if lesson is not None and lesson not in lessons:
         lessons = [lesson] + lessons
+    if members:
+        lessons = _without_swapped_out_days(child, bundle, members, lessons)
     today = timezone.now().astimezone(JERUSALEM_TZ).date()
     for member in lessons:
         enrollment, created = LessonEnrollment.objects.get_or_create(
@@ -298,6 +300,31 @@ def enroll_child_in_paid_lessons(*, child, lesson, bundle=None) -> None:
         row.status = 'inactive'
         row.end_date = row.trial_lesson_date
         row.save(update_fields=['status', 'end_date', 'trial_outcome', 'updated_at'])
+
+
+def _without_swapped_out_days(child, bundle, members, lessons) -> list:
+    """`lessons` less the track days this child gave up for another lesson.
+
+    A day of a track can be swapped for a lesson outside it (change_course.
+    swap_day_targets); the replacement row carries the track's bundle. While such
+    a row is live, a payment on the track — a new card through a link, the healer
+    of split tracks — must not put the child back on the day they left: only the
+    days they still hold are touched.
+    """
+    member_ids = {member.id for member in members}
+    rows = list(
+        LessonEnrollment.objects
+        .filter(child=child, bundle=bundle, status__in=('active', 'payments_problem'), trial_lesson_date__isnull=True)
+        .values_list('lesson_id', flat=True)
+    )
+    if not any(lesson_id not in member_ids for lesson_id in rows):
+        return lessons
+    held = set(rows)
+    kept = [item for item in lessons if item.id in held or item.id not in member_ids]
+    skipped = [str(item.id) for item in lessons if item not in kept]
+    if skipped:
+        logger.info('Child %s swapped a day of bundle %s: not re-enrolled in %s', child.id, bundle.id, skipped)
+    return kept
 
 
 def _record_trial_outcome_before_conversion(enrollment, today) -> None:

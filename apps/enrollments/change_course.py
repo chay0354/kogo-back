@@ -78,6 +78,74 @@ def _lesson_has_room(lesson: Lesson, child_id) -> str | None:
     return None
 
 
+def swap_day_targets(enrollment: LessonEnrollment, new_lesson: Lesson) -> tuple[list[Lesson], LessonBundle]:
+    """The unit after one day of a twice/thrice-a-week track is replaced by `new_lesson`.
+
+    Owner, 15.10.2026: one day of a family's track was cancelled, and they go to
+    another class at the same branch instead — another group, another instructor —
+    for the same money, without signing up again. `enrollment` is the day that
+    goes; the other days stay as they are.
+
+    The replacement keeps the track's bundle, so everything that reads a
+    registration by its bundle — a later move, "remove from the class", the
+    standing order's match, the unpaid check — still sees one registration at
+    one price. Moving the child back is an ordinary move to the track.
+    """
+    if enrollment.trial_lesson_date:
+        raise ValueError('שיעור ניסיון — אין בו ימים להחליף')
+    rows = sibling_unit_enrollments(enrollment)
+    bundle = enrollment.bundle
+    if (
+        bundle is None
+        or len(rows) < 2
+        or all(row.id != enrollment.id for row in rows)
+        or any(row.bundle_id != bundle.id for row in rows)
+    ):
+        raise ValueError('החלפת יום אחד אפשרית רק ברישום פעיל למסלול של פעמיים או שלוש בשבוע')
+    if new_lesson.status == 'cancelled':
+        raise ValueError('השיעור שנבחר מבוטל')
+    if any(row.lesson_id == new_lesson.id for row in rows):
+        raise ValueError('הילד כבר רשום לשיעור הזה במסלול')
+    if new_lesson.course.branch_id != enrollment.lesson.course.branch_id:
+        raise ValueError('אפשר להחליף יום רק לשיעור באותו סניף')
+    # A row of the child's own on that lesson that is live — a class paid for
+    # apart, or a trial still ahead — must not be swallowed into the track.
+    live = LessonEnrollment.objects.filter(
+        child=enrollment.child, lesson=new_lesson, status__in=('active', 'payments_problem'),
+    ).first()
+    if live is not None:
+        if live.trial_lesson_date:
+            raise ValueError('לילד יש שיעור ניסיון בשיעור הזה — יש לבטל אותו קודם')
+        raise ValueError('הילד כבר רשום לשיעור הזה')
+    kept = [row.lesson for row in rows if row.id != enrollment.id]
+    # The days that stay come first: the move points the payments at the first
+    # lesson of the unit, and that must remain the track's own lesson.
+    return kept + [new_lesson], bundle
+
+
+def swap_note(*, old_lesson: Lesson, new_lesson: Lesson, who: str = '', reason: str = '', today: date | None = None) -> str:
+    """'15.10.2026 · יום מוחלף: רביעי 16:00 (…) ← חמישי 17:00 (…) · המחיר לא השתנה · …'."""
+    def label(lesson: Lesson) -> str:
+        when = f"{lesson.get_day_of_week_display()} {lesson.start_time.strftime('%H:%M') if lesson.start_time else ''}".strip()
+        about = ' · '.join(part for part in (
+            lesson.course.name,
+            lesson.instructor.full_name if lesson.instructor_id else '',
+        ) if part)
+        return f'{when} ({about})' if about else when
+
+    day = today or date.today()
+    parts = [
+        day.strftime('%d.%m.%Y'),
+        f'יום מוחלף: {label(old_lesson)} ← {label(new_lesson)}',
+        'המחיר לא השתנה',
+    ]
+    if who:
+        parts.append(who)
+    if reason:
+        parts.append(f'סיבה: {reason}')
+    return ' · '.join(parts)
+
+
 def _same_unit(old_rows: list[LessonEnrollment], target_lessons: list[Lesson], target_bundle: LessonBundle | None) -> bool:
     old_ids = {row.lesson_id for row in old_rows}
     new_ids = {lesson.id for lesson in target_lessons}
@@ -134,7 +202,18 @@ def replace_unit(
                 row.start_date = today
             row.bundle = target_bundle
             row.end_date = None
-            row.save(update_fields=['status', 'start_date', 'bundle', 'end_date', 'updated_at'])
+            fields = ['status', 'start_date', 'bundle', 'end_date', 'updated_at']
+            if row.trial_lesson_date and not enrollment.trial_lesson_date and row.id not in {old.id for old in old_rows}:
+                # An old trial row on the target lesson is taken as the regular
+                # place. Left with its trial date it reads as a trial — off the
+                # register after that date, outside the unit — the same thing
+                # enroll_child_in_paid_lessons clears when a trial turns paid.
+                from apps.core.payment_service import _record_trial_outcome_before_conversion
+
+                _record_trial_outcome_before_conversion(row, today)
+                row.trial_lesson_date = None
+                fields += ['trial_lesson_date', 'trial_outcome']
+            row.save(update_fields=fields)
             kept.append(row)
             claimed.add(row.id)
 

@@ -115,6 +115,7 @@ def _serialize_lesson_enrollment(enrollment):
         'instructor_name': lesson.instructor.full_name if lesson.instructor else None,
         'status': enrollment.status,
         'bundle_id': str(enrollment.bundle_id) if enrollment.bundle_id else None,
+        **_track_of(enrollment),
         'trial_lesson_date': (
             enrollment.trial_lesson_date.isoformat()
             if enrollment.trial_lesson_date else None
@@ -122,6 +123,29 @@ def _serialize_lesson_enrollment(enrollment):
         'trial_outcome': enrollment.trial_outcome or None,
         'trial_number': enrollment.trial_number,
         'scheduled_change': _scheduled_change_for(enrollment),
+    }
+
+
+def _track_of(enrollment) -> dict:
+    """
+    The track a row belongs to, so the screens show one registration per track.
+
+    A day swapped out of a track (change_course.swap_day_targets) sits on another
+    group's lesson with the track's bundle; without the track's own course the
+    customers page grouped it by its lesson's group and showed it as a second,
+    unpaid registration.
+    """
+    bundle = enrollment.bundle if enrollment.bundle_id else None
+    if bundle is None:
+        return {'track_course_id': None, 'track_course_name': None, 'swapped_day': False}
+    members = getattr(bundle, '_prefetched_objects_cache', {}).get('lessons')
+    member_ids = {lesson.id for lesson in members} if members is not None else set(
+        bundle.lessons.values_list('id', flat=True)
+    )
+    return {
+        'track_course_id': str(bundle.course_id),
+        'track_course_name': bundle.course.name,
+        'swapped_day': enrollment.lesson_id not in member_ids,
     }
 
 

@@ -53,6 +53,29 @@ def _is_trial_registration(request, validated_data) -> bool:
     return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _wants_swap_day(request) -> bool:
+    """`swap_day` in a change body: replace one day of a track, keep the others."""
+    raw = request.data.get('swap_day')
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _note_swapped_day(request, *, kept, old_lesson, new_lesson) -> None:
+    """Write on the replacement row which day it stands for, when, by whom and why."""
+    from apps.enrollments.change_course import swap_note
+
+    row = next((item for item in kept if item.lesson_id == new_lesson.id), None)
+    if row is None:
+        return
+    user = request.user if request.user.is_authenticated else None
+    who = ((user.get_full_name() or user.email or user.username) if user else '').strip()
+    reason = str(request.data.get('reason') or '').strip()[:300]
+    line = swap_note(old_lesson=old_lesson, new_lesson=new_lesson, who=who, reason=reason)
+    row.notes = f'{row.notes.rstrip()}\n{line}' if (row.notes or '').strip() else line
+    row.save(update_fields=['notes', 'updated_at'])
+
+
 def _existing_row(lesson_id, child_id):
     """The (lesson, child) row a trial registration would collide with, if any."""
     if not lesson_id or not child_id:
@@ -310,14 +333,20 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             ],
         })
 
-    def _resolve_change_target(self, request):
+    def _resolve_change_target(self, request, enrollment=None):
         """(target_lessons, target_bundle) for a non-trial change body, or raise LookupError/ValueError."""
         from apps.courses.models import Course, LessonBundle
-        from apps.enrollments.change_course import course_unit_lessons, matching_bundle
+        from apps.enrollments.change_course import course_unit_lessons, matching_bundle, swap_day_targets
 
         course_id = (request.data.get('course_id') or request.data.get('course') or '').strip()
         new_lesson_id = (request.data.get('lesson_id') or request.data.get('lesson') or '').strip()
         bundle_id = (request.data.get('bundle_id') or request.data.get('bundle') or '').strip()
+        if _wants_swap_day(request):
+            # One day of a track for another lesson; the other days stay.
+            if not new_lesson_id or enrollment is None:
+                raise ValueError('יש לבחור את השיעור שיחליף את היום')
+            lesson = Lesson.objects.select_related('course', 'course__branch', 'room', 'instructor').get(pk=new_lesson_id)
+            return swap_day_targets(enrollment, lesson)
         if bundle_id:
             bundle = (
                 LessonBundle.objects
@@ -347,9 +376,11 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         if enrollment.trial_lesson_date:
             return Response({'direction': 'no_sto', 'blocked': 'שיעור ניסיון — אין תמחור'})
         try:
-            target_lessons, target_bundle = self._resolve_change_target(request)
+            target_lessons, target_bundle = self._resolve_change_target(request, enrollment)
         except (Course.DoesNotExist, Lesson.DoesNotExist, LessonBundle.DoesNotExist, DjangoValidationError, TypeError):
             return Response({'error': 'החוג לא נמצא'}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if not target_lessons:
             return Response({'error': 'לא נמצאו שיעורים בחוג שנבחר'}, status=status.HTTP_400_BAD_REQUEST)
         try:
@@ -387,7 +418,7 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         from apps.courses.models import Course, LessonBundle
         from apps.customers.serializers import _serialize_lesson_enrollment, propagate_scheduled_change
         from apps.enrollments.change_course import move_trial_enrollment, replace_course_unit, replace_unit
-        from apps.enrollments.change_pricing import ChangePricingError, apply_unit_change
+        from apps.enrollments.change_pricing import ChangePricingError, apply_unit_change, quote_unit_change
 
         enrollment = self.get_object()
         course_id = (request.data.get('course_id') or request.data.get('course') or '').strip()
@@ -395,6 +426,10 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
         bundle_id = (request.data.get('bundle_id') or request.data.get('bundle') or '').strip()
         if not course_id and not new_lesson_id and not bundle_id:
             return Response({'error': 'יש לבחור חוג'}, status=status.HTTP_400_BAD_REQUEST)
+        swap_day = _wants_swap_day(request)
+        if swap_day and enrollment.trial_lesson_date:
+            return Response({'error': 'שיעור ניסיון — אין בו ימים להחליף'}, status=status.HTTP_400_BAD_REQUEST)
+        old_lesson = enrollment.lesson
 
         if enrollment.trial_lesson_date:
             if bundle_id:
@@ -448,12 +483,20 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             if not expected.is_finite():
                 return Response({'error': 'סכום לא תקין'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            target_lessons, target_bundle = self._resolve_change_target(request)
+            target_lessons, target_bundle = self._resolve_change_target(request, enrollment)
             if not target_lessons:
                 return Response({'error': 'לא נמצאו שיעורים בחוג שנבחר'}, status=status.HTTP_400_BAD_REQUEST)
             if not bundle_id and not new_lesson_id and str(target_lessons[0].course_id) == str(enrollment.lesson.course_id):
                 result = replace_course_unit(enrollment=enrollment, new_course=target_lessons[0].course)
                 result = {**result, 'applied': 'now', 'charged': None, 'quote': None}
+            elif swap_day and quote_unit_change(
+                enrollment=enrollment, target_lessons=target_lessons, target_bundle=target_bundle,
+            )['direction'] in ('up', 'down'):
+                # The track and its price stay; a swap that would reprice is not a swap.
+                return Response(
+                    {'error': 'החלפת יום אחד לא משנה את המחיר — לשינוי מחיר יש להעביר את כל המסלול'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             else:
                 result = apply_unit_change(
                     enrollment=enrollment,
@@ -473,6 +516,8 @@ class LessonEnrollmentViewSet(viewsets.ModelViewSet):
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         kept = result['kept']
+        if swap_day and not result.get('unchanged') and result.get('applied') == 'now':
+            _note_swapped_day(request, kept=kept, old_lesson=old_lesson, new_lesson=target_lessons[-1])
         primary = next((row for row in kept if row.id == enrollment.id), kept[0])
         data = dict(self.get_serializer(primary).data)
         data['enrollments'] = propagate_scheduled_change([_serialize_lesson_enrollment(row) for row in kept])
