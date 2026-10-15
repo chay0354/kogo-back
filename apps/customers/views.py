@@ -609,8 +609,13 @@ class ChildViewSet(viewsets.ModelViewSet):
 
         Body: {child_ids: [...] (≤ BROADCAST_MAX_CHILDREN), automation_type: 'kind'|'flow',
                automation_id, dry_run (default true), skip_phones: [...],
-               include_extra_phones (default false)}.
+               include_extra_phones (default false), marketing (default true)}.
         Manager only. Nothing is sent unless dry_run is explicitly false.
+
+        `marketing` is the office's word on what the message is: marketing skips
+        whoever asked "הסר", anything else (an update, a service message) reaches
+        them too. Only an explicit false makes it not marketing — a screen that
+        does not ask (an older one) keeps skipping them.
 
         The family's extra phones get the message only when the request asks
         (include_extra_phones: true) — the screen that shows and counts them
@@ -630,6 +635,12 @@ class ChildViewSet(viewsets.ModelViewSet):
             or (isinstance(raw_dry_run, str) and raw_dry_run.strip().lower() in ('false', '0', 'no'))
         )
         include_extras = request.data.get('include_extra_phones') is True
+        # Like dry_run: only an explicit false turns it off — the side a message that cannot be taken back is safe on.
+        raw_marketing = request.data.get('marketing', True)
+        marketing = not (
+            raw_marketing is False
+            or (isinstance(raw_marketing, str) and raw_marketing.strip().lower() in ('false', '0', 'no'))
+        )
         lesson_hint = str(request.data.get('lesson_id') or '').strip() or None
         day_hint = request.data.get('day_of_week')
         try:
@@ -690,6 +701,7 @@ class ChildViewSet(viewsets.ModelViewSet):
                 lesson_id=lesson_hint,
                 day_of_week=day_hint,
                 include_extra_phones=include_extras,
+                marketing=marketing,
             )
         except OptOutListUnavailable as exc:
             # The list of who asked "הסר" could not be read: nothing was sent, to anybody.

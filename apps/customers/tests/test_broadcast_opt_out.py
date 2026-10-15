@@ -107,6 +107,100 @@ class BroadcastOptOutTest(_Studio):
         self.assertEqual(read.call_count, 1)
 
 
+class MarketingOrNotTest(_Studio):
+    """
+    The office says whether a broadcast is marketing (15.10.2026). Marketing skips whoever asked "הסר", as before;
+    an update or a service message reaches them too, and the answer says how many of them got it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        # Dana Cohen (Noa + Ido) asked "הסר"; her mother is an extra phone of the family and did not.
+        whatsapp_optout.add('050-111-1111', source=WhatsAppOptOut.SOURCE_MESSAGE, text='הסר')
+        self.grandma = Parent.objects.create(family=self.cohen, first_name='סבתא', last_name='רחל', phone='052-555-6666')
+
+    def _post(self, **body):
+        payload = {
+            'child_ids': [str(self.noa.id), str(self.ido.id), str(self.tom.id)],
+            'automation_type': 'kind', 'automation_id': 'subscription',
+        }
+        payload.update(body)
+        return self.client.post(BROADCAST_URL, payload, format='json')
+
+    def test_a_request_that_does_not_say_is_marketing_as_it_always_was(self):
+        for body in ({}, {'marketing': True}, {'marketing': None}, {'marketing': ''}, {'marketing': 'maybe'}):
+            with self.subTest(**body):
+                res = self._post(**body)
+                self.assertEqual(res.status_code, 200, res.content)
+                self.assertIs(res.data['marketing'], True)
+                self.assertEqual((res.data['preview_count'], res.data['opted_out'], res.data['included_opted_out']), (1, 2, 0))
+                noa = next(row for row in res.data['results'] if row['child_name'] == 'Noa Cohen')
+                self.assertEqual((noa['status'], noa['reason'], noa['opted_out']), ('skipped', 'opted_out', True))
+
+    def test_not_marketing_reaches_them_too_and_says_how_many(self):
+        res = self._post(marketing=False)
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertIs(res.data['marketing'], False)
+        by_name = {row['child_name']: row for row in res.data['results']}
+        self.assertEqual((by_name['Noa Cohen']['status'], by_name['Noa Cohen']['opted_out']), ('preview', True))
+        # The sibling on the same phone: one message per phone, as for everybody.
+        self.assertEqual((by_name['Ido Cohen']['status'], by_name['Ido Cohen']['reason']), ('skipped', 'duplicate_phone'))
+        self.assertNotIn('opted_out', by_name['Tom Levi'])
+        self.assertEqual(
+            (res.data['preview_count'], res.data['skipped'], res.data['opted_out'], res.data['included_opted_out']), (2, 1, 0, 1),
+        )
+        self.assertEqual(res.data['phones'], ['972501111111', '972502222222'])
+
+    def test_the_real_send_of_a_message_that_is_not_marketing(self):
+        with CONFIGURED, patch('apps.customers.broadcast.ManyChatService.notify_registration', return_value=SENT) as send:
+            res = self._post(dry_run=False, marketing='false')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual([call.kwargs['phone'] for call in send.call_args_list], ['0501111111', '0502222222'])
+        self.assertEqual((res.data['sent'], res.data['opted_out'], res.data['included_opted_out']), (2, 0, 1))
+        self.assertEqual(res.data['total'], res.data['sent'] + res.data['failed'] + res.data['skipped'])
+
+    def test_an_extra_phone_that_asked_gets_a_message_that_is_not_marketing(self):
+        whatsapp_optout.restore('0501111111')
+        whatsapp_optout.add('0525556666', source=WhatsAppOptOut.SOURCE_OFFICE)
+        body = dict(child_ids=[str(self.noa.id)], dry_run=False, include_extra_phones=True)
+        with CONFIGURED, patch('apps.customers.broadcast.ManyChatService.notify_registration', return_value=SENT) as send:
+            marketing = self._post(**body)
+            service = self._post(**body, marketing=False)
+        self.assertEqual([call.kwargs['phone'] for call in send.call_args_list], ['0501111111', '0501111111', '052-555-6666'])
+        self.assertEqual((marketing.data['extra_opted_out'], marketing.data['extra_included_opted_out']), (1, 0))
+        extra = service.data['results'][0]['extra_phones'][0]
+        self.assertEqual((extra['status'], extra['opted_out']), ('sent', True))
+        self.assertEqual((service.data['extra_sent'], service.data['extra_opted_out'], service.data['extra_included_opted_out']), (1, 0, 1))
+        self.assertEqual(service.data['included_opted_out'], 0)
+
+    def test_a_template_with_no_lesson_is_skipped_for_its_own_reason_whatever_the_kind(self):
+        idle = _child(self.cohen, 'Idle')
+        out = broadcast_to_children([idle], automation_type='kind', automation_id='subscription', marketing=False)
+        row = out['results'][0]
+        self.assertEqual((row['status'], row['reason']), ('skipped', 'no_active_lesson'))
+        self.assertEqual((out['opted_out'], out['included_opted_out']), (0, 0))
+
+    def test_the_kind_of_message_is_in_the_log(self):
+        with self.assertLogs('apps.customers.broadcast', level='INFO') as logged:
+            broadcast_to_children([self.noa, self.tom], automation_type='kind', automation_id='subscription', marketing=False)
+            broadcast_to_children([self.noa, self.tom], automation_type='kind', automation_id='subscription')
+        lines = [line for line in logged.output if 'Customers broadcast' in line]
+        self.assertEqual(len(lines), 2)
+        self.assertIn('not marketing message (dry run)', lines[0])
+        self.assertIn('included 1', lines[0])
+        self.assertIn('— marketing message (dry run)', lines[1])
+        self.assertIn('skipped 1, included 0', lines[1])
+        # Counts only: no phone and no name goes into the log.
+        self.assertFalse(any('972501111111' in line or 'Noa' in line for line in lines))
+
+    def test_when_the_list_cannot_be_read_nothing_leaves_whatever_the_kind(self):
+        with CONFIGURED, LIST_DOWN, patch('apps.customers.broadcast.ManyChatService.notify_registration') as kind:
+            res = self._post(dry_run=False, marketing=False)
+        self.assertEqual((res.status_code, res.data['code']), (503, 'opt_out_list_unavailable'))
+        kind.assert_not_called()
+
+
 class FromTheMessageToTheBroadcastTest(_Studio):
     """The whole chain, as it runs: ManyChat's copy of a parent's "הסר" comes in, and the next broadcast skips her."""
 

@@ -300,7 +300,7 @@ class OpeningsTests(NoOneLostCase):
     def test_a_class_that_opened_moves_the_lead_to_the_office_with_what_to_offer(self):
         contact = self.kept()
         self.assertEqual((contact.lead_stage, contact.lead_owner), ('nothing_to_offer', ''))
-        self.assertEqual(self.next_of(contact)['what'], 'נבדק כל יום — כשייפתח חוג שמתאים, יעבור אליך')
+        self.assertEqual(self.next_of(contact)['what'], 'נבדק כל יום — אם ייפתח חוג שמתאים, הליד יחזור אליך')
         # Nothing open today: only the day of the look is kept.
         self.assertEqual(lead_openings.check(), {'openings_checked': 1, 'openings_found': 0})
         self.assertEqual(self.fresh(contact).lead_opened, {'checked_on': '2026-10-12'})
@@ -313,7 +313,9 @@ class OpeningsTests(NoOneLostCase):
         self.assertEqual(after.lead_opened, {
             'checked_on': '2026-10-13', 'found_at': self.clock().isoformat(), 'what': 'נפתח: קפוארה גן חובה בראש העין',
         })
-        self.assertEqual((after.lead_stage, after.lead_owner), ('nothing_to_offer', 'office'))
+        # Open again, the office's question (15.10.2026) — from the moment the class was found.
+        self.assertEqual((after.lead_stage, after.lead_owner), ('needs_reply', 'office'))
+        self.assertEqual(after.lead_stage_since, self.clock())
         self.assertEqual(after.lead_next_step, 'נפתח: קפוארה גן חובה בראש העין — להציע לו')
         self.assertIn('נפתח: קפוארה גן חובה בראש העין', after.lead_reason)
         self.assertEqual(self.next_of(after), {
@@ -422,6 +424,180 @@ class OpeningsTests(NoOneLostCase):
         self.assertEqual(self.fresh(contact).lead_owner, 'office')
         with override_settings(ANTHROPIC_API_KEY=''):
             self.assertEqual(cron.tick()['openings_checked'], 0)
+
+
+# --- ט. nothing to offer is closed: "לא רלוונטי · אין מה להציע" (15.10.2026) ------------------------------
+
+class NothingToOfferClosedTests(NoOneLostCase):
+    """
+    The owner, 15.10.2026: a lead with nothing to offer is no lead the bot handles. It is closed — "לא רלוונטי ·
+    אין מה להציע", under "נסגרו", nobody's step and no follow-up of the bot's — and the daily look goes on: a class
+    that fits opens, and it is an open question of the office's again ("נפתח: … — להציע לו").
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.branch = TestDataFactory.create_branch(name='ראש העין', city=TestDataFactory.create_city('ראש העין'))
+        self.capoeira = TestDataFactory.create_course_type('קפוארה')
+
+    def open_a_class(self, name='קפוארה גן חובה'):
+        course = TestDataFactory.create_course(
+            name=name, branch=self.branch, course_type=self.capoeira, price=Decimal('260.00'), min_age=2, max_age=2,
+        )
+        TestDataFactory.create_lesson(course=course, day_of_week=2, start_time=time(17, 0), end_time=time(17, 45))
+
+    def kept(self, wrote=HOUR, **fields) -> Contact:
+        """Asked about capoeira for a five-year-old in Rosh HaAyin; the group is full."""
+        row = dict(known_child_age='5', said={'blocker': 'full', 'blocker_text': 'הקבוצה מלאה'})
+        row.update(fields)
+        return self.staged(self.lead(wrote, **row))
+
+    def listed(self, owner, **params) -> dict:
+        return {row['contact_id']: row for row in self.get('leads/', owner=owner, **params).data['results']}
+
+    def test_closed_in_its_new_words_and_the_bubble_says_what_becomes_of_it(self):
+        contact = self.kept()
+        result = lead_stage.compute(contact, self.clock())
+        self.assertEqual(
+            (result['stage'], result['group'], result['label'], result['owner'], result['follow'], result['next_step']),
+            ('nothing_to_offer', 'closed', 'לא רלוונטי · אין מה להציע', '', None, ''),
+        )
+        # No clock moves a closed lead: it is not looked at again at midnight.
+        self.assertEqual((contact.lead_owner, contact.lead_next_step, contact.lead_recheck_at), ('', '', None))
+        row = self.get(f'leads/{contact.id}/').data
+        self.assertEqual((row['stage'], row['stage_label'], row['list'], row['list_label']), (
+            'nothing_to_offer', 'לא רלוונטי · אין מה להציע', 'closed', 'נסגרו',
+        ))
+        # Closed, and nobody's step — but not over: the row says it is looked at every day, and comes back.
+        self.assertEqual(row['next'], {
+            'who': 'none', 'what': 'נבדק כל יום — אם ייפתח חוג שמתאים, הליד יחזור אליך', 'when': None, 'state': 'none',
+            'note': '', 'hold': '',
+        })
+        # The conversation's own copy of the stage says the same.
+        lead = self.get(f'contacts/{contact.id}/').data['lead']
+        self.assertEqual((lead['stage'], lead['stage_label'], lead['group']), ('nothing_to_offer', 'לא רלוונטי · אין מה להציע', 'closed'))
+        board = {group['key']: {stage['key']: stage for stage in group['stages']} for group in lead_stage.board()['groups']}
+        self.assertNotIn('nothing_to_offer', board['wait'])
+        self.assertEqual(board['closed']['nothing_to_offer']['label'], 'לא רלוונטי · אין מה להציע')
+        self.assertEqual(
+            board['closed']['nothing_to_offer']['hint'],
+            'אין סניף באזור, אין חוג לגיל, או שהחוג מלא. אם ייפתח חוג שמתאים, הליד יחזור אליך',
+        )
+
+    def test_not_under_the_bot_nor_waiting_for_you_and_counted_with_the_closed(self):
+        by_the_bot = self.link_lead(3 * HOUR)
+        for_you = self.staged(self.lead(2 * HOUR, answer=None))
+        contact = self.kept()
+        for apart in ({}, {'waiting': 'apart'}):
+            with self.subTest(**apart):
+                answer = self.get('leads/', owner='bot', **apart).data
+                self.assertEqual(
+                    {key: answer['counts'][key] for key in ('office', 'bot', 'closed')}, {'office': 1, 'bot': 1, 'closed': 1},
+                )
+                self.assertEqual(set(self.listed('bot', **apart)), {by_the_bot.id})
+                self.assertEqual(set(self.listed('office', **apart)), {for_you.id})
+        self.assertEqual(set(self.listed('closed')), {contact.id})
+        self.assertEqual(self.get('leads/', owner='closed').data['stages'], [
+            {'key': 'nothing_to_offer', 'label': 'לא רלוונטי · אין מה להציע', 'count': 1},
+        ])
+        # The conversations' filter by group agrees.
+        groups = {
+            group: [row['id'] for row in self.get('contacts/', lead_group=group).data['results']]
+            for group in ('wait', 'closed')
+        }
+        self.assertIn(contact.id, groups['closed'])
+        self.assertNotIn(contact.id, groups['wait'])
+
+    def test_no_follow_up_ever_and_it_does_not_go_cold(self):
+        # Even with a registration link and a ManyChat contact: nothing to offer comes first, and the bot starts nothing.
+        contact = self.kept(lead_link_sent_at=self.clock() - HOUR, manychat_subscriber_id='4242')
+        self.assertEqual(contact.lead_stage, 'nothing_to_offer')
+        self.assertEqual(self.rows(contact), [])
+        self.clock.forward(days=40)
+        lead_stage.refresh(contact)
+        lead_followups.run()
+        after = self.fresh(contact)
+        self.assertEqual((after.lead_stage, after.lead_owner, self.rows(contact)), ('nothing_to_offer', '', []))
+        self.assertEqual(self.manychat.asked, [])
+
+    def test_the_message_to_the_dormant_is_still_only_for_the_dormant(self):
+        from apps.wahub import knowledge
+
+        cold = self.staged(self.lead(40 * DAY, is_demo=True, source='demo'))
+        contact = self.kept(40 * DAY, is_demo=True, source='demo')
+        self.assertEqual((cold.lead_stage, contact.lead_stage), ('cold', 'nothing_to_offer'))
+        settings_store.put(settings_store.LEAD_DORMANT_ON, TODAY.isoformat())
+        knowledge.create_item({'kind': 'phrasing', 'key': 'lead_dormant', 'title': 'נפתחה הרשמה', 'body': 'היי, נפתחה ההרשמה 🙂'})
+        self.assertEqual(lead_followups.plan_dormant(self.clock()), 1)
+        self.assertEqual([row.kind for row in self.rows(cold)], ['dormant'])
+        self.assertEqual(self.rows(contact), [])
+
+    def test_the_waiting_list_stands_above_it_as_it_did(self):
+        waiting = {'status': 'waiting', 'label': 'קפוארה גן חובה, יום שלישי 17:00', 'since': self.clock().isoformat()}
+        contact = self.kept(lead_waiting=waiting)
+        self.assertEqual(lead_stage.compute(contact, self.clock())['group'], 'wait')
+        row = self.get(f'leads/{contact.id}/').data
+        self.assertEqual((row['stage'], row['list']), ('waiting_list', 'waiting'))
+
+    def test_a_class_that_opened_is_an_open_question_of_the_offices_and_stays_one(self):
+        self.open_a_class()
+        contact = self.kept()
+        self.assertEqual(lead_openings.check()['openings_found'], 1)
+        after = self.fresh(contact)
+        self.assertEqual((after.lead_stage, after.lead_owner, after.lead_stage_since), ('needs_reply', 'office', self.clock()))
+        self.assertEqual(after.lead_next_step, 'נפתח: קפוארה גן חובה בראש העין — להציע לו')
+        row = self.get(f'leads/{contact.id}/').data
+        self.assertEqual((row['stage'], row['stage_label'], row['list']), ('needs_reply', 'נפתח חוג שמתאים', 'office'))
+        self.assertEqual(set(self.listed('office')), {contact.id})
+        counts = self.get('leads/', owner='office').data['counts']
+        self.assertEqual((counts['office'], counts['bot'], counts['closed']), (1, 0, 0))
+        self.assertTrue(ContactEvent.objects.filter(
+            contact=contact, kind='lead_stage_changed', text__startswith='לא רלוונטי · אין מה להציע ← נפתח חוג שמתאים',
+        ).exists())
+        # It stays the office's: after midnight, and when the rules are run again.
+        self.clock.forward(days=1)
+        lead_stage.scan()
+        lead_stage.refresh(contact)
+        again = self.fresh(contact)
+        self.assertEqual((again.lead_stage, again.lead_owner, again.lead_stage_since), ('needs_reply', 'office', after.lead_stage_since))
+        # ...and the daily look leaves it alone while it is: it is no longer "nothing to offer".
+        self.assertEqual(lead_openings.check(), {'openings_checked': 0, 'openings_found': 0})
+        # Nothing goes to the customer by itself.
+        self.assertEqual((self.rows(contact), self.manychat.asked), ([], []))
+
+    def test_once_the_office_dealt_with_it_it_is_closed_again_and_looked_at_every_day(self):
+        self.open_a_class()
+        contact = self.kept()
+        lead_openings.check()
+        self.clock.forward(minutes=30)
+        Contact.objects.filter(pk=contact.pk).update(followup_status='answered', followup_at=self.clock(), followup_by=self.manager)
+        lead_stage.refresh(contact)
+        self.assertEqual((self.fresh(contact).lead_stage, self.fresh(contact).lead_owner), ('nothing_to_offer', ''))
+        self.assertEqual(set(self.listed('closed')), {contact.id})
+        self.clock.forward(days=1)
+        self.assertEqual(lead_openings.check(), {'openings_checked': 1, 'openings_found': 0})
+        self.assertEqual(self.fresh(contact).lead_stage, 'nothing_to_offer')
+
+    def test_version_6_of_the_rules_reaches_the_leads_already_there(self):
+        self.assertEqual(lead_stage.RULES_VERSION, 6)
+        # As version 5 left them: one waiting for a class, and one whose class had opened (still "nothing to offer",
+        # the office's), both in the group "בתהליך".
+        waiting = self.kept()
+        opened = self.kept()
+        found_at = self.clock() - HOUR
+        Contact.objects.filter(pk=waiting.pk).update(lead_version=5, lead_recheck_at=self.clock() + DAY)
+        Contact.objects.filter(pk=opened.pk).update(
+            lead_version=5, lead_owner='office', lead_stage_since=self.clock() - DAY,
+            lead_opened={'checked_on': TODAY.isoformat(), 'found_at': found_at.isoformat(), 'what': 'נפתח: קפוארה גן חובה בראש העין'},
+            lead_next_step='נפתח: קפוארה גן חובה בראש העין — להציע לו',
+        )
+        self.assertEqual(lead_stage.pending_count(), 2)
+        lead_stage.scan()
+        self.assertEqual(lead_stage.pending_count(), 0)
+        waiting, opened = self.fresh(waiting), self.fresh(opened)
+        self.assertEqual((waiting.lead_stage, waiting.lead_owner, waiting.lead_version, waiting.lead_recheck_at), ('nothing_to_offer', '', 6, None))
+        self.assertEqual((opened.lead_stage, opened.lead_owner, opened.lead_version), ('needs_reply', 'office', 6))
+        self.assertEqual((opened.lead_stage_since, opened.lead_next_step), (found_at, 'נפתח: קפוארה גן חובה בראש העין — להציע לו'))
 
 
 # --- the templates found by name, kept fresh by the cron for the leads list ---------------------------------

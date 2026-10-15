@@ -17,7 +17,7 @@ from apps.wahub.models import (
     HANDLED_HUMAN,
     HIDDEN_OUTCOMES,
     INTEREST_CHOICES,
-    LEAD_STAGE_CHOICES,
+    LEAD_NEEDS_REPLY,
     LEAD_STAGE_GROUPS,
     LEAD_TRIAL_DONE,
     LEGACY_LEAD_STAGES,
@@ -45,7 +45,6 @@ OUTCOME_LABELS = dict(OUTCOME_CHOICES)
 FOLLOWUP_LABELS = dict(FOLLOWUP_CHOICES)
 SENDER_LABELS = dict(SENDER_CHOICES)
 EVENT_LABELS = dict(EVENT_KIND_CHOICES)
-LEAD_STAGE_LABELS = dict(LEAD_STAGE_CHOICES)
 UNCHECKED_LABEL = 'עוד לא נבדק'
 
 
@@ -58,14 +57,19 @@ def outcome_label(contact: Contact, unchecked: str = '') -> str:
 
 def stage_label(contact: Contact, stage: str) -> str:
     """
-    The stage in words. A walk-in is in the stage of a trial nobody registered
-    after — its round is that one — but it was no trial lesson, and is said so.
+    The stage in words — the screens' words (lead_stage.STAGE_LABELS), which
+    are not always the stored choice's. A walk-in is in the stage of a trial
+    nobody registered after — its round is that one — but it was no trial
+    lesson, and is said so. A question for the office that is a class which
+    opened for a lead with nothing to offer is said so too.
     """
-    from apps.wahub import matching
+    from apps.wahub import lead_stage, matching
 
     if stage == LEAD_TRIAL_DONE and matching.is_walk_in(contact):
         return WALK_IN_LABEL
-    return LEAD_STAGE_LABELS.get(stage, '')
+    if stage == LEAD_NEEDS_REPLY and lead_stage.opening_found(contact) is not None:
+        return lead_stage.OPENED_LABEL
+    return lead_stage.STAGE_LABELS.get(stage, '')
 # "What they asked" on the list of those who did not register: a line, not a conversation.
 ASKED_CHARS = 160
 

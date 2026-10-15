@@ -262,10 +262,12 @@ class ClosedStageTests(LeadStageTestCase):
         self.assertEqual((marked['stage'], marked['group'], marked['label']), ('not_interested', 'closed', 'לא מעוניין'))
         self.assertEqual((marked['reason'], marked['next_step']), (f'הצוות סימן "לא רלוונטי" ב-{self.day(self.today)}.', ''))
 
-        # No branch nearby is kept, not closed: "אין כרגע מה להציע" (docs/WAHUB-CONTRACT-LEADS-V2.md, ב).
+        # No branch nearby is closed since 15.10.2026 — "לא רלוונטי · אין מה להציע" — and looked at every day
+        # (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md, ט).
         asked_on = self.day(self.today - timedelta(days=1))
         far = self.stage(self.lead(DAY, known_city='חולון', known_branch_name='', known_flags=['no_branch_nearby']))
-        self.assertEqual((far['stage'], far['group']), ('nothing_to_offer', 'wait'))
+        self.assertEqual((far['stage'], far['group'], far['label']), ('nothing_to_offer', 'closed', 'לא רלוונטי · אין מה להציע'))
+        self.assertEqual((far['owner'], far['follow'], far['next_step']), ('', None, ''))
         self.assertEqual(far['reason'], f'שאל על קפוארה בחולון ב-{asked_on}. אין סניף באזור שלו.')
 
         # "Not now" in the older summary is no "not interested": that takes the customer's own words.
@@ -347,8 +349,8 @@ class WordsTests(LeadStageTestCase):
                 'signup_stuck', 'needs_reply', 'signup_failed', 'signup_started', 'link_sent', 'trial_no_show', 'trial_done',
                 'callback_due', 'answered_silent',
             ],
-            'wait': ['will_check', 'trial_booked', 'waiting_date', 'waiting_list', 'nothing_to_offer', 'in_conversation'],
-            'closed': ['registered', 'customer', 'not_interested', 'deleted', 'cold'],
+            'wait': ['will_check', 'trial_booked', 'waiting_date', 'waiting_list', 'in_conversation'],
+            'closed': ['nothing_to_offer', 'registered', 'customer', 'not_interested', 'deleted', 'cold'],
         })
         self.assertEqual(set(lead_stage.STAGE_OWNERS), set(keys))
         # Every stage that asks for something says what; a closed one asks for nothing.
@@ -950,8 +952,8 @@ class BoardTests(ApiTestCase):
                     'signup_stuck', 'needs_reply', 'signup_failed', 'signup_started', 'link_sent', 'trial_no_show',
                     'trial_done', 'callback_due', 'answered_silent',
                 ],
-                ['will_check', 'trial_booked', 'waiting_date', 'waiting_list', 'nothing_to_offer', 'in_conversation'],
-                ['registered', 'customer', 'not_interested', 'deleted', 'cold'],
+                ['will_check', 'trial_booked', 'waiting_date', 'waiting_list', 'in_conversation'],
+                ['nothing_to_offer', 'registered', 'customer', 'not_interested', 'deleted', 'cold'],
             ],
         )
         first = data['groups'][0]['stages'][1]

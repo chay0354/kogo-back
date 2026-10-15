@@ -207,7 +207,9 @@ LEAD_STAGE_GROUPS = {
     LEAD_TRIAL_BOOKED: LEAD_GROUP_WAIT,
     LEAD_WAITING_DATE: LEAD_GROUP_WAIT,
     LEAD_WAITING_LIST: LEAD_GROUP_WAIT,
-    LEAD_NOTHING_TO_OFFER: LEAD_GROUP_WAIT,
+    # Closed since 15.10.2026 (the owner: "לא רלוונטי" — not one of the bot's to follow): nobody has a step on it.
+    # The daily look at what opened goes on (lead_openings.py), and a class that fits brings it back to the office.
+    LEAD_NOTHING_TO_OFFER: LEAD_GROUP_CLOSED,
     LEAD_IN_CONVERSATION: LEAD_GROUP_WAIT,
     LEAD_REGISTERED: LEAD_GROUP_CLOSED,
     LEAD_CUSTOMER: LEAD_GROUP_CLOSED,

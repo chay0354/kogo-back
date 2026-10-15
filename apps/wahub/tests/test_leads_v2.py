@@ -725,8 +725,9 @@ class StageTests(LeadsCase):
         self.assertEqual((checking['follow']['kind'], checking['follow']['delays'], checking['follow']['hot']), ('will_check', (DAY,), True))
 
         nothing = self.stage(self.lead(said={'blocker': 'full', 'blocker_text': 'הקבוצה מלאה'}))
-        self.assertEqual((nothing['label'], nothing['group'], nothing['follow']), ('אין כרגע מה להציע', 'wait', None))
-        self.assertEqual(nothing['next_step'], 'אין מה לעשות עכשיו — לחזור אליו כשייפתח משהו מתאים')
+        # Closed since 15.10.2026: "לא רלוונטי", nobody's step — the daily look brings it back (rule 18).
+        self.assertEqual((nothing['label'], nothing['group'], nothing['follow']), ('לא רלוונטי · אין מה להציע', 'closed', None))
+        self.assertEqual((nothing['next_step'], nothing['owner']), ('', ''))
 
         link = self.stage(self.lead(lead_link_sent_at=self.clock() - HOUR))
         self.assertEqual((link['label'], link['group']), ('קיבל קישור ועוד לא נרשם', 'act'))
@@ -1134,7 +1135,7 @@ class LeadsApiTests(LeadsCase):
         self.assertEqual(next_of(self.placed(HOUR, kogo_outcome='trial_upcoming'))['what'], 'מחכים לשיעור הניסיון')
         # Nothing to offer: looked at every day (the lead's field, age and place are known — capoeira, 5, Rosh HaAyin).
         kept = self.placed(HOUR, known_child_age='5', said={'blocker': 'full', 'blocker_text': 'הקבוצה מלאה'})
-        self.assertEqual((next_of(kept)['who'], next_of(kept)['what']), ('none', 'נבדק כל יום — כשייפתח חוג שמתאים, יעבור אליך'))
+        self.assertEqual((next_of(kept)['who'], next_of(kept)['what']), ('none', 'נבדק כל יום — אם ייפתח חוג שמתאים, הליד יחזור אליך'))
         self.assertEqual(next_of(self.placed(HOUR))['what'], 'בשיחה עכשיו')
         # An external branch whose one round could not begin (it went quiet too long ago): it says why.
         outside = self.placed(20 * DAY, said={'external': True})
