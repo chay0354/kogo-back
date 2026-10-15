@@ -574,9 +574,17 @@ def answers_itself(contact: Contact) -> bool:
     return bool(contact.is_demo or contact.live_test or contact.handled_by == HANDLED_HUMAN)
 
 
+def bot_answers_seen(now=None) -> bool:
+    """
+    Kogo sees the bot's answers to real customers: the new bot has answered everybody since the switch (its answers
+    are Kogo's own), or ManyChat copies the old bot's.
+    """
+    return switched_at(now) is not None or old_bot_replies_seen(now)
+
+
 def replies_visible(contact: Contact, now=None) -> bool:
-    """Kogo sees the answers this contact gets: they are its own, or ManyChat copies the old bot's."""
-    return answers_itself(contact) or old_bot_replies_seen(now)
+    """Kogo sees the answers this contact gets: they are its own, or the bot's are seen (bot_answers_seen)."""
+    return answers_itself(contact) or bot_answers_seen(now)
 
 
 class _Facts:

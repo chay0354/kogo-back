@@ -453,6 +453,19 @@ class AutomationCardTests(AutomationCase):
         self.assertEqual(line['detail'], 'ליד פתוח אחד. תשובות הבוט לא מגיעות ל-Kogo — לכן לא ידוע מי כבר קיבל קישור להרשמה')
         self.assertIn('ManyChat', line['how'])
 
+    def test_after_the_switch_the_new_bots_answers_are_kogos_own_and_nothing_is_missing(self):
+        """The owner, 15.10.2026: "חסר דבר אחד" stood on the card a day after the new bot took every customer."""
+        from apps.wahub import settings_store
+
+        self.staged(self.lead(HOUR))
+        lead_stage._switch_seen.update(at=None, since=None)
+        self.addCleanup(lambda: lead_stage._switch_seen.update(at=None, since=None))
+        moment = (self.clock() - 2 * HOUR).isoformat()
+        settings_store.put(settings_store.BOT_MODE, {'mode': 'all', 'since': moment, 'first_since': moment})
+        with patch.object(lead_stage, 'replies_copied_since', return_value=None):
+            line = self.line('classify')
+        self.assertEqual((line['ok'], line['detail']), (True, 'ליד פתוח אחד, עודכן עכשיו'))
+
     def test_the_schedule_line_and_todays_numbers(self):
         waiting = self.link_lead()                                   # planned for tomorrow 10:30
         asked = self.link_lead(3 * HOUR)

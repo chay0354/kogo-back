@@ -453,10 +453,11 @@ def _classify_line(now) -> dict:
             _count(seen['stale'], f'איש קשר אחד מחכה לסיווג יותר מ-{hours} שעות', '{n} אנשי קשר מחכים לסיווג יותר מ-' + f'{hours} שעות'),
             'הסיווג רץ לבד כל 5 דקות. אם המספר לא יורד — לפנות לתמיכה הטכנית',
         )
-    # The old bot answers in ManyChat. Until ManyChat copies its answers, Kogo never sees the
-    # registration link it sent — and "קיבל קישור ועוד לא נרשם", the commonest round, never begins.
-    # (The same gate as lead_stage.replies_visible; the two change together.)
-    if not lead_stage.old_bot_replies_seen(now):
+    # The old bot answered in ManyChat. Until ManyChat copied its answers, Kogo never saw the
+    # registration link it sent — and "קיבל קישור ועוד לא נרשם", the commonest round, never began.
+    # Since the switch the new bot answers everybody from Kogo itself, and nothing is missing
+    # (owner, 15.10.2026, on the false "חסר דבר אחד"). The same gate as lead_stage.replies_visible.
+    if not lead_stage.bot_answers_seen(now):
         return _line(
             'classify', title, False,
             f'{how_many}. תשובות הבוט לא מגיעות ל-Kogo — לכן לא ידוע מי כבר קיבל קישור להרשמה',
