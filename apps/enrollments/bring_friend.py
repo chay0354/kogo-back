@@ -18,6 +18,7 @@ own details) set in MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS, and TRIAL_BRING_FRIEND_
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 
 from django.conf import settings
@@ -37,8 +38,21 @@ FULL = 'full'
 FAMILY_HAS_IT = 'family'
 NO_FLOW = 'no_flow'
 NO_PHONE = 'no_phone'
+NO_DETAILS = 'no_details'
 OPTED_OUT = 'opted_out'
 FAILED = 'failed'
+
+# The ManyChat fields the invitation's template reads (owner approved the
+# wording 15.10.2026: "היי {הורה} / בקבוצה של {ילד} ב{חוג} נשארו עוד מקומות…").
+# Its own fields, not the kogo_* ones: the 10:00 message that went out a moment
+# earlier reads those, and ManyChat may still be filling it in when this one is
+# written — rewriting them would put a short name or a first name into it.
+FIELD_PARENT = 'kogo_friend_parent'
+FIELD_CHILD = 'kogo_friend_child'
+FIELD_COURSE = 'kogo_friend_course'
+FIELD_WHEN = 'kogo_friend_when'
+FIELD_BRANCH = 'kogo_friend_branch'
+INVITATION_FIELDS = (FIELD_PARENT, FIELD_CHILD, FIELD_COURSE, FIELD_WHEN, FIELD_BRANCH)
 
 
 def is_enabled() -> bool:
@@ -129,6 +143,61 @@ def resolve_bring_friend_flow(svc) -> str:
     return svc.resolve_flow_ns('MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS')
 
 
+def invitation_fields(enrollment) -> dict | None:
+    """
+    What the invitation says about this child, every value filled — or None.
+
+    {הורה} is the parent's first name, {ילד} the child's, {חוג} the field's short
+    name (the calendar event's: "קפוארה", not "קפוארה 4.5-6 יום רביעי"), {מתי}
+    "יום רביעי 17:30", {סניף} the branch the lesson is in. Each family hears its
+    own branch: the invitation carries no branch of its own.
+    """
+    from apps.courses.models import Lesson
+    from apps.customers.trial_calendar import short_course_name
+
+    lesson = enrollment.lesson
+    child = enrollment.child
+    family = getattr(child, 'family', None)
+    if not (lesson and child and family):
+        return None
+    parents = list(family.parents.all())
+    primary = next((p for p in parents if p.is_primary), None) or (parents[0] if parents else None)
+    parent_first = ((primary.first_name if primary else '') or '').strip() or (family.name or '').strip()
+    course = lesson.course if lesson.course_id else None
+    branch = course.branch if course and course.branch_id else None
+    day = dict(Lesson.DAY_OF_WEEK_CHOICES).get(lesson.day_of_week, '')
+    start = lesson.start_time.strftime('%H:%M') if lesson.start_time else ''
+    fields = {
+        FIELD_PARENT: parent_first,
+        FIELD_CHILD: (child.first_name or '').strip(),
+        FIELD_COURSE: short_course_name(lesson) if course else '',
+        FIELD_WHEN: f'יום {day} {start}' if day and start else '',
+        FIELD_BRANCH: ((branch.name if branch else '') or '').strip(),
+    }
+    return fields if all(fields.values()) else None
+
+
+def _send_invitation(svc, *, phone: str, ctx: dict, fields: dict, flow_ns: str) -> dict:
+    """
+    Write the invitation's fields, every one of them, then fire its automation.
+
+    Strict on purpose: a field ManyChat does not have, or one that would not
+    write, stops the send — a template with an empty name in it does not go out.
+    """
+    from apps.core.manychat_service import FIELD_SETTLE_SECONDS
+
+    resolved = svc.lookup_or_create(phone, ctx.get('parent_name') or '', lookup_names=ctx.get('lookup_names'))
+    sid = resolved.get('subscriber_id')
+    if not sid:
+        return {'sent': False, 'reason': 'no_subscriber_id'}
+    for name in INVITATION_FIELDS:
+        svc.set_custom_field_by_name(sid, name, fields[name])
+    if FIELD_SETTLE_SECONDS > 0:
+        time.sleep(FIELD_SETTLE_SECONDS)
+    svc.send_flow(sid, flow_ns)
+    return {'sent': True, 'method': 'flow', 'subscriber_id': sid, 'flow_ns': flow_ns}
+
+
 def send_bring_friend(enrollment, ctx: dict, *, svc, flow_ns: str, dry_run: bool, cache: dict) -> tuple[str, dict]:
     """
     One invitation for one trial, if its class is small enough. Returns
@@ -161,6 +230,9 @@ def send_bring_friend(enrollment, ctx: dict, *, svc, flow_ns: str, dry_run: bool
     phone = (ctx.get('phone') or '').strip()
     if not phone:
         return NO_PHONE, {'registered': registered}
+    fields = invitation_fields(enrollment)
+    if not fields:
+        return NO_DETAILS, {'registered': registered}
 
     # An invitation is a broadcast, not a message about the child's own trial:
     # whoever said "הסר" does not get it (core/whatsapp_optout.py). A list that
@@ -185,12 +257,7 @@ def send_bring_friend(enrollment, ctx: dict, *, svc, flow_ns: str, dry_run: bool
         return FAMILY_HAS_IT, {'registered': registered}
 
     try:
-        result = svc.send_automation_to_contact(
-            automation_type='flow',
-            automation_id=flow_ns,
-            phone=phone,
-            name=ctx.get('parent_name') or '',
-        )
+        result = _send_invitation(svc, phone=phone, ctx=ctx, fields=fields, flow_ns=flow_ns)
     except ManyChatError as exc:
         result = {'sent': False, 'reason': 'manychat_error', 'error': manychat_error_detail(exc)}
     except Exception as exc:  # the trial-day loop must go on to the next parent
