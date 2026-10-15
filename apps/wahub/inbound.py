@@ -13,7 +13,9 @@ is worked out again at once, from the row alone (apps/wahub/lead_stage.py).
 
 A customer's message that asks to be taken off the broadcast list ("הסר") is
 recognised here, by rules (apps/wahub/optout.py), and the phone is put on the
-system's list at once — one small write, to our own database.
+system's list at once — one small write, to our own database. So is one that
+asks for Kogo's birthday greeting: the tag, and the wait for a person to send
+it (apps/wahub/birthday.py).
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.wahub import lead_ai, lead_stage, media, optout, state
+from apps.wahub import birthday, lead_ai, lead_stage, media, optout, state
 from apps.wahub.models import (
     DIRECTION_IN,
     DIRECTION_OUT,
@@ -327,6 +329,10 @@ def store_event(*, event: str, phone, text, name: str = '', subscriber_id='', ts
                 marked = optout.from_message(contact, text, message.id, now)
                 if marked is not None:
                     changes['opted_out'] = marked
+            if message_type == TYPE_TEXT:
+                # Asks for Kogo's birthday greeting (or video): tagged, and the office's box "ברכת יום הולדת" — by
+                # rules, whichever bot answers; no person is asked for (birthday.py).
+                birthday.from_message(contact, text, now)
         else:
             # The bot answered: nobody is waiting any more.
             changes['waiting_since'] = None

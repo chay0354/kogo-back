@@ -1144,6 +1144,10 @@ class DemoReplyView(APIView):
             return Response({'shadow': None, **payload_of(None)})
         message = sending.keep_new_bot_reply(contact, reply.text) if post and reply.text else None
         if message is not None:
+            # The answer stands in the demo conversation: its tags are kept, as for an answer that left (birthday.py).
+            from apps.wahub import birthday
+
+            birthday.apply_tag_marks(contact, reply.tools_used)
             lead_stage.refresh_quietly(contact.id)
         return Response({'shadow': shadow.reply_payload(reply), **payload_of(message)})
 

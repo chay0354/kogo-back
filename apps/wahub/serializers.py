@@ -217,6 +217,8 @@ def contact_payload(contact: Contact, *, now=None, today=None, found_by=NOT_SEAR
             'needs_human': contact.needs_human,
             'needs_human_reason': contact.needs_human_reason,
             'needs_human_at': _iso(contact.needs_human_at),
+            # Since when the customer waits for Kogo's birthday greeting; null when not (birthday.py).
+            'birthday_wait_since': _iso(contact.birthday_wait_since),
             'can_free_text': can_free_text(contact, now),
             'window_closes_at': _iso(window_closes_at(contact)),
             # Whether a person has to deal with the conversation now, and why (docs/WAHUB-CONTRACT-FUTURE-LEADS.md, ג.1).
@@ -311,13 +313,22 @@ def found_elsewhere(found, contacts, *, today=None) -> list:
     return shown
 
 
+def office_sender_name(message: Message) -> str | None:
+    """
+    Who in the office wrote it, or None. A name kept before 15.10.2026 may be the sender's email — what
+    `state.user_display_name` gave for an account with no name — and an email is not shown as a name.
+    """
+    name = (message.sender_name or '').strip() if message.sender == SENDER_OFFICE else ''
+    return name if name and '@' not in name else None
+
+
 def message_payload(message: Message) -> dict:
     return {
         'id': message.id,
         'direction': message.direction,
         'sender': message.sender,
         'sender_label': SENDER_LABELS.get(message.sender, message.sender),
-        'sender_name': (message.sender_name or None) if message.sender == SENDER_OFFICE else None,
+        'sender_name': office_sender_name(message),
         'text': message.text,
         'message_type': message.message_type,
         # The object's path in the private bucket, not an address: the screen asks messages/{id}/media/ for one.

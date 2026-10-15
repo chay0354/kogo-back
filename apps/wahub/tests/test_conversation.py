@@ -87,6 +87,8 @@ class ConversationDetailTests(WahubTestCase):
             set(data['chat']),
             {'unread_count', 'waiting_since', 'handled_by', 'handled_by_label', 'needs_human',
              'needs_human_reason', 'needs_human_at', 'can_free_text', 'window_closes_at',
+             # waits for Kogo's birthday greeting (test_birthday)
+             'birthday_wait_since',
              'open', 'open_reason', 'open_label', 'box', 'box_label',
              # waiting for a person, in the office's own hours (test_overdue)
              'overdue', 'waited_office_minutes', 'waiting_label', 'waiting_from'},
@@ -204,6 +206,7 @@ class LiveUpdateTests(WahubTestCase):
         self.assertTrue(data['cursor'].endswith('Z'))
         self.assertEqual(data['boxes'], {
             'all': 1, 'waiting': 1, 'needs_human': 0, 'unread': 1, 'human': 0, 'bot': 1, 'open': 0, 'future': 0, 'overdue': 0,
+            'birthday': 0,
         })
         self.assertEqual(data['overdue'], [])
 

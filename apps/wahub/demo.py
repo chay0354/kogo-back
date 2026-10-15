@@ -167,6 +167,12 @@ SCENARIOS = [
         ('c', 'הבן שלי בן 3, אפשר לרשום אותו לקפוארה?', 6 * DAY + 4), ('b', 'החוגים מגיל 4.', 6 * DAY + 3),
         ('c', 'אז הוא קטן מדי. חבל', 6 * DAY), ('b', 'נשמח לראות אתכם בשנה הבאה!', 6 * DAY - 1),
     ], read=True),
+    # Asked for Kogo's birthday greeting: waits for a person to send it — the box "ברכת יום הולדת" (birthday.py).
+    S('הדס לוי', '0146', [
+        ('c', 'היי, אפשר ברכה ליום הולדת מקוגומלו לבן שלי? הוא חוגג 7 ביום חמישי', 70),
+        ('b', 'בשמחה! איך קוראים לו, והוא בחוג אצלנו?', 69),
+        ('c', 'יונתן, קפוארה בראש העין', 60), ('b', 'מעולה, העברתי לצוות — הברכה תישלח אליכם 🎉', 59),
+    ], birthday=True, tags=['ברכת יום הולדת']),
     S('אסף גולן', '0126', [
         ('c', 'כבר נרשמנו אתמול לחוג קפוארה ולא קיבלתי אישור', 9 * HOUR), ('b', 'אבדוק מול המשרד.', 9 * HOUR - 1),
     ], needs_human='אומר שנרשם ולא קיבל אישור'),
@@ -241,6 +247,7 @@ SCENARIOS = [
 
 TAGS = [
     ('ראש העין', '#2563eb'), ('כפר סבא', '#7c3aed'), ('אחרי החגים', '#d97706'), ('מודעה אוקטובר', '#059669'),
+    ('ברכת יום הולדת', '#db2777'),
 ]
 QUICK_REPLIES = [
     ('פתיחה', 'היי {{first_name}}, כאן המשרד של קוגומלו 🙂 איך אפשר לעזור?'),
@@ -411,6 +418,8 @@ def _contact(scenario: dict, now, office_user, tags: dict) -> Contact:
         )
     if scenario.get('needs_human'):
         fields.update(needs_human=True, needs_human_reason=scenario['needs_human'], needs_human_at=last_in or now)
+    if scenario.get('birthday'):
+        fields.update(birthday_wait_since=first_in or now)
     if scenario.get('followup'):
         mark, due_in_days, note = scenario['followup']
         fields.update(
