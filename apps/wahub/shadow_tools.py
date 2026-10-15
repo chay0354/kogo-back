@@ -834,7 +834,8 @@ def customer_card(ctx: ToolContext) -> dict:
         return ctx.scripted_customer or {'known': False, 'note': 'אין איש קשר — שאלת ניסיון בלי לקוח.'}
     from apps.wahub.serializers import UNCHECKED_LABEL
 
-    children = matching.children_of(contact)
+    # One row a child, the duplicate cards of one child as one; the classes are the bot's own list, as they were.
+    children = matching.children_of(contact, classes=False)
     classes = _classes_of([child['id'] for child in children]) if children else {}
     for child in children:
         child['classes'] = classes.get(child['id'], [])

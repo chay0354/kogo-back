@@ -1120,7 +1120,9 @@ class ListTests(ApiTestCase):
 
     def test_the_small_dot(self):
         def dot(**fields):
-            return self.get(f'contacts/{self.lead(HOUR, **fields).id}/').data['lead']['temperature']
+            # Matched a moment ago: opening the conversation does not match it again (matching.STALE_AFTER).
+            contact = self.lead(HOUR, kogo_checked_at=timezone.now(), **fields)
+            return self.get(f'contacts/{contact.id}/').data['lead']['temperature']
 
         self.assertEqual(dot(known_interest='hot'), 'hot')
         for outcome in ('signup_declined', 'trial_upcoming', 'trial_only'):       # a step taken is hot, whatever was said

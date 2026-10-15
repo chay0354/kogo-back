@@ -310,7 +310,10 @@ class CustomerCardTests(SearchCase):
         self.assertEqual(self.get(f'contacts/{self.mother.id}/').data['customer']['child_id'], str(self.noam.id))
 
     def test_a_family_with_no_child_has_no_link(self):
-        Contact.objects.filter(pk=self.jenny.pk).update(kogo_family_id=self.sagi.id, kogo_child_ids=[])
+        # As the matching found it a moment ago — opening the conversation does not match it again.
+        Contact.objects.filter(pk=self.jenny.pk).update(
+            kogo_family_id=self.sagi.id, kogo_child_ids=[], kogo_checked_at=timezone.now(),
+        )
         self.assertEqual(
             self.get(f'contacts/{self.jenny.id}/').data['customer'], {'family_id': str(self.sagi.id), 'child_id': None, 'link': None},
         )
