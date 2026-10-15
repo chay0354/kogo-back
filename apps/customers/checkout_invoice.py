@@ -55,6 +55,33 @@ def payments_covered_by_checkout(payment_ids) -> dict[str, str]:
     return covered
 
 
+def checkout_receipts_naming(payment_ids) -> dict[str, list[str]]:
+    """
+    Every family-checkout receipt that names each of these charges, by number.
+
+    payments_covered_by_checkout keeps the first one it meets; a charge of
+    1–11.9.2026 is named by its 'INV-…' email and, once receipted late, by an
+    IR receipt too — and only the IR one is a receipt (missing_receipts).
+    """
+    wanted = sorted({str(pid) for pid in payment_ids})
+    named: dict[str, list[str]] = {}
+    for start in range(0, len(wanted), 100):
+        chunk = set(wanted[start:start + 100])
+        match = Q()
+        for pid in chunk:
+            match |= Q(details__payment_ids__icontains=pid)
+        logs = (
+            InvoiceActivityLog.objects
+            .filter(action=CHECKOUT_LINES_ACTION)
+            .filter(match)
+            .values_list('details', 'invoice__invoice_number')
+        )
+        for details, number in logs:
+            for pid in chunk.intersection(checkout_log_payment_ids(details)):
+                named.setdefault(pid, []).append(number)
+    return named
+
+
 def _lesson_slot_label(lesson) -> str:
     if lesson is None:
         return ''

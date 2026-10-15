@@ -23,14 +23,15 @@ from __future__ import annotations
 import csv
 import io
 import logging
-from datetime import timedelta
+import re
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.documents.numbering import SERIES_SUBSCRIPTION, format_document_number
+from apps.documents.numbering import LESSON_RUN_REGEX, SERIES_SUBSCRIPTION, format_document_number
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,58 @@ SKIP_MESSAGES = {
 FAILED_MESSAGE = 'ההפקה נכשלה — נסו שוב או פנו לתמיכה'
 
 
+# From this day a charge is receipted only by a numbered receipt in the IR run.
+# The run opened on 12.9.2026; the lesson charges of 1–11.9 got an 'INV-…'
+# email, which is no fiscal document, and the owner had every one of them
+# receipted late, with its signature (15.10.2026: "ברור להפיק עם החתימה
+# הדיגיטלית הכל"). An older charge keeps its INV email as its record, as before.
+NUMBERED_RECEIPTS_FROM = date(2026, 9, 1)
+
+_NUMBERED = re.compile(LESSON_RUN_REGEX)
+
+
+def needs_numbered_receipt(payment) -> bool:
+    return timezone.localtime(charge_date(payment)).date() >= NUMBERED_RECEIPTS_FROM
+
+
+def receipts_of(payments) -> dict[str, list[str]]:
+    """
+    payment id → the receipts that count for it, by number; absent = missing.
+
+    Its own Invoice, and any family-checkout receipt that names it. From
+    NUMBERED_RECEIPTS_FROM only an IR-run number counts — an 'INV-…' email
+    names the charge but is not its receipt.
+    """
+    from apps.customers.checkout_invoice import checkout_receipts_naming
+    from apps.customers.financial_models import Invoice
+
+    payments = list(payments)
+    ids = [str(payment.id) for payment in payments]
+    numbers: dict[str, list[str]] = {}
+    for number, pid in Invoice.objects.filter(payment_id__in=ids).values_list('invoice_number', 'payment_id'):
+        numbers.setdefault(str(pid), []).append(number)
+    for pid, named in checkout_receipts_naming(ids).items():
+        numbers.setdefault(pid, []).extend(named)
+    out = {}
+    for payment in payments:
+        found = numbers.get(str(payment.id), [])
+        if needs_numbered_receipt(payment):
+            found = [number for number in found if _NUMBERED.match(number)]
+        if found:
+            out[str(payment.id)] = list(dict.fromkeys(found))
+    return out
+
+
+def old_numbers_of(payment) -> list[str]:
+    """The 'INV-…' records a charge has, which a late receipt now replaces."""
+    from apps.customers.checkout_invoice import checkout_receipts_naming
+    from apps.customers.financial_models import Invoice
+
+    found = list(Invoice.objects.filter(payment_id=payment.pk).values_list('invoice_number', flat=True))
+    found += checkout_receipts_naming([payment.pk]).get(str(payment.pk), [])
+    return [number for number in dict.fromkeys(found) if not _NUMBERED.match(number)]
+
+
 def charge_date(payment):
     """When the money came in: the charge's own date, or the row's when it has none."""
     return payment.payment_date or payment.created_at
@@ -99,16 +152,26 @@ def _is_recent(charged_on, now) -> bool:
 
 def _missing_queryset(now=None):
     """
-    Completed, actually charged, no Invoice pointing at it, and not completed in
-    the last few minutes. The database's half of "missing" — payments_without_invoice
-    adds the checkout receipts' logs.
+    Completed, actually charged, not completed in the last few minutes, and with
+    no Invoice that counts as its receipt: none at all, or — from
+    NUMBERED_RECEIPTS_FROM — none in the IR run. The database's half of
+    "missing"; payments_without_invoice adds the checkout receipts' logs.
     """
+    from datetime import datetime, time
+
+    from django.db.models import Exists, OuterRef
+
+    from apps.customers.financial_models import Invoice
     from apps.customers.models import Payment
 
     now = now or timezone.now()
+    numbered_from = timezone.make_aware(datetime.combine(NUMBERED_RECEIPTS_FROM, time.min))
+    numbered = Invoice.objects.filter(payment=OuterRef('pk'), invoice_number__regex=LESSON_RUN_REGEX)
+    any_invoice = Invoice.objects.filter(payment=OuterRef('pk'))
     return (
         Payment.objects
-        .filter(status='completed', final_amount__gt=0, invoices__isnull=True)
+        .filter(status='completed', final_amount__gt=0)
+        .filter(~Exists(any_invoice) | (_completed_since(numbered_from) & ~Exists(numbered)))
         .exclude(_completed_since(now - RECENT_CHARGE_GRACE))
         .select_related('child', 'family', 'parent', 'branch', 'lesson__course',
                         'tranzila_transaction', 'card_link')
@@ -122,8 +185,6 @@ def payments_without_invoice(since=None, *, year: int | None = None) -> list:
     `since` is the command's window (rows created since then); `year` is the
     screen's, by the day the money came in.
     """
-    from apps.customers.checkout_invoice import payments_covered_by_checkout
-
     rows = _missing_queryset()
     if since is not None:
         rows = rows.filter(created_at__gte=since)
@@ -132,7 +193,7 @@ def payments_without_invoice(since=None, *, year: int | None = None) -> list:
             Q(payment_date__year=year) | Q(payment_date__isnull=True, created_at__year=year)
         )
     rows = list(rows)
-    covered = payments_covered_by_checkout(payment.id for payment in rows)
+    covered = receipts_of(rows)
     return sorted((payment for payment in rows if str(payment.id) not in covered), key=charge_date)
 
 
@@ -351,8 +412,7 @@ def issue_late_receipt(payment, *, now, send_email: bool = False, backdate: bool
     dates it is printed with.
     """
     from apps.core.payment_service import PaymentService
-    from apps.customers.checkout_invoice import payments_covered_by_checkout
-    from apps.customers.financial_models import Invoice, InvoiceActivityLog
+    from apps.customers.financial_models import InvoiceActivityLog
     from apps.customers.models import Payment
 
     charged_on = charge_date(payment)
@@ -367,10 +427,9 @@ def issue_late_receipt(payment, *, now, send_email: bool = False, backdate: bool
             return None
         if _is_recent(state[2] or state[3], timezone.now()):
             return None
-        if Invoice.objects.filter(payment_id=payment.pk).exists():
+        if receipts_of([payment]):
             return None
-        if payments_covered_by_checkout([payment.pk]):
-            return None
+        replaces = old_numbers_of(payment)
 
         invoice = PaymentService()._create_invoice_from_payment(
             payment,
@@ -385,6 +444,9 @@ def issue_late_receipt(payment, *, now, send_email: bool = False, backdate: bool
             'backdated': backdate,
             'emailed': send_email,
         }
+        if replaces:
+            # The 'INV-…' email the charge had instead of a receipt (1–11.9.2026).
+            details['replaces'] = replaces
         if issued_by is not None:
             # Who pressed the button. The command's own runs carry no user and
             # keep the details they always had.
@@ -406,8 +468,6 @@ def issue_missing_receipts(payment_ids, *, user) -> dict:
     was) is skipped and says why; one that fails is reported and the rest go on,
     as in the command.
     """
-    from apps.customers.checkout_invoice import payments_covered_by_checkout
-    from apps.customers.financial_models import Invoice
     from apps.customers.models import Payment
 
     wanted = list(dict.fromkeys(str(pid) for pid in payment_ids))
@@ -418,10 +478,12 @@ def issue_missing_receipts(payment_ids, *, user) -> dict:
             .select_related('child', 'family', 'parent', 'branch', 'lesson__course', 'tranzila_transaction')
         )
     }
-    with_receipt = {
-        str(pid) for pid in Invoice.objects.filter(payment_id__in=wanted).values_list('payment_id', flat=True)
-    }
-    in_checkout = payments_covered_by_checkout(found)
+    from apps.customers.financial_models import Invoice
+
+    with_receipt = receipts_of(found.values())
+    own_numbers: dict = {}
+    for payment_id, number in Invoice.objects.filter(payment_id__in=wanted).values_list('payment_id', 'invoice_number'):
+        own_numbers.setdefault(str(payment_id), set()).add(number)
 
     issued, skipped, failed, candidates = [], [], [], []
 
@@ -436,10 +498,10 @@ def issue_missing_receipts(payment_ids, *, user) -> dict:
             skip(pid, 'not_found')
         elif payment.status != 'completed' or not payment.final_amount > 0:
             skip(pid, 'not_completed')
-        elif pid in with_receipt:
+        elif pid in with_receipt and own_numbers.get(pid, set()).intersection(with_receipt[pid]):
             skip(pid, 'has_receipt')
-        elif pid in in_checkout:
-            skip(pid, 'in_checkout_receipt', in_checkout[pid])
+        elif pid in with_receipt:
+            skip(pid, 'in_checkout_receipt', with_receipt[pid][0])
         elif _is_recent(charge_date(payment), now):
             skip(pid, 'too_recent')
         else:

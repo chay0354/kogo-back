@@ -45,6 +45,7 @@ from apps.documents.undocumented_income import (
     _card_link_tags,
     _delivery_tags,
     _income_tags,
+    money_received_on,
 )
 
 CHANNEL_MANUAL = 'manual'
@@ -114,7 +115,7 @@ def lesson_documents(branch_ids, start, end, document_type: str = '') -> list[Ch
         .select_related('family', 'family__branch', 'branch',
                         'payment__card_link__business', 'payment__card_link__business_category')
         .prefetch_related('children__child', 'children__course__business',
-                          'children__course__business_category')
+                          'children__course__business_category', 'activity_logs')
         .order_by('invoice_date', 'invoice_number')
     )
     if branch_ids is not None:
@@ -151,6 +152,7 @@ def lesson_documents(branch_ids, start, end, document_type: str = '') -> list[Ch
             category_name=tags.get('category_name', ''),
             void=void,
             void_reason='החיוב לא הושלם' if void else '',
+            money_received_on=money_received_on(invoice),
         )
         out.append(ChannelDocument(
             row=row, branch_id=branch_id, branch_name=branch_name,
@@ -471,31 +473,36 @@ def _write_summary(writer, report) -> None:
         writer.writerow([DOCUMENT_TYPE_LABELS.get(code, code), bucket.count,
                          f'{bucket.net_amount:.2f}', f'{bucket.vat_amount:.2f}', f'{bucket.total_amount:.2f}'])
     writer.writerow([])
-    lines = [('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', report.collected_total)]
-    if report.undocumented is not None:
-        lines.append(('תקבולים ללא מסמך', report.undocumented_total))
-    lines.append(('זיכויים — חשבוניות זיכוי', -report.totals.credits_total))
-    if report.uncredited_refunds_total:
-        lines.append(('זיכויים בכרטיס ללא חשבונית זיכוי', -report.uncredited_refunds_total))
-    total = report.all_income_total if report.undocumented is not None else (
-        report.collected_total - report.totals.credits_total
-    )
-    lines.append(('סה"כ כסף שנכנס בתקופה', total))
-    for label, amount in lines:
+    for label, amount in money_lines(report) + [('סה"כ כסף שנכנס בתקופה', period_take(report))]:
         writer.writerow([label, f'{amount:.2f}'])
 
 
 # ---------------------------------------------------------------- the Excel file
 
-def _money_lines(report) -> list:
-    """The period's money, line by line — the PDF's summary and the CSV's, in one place."""
+def money_lines(report) -> list:
+    """
+    The period's money, line by line — the same lines in the PDF, the CSV and
+    the Excel summary, so the three can be checked against each other.
+    """
     lines = [('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', report.collected_total)]
-    if report.undocumented is not None:
-        lines.append(('תקבולים ללא מסמך', report.undocumented_total))
+    if report.earlier_money_total:
+        lines.append(('מזה קבלות באיחור על כסף שנכנס לפני התקופה — נספר שם', -report.earlier_money_total))
+    undocumented = report.undocumented
+    if undocumented is not None:
+        if undocumented.late_total:
+            lines.append(('תקבולים שהקבלה שלהם הופקה אחרי התקופה', undocumented.late_total))
+        lines.append(('תקבולים ללא מסמך', undocumented.no_document_total))
     lines.append(('זיכויים — חשבוניות זיכוי', -report.totals.credits_total))
     if report.uncredited_refunds_total:
         lines.append(('זיכויים בכרטיס ללא חשבונית זיכוי', -report.uncredited_refunds_total))
     return lines
+
+
+def period_take(report):
+    """What came in, net — all_income_total, or without the undocumented half when it was not gathered."""
+    if report.undocumented is not None:
+        return report.all_income_total
+    return report.collected_total - report.earlier_money_total - report.totals.credits_total
 
 
 def register_xlsx(report, *, undocumented_failed: bool = False) -> bytes:
@@ -524,12 +531,9 @@ def register_xlsx(report, *, undocumented_failed: bool = False) -> bytes:
     summary.add([f'קוגומלו · {report.period_label} · {report.scope_label}'.strip(' ·')], NOTE, merge_to=5)
     summary.blank()
     summary.add(['כמה כסף נכנס'], SECTION, merge_to=5)
-    for label, amount in _money_lines(report):
+    for label, amount in money_lines(report):
         summary.add([label, amount])
-    total = report.all_income_total if undocumented is not None else (
-        report.collected_total - report.totals.credits_total
-    )
-    summary.add(['סה"כ כסף שנכנס בתקופה', total], TOTAL)
+    summary.add(['סה"כ כסף שנכנס בתקופה', period_take(report)], TOTAL)
     if undocumented_failed:
         summary.add([UNDOCUMENTED_FAILED], NOTE, merge_to=5)
     summary.blank()

@@ -468,20 +468,13 @@ def _overview_panel(report: PeriodReport, styles: dict) -> list:
     asked for the important thing first (14.10.2026). Nothing here is computed
     afresh — each line is a total the sections below print in full.
     """
-    rows = [('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', _money(report.collected_total))]
-    if report.undocumented is not None:
-        rows.append(('תקבולים ללא מסמך', _money(report.undocumented_total)))
-    if report.totals.credits_total:
-        rows.append(('זיכויים — חשבוניות זיכוי', _money(-report.totals.credits_total)))
-    if report.uncredited_refunds_total:
-        rows.append(('זיכויים בכרטיס ללא חשבונית זיכוי', _money(-report.uncredited_refunds_total)))
+    from apps.documents.register import money_lines, period_take
+
     data = [
-        [_rtl_cell(label, styles['label'], 8.0 * cm, pad=10), _rtl_cell(value, styles['value'], 4.5 * cm, pad=10)]
-        for label, value in rows
+        [_rtl_cell(label, styles['label'], 8.0 * cm, pad=10), _rtl_cell(_money(amount), styles['value'], 4.5 * cm, pad=10)]
+        for label, amount in money_lines(report) if amount or label.startswith('תקבולים')
     ]
-    grand = report.all_income_total if report.undocumented is not None else (
-        report.collected_total - report.totals.credits_total
-    )
+    grand = period_take(report)
     data.append([
         _rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('OverviewL', parent=styles['grand']), 8.0 * cm, pad=10),
         _rtl_cell(_money(grand), styles['grand'], 4.5 * cm, pad=10),
@@ -678,6 +671,7 @@ SHORT_SOURCE_LABELS = {
     'rentals': 'שכירות',
     'orphan_charges': 'חיוב ללא חשבונית',
     'payment_links': 'קישור',
+    'late_receipts': 'קבלה באיחור',
 }
 
 GROUP_WORD = {GROUP_BY_BRANCH: 'סניף', GROUP_BY_UNIT: 'עסק', GROUP_BY_CATEGORY: 'קטגוריה'}
@@ -906,22 +900,13 @@ def _undocumented_block(report: PeriodReport, styles: dict) -> list:
 
     out.extend(_uncredited_refunds_block(undoc, styles))
 
+    from apps.documents.register import money_lines
+
     grand = [
-        [_rtl_cell('תקבולים עם מסמך (קבלות וחשבוניות מס/קבלה)', styles['label'], 8.0 * cm, pad=10),
-         _rtl_cell(_money(report.collected_total), styles['value'], 4.5 * cm, pad=10)],
-        [_rtl_cell('תקבולים ללא מסמך', styles['label'], 8.0 * cm, pad=10),
-         _rtl_cell(_money(undoc.total), styles['value'], 4.5 * cm, pad=10)],
+        [_rtl_cell(label, styles['label'], 8.0 * cm, pad=10),
+         _rtl_cell(_money(amount), styles['value'], 4.5 * cm, pad=10)]
+        for label, amount in money_lines(report) if amount or label.startswith('תקבולים')
     ]
-    if report.totals.credits_total:
-        grand.append([
-            _rtl_cell('זיכויים', styles['label'], 8.0 * cm, pad=10),
-            _rtl_cell(f'-{_money(report.totals.credits_total)}', styles['value'], 4.5 * cm, pad=10),
-        ])
-    if report.uncredited_refunds_total:
-        grand.append([
-            _rtl_cell('זיכויים בכרטיס ללא חשבונית זיכוי', styles['label'], 8.0 * cm, pad=10),
-            _rtl_cell(_money(-report.uncredited_refunds_total), styles['value'], 4.5 * cm, pad=10),
-        ])
     grand.append([
         _rtl_cell('סה"כ כסף שנכנס בתקופה', ParagraphStyle('AllInc', parent=styles['grand']), 8.0 * cm, pad=10),
         _rtl_cell(_money(report.all_income_total), styles['grand'], 4.5 * cm, pad=10),
