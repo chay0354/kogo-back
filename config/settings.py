@@ -502,8 +502,10 @@ MANYCHAT_TRIAL_10AM_FLOW_NS = config('MANYCHAT_TRIAL_10AM_FLOW_NS', default='')
 MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS = config('MANYCHAT_TRIAL_AFTER_TEST_FLOW_NS', default='')
 TRIAL_AFTER_TEST_HOURS = int(config('TRIAL_AFTER_TEST_HOURS', default=2))
 # "חבר מביא חבר" — sent with the 10:00 trial-day message when the class has fewer
-# than TRIAL_BRING_FRIEND_BELOW registered (owner, 15.10.2026). Empty ns = found by
-# the automation's name in ManyChat.
+# than TRIAL_BRING_FRIEND_BELOW registered (owner, 15.10.2026). OFF: the owner
+# stopped it the same evening — the automation of that name carries one branch's
+# details. It goes on again with its own automation (ns here) and the switch.
+TRIAL_BRING_FRIEND_ENABLED = config('TRIAL_BRING_FRIEND_ENABLED', default=False, cast=bool)
 MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS = config('MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS', default='')
 TRIAL_BRING_FRIEND_BELOW = int(config('TRIAL_BRING_FRIEND_BELOW', default=15))
 # When Tranzila webhook returns Response != 000 for a subscription enrollment payment.

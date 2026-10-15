@@ -4,7 +4,7 @@ Trial-reminder scheduling for children in trial_signed status.
   • test-lesson-10am — 10:00 Israel time on the trial lesson date (cron)
   • after-test — 2 hours after the trial lesson ends (cron, configurable)
   • "חבר מביא חבר" — with the 10:00 message, when the class has fewer than 15
-    registered (bring_friend.py)
+    registered (bring_friend.py; off until TRIAL_BRING_FRIEND_ENABLED)
 
 Instant signup uses test-lesson-register (see LessonEnrollmentViewSet.create).
 
@@ -703,7 +703,7 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
 
         # Right behind the 10:00 message, and only after it went out: a class
         # with fewer than 15 registered also gets "חבר מביא חבר" (owner, 15.10).
-        if bring_friend.bring_friend_is_due(enr, ten_am_sent_now=ten_am_sent_now):
+        if bring_friend.is_enabled() and bring_friend.bring_friend_is_due(enr, ten_am_sent_now=ten_am_sent_now):
             ctx = _build_send_kwargs(enr)
             if not ctx:
                 summary['bring_friend_skipped'] += 1
@@ -721,7 +721,7 @@ def send_due_trial_reminders(*, dry_run: bool = False) -> dict:
                     summary['bring_friend_errors'] += 1
                 else:
                     if outcome == bring_friend.NO_FLOW:
-                        logger.warning('bring-a-friend: no ManyChat automation named "חבר מביא חבר"')
+                        logger.warning('bring-a-friend: MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS is not set')
                     summary['bring_friend_skipped'] += 1
 
         if not enr.trial_followup_reminder_sent_at and _reminder_is_fresh(now, after_test_due):

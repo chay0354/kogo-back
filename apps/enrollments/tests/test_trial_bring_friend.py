@@ -31,7 +31,7 @@ def _flows(setting_name):
     return BRING_FRIEND_NS if setting_name == 'MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS' else ''
 
 
-@override_settings(TIME_ZONE='Asia/Jerusalem', TRIAL_BRING_FRIEND_BELOW=15)
+@override_settings(TIME_ZONE='Asia/Jerusalem', TRIAL_BRING_FRIEND_BELOW=15, TRIAL_BRING_FRIEND_ENABLED=True)
 class BringFriendTests(HeadcountTestBase):
     def setUp(self):
         super().setUp()
@@ -238,6 +238,36 @@ class BringFriendTests(HeadcountTestBase):
         serializer.save()
         self.trial.refresh_from_db()
         self.assertIsNone(self.trial.trial_bring_friend_sent_at)
+
+
+@override_settings(TIME_ZONE='Asia/Jerusalem')
+class SwitchedOffTests(HeadcountTestBase):
+    """
+    Owner, 15.10.2026, the evening it went live: "זה ישלח את הפרטים של ראש העין
+    לכל שאר הסניפים אז תבטל את האוטומציה הזאת".
+    """
+
+    def test_off_unless_switched_on(self):
+        wednesday = BringFriendTests.the_next_wednesday()
+        trial = self.enroll('ניסיון', child_status='trial_signed', trial_on=wednesday)
+        now = timezone.make_aware(datetime.combine(wednesday, time(10, 0)), JERUSALEM)
+        with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=now), \
+             patch.object(ManyChatService, 'notify_registration', return_value={'sent': True}) as ten_am, \
+             patch.object(ManyChatService, 'send_automation_to_contact') as invitation, \
+             patch.object(ManyChatService, 'resolve_flow_ns', side_effect=_flows):
+            summary = send_due_trial_reminders()
+        self.assertEqual(ten_am.call_count, 1)  # the 10:00 message goes as before
+        invitation.assert_not_called()
+        self.assertEqual(summary['bring_friend_sent'], 0)
+        trial.refresh_from_db()
+        self.assertIsNone(trial.trial_bring_friend_sent_at)
+
+    def test_the_rosh_haayin_automation_is_never_found_by_its_name(self):
+        self.assertNotIn('MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS', ManyChatService._FLOW_NAME_ALIASES)
+        flows = [{'name': 'חבר מביא חבר', 'ns': 'content20260927102922_555377'}]
+        with override_settings(MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS=''), \
+             patch.object(ManyChatService, 'get_flows', return_value=flows):
+            self.assertEqual(ManyChatService(api_key='x').resolve_flow_ns('MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS'), '')
 
 
 @override_settings(TIME_ZONE='Asia/Jerusalem')
