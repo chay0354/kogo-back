@@ -11,6 +11,12 @@ has a free seat is kept on the contact (`lead_opened`), and the stage moves the
 lead to the office: "נפתח: … — להציע לו" (lead_stage.opening_found). Nothing is
 sent to the customer: what to tell them is the office's to decide.
 
+Since 15.10.2026 the stage itself is closed ("לא רלוונטי · אין מה להציע"): no
+list but "נסגרו" shows it, and nobody has a step on it. What opened makes it an
+open question of the office's (`needs_reply`, rule 18 of lead_stage) — which
+is no longer in `nothing_to_offer`, and so is not looked at here again until a
+person has dealt with it and it is back.
+
     checked_on   the day the lead was last looked at — one look a day, whatever the cron does
     found_at     the moment what fits was found
     what         "נפתח: קפוארה גן חובה בראש העין" — the classes, by branch

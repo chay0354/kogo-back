@@ -128,8 +128,9 @@ NEXT_BY_STEP = {
 }
 NOTHING_PLANNED = 'אין חזרה מתוכננת'
 WAITING_FOR_AN_ANSWER = 'הבוט חזר אליו — מחכים לתשובה'
-# A lead with nothing to offer is looked at every day (lead_openings.py) — when its field, age and place are known.
-KEPT_FOR_LATER = 'נבדק כל יום — כשייפתח חוג שמתאים, יעבור אליך'
+# A lead with nothing to offer is closed, and looked at every day (lead_openings.py) — when its field, age and
+# place are known: a class that fits brings it back to the office.
+KEPT_FOR_LATER = 'נבדק כל יום — אם ייפתח חוג שמתאים, הליד יחזור אליך'
 NOTHING_TO_LOOK_FOR = 'אין כרגע מה להציע — חסר תחום, גיל או מקום כדי לבדוק כל יום'
 ON_A_WAITING_LIST = 'ברשימת המתנה — נתריע כשיתפנה מקום'
 TALKING_NOW = 'בשיחה עכשיו'
@@ -228,8 +229,8 @@ def stages_in(tab: str, *, apart: bool = False) -> list[dict]:
         if old in found:
             found[new] = found.get(new, 0) + found.pop(old)
     return [
-        {'key': stage, 'label': label, 'count': found[stage]}
-        for stage, label in LEAD_STAGE_CHOICES if found.get(stage)
+        {'key': stage, 'label': lead_stage.STAGE_LABELS[stage], 'count': found[stage]}
+        for stage, _label in LEAD_STAGE_CHOICES if found.get(stage)
     ]
 
 
@@ -394,6 +395,9 @@ def next_move(contact: Contact, follow: LeadFollowUp | None, *, gate=None, now=N
     """
     stage = LEGACY_LEAD_STAGES.get(contact.lead_stage, contact.lead_stage)
     nothing = {'who': 'none', 'what': '', 'when': None, 'state': 'none', 'note': '', 'hold': ''}
+    if stage == LEAD_NOTHING_TO_OFFER:
+        # Closed, and nobody's step — but not over: it says that it is looked at every day, and comes back.
+        return {**nothing, 'what': kept_for_later(contact)}
     if not stage or LEAD_STAGE_GROUPS.get(stage) == LEAD_GROUP_CLOSED:
         return nothing
     if contact.lead_owner == LEAD_OWNER_OFFICE:
@@ -420,6 +424,11 @@ def next_move(contact: Contact, follow: LeadFollowUp | None, *, gate=None, now=N
     return {**nothing, 'what': no_step_because(contact, stage)}
 
 
+def kept_for_later(contact: Contact) -> str:
+    """What becomes of a lead with nothing to offer: looked at every day — or not, when what to look for is not known."""
+    return KEPT_FOR_LATER if lead_openings.search_terms(contact) is not None else NOTHING_TO_LOOK_FOR
+
+
 def no_step_because(contact: Contact, stage: str) -> str:
     """Why nobody has a step on this open lead right now, in the screen's words."""
     said = _said(contact)
@@ -442,8 +451,6 @@ def no_step_because(contact: Contact, stage: str) -> str:
         return f'מחכים לשיעור הניסיון ביום {WEEKDAYS[on.weekday()]}, {on.day}.{on.month}'
     if stage == LEAD_WAITING_LIST:
         return ON_A_WAITING_LIST
-    if stage == LEAD_NOTHING_TO_OFFER:
-        return KEPT_FOR_LATER if lead_openings.search_terms(contact) is not None else NOTHING_TO_LOOK_FOR
     if stage == LEAD_IN_CONVERSATION:
         return TALKING_NOW
     if said.get('blocker') in lead_ai.NO_NUDGE_BLOCKERS:

@@ -48,8 +48,10 @@ The rules, in order:
    17w. waiting_list      on the waiting list of a lesson that is full (waiting_list.py). While it
                           lasts, rules 3, 4 and "no stage" do not close the lead: somebody who
                           waits for a seat is a lead, whatever else they are
-    18. nothing_to_offer  no branch nearby, no class that fits, or the class is full — looked at
-                          every day (lead_openings.py); once a class that fits opens       office
+    18. nothing_to_offer  no branch nearby, no class that fits, or the class is full: closed — "לא
+                          רלוונטי", nobody's step, and not on the bot's list. Looked at every day
+                          (lead_openings.py); once a class that fits opens it is open again —
+        needs_reply       "נפתח: … — להציע לו"                                             office
     19. will_check        said they would check and come back                            bot
     20. link_sent         got a registration link and has not registered                 bot
     21. in_conversation   the last message (or mark) is younger than IN_CONVERSATION_FOR
@@ -199,7 +201,9 @@ COLD_AFTER = timedelta(days=30)
 # contacts that were already there. 3 (14.10.2026): the rounds of an external branch and of a
 # lead that went quiet, the price or the days to the office, a class that opened
 # (docs/WAHUB-CONTRACT-LEADS-NO-ONE-LOST.md) — at once after the deploy, not at the next midnight.
-RULES_VERSION = 5
+# 6 (15.10.2026): "nothing to offer" is closed, and a class that opened for it is the office's
+# question to answer (`needs_reply`) — the same contract, ט.
+RULES_VERSION = 6
 
 # --- the bot's own follow-ups (docs/WAHUB-CONTRACT-LEADS-V2.md, ג and ח.10) ---
 DAY = timedelta(days=1)
@@ -293,8 +297,8 @@ STAGE_OWNERS = {
     LEAD_COLD: '',
 }
 # Stages in which a person who holds the conversation has nothing to do right now: the customer's turn,
-# a lesson or a date ahead, nothing to offer yet.
-NOBODYS_MOVE = (LEAD_IN_CONVERSATION, LEAD_TRIAL_BOOKED, LEAD_WAITING_DATE, LEAD_WAITING_LIST, LEAD_NOTHING_TO_OFFER)
+# a lesson or a date ahead. (Nothing to offer is closed since 15.10.2026: nobody's move whoever holds it.)
+NOBODYS_MOVE = (LEAD_IN_CONVERSATION, LEAD_TRIAL_BOOKED, LEAD_WAITING_DATE, LEAD_WAITING_LIST)
 OWNER_LABELS = dict(LEAD_OWNER_CHOICES)
 
 # One cron call: how long the look may take, and how many contacts of each kind it reads.
@@ -306,7 +310,13 @@ RETRY_AFTER = timedelta(hours=1)
 # The marks that say a person spoke to the customer (on the phone).
 SPOKEN_MARKS = (FOLLOWUP_ANSWERED, FOLLOWUP_LATER)
 
-STAGE_LABELS = dict(LEAD_STAGE_CHOICES)
+# What the screens call a stage, where it is not the stored choice's label — a new label of a choice is a
+# migration, and the words of the screen are not (15.10.2026).
+NOTHING_TO_OFFER_LABEL = 'לא רלוונטי · אין מה להציע'
+STAGE_LABELS = {**dict(LEAD_STAGE_CHOICES), LEAD_NOTHING_TO_OFFER: NOTHING_TO_OFFER_LABEL}
+# A lead with nothing to offer for which a class that fits has opened: the office's to offer, in the stage of a
+# question waiting for an answer — and said so, rather than "שאל ולא קיבל מענה".
+OPENED_LABEL = 'נפתח חוג שמתאים'
 FOLLOWUP_LABELS = dict(FOLLOWUP_CHOICES)
 STAGES = [stage for stage, _label in LEAD_STAGE_CHOICES]
 
@@ -336,7 +346,8 @@ NEXT_STEPS = {
     LEAD_TRIAL_BOOKED: 'אין מה לעשות עכשיו — מחכים לשיעור הניסיון',
     LEAD_WAITING_DATE: 'אין מה לעשות עכשיו — מחכים לתאריך',
     LEAD_WAITING_LIST: 'אין מה לעשות עכשיו — נתריע כשיתפנה מקום',
-    LEAD_NOTHING_TO_OFFER: 'אין מה לעשות עכשיו — לחזור אליו כשייפתח משהו מתאים',
+    # Closed: nothing to do. A class that opens brings it back as a question for the office (rule 18).
+    LEAD_NOTHING_TO_OFFER: '',
     LEAD_IN_CONVERSATION: 'אין מה לעשות עכשיו',
     LEAD_REGISTERED: '',
     LEAD_CUSTOMER: '',
@@ -367,7 +378,7 @@ HINTS = {
     LEAD_TRIAL_BOOKED: 'שיעור הניסיון עוד לפניו',
     LEAD_WAITING_DATE: 'נקבע יום לחזור אליו, והוא עוד לא הגיע',
     LEAD_WAITING_LIST: 'מחכה למקום בשיעור מסוים שמלא; כשמתפנה מקום הליד עובר למשרד',
-    LEAD_NOTHING_TO_OFFER: 'אין סניף באזור שלו, אין חוג שמתאים לו, או שהחוג מלא',
+    LEAD_NOTHING_TO_OFFER: 'אין סניף באזור, אין חוג לגיל, או שהחוג מלא. אם ייפתח חוג שמתאים, הליד יחזור אליך',
     LEAD_IN_CONVERSATION: f'ההודעה האחרונה ב-{_CONVERSATION_HOURS} השעות האחרונות',
     LEAD_REGISTERED: 'נרשם אחרי שפנה, או שסומן "נרשם"',
     LEAD_CUSTOMER: 'היה לקוח רשום לפני שפנה — השיחה היא שירות, לא ליד',
@@ -789,14 +800,21 @@ def opening_found(contact: Contact) -> dict | None:
     while it still stands: found since the lead came to "nothing to offer", and
     neither did the customer write nor did a person mark the contact after it
     — from either of those the ordinary rules decide again. None otherwise.
+
+    The opening moves the lead out of "nothing to offer", into the office's
+    question (`needs_reply`, from the moment it was found — rule 18): there the
+    stage began when the opening was found, never before it. A question of any
+    other making began after it, or the customer wrote — and that is no opening.
     """
     kept = contact.lead_opened if isinstance(contact.lead_opened, dict) else {}
     found_at = _moment(kept.get('found_at'))
     what = str(kept.get('what') or '').strip()
     if found_at is None or not what:
         return None
-    began = contact.lead_stage_since if contact.lead_stage == LEAD_NOTHING_TO_OFFER else None
+    began = contact.lead_stage_since if contact.lead_stage in (LEAD_NOTHING_TO_OFFER, LEAD_NEEDS_REPLY) else None
     if began is None or found_at < began:
+        return None
+    if contact.lead_stage == LEAD_NEEDS_REPLY and began != found_at:
         return None
     wrote = contact.last_inbound_at is not None and contact.last_inbound_at > found_at
     # A mark that was cleared is no mark (as in _Facts).
@@ -838,7 +856,7 @@ def compute(contact: Contact, now=None) -> dict:
     come_back_on = None
 
     def done(stage: str, reason: str, *, next_step: str | None = None, since=None, recheck_at=None,
-             owner: str | None = None, follow: dict | None = None) -> dict:
+             owner: str | None = None, follow: dict | None = None, label: str | None = None) -> dict:
         group = LEAD_STAGE_GROUPS[stage]
         moments = [recheck_at, reply_due_at]
         if group == LEAD_GROUP_CLOSED:
@@ -860,7 +878,7 @@ def compute(contact: Contact, now=None) -> dict:
         return {
             'stage': stage,
             'group': group,
-            'label': STAGE_LABELS[stage],
+            'label': label or STAGE_LABELS[stage],
             'reason': reason[:300],
             'next_step': (NEXT_STEPS[stage] if next_step is None else next_step)[:200],
             'since': since,
@@ -1170,14 +1188,17 @@ def compute(contact: Contact, now=None) -> dict:
             since=_moment(waits.get('since')),
         )
 
-    # 18. nothing the business has fits them today — kept, and looked at every day (lead_openings.py): once a
-    #     class that fits them opens, the office offers it to them
+    # 18. nothing the business has fits them today — closed ("לא רלוונטי"): nobody's step, and not on the bot's
+    #     list. Looked at every day all the same (lead_openings.py): once a class that fits them opens, the lead is
+    #     open again — a question for the office, from the moment the class was found, to offer it to them.
+    #     Nothing goes to the customer by itself.
     if said.blocker in lead_ai.NOTHING_TO_OFFER_BLOCKERS:
         opened = opening_found(contact)
         if opened is not None:
             return done(
-                LEAD_NOTHING_TO_OFFER, _sentences(facts.opening(absolute=True), said.blocker_text, opened['what']),
-                next_step=f'{opened["what"]} — להציע לו', owner=LEAD_OWNER_OFFICE,
+                LEAD_NEEDS_REPLY, _sentences(facts.opening(absolute=True), said.blocker_text, opened['what']),
+                next_step=f'{opened["what"]} — להציע לו', owner=LEAD_OWNER_OFFICE, since=opened['found_at'],
+                label=OPENED_LABEL,
             )
         return done(LEAD_NOTHING_TO_OFFER, _sentences(facts.opening(absolute=True), said.blocker_text))
 

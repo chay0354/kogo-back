@@ -6,12 +6,19 @@ so the Kogo templates (kind) go out with the child's own course, day and time.
 
 Nothing here sends unless ``dry_run`` is False; the default is a preview.
 
-Whoever asked "הסר" gets no broadcast (apps/core/whatsapp_optout.py). The list
-is read once, before the first message of the request, and a phone on it is
-skipped in whatever role it appears — the parent the message is for, or one of
-the family's extra phones. The other parent, on a number of their own, did not
-ask and still gets it. When the list cannot be read nothing is sent at all,
-the preview included: `OptOutListUnavailable` goes up to the caller.
+Whoever asked "הסר" gets no marketing broadcast (apps/core/whatsapp_optout.py).
+The list is read once, before the first message of the request, and a phone on
+it is skipped in whatever role it appears — the parent the message is for, or
+one of the family's extra phones. The other parent, on a number of their own,
+did not ask and still gets it. When the list cannot be read nothing is sent at
+all, the preview included: `OptOutListUnavailable` goes up to the caller.
+
+The office says, for every broadcast, whether it is marketing (15.10.2026). "הסר"
+is a request not to get marketing: an update about the child's own class — a
+lesson moved, the studio closed — is service, and goes to them too. Marketing
+is what a request that does not say is taken to be, so a screen that never
+asks keeps skipping them. A message that is not marketing still reads the list,
+to say how many who asked out got it (`included_opted_out`).
 """
 from __future__ import annotations
 
@@ -109,6 +116,7 @@ def broadcast_to_children(
     lesson_id=None,
     day_of_week=None,
     include_extra_phones: bool = False,
+    marketing: bool = True,
 ) -> dict:
     """
     Send (or preview) one automation to the parents of ``children``.
@@ -129,9 +137,13 @@ def broadcast_to_children(
 
     A phone that asked "הסר" is skipped with reason ``opted_out``, as the
     parent's phone or as an extra one, and is counted apart (``opted_out``,
-    ``extra_opted_out``) inside the skipped. Raises
-    ``whatsapp_optout.OptOutListUnavailable`` — before anything is sent — when
-    that list cannot be read.
+    ``extra_opted_out``) inside the skipped — when the message is
+    ``marketing``. When it is not, the phone is sent to like any other, and
+    counted apart as one that got it although it asked out
+    (``included_opted_out``, ``extra_included_opted_out``). Either way a row or
+    an extra phone whose number is on the list says so (``opted_out: true``).
+    Raises ``whatsapp_optout.OptOutListUnavailable`` — before anything is sent —
+    when that list cannot be read.
     """
     svc = service or ManyChatService()
     # Read once, before the first message: no row of this request is sent unless the list was read.
@@ -140,8 +152,13 @@ def broadcast_to_children(
     seen_phones.discard('')
 
     results: list[dict] = []
-    counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0}
-    extra_counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0}
+    counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0, 'included_opted_out': 0}
+    extra_counts = {'sent': 0, 'failed': 0, 'skipped': 0, 'preview': 0, 'opted_out': 0, 'included_opted_out': 0}
+
+    def got_it_anyway(target: dict, tally: dict) -> None:
+        """A message that is not marketing went (or, in the preview, would go) to a number that asked "הסר"."""
+        if target['status'] in ('sent', 'preview'):
+            tally['included_opted_out'] += 1
     phones_used: list[str] = []
 
     def deliver(*, phone: str, parent_name: str, lookup_names, ctx: dict) -> dict:
@@ -224,7 +241,11 @@ def broadcast_to_children(
             counts['skipped'] += 1
             continue
         asked_out = phone_key in opted_out
-        if not asked_out and automation_type == 'kind' and lesson is None and phone_key not in seen_phones:
+        if asked_out:
+            row['opted_out'] = True
+        # Only marketing holds back whoever asked "הסר"; an update about their own class reaches them too.
+        held_back = asked_out and marketing
+        if not held_back and automation_type == 'kind' and lesson is None and phone_key not in seen_phones:
             # The Kogo templates carry course/day/time; without a lesson the
             # parent would get a message full of dashes — and so would the
             # extra phones, which are skipped with it.
@@ -232,8 +253,8 @@ def broadcast_to_children(
             counts['skipped'] += 1
             continue
 
-        if asked_out:
-            # Asked "הסר": no broadcast to this number, whatever else is true of the row. It does not
+        if held_back:
+            # Asked "הסר": no marketing to this number, whatever else is true of the row. It does not
             # use the phone up, so it is said again on a sibling's row rather than "duplicate".
             row['reason'] = whatsapp_optout.REASON
             counts['skipped'] += 1
@@ -256,6 +277,8 @@ def broadcast_to_children(
             settle(row, phone_key, outcome, counts)
             if row['status'] == 'failed':
                 logger.warning('Broadcast to child %s failed: %s', child.id, row['error'])
+        if asked_out and not marketing:
+            got_it_anyway(row, counts)
 
         if include_extra_phones and not (automation_type == 'kind' and lesson is None):
             pending_extras.append((row, child, ctx, phone_key))
@@ -276,7 +299,10 @@ def broadcast_to_children(
                 extra['reason'] = skip_reason
                 extra_counts['skipped'] += 1
                 continue
-            if key in opted_out:
+            extra_asked_out = key in opted_out
+            if extra_asked_out:
+                extra['opted_out'] = True
+            if extra_asked_out and marketing:
                 extra['reason'] = whatsapp_optout.REASON
                 extra_counts['skipped'] += 1
                 extra_counts['opted_out'] += 1
@@ -290,19 +316,33 @@ def broadcast_to_children(
                 phones_used.append(key)
                 extra['status'] = 'preview'
                 extra_counts['preview'] += 1
-                continue
-            outcome = deliver(
-                phone=parent.phone,
-                parent_name=name,
-                lookup_names=_extra_lookup_names(parent, child.family),
-                ctx=ctx,
-            )
-            settle(extra, key, outcome, extra_counts)
-            if extra['status'] == 'failed':
-                logger.warning('Broadcast to an extra phone of child %s failed: %s', child.id, extra['error'])
+            else:
+                outcome = deliver(
+                    phone=parent.phone,
+                    parent_name=name,
+                    lookup_names=_extra_lookup_names(parent, child.family),
+                    ctx=ctx,
+                )
+                settle(extra, key, outcome, extra_counts)
+                if extra['status'] == 'failed':
+                    logger.warning('Broadcast to an extra phone of child %s failed: %s', child.id, extra['error'])
+            if extra_asked_out:
+                got_it_anyway(extra, extra_counts)
+
+    # Which kind of message it was, beside what it did — the record of why somebody who asked "הסר" got it, or
+    # did not. Counts only: no phone, no name.
+    logger.info(
+        'Customers broadcast %s:%s — %s message%s: %d rows, sent %d, preview %d, failed %d, skipped %d '
+        '(asked "הסר" — skipped %d, included %d; extra phones — skipped %d, included %d)',
+        automation_type, automation_id, 'marketing' if marketing else 'not marketing', ' (dry run)' if dry_run else '',
+        len(results), counts['sent'], counts['preview'], counts['failed'], counts['skipped'],
+        counts['opted_out'], counts['included_opted_out'], extra_counts['opted_out'], extra_counts['included_opted_out'],
+    )
 
     return {
         'dry_run': dry_run,
+        # Marketing skips whoever asked "הסר"; anything else reaches them too (the office chose, 15.10.2026).
+        'marketing': marketing,
         'automation_type': automation_type,
         'automation_id': automation_id,
         'total': len(results),
@@ -317,6 +357,10 @@ def broadcast_to_children(
         'extra_skipped': extra_counts['skipped'],
         'extra_preview_count': extra_counts['preview'],
         'extra_opted_out': extra_counts['opted_out'],
+        # How many got it (or, in the preview, would) although they asked "הסר" — only a message that is not
+        # marketing; 0 for marketing.
+        'included_opted_out': counts['included_opted_out'],
+        'extra_included_opted_out': extra_counts['included_opted_out'],
         'phones': phones_used,
         'results': results,
     }
