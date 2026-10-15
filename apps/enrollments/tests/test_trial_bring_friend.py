@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from django.test import override_settings
 from django.utils import timezone
 
-from apps.core.manychat_service import ManyChatService
+from apps.core.manychat_service import ManyChatError, ManyChatService
 from apps.customers.models import Child
 from apps.enrollments.bring_friend import registered_on_lesson
 from apps.enrollments.models import LessonEnrollment
@@ -31,12 +31,29 @@ def _flows(setting_name):
     return BRING_FRIEND_NS if setting_name == 'MANYCHAT_TRIAL_BRING_FRIEND_FLOW_NS' else ''
 
 
+SUBSCRIBER = 7
+
+
+def _quiet_manychat(test):
+    """The contact and its fields, never the network; `test.fields` records each write."""
+    for patcher in (
+        patch.object(ManyChatService, 'lookup_or_create', return_value={'subscriber_id': SUBSCRIBER}),
+        patch('apps.core.manychat_service.FIELD_SETTLE_SECONDS', 0),
+    ):
+        patcher.start()
+        test.addCleanup(patcher.stop)
+    fields = patch.object(ManyChatService, 'set_custom_field_by_name', return_value={'status': 'success'})
+    test.fields = fields.start()
+    test.addCleanup(fields.stop)
+
+
 @override_settings(TIME_ZONE='Asia/Jerusalem', TRIAL_BRING_FRIEND_BELOW=15, TRIAL_BRING_FRIEND_ENABLED=True)
 class BringFriendTests(HeadcountTestBase):
     def setUp(self):
         super().setUp()
         self.wednesday = self.the_next_wednesday()
         self.trial = self.enroll('ניסיון', child_status='trial_signed', trial_on=self.wednesday)
+        _quiet_manychat(self)
 
     @staticmethod
     def the_next_wednesday():
@@ -52,8 +69,8 @@ class BringFriendTests(HeadcountTestBase):
         now = timezone.make_aware(datetime.combine(self.wednesday, time(hour, minute)), JERUSALEM)
         with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=now), \
              patch.object(ManyChatService, 'notify_registration', return_value={'sent': ten_am_sent}) as ten_am, \
-             patch.object(ManyChatService, 'send_automation_to_contact',
-                          return_value={'sent': invitation_sent}) as invitation, \
+             patch.object(ManyChatService, 'send_flow',
+                          **({'return_value': {}} if invitation_sent else {'side_effect': ManyChatError('נכשל')})) as invitation, \
              patch.object(ManyChatService, 'resolve_flow_ns', side_effect=flows):
             summary = send_due_trial_reminders()
         return summary, ten_am, invitation
@@ -62,23 +79,31 @@ class BringFriendTests(HeadcountTestBase):
         self.students(3)
         seen_ten_am_first = []
 
-        def invitation_side_effect(**kwargs):
+        def invitation_side_effect(*args):
             self.trial.refresh_from_db()
             seen_ten_am_first.append(self.trial.trial_10am_reminder_sent_at is not None)
-            return {'sent': True}
+            return {}
 
         now = timezone.make_aware(datetime.combine(self.wednesday, time(10, 0)), JERUSALEM)
         with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=now), \
              patch.object(ManyChatService, 'notify_registration', return_value={'sent': True}) as ten_am, \
-             patch.object(ManyChatService, 'send_automation_to_contact',
-                          side_effect=invitation_side_effect) as invitation, \
+             patch.object(ManyChatService, 'send_flow', side_effect=invitation_side_effect) as invitation, \
              patch.object(ManyChatService, 'resolve_flow_ns', side_effect=_flows):
             summary = send_due_trial_reminders()
 
         self.assertEqual(ten_am.call_count, 1)
         self.assertEqual(ten_am.call_args.kwargs['kind'], ManyChatService.REGISTRATION_KIND_TRIAL_10AM)
-        invitation.assert_called_once_with(
-            automation_type='flow', automation_id=BRING_FRIEND_NS, phone='0529999999', name='ניסיון',
+        invitation.assert_called_once_with(SUBSCRIBER, BRING_FRIEND_NS)
+        # Its own fields, each family's own details (the approved wording).
+        self.assertEqual(
+            {call.args[1]: call.args[2] for call in self.fields.call_args_list},
+            {
+                'kogo_friend_parent': 'ניסיון',
+                'kogo_friend_child': 'ניסיון',
+                'kogo_friend_course': 'קפוארה',
+                'kogo_friend_when': 'יום רביעי 17:30',
+                'kogo_friend_branch': 'סניף',
+            },
         )
         self.assertEqual(seen_ten_am_first, [True])
         self.assertEqual(summary['bring_friend_sent'], 1)
@@ -153,6 +178,38 @@ class BringFriendTests(HeadcountTestBase):
         invitation.assert_not_called()
         self.assertEqual(summary['bring_friend_errors'], 1)
 
+    def test_the_parent_and_child_by_first_name_and_the_field_by_its_short_name(self):
+        from apps.customers.models import Parent
+
+        self.students(3)
+        Parent.objects.create(
+            family=self.trial.child.family, first_name='מיכל', last_name='לוי', phone='0529999999', is_primary=True,
+        )
+        self.ctype.short_name = 'קפוארה'
+        self.ctype.save(update_fields=['short_name'])
+        self.course.name = 'קפוארה 4.5-6 יום רביעי'
+        self.course.save(update_fields=['name'])
+        self.run_at()
+        written = {call.args[1]: call.args[2] for call in self.fields.call_args_list}
+        self.assertEqual(written['kogo_friend_parent'], 'מיכל')
+        self.assertEqual(written['kogo_friend_course'], 'קפוארה')
+
+    def test_the_10am_fields_are_not_rewritten(self):
+        self.students(3)
+        self.run_at()
+        names = {call.args[1] for call in self.fields.call_args_list}
+        self.assertTrue(all(name.startswith('kogo_friend_') for name in names), names)
+
+    def test_a_field_that_will_not_write_sends_nothing(self):
+        # A field the ManyChat page does not have: no template with a hole in it.
+        self.students(3)
+        self.fields.side_effect = ManyChatError('Field not found')
+        summary, _, invitation = self.run_at()
+        invitation.assert_not_called()
+        self.assertEqual(summary['bring_friend_errors'], 1)
+        self.trial.refresh_from_db()
+        self.assertIsNone(self.trial.trial_bring_friend_sent_at)
+
     def test_no_10am_message_no_invitation(self):
         self.students(3)
         summary, ten_am, invitation = self.run_at(ten_am_sent=False)
@@ -217,7 +274,7 @@ class BringFriendTests(HeadcountTestBase):
         now = timezone.make_aware(datetime.combine(self.wednesday, time(10, 0)), JERUSALEM)
         with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=now), \
              patch.object(ManyChatService, 'notify_registration') as ten_am, \
-             patch.object(ManyChatService, 'send_automation_to_contact') as invitation, \
+             patch.object(ManyChatService, 'send_flow') as invitation, \
              patch.object(ManyChatService, 'resolve_flow_ns', side_effect=_flows):
             summary = send_due_trial_reminders(dry_run=True)
         ten_am.assert_not_called()
@@ -248,12 +305,13 @@ class SwitchedOffTests(HeadcountTestBase):
     """
 
     def test_off_unless_switched_on(self):
+        _quiet_manychat(self)
         wednesday = BringFriendTests.the_next_wednesday()
         trial = self.enroll('ניסיון', child_status='trial_signed', trial_on=wednesday)
         now = timezone.make_aware(datetime.combine(wednesday, time(10, 0)), JERUSALEM)
         with patch('apps.enrollments.trial_reminders.timezone.localtime', return_value=now), \
              patch.object(ManyChatService, 'notify_registration', return_value={'sent': True}) as ten_am, \
-             patch.object(ManyChatService, 'send_automation_to_contact') as invitation, \
+             patch.object(ManyChatService, 'send_flow') as invitation, \
              patch.object(ManyChatService, 'resolve_flow_ns', side_effect=_flows):
             summary = send_due_trial_reminders()
         self.assertEqual(ten_am.call_count, 1)  # the 10:00 message goes as before
