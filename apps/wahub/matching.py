@@ -41,8 +41,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 
-from django.db.models import F, Q
+from django.db import transaction
+from django.db.models import Count, F, Q
 from django.utils import timezone
 
 from apps.customers.child_status import (
@@ -84,6 +86,9 @@ PAYING_STATUSES = (STATUS_ACTIVE, STATUS_PAYMENT_PROBLEM)
 TRIAL_OUTCOME_LABELS = {'attended': 'הגיע', 'no_show': 'לא הגיע', 'unmarked': 'לא סומן', '': 'לא סומן'}
 # Who wrote a walk-in down, said at the end of its sentence.
 WALK_IN_BY = 'נוסף על ידי המדריך'
+# An answer older than this is matched again when its conversation is opened (views.retrieve); the
+# cron's own round (cron.RECHECK_AFTER, 12 hours) is too slow for a parent who has just paid.
+STALE_AFTER = timedelta(hours=1)
 
 # A charge that registered a child: the registration fee, a month of a course.
 # A paid trial carries trial_lesson_date and is not one.
@@ -508,26 +513,152 @@ def recheck_contact(contact: Contact) -> bool:
     return True
 
 
-def children_of(contact: Contact) -> list[dict]:
-    """The children behind the answer, for the open conversation."""
-    ids = list(contact.kogo_child_ids or [])
+def is_stale(contact: Contact, now=None) -> bool:
+    """Never matched, or matched longer ago than the card trusts (STALE_AFTER)."""
+    checked = contact.kogo_checked_at
+    return checked is None or checked <= (now or timezone.now()) - STALE_AFTER
+
+
+def recheck_if_stale(contact: Contact, *, now=None) -> bool:
+    """
+    `recheck_contact` for a card about to be shown, when the answer kept is
+    stale: True when it changed. The cron matches every twelve hours, so a
+    parent who paid this morning read "בתהליך רישום" all day on the card of
+    their own conversation. Never raises — a fault is logged and the answer
+    already kept is shown — and runs in a savepoint, so a database error here
+    does not take the caller's request down with it.
+    """
+    if not is_stale(contact, now):
+        return False
+    try:
+        with transaction.atomic():
+            return recheck_contact(contact)
+    except Exception:
+        logger.exception('wahub matching: contact %s was not rechecked on opening', contact.pk)
+        return False
+
+
+def _person(child) -> tuple:
+    """
+    Who a card is about, for telling two cards of one child apart from two
+    children: the first and the last name, however they were typed. A card
+    with no name at all is only itself.
+    """
+    first = ' '.join((child.first_name or '').split()).casefold()
+    last = ' '.join((child.last_name or '').split()).casefold()
+    return (first, last) if first or last else ('', str(child.id))
+
+
+def _one_card_each(cards: list) -> list[tuple]:
+    """
+    [(the card shown, every card of that child)], in the order the matching
+    gave. A widget retry leaves a pending card beside the real one, and a
+    second family on the same phone can carry the same child again; side by
+    side they read as an active child "בתהליך רישום" too. The card kept is the
+    one the customers page keeps (child_identity.exclude_weaker_duplicate_children):
+    the strongest status, then the one with more enrolments, then the newest —
+    across families as well, since the phone already put them together.
+    """
+    groups: dict = {}
+    for card in cards:
+        groups.setdefault(_person(card), []).append(card)
+
+    def strength(card) -> tuple:
+        status = canonical_status(card.status) or card.status
+        return (CHILD_STATUS_RANK.get(status, 99), -card._enrollments, -card.created_at.timestamp())
+
+    return [(min(group, key=strength), group) for group in groups.values()]
+
+
+def classes_of(child_ids, *, today=None) -> dict:
+    """
+    {child id: [class, …]} — where each child is now, for the card of the
+    conversation: the class, its day and hours, the branch and its city, the
+    instructor and the ages (age_groups.range_label — the course's ages are a
+    scale, not years), in the words the waiting-list summary already uses
+    (waiting_summary._lesson_words). A registration that counts the child on
+    the lesson (active, and payments_problem — a billing flag, not a
+    cancellation), and a trial still ahead, with its day; a trial that has
+    been is the lead's story, not a class. One query, whatever the number of
+    children. Reads only. The bot reads its own list (shadow_tools._classes_of),
+    which this does not change.
+    """
+    by_child: dict = {}
+    for child_id, entry in _class_rows(child_ids, today=today):
+        by_child.setdefault(child_id, []).append(entry)
+    return by_child
+
+
+def _class_rows(child_ids, *, today=None) -> list[tuple]:
+    """[(child id, class)] for `classes_of`, all the children's together in the order of the week."""
+    from apps.wahub.waiting_summary import _lesson_words
+
+    ids = [child_id for child_id in child_ids if child_id]
+    if not ids:
+        return []
+    today = today or state.now_israel_date()
+    rows = (
+        LessonEnrollment.objects
+        .filter(child_id__in=ids, status__in=LIVE_ENROLLMENT_STATUSES)
+        .filter(Q(trial_lesson_date__isnull=True) | Q(trial_lesson_date__gte=today))
+        .select_related('lesson__instructor', 'lesson__course__course_type', 'lesson__course__branch__city')
+        .order_by('lesson__day_of_week', 'lesson__start_time', 'trial_lesson_date', 'id')
+    )
+    found = []
+    for row in rows:
+        lesson, course = row.lesson, row.lesson.course
+        words = _lesson_words(lesson, course)
+        words.pop('label', None)
+        found.append((str(row.child_id), {
+            **words,
+            'course_type': course.course_type.name if course.course_type_id else '',
+            'trial_on': row.trial_lesson_date.isoformat() if row.trial_lesson_date else None,
+            'status': row.status,
+        }))
+    return found
+
+
+def children_of(contact: Contact, *, classes: bool = True, today=None) -> list[dict]:
+    """
+    The children behind the answer, for the open conversation's card: one row
+    a child — the duplicate cards of one child as one (_one_card_each) — each
+    with the classes they are in now (`classes`), those of all its cards
+    together and every lesson once. Two queries, whatever the number of
+    children; one with `classes=False` (the bot, which reads its own list).
+    """
+    ids = list(dict.fromkeys(str(child_id) for child_id in (contact.kogo_child_ids or []) if child_id))
     if not ids:
         return []
     rows = {
         str(child.id): child
-        for child in Child.objects.filter(id__in=ids).only('id', 'first_name', 'last_name', 'status')
+        for child in Child.objects.filter(id__in=ids)
+        .only('id', 'first_name', 'last_name', 'status', 'created_at')
+        .annotate(_enrollments=Count('lesson_enrollments'))
     }
+    people = _one_card_each([rows[child_id] for child_id in ids if child_id in rows])
+    person_of = {str(card.id): index for index, (_shown, cards) in enumerate(people) for card in cards}
+    lessons: list = [[] for _person in people]
+    seen: set = set()
+    if classes:
+        for card_id, row in _class_rows(list(person_of), today=today):
+            # Each card of the child carries its own row of the same lesson: it is one class.
+            slot = (person_of[card_id], row['lesson_id'], row['trial_on'] is not None)
+            if slot not in seen:
+                seen.add(slot)
+                lessons[person_of[card_id]].append(row)
     result = []
-    for child_id in ids:
-        child = rows.get(str(child_id))
-        if child is None:
-            continue
-        status = canonical_status(child.status) or child.status
-        result.append({
-            'id': str(child.id),
-            'name': f'{child.first_name} {child.last_name}'.strip(),
+    for (shown, _cards), rows_of_child in zip(people, lessons):
+        status = canonical_status(shown.status) or shown.status
+        # A class first, a trial ahead after it; each in the order of the week.
+        rows_of_child.sort(key=lambda row: row['trial_on'] is not None)
+        child = {
+            'id': str(shown.id),
+            'name': f'{shown.first_name} {shown.last_name}'.strip(),
             'status': status,
             # "רפאים" is the staff's word; the bot and the conversation's card say what it means.
             'status_label': WALK_IN_LABEL if status == STATUS_GHOST else status_label(status),
-        })
+        }
+        if classes:
+            child['classes'] = rows_of_child
+        result.append(child)
     return result

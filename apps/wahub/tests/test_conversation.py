@@ -116,8 +116,14 @@ class ConversationDetailTests(WahubTestCase):
         )
         self.assertEqual(set(data['followup']), {'status', 'status_label', 'due', 'note', 'by_name', 'at', 'is_due'})
         self.assertEqual(data['tags'], [])
-        self.assertEqual(data['kogo']['outcome'], '')
-        self.assertEqual(data['kogo']['outcome_label'], 'עוד לא נבדק')
+        # Never matched before: opening the conversation matches it first (docs/WAHUB-CONTRACT-LAYOUT.md, ב.1) —
+        # nobody has this phone. The list, which matches nothing, still says it was not looked at.
+        self.assertEqual(data['kogo']['outcome'], 'not_found')
+        self.assertEqual(data['kogo']['outcome_label'], 'לא נמצא במערכת')
+        self.assertIsNotNone(data['kogo']['checked_at'])
+        self.make_contact(phone='972505550199', name='עוד לא נפתח')
+        row = next(row for row in self.get('contacts/', box='all').data['results'] if row['phone'] == '972505550199')
+        self.assertEqual((row['kogo']['outcome'], row['kogo']['outcome_label']), ('', 'עוד לא נבדק'))
 
     def test_messages_come_oldest_first_with_the_last_fifty(self):
         self.incoming('פתיחה')

@@ -245,6 +245,13 @@ class ContactViewSet(viewsets.GenericViewSet):
 
     def retrieve(self, request, pk=None):
         contact = self.get_object()
+        # A match older than an hour is read again before the card is drawn: the cron's round is twelve hours,
+        # and a parent who paid in between still read "בתהליך רישום". It never fails the request
+        # (matching.recheck_if_stale). Only a changed answer moves the lead stage — an unchanged one leaves
+        # the facts the stage was worked out from as they were — and the contact is then read again with both.
+        if matching.recheck_if_stale(contact):
+            lead_stage.refresh_quietly(contact.id)
+            contact = self.get_object()
         payload = contact_payload(contact)
         messages = list(Message.objects.filter(contact=contact).order_by('-id')[:MESSAGES_PAGE + 1])
         payload['has_older'] = len(messages) > MESSAGES_PAGE
