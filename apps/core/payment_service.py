@@ -1987,9 +1987,10 @@ class PaymentService:
                 status='paid',
                 payment_method='credit_card' if tranzila_transaction is not None else '',
                 payment_type='recurring' if payment.payment_type == 'recurring_subscription' else 'one_time',
-                payer_name=payment.family.name,
-                payer_email=payment.family.email,
-                payer_phone=payment.family.phone,
+                # A payer of a split is receipted in their own name (apps/customers/split_models).
+                payer_name=payment.split_share.payer_name if payment.split_share_id else payment.family.name,
+                payer_email=payment.split_share.payer_email if payment.split_share_id else payment.family.email,
+                payer_phone=payment.split_share.payer_phone if payment.split_share_id else payment.family.phone,
                 tranzila_transaction_id=tranzila_transaction.transaction_id if tranzila_transaction is not None else '',
                 invoice_date=issued_on,
             )

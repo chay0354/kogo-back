@@ -71,11 +71,12 @@ STANDING_ORDER_NO_CARD = 'standing_order_no_card'
 NO_STANDING_ORDER = 'no_standing_order'
 STATUS_MISMATCH = 'status_mismatch'
 DUPLICATE_CARD = 'duplicate_card'
+SPLIT_INCOMPLETE = 'split_incomplete'
 
 ORDER = (
     DOUBLE_STANDING_ORDER, DOUBLE_CHARGE, DECLINED_RECORDED_PAID, STUCK_CHARGE, SIGNUP_DECLINED,
     STANDING_ORDER_FAILED, STANDING_ORDER_OVERDUE, STANDING_ORDER_NO_CARD, NO_STANDING_ORDER,
-    STATUS_MISMATCH, DUPLICATE_CARD,
+    SPLIT_INCOMPLETE, STATUS_MISMATCH, DUPLICATE_CARD,
 )
 
 # A student, as counts of students read it (enrollment_counts.ACTIVE_STUDENT_CHILD_STATUSES).
@@ -137,7 +138,7 @@ class Problem:
 _Payment = namedtuple('_Payment', (
     'id', 'child_id', 'status', 'payment_type', 'lesson_id', 'bundle_id', 'final_amount',
     'registration_fee', 'trial_credit_amount', 'trial_lesson_date', 'payment_date',
-    'created_at', 'updated_at', 'description', 'response_code',
+    'created_at', 'updated_at', 'description', 'response_code', 'split_share_id',
 ))
 # A charge that did not go through: a sign-up or a paid trial the parent tried.
 _FailedCharge = namedtuple('_FailedCharge', (
@@ -265,6 +266,8 @@ class _Records:
         self.held: dict = {}                        # standing order id (str) -> when its charge stopped
         self.documents: dict = defaultdict(int)     # child id -> issued documents
         self.set_by_hand: dict = {}                 # child id -> the reason written
+        self.share_split: dict = {}                 # split share id -> its split's id
+        self.splits: dict = defaultdict(list)       # child id -> live payment splits (with their shares)
 
     def person(self, child) -> list:
         return self.people.get(identity_key(child)) or [child]
@@ -361,7 +364,7 @@ def _load(children) -> _Records:
     for row in payments.order_by('created_at').values_list(
         'id', 'child_id', 'status', 'payment_type', 'lesson_id', 'bundle_id', 'final_amount',
         'registration_fee', 'trial_credit_amount', 'trial_lesson_date', 'payment_date',
-        'created_at', 'updated_at', 'description', 'tranzila_transaction__response_code',
+        'created_at', 'updated_at', 'description', 'tranzila_transaction__response_code', 'split_share_id',
     ):
         payment = _Payment(*row)
         if payment.child_id in records.cards:
@@ -444,6 +447,28 @@ def _load(children) -> _Records:
             if len(parts) >= 3:
                 records.held.setdefault(parts[1], when)
 
+    # Payments split between cards: which charges and standing orders belong
+    # together, and which payer has not saved a card yet.
+    from apps.customers.split_models import PaymentSplit
+
+    for split in scoped(
+        PaymentSplit.objects.filter(status=PaymentSplit.STATUS_ACTIVE).prefetch_related('shares')
+    ).select_related('lesson', 'lesson__course'):
+        if split.child_id not in records.cards:
+            continue
+        records.splits[split.child_id].append(split)
+        for share in split.shares.all():
+            records.share_split[share.id] = split.id
+    share_ids = {
+        sid for group in records.payments.values() for p in group for sid in [p.split_share_id] if sid
+    } | {order.split_share_id for order in orders if order.split_share_id}
+    missing = share_ids - set(records.share_split)
+    if missing:
+        from apps.customers.split_models import PaymentSplitShare
+
+        for share_id, split_id in PaymentSplitShare.objects.filter(id__in=missing).values_list('id', 'split_id'):
+            records.share_split[share_id] = split_id
+
     # Documents are asked only of people with more than one card — the other
     # card's papers are what the flag is about.
     doubled = [card.id for group in records.people.values() if len(group) > 1 for card in group]
@@ -505,6 +530,29 @@ def _where(child_id, viewer) -> str:
     return '' if child_id == viewer.id else f' ({OTHER_CARD})'
 
 
+def _separate_bills(rows, records) -> list:
+    """
+    The rows (standing orders or charges) that are bills of their own.
+
+    The payers of one split are one bill between them: their orders, and their
+    charges in one month, are the split working, not a duplicate. The same
+    payer twice is still two — that is a double.
+    """
+    kept, seen_share, seen_split = [], set(), set()
+    for row in rows:
+        share_id = getattr(row, 'split_share_id', None)
+        if share_id is None or share_id in seen_share:
+            kept.append(row)
+            continue
+        seen_share.add(share_id)
+        split_id = records.share_split.get(share_id)
+        if split_id is not None and split_id in seen_split:
+            continue
+        seen_split.add(split_id)
+        kept.append(row)
+    return kept
+
+
 def _double_standing_orders(person, viewer, records) -> list[Problem]:
     """Two live standing orders billing the same lesson — on one card, or on the two cards of one child."""
     active = [
@@ -518,7 +566,7 @@ def _double_standing_orders(person, viewer, records) -> list[Problem]:
 
     problems, reported = [], set()
     for lesson_id, orders in by_lesson.items():
-        if len(orders) < 2:
+        if len(_separate_bills(orders, records)) < 2:
             continue
         cluster = frozenset(order.id for order in orders)
         if cluster in reported:
@@ -543,6 +591,46 @@ def _double_standing_orders(person, viewer, records) -> list[Problem]:
             ),
             branch_ids={lesson.branch_id} if lesson.branch_id else set(),
         ))
+    return problems
+
+
+def _split_incomplete(person, viewer, records) -> list[Problem]:
+    """A payment split where one payer pays and another has not saved a card yet."""
+    problems = []
+    live = {
+        order.split_share_id
+        for card in person for order in records.standing_orders.get(card.id, ())
+        if order.split_share_id and order.status in ('active', 'paused', 'failed')
+    }
+    for card in person:
+        for split in records.splits.get(card.id, ()):
+            if split.mode == 'existing':
+                # The card that paid the whole keeps paying it until the others
+                # save theirs (payment_split.after_share_activated): nothing is short.
+                continue
+            shares = list(split.shares.all())
+            waiting = [share for share in shares if share.id not in live]
+            if not waiting or len(waiting) == len(shares):
+                continue
+            course = split.lesson.course if split.lesson_id else None
+            lesson = _Lesson(course.id if course else None, course.name if course else '', course.branch_id if course else None)
+            problems.append(Problem(
+                code=SPLIT_INCOMPLETE,
+                title='חלוקת תשלום: משלם עוד לא הזין כרטיס',
+                what=_lines(
+                    f'התשלום על {lesson.course_name or "החוג"} מחולק בין {len(shares)} משלמים. '
+                    f'{_b("עוד לא הזינו כרטיס")}:',
+                    _items(*(
+                        f'{share.payer_name} — {_b(_money(share.monthly_amount))} לחודש{_where(card.id, viewer)}'
+                        for share in waiting
+                    )),
+                    'עד אז החוג משולם רק בחלקו.',
+                ),
+                action=_items(
+                    f'{_b("לשלוח שוב את הקישור")} — כרטיס הילד, "קישור להזנת כרטיס", תחת "חלוקת תשלום".',
+                ),
+                branch_ids={lesson.branch_id} if lesson.branch_id else set(),
+            ))
     return problems
 
 
@@ -607,7 +695,7 @@ def _double_charges(person, viewer, records, today: date) -> list[Problem]:
         for charge in charges:
             by_month[_billing_month(charge)].append(charge)
         for month in sorted(by_month):
-            rows = by_month[month]
+            rows = _separate_bills(by_month[month], records)
             if len(rows) < 2 or month < since:
                 continue
             cards_charged = {row.child_id for row in rows}
@@ -1204,6 +1292,7 @@ def _problems_of(card, records, today: date, now) -> list[Problem]:
     problems += _stuck_charges(person, card, records, now)
     problems += _signup_declined(person, card, records, now)
     problems += _unpaid(person, card, records, today)
+    problems += _split_incomplete(person, card, records)
     problems += _status_problem(card, records, today)
     problems += _duplicate_cards(person, card, records)
     problems.sort(key=lambda problem: ORDER.index(problem.code))

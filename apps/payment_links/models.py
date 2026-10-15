@@ -262,6 +262,12 @@ class CardLink(models.Model):
     # catalogue is not touched, so the lesson stays closed to anyone else on its
     # own (owner, 14.10.2026: one pupil, once a week on a twice-a-week course).
     special_monthly_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # One payer of a payment split between cards: the link bills that share
+    # (its part of the month and of the registration fee) and is sent to that
+    # payer. Empty on a link that bills the whole.
+    split_share = models.ForeignKey(
+        'customers.PaymentSplitShare', on_delete=models.SET_NULL, null=True, blank=True, related_name='card_links',
+    )
     # one_time
     amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     description = models.CharField(max_length=200, blank=True)

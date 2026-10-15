@@ -86,6 +86,27 @@ def _serialize(link: CardLink, request=None) -> dict:
         'sent_result': link.sent_result or {},
         'completed_at': link.completed_at.isoformat() if link.completed_at else None,
         'created_at': link.created_at.isoformat(),
+        'split': _split_of(link),
+    }
+
+
+def _split_of(link: CardLink) -> dict | None:
+    """The payer this link is for, when the payment is split between cards."""
+    if not link.split_share_id:
+        return None
+    share = link.split_share
+    split = share.split
+    return {
+        'split_id': str(split.id),
+        'share_id': str(share.id),
+        'position': share.position,
+        'parts': split.shares.count(),
+        'payer_name': share.payer_name,
+        'payer_phone': share.payer_phone,
+        'monthly_amount': str(share.monthly_amount),
+        'registration_fee': str(share.registration_fee),
+        'monthly_total': str(split.monthly_total),
+        'mode': split.mode,
     }
 
 

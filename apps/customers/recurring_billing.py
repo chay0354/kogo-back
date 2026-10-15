@@ -113,6 +113,8 @@ def process_due_recurring_charges(
             'initial_payment__lesson__course',
             'initial_payment__lesson__course__branch',
             'initial_payment__bundle',
+            'split_share',
+            'split_share__payer_parent',
         )
         .order_by('next_billing_date', 'created_at')[:batch]
     )
@@ -214,9 +216,11 @@ def process_due_recurring_charges(
             continue
         # Tranzila already refused this standing order's request today: the same
         # request would be refused again every hour. Tomorrow's run tries again.
+        # One payer of a split is not stopped by another payer's refusal.
         if Payment.objects.filter(
             child=child, lesson=lesson, payment_type='recurring_subscription', status='cancelled',
             failure_reason__startswith=REQUEST_REJECTED, created_at__date=today,
+            split_share_id=recurring.split_share_id,
         ).exists():
             summary['skipped'] += 1
             continue
@@ -250,10 +254,14 @@ def process_due_recurring_charges(
             summary['errors'].append(f'{recurring.id}: ריצה מקבילה כבר תופסת את החיוב של היום')
             continue
 
+        # A payer of a split is charged, and receipted, in their own name.
+        share = recurring.split_share if recurring.split_share_id else None
         payment = Payment.objects.create(
             child=child,
             family=family,
-            parent=family.parents.filter(is_primary=True).first(),
+            parent=(share.payer_parent if share is not None
+                    else family.parents.filter(is_primary=True).first()),
+            split_share=share,
             branch=lesson.course.branch,
             lesson=lesson,
             bundle=initial.bundle if initial else None,
@@ -265,6 +273,7 @@ def process_due_recurring_charges(
             registration_fee=Decimal('0.00'),
             description=(
                 f'מנוי חודשי - {lesson.course.name} - {child.full_name}'
+                + (f' · {share.label}' if share is not None else '')
                 + (f' · כולל רכישה בחנות ₪{store_part:.2f}' if store_part > 0 else '')
             ),
         )

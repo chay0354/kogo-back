@@ -2014,6 +2014,8 @@ class RecurringPaymentViewSet(viewsets.ModelViewSet):
     """
     queryset = RecurringPayment.objects.all().select_related(
         'child', 
+        'split_share',
+        'split_share__split',
         'initial_payment',
         'initial_payment__lesson',
         'initial_payment__lesson__course',
