@@ -275,8 +275,11 @@ class ReadAgainTests(HistoryTestCase):
         from apps.wahub import cron
 
         self.assertFalse(cron._history_to_read(self.now).filter(pk=self.contact_row.pk).exists())
-        Contact.objects.filter(pk=self.contact_row.pk).update(kogo_checked_at=self.now, last_inbound_at=self.now - timedelta(days=200))
+        # The owner, 15.10.2026: "30 יום" — a conversation quiet longer than that is not read again by Claude.
+        Contact.objects.filter(pk=self.contact_row.pk).update(kogo_checked_at=self.now, last_inbound_at=self.now - timedelta(days=31))
         self.assertFalse(cron._history_to_read(self.now).filter(pk=self.contact_row.pk).exists())
+        Contact.objects.filter(pk=self.contact_row.pk).update(last_inbound_at=self.now - timedelta(days=29))
+        self.assertTrue(cron._history_to_read(self.now).filter(pk=self.contact_row.pk).exists())
 
     def test_a_new_message_waiting_for_the_summary_comes_first(self):
         from apps.wahub import cron
