@@ -238,6 +238,8 @@ class PerChildFormUnchangedTests(_Base):
                 'business_category_id', 'public_url', 'attempts', 'last_error', 'review_reason',
                 'payment_id', 'recurring_payment_id', 'sent_at', 'sent_result', 'completed_at',
                 'created_at',
+                # The payer a link is for when the payment is split between cards (15.10.2026).
+                'split',
             },
         )
         self.assertEqual(row['child_id'], str(self.child.id))
